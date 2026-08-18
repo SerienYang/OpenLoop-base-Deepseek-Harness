@@ -11,4 +11,4 @@ Product plugins that add model-visible request context without defining a tool. 
 | [`tmux-context/`](tmux-context/README.md) | tmux location context | — |
 | [`agent-instructions/`](agent-instructions/README.md) | Workspace-instruction context | — |
 
-Session references are documented in [docs/subsystems/session-reference.md](../../docs/subsystems/session-reference.md); the [`agent-instructions` decision record](../../.agents/notes/implemented/feature/2026-06-24-workspace-context.md) owns its per-agent/session isolation and lifecycle split.
+Session references are documented in docs/subsystems/session-reference.md; the `agent-instructions` decision record owns its per-agent/session isolation and lifecycle split.

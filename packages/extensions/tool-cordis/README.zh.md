@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-自引用 Cordis 工具集：五个面向模型的工具，操作当前 DSH 进程中的实时运行时。注册表、vm 沙箱与浏览器广播属于 [`@deepseek-ai/dsh-cordis-host-runner`](../cordis-host-runner/README.md)（`ctx.dynamic`），本工具集注入它——只装这些工具而不装 runner 的组合永远不会激活它们。沙箱语义、动态包生命周期与组合及既定决策详见[工具集 Agent Note](../../../.agents/notes/implemented/feature/2026-07-08-self-referential-cordis-toolset.md)。
+自引用 Cordis 工具集：五个面向模型的工具，操作当前 DSH 进程中的实时运行时。注册表、vm 沙箱与浏览器广播属于 [`@deepseek-ai/dsh-cordis-host-runner`](../cordis-host-runner/README.md)（`ctx.dynamic`），本工具集注入它——只装这些工具而不装 runner 的组合永远不会激活它们。沙箱语义、动态包生命周期与组合及既定决策详见工具集 Agent Note。
 
 ## 功能
 
@@ -14,13 +14,13 @@
 - `cordis_stop`：把 host 半 dispose 到完全停稳，并从各页面撤回浏览器半；定义存续，可以再次运行。
 - `cordis_undefine`：必要时先停止该包，再忘掉定义；它的卡片作为一条已卸载记录留在会话里。
 
-面向模型的确切 schema 见[生成的工具目录](../../../docs/tool-catalog.md)。
+面向模型的确切 schema 见生成的工具目录。
 
 动态包只存在于共享 DSH 进程内存中。它可跨后续轮次保持活跃，也可能影响同一进程中的其他会话，但会在 `cordis_stop`／`cordis_undefine`、工具集卸载或 DSH 重启后消失。它不会创建插件文件、安装任何包、修改 `cordis.yml` 或个人／项目配置、跨重启存续，也不能自动转为正式插件。若要保留实验结果，应让 agent（智能体）通过常规开发流程实现普通的本地、项目或仓库插件。每个动词都以会话为界：一个包只在定义它的那个会话里可见、可控。
 
 ## 信任立场
 
-该沙箱隔离全局变量，但不是安全边界。Node 全局变量不存在，或会重定向到 `ctx.fs`、`ctx.web`、`ctx.bash` 等 Cordis 服务；写入 `globalThis` 的内容保持局部，但 host realm helper 使逃逸成为可能。运行中的 host 半收到不含框架内部机制的 façade，但获准服务仍会影响存活运行时。动态工具 schema 与 annotation 通过迭代式 JSON 克隆和 schema 规范化跨越 realm，因此有效的深层声明受内存而非调用栈限制；含 JSON 不可见 key 的 record，以及子类化或装饰过的 schema array，会在规范化前被拒绝。应当像对待 bash 访问一样对待该工具集；参见[设计与信任立场](../../../.agents/notes/implemented/feature/2026-07-08-self-referential-cordis-toolset.md)。
+该沙箱隔离全局变量，但不是安全边界。Node 全局变量不存在，或会重定向到 `ctx.fs`、`ctx.web`、`ctx.bash` 等 Cordis 服务；写入 `globalThis` 的内容保持局部，但 host realm helper 使逃逸成为可能。运行中的 host 半收到不含框架内部机制的 façade，但获准服务仍会影响存活运行时。动态工具 schema 与 annotation 通过迭代式 JSON 克隆和 schema 规范化跨越 realm，因此有效的深层声明受内存而非调用栈限制；含 JSON 不可见 key 的 record，以及子类化或装饰过的 schema array，会在规范化前被拒绝。应当像对待 bash 访问一样对待该工具集；参见设计与信任立场。
 
 ## 配置
 
@@ -28,13 +28,13 @@
 
 ## 生成的 client 槽目录
 
-`src/client-catalog.ts` 描述浏览器半的座位，由 `scripts/gen-client-catalog.ts` 生成（新鲜度门禁为 `doc-sync` 中的 `pnpm run verify-client-catalog`），数据来自对每一处 `SlotMap` 声明合并与每一个 `slots.register` 调用点的词法扫描。它承载浏览器半唯一能动的那个面——槽键、每个 register 调用的选项、组件会收到的 props、谁已经占着这个座位、以及哪个 owner 挂着这个座位才存在——并且只以纯数据承载：本包始终在 host 侧、不 import 任何 client 模块，跨越两平面的只有这些字符串。生成器宁可高声失败也不吐出一条模型无法照做的条目：槽缺少面向 registrant 的 JSDoc 正文、`kind`／`scope` 不是字面量、owner props 没有任何导出声明、键重复、或注册进了没人声明的槽，都会让门禁变红。owner props 只展开一层——owner 声明本身连它的成员文档,加上其字段所引用的那些形状的名字——而单个槽的整份报告有行数上限:收窄到一个槽的意义是少花上下文,不是多花。
+`src/client-catalog.ts` 描述浏览器半的座位，由 `scripts/gen-client-catalog.ts` 生成，并由 `pnpm run verify-client-catalog` 检查新鲜度，数据来自对每一处 `SlotMap` 声明合并与每一个 `slots.register` 调用点的词法扫描。它承载浏览器半唯一能动的那个面——槽键、每个 register 调用的选项、组件会收到的 props、谁已经占着这个座位、以及哪个 owner 挂着这个座位才存在——并且只以纯数据承载：本包始终在 host 侧、不 import 任何 client 模块，跨越两平面的只有这些字符串。生成器宁可高声失败也不吐出一条模型无法照做的条目：槽缺少面向 registrant 的 JSDoc 正文、`kind`／`scope` 不是字面量、owner props 没有任何导出声明、键重复、或注册进了没人声明的槽，都会让门禁变红。owner props 只展开一层——owner 声明本身连它的成员文档,加上其字段所引用的那些形状的名字——而单个槽的整份报告有行数上限:收窄到一个槽的意义是少花上下文,不是多花。
 
 一个槽的教学文案就是它声明处的 JSDoc，所以要改模型读到的内容，改的是声明它的那个包里的约定，而不是这份目录。
 
 ## API 报告从哪里来
 
-`cordis_inspect what:"api"`／`what:"events"` 渲染的是 `src/api-catalog.ts`，即工作区 Cordis 声明的生成投影：渲染好的方法签名、源码 JSDoc、带分发模式的 harness 事件，以及这些签名引用到的类型形状——全部由与 `docs/subsystems` 同一次 AST 遍历产出，因此模型读到的数据与渲染出的文档不可能彼此偏离。它是关于**仓库**的编译期事实，所以用 `pnpm run gen-cordis-api` 重新生成、用 `pnpm run verify-cordis-api` 守它的新鲜度。
+`cordis_inspect what:"api"`／`what:"events"` 渲染的是 `src/api-catalog.ts`，即工作区 Cordis 声明的生成投影：渲染好的方法签名、源码 JSDoc、带分发模式的 harness 事件，以及这些签名引用到的类型形状。它是关于仓库的编译期事实，所以用 `pnpm run gen-cordis-inspect-catalog` 同时重新生成 Host 与 Client 两份目录，并用 `pnpm run verify-cordis-inspect-catalog` 检查新鲜度。
 
 `src/inspect.ts` 把这份目录与**活的**服务存储取交集：**谁在跑**由存储回答，**每个服务能做什么**由目录回答；目录没覆盖到的活服务会被报成可达但没有签名，而不是被省略。包代码若要在自己源码里用这份清单，就从报告里抄出来——目录是关于仓库的编译期事实，所以对任一个部署而言，抄出来的清单与现读的清单说的是同一件事。
 
@@ -51,7 +51,7 @@
 
 ## 导出形式
 
-Namespace 插件：命名导出 `name`／`inject`／`apply`，无默认导出（[docs/postmortem/0001](../../../docs/postmortem/0001-acp-default-export-drops-inject.md)）。它注入 `tools` 与 `dynamicCordisRunner`。
+Namespace 插件：命名导出 `name`／`inject`／`apply`，无默认导出（docs/postmortem/0001）。它注入 `tools` 与 `dynamicCordisRunner`。
 
 ## 模型体验
 
@@ -59,7 +59,7 @@ Namespace 插件：命名导出 `name`／`inject`／`apply`，无默认导出（
 
 #### 模型看到的内容
 
-该插件可见时，会话模型会看到生成的 [`cordis_inspect`、`cordis_define`、`cordis_run`、`cordis_stop` 和 `cordis_undefine` schema](../../../docs/tool-catalog.md#deepseek-aidsh-tool-cordis)。
+该插件可见时，会话模型会看到生成的 `cordis_inspect`、`cordis_define`、`cordis_run`、`cordis_stop` 和 `cordis_undefine` schema。
 
 #### Token 影响
 

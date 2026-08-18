@@ -21,7 +21,6 @@ import {
   parseTranslationPairingCliArgs,
   parseTranslationPairingManifest,
   partitionGeneratedRegions,
-  requiresSourceLanguageSwitcher,
   translationStructureDiff,
   translationStructureSignature,
 } from './translation-pairing.ts'
@@ -146,14 +145,6 @@ describe('translation pairing manifest', () => {
 })
 
 describe('translation pairing switchers', () => {
-  it('exempts only paired generated English sources from reciprocal switchers', () => {
-    expect(requiresSourceLanguageSwitcher('docs/config-catalog.md')).toBe(false)
-    expect(requiresSourceLanguageSwitcher('docs/cordis-api/context.md')).toBe(false)
-    expect(requiresSourceLanguageSwitcher('docs/cordis-api/inherited.md')).toBe(false)
-    expect(requiresSourceLanguageSwitcher('docs/architecture.md')).toBe(true)
-    expect(requiresSourceLanguageSwitcher('packages/core/session/README.md')).toBe(true)
-  })
-
   it('accepts only the canonical public URL for an absolute switcher', () => {
     const targets = languageSwitcherTargets('python/sdk/README.zh.md')
     const canonical = parseTranslationMarkdown(
@@ -197,22 +188,23 @@ describe('translation pairing records', () => {
 
 describe('translation scope discovery', () => {
   it.each([
-    'README.md',
-    'CONTRIBUTING.md',
-    'CONTRIBUTING.zh.md',
-    'CONTRIBUTING.i18n.yaml',
     'apps/cli/README.md',
-    'future/subtree/readme.md',
+    'examples/demo/README.md',
     'packages/example/README.zh.md',
     'native/example/README.i18n.yaml',
-    '.agents/notes/proposed/feature.md',
-    'docs/guide.md',
     'python/guide.md',
   ])('includes %s', (file) => {
     expect(isTranslationScopeFile(file)).toBe(true)
   })
 
   it.each([
+    'README.md',
+    'CONTRIBUTING.md',
+    'CONTRIBUTING.zh.md',
+    'CONTRIBUTING.i18n.yaml',
+    'future/subtree/readme.md',
+    '.agents/notes/proposed/feature.md',
+    'docs/guide.md',
     'packages/example/guide.md',
     'packages/example/CONTRIBUTING.md',
     'examples/tutorial.md',

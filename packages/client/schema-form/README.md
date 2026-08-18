@@ -20,4 +20,4 @@ None; this package neither assembles nor sends a provider request.
 
 - **Rehydration executes the served envelope** — `rehydrateSchema` reconstructs a live schemastery validator, and schemastery revives serialized callbacks through `new Function`, so the schema envelope is executable content rather than inert data. This is safe only for an envelope from the same trusted host that serves the page; the protocol provides no inert cross-trust representation.
 - **Validation is draft-level, not per-field** — `validateDraft` reports schemastery's first failure message, including its `$.path`; it does not map errors onto individual controls.
-- **No generic renderer** — consumers build feature-specific forms over these helpers. The [Web config-plane Agent Note](../../../.agents/notes/implemented/architecture/2026-07-30-web-config-plane.md) records that trade-off.
+- **No generic renderer** — consumers build feature-specific forms over these helpers. The Web config-plane Agent Note records that trade-off.

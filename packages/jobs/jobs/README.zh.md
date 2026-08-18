@@ -23,7 +23,7 @@
 
 实现还必须兑现约定的生命周期语义：注册的存续期长于生产方 fiber 与控制器 fiber，owner 释放和服务释放会取消仍在运行的工作并等待守约的生产方，结算遵循首次结果优先（一条终止记录、一轮异常受到隔离的监听器通知，然后释放等待方）。
 
-参见[任务类型目录](../../../docs/subsystems/jobs.md)、[运行时 Agent Note](../../../.agents/notes/implemented/architecture/2026-06-20-generic-long-running-tool-runtime.md)和 [seam Agent Note](../../../.agents/notes/implemented/architecture/2026-07-26-job-registry-seam.md)。
+参见任务类型目录、运行时 Agent Note和 seam Agent Note。
 
 ## 模型体验
 

@@ -57,7 +57,7 @@ The provider advertises no start-time capabilities (`outputSchema`/`depthLimit`/
 
 The child environment is the [`dsh-subprocess`](../../subprocess/README.md) seam's `scrubbedParentEnv()` base — ambient credential-shaped and `DSH_*` names dropped — with explicit `config.env` values merged after the scrub. The child is spawned by the SDK client rather than through `ctx.subprocess` (the subprocess README's documented exception for SDK-managed transports), which is why this backend applies the scrub itself. The JSON-RPC wire is the real serialization boundary.
 
-The package has no default export. Cordis loader unwrapping would otherwise hide the named `inject` metadata; see [postmortem 0001](../../../docs/postmortem/0001-acp-default-export-drops-inject.md).
+The package has no default export. Cordis loader unwrapping would otherwise hide the named `inject` metadata; see postmortem 0001.
 
 ## Model Experience
 

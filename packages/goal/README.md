@@ -11,4 +11,4 @@ Durable objective state for an agent session, owned independently of the model-f
 | [`tool-goal/`](tool-goal/README.md) | Model-facing goal tools | — |
 | [`command-goal/`](command-goal/README.md) | Human-facing goal command | — |
 
-The subsystem reference — goal identity, lifecycle snapshots, activation, change records — is [docs/subsystems/goal.md](../../docs/subsystems/goal.md).
+The subsystem reference — goal identity, lifecycle snapshots, activation, change records — is docs/subsystems/goal.md.

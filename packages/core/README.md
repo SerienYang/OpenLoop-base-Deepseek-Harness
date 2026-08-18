@@ -18,4 +18,4 @@ The session log, system-prompt assembly, tool registry, agent vocabulary, deploy
 
 Runnable compositions belong to [`examples/agent-spine-demo`](../examples/agent-spine-demo/README.md); this group owns only the swappable spine pieces.
 
-The subsystem reference — the package-by-package loop map, the `Agent` handle and its delivery/interception contracts — is [docs/subsystems/core.md](../../docs/subsystems/core.md); the default runnable composition is [`examples/agent-spine-demo`](../examples/agent-spine-demo/README.md).
+The subsystem reference — the package-by-package loop map, the `Agent` handle and its delivery/interception contracts — is docs/subsystems/core.md; the default runnable composition is [`examples/agent-spine-demo`](../examples/agent-spine-demo/README.md).

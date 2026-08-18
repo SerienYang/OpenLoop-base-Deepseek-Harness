@@ -88,8 +88,6 @@
     "examples/*/tests/**/*.ts",
     "packages/*/*/tests/**/*.ts",
     "scripts/**/*.ts",
-    "website/**/*.ts",
-    "website/.vitepress/**/*.ts"
   ],
   // Under packages/client a test file names the face it covers: `*.client.*`
   // belongs to the Client aggregate, `*.host.spec.ts` to this one. The two

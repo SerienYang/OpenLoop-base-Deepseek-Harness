@@ -184,18 +184,3 @@ export function checkReturns(
   if (returns === null) violations.push(`${where} is missing @returns (return type: ${rt}).`)
   else if (!returns.trim()) violations.push(`${where}: @returns has an empty description.`)
 }
-
-/**
- * Throw one aggregate error for every completeness violation a walk collected.
- * Aggregation (vs failing fast) is deliberate: a remediation pass sees the
- * whole list at once instead of replaying the gate once per offender.
- * @param gate - the reporting gate's name, prefixed to the error message.
- * @param violations - the collected violation lines; no-op when empty.
- */
-export function reportViolations(gate: string, violations: string[]): void {
-  if (violations.length === 0) return
-  throw new Error(
-    `${gate}: ${violations.length} JSDoc completeness violation(s) (see AGENTS.md):\n`
-    + violations.map(v => `  ${v}`).join('\n'),
-  )
-}

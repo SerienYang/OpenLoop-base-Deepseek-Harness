@@ -11,6 +11,6 @@ This family runs model-authored orchestration workflows over subagents and expos
 | [`tool-workflow/`](tool-workflow/README.md) | Exposes general workflow execution to the model | registers on `ctx.tools` |
 | [`tool-ralph/`](tool-ralph/README.md) | Exposes the fixed fresh-agent Ralph workflow | registers on `ctx.tools` |
 
-Worker threads isolate workflow execution from the host event loop but are not a security boundary. See the [dynamic-workflow](../../.agents/notes/implemented/feature/2026-07-05-dynamic-workflows.md) and [Ralph tool](../../.agents/notes/implemented/feature/2026-07-19-fresh-agent-ralph-workflow-tool.md) decisions.
+Worker threads isolate workflow execution from the host event loop but are not a security boundary. See the dynamic-workflow and Ralph tool decisions.
 
-The subsystem reference — start requests, `WorkflowMeta`, results, live runs, `workflow/*` events — is [docs/subsystems/workflow.md](../../docs/subsystems/workflow.md); decisions in the [dynamic-workflows](../../.agents/notes/implemented/feature/2026-07-05-dynamic-workflows.md) and [Ralph consumer](../../.agents/notes/implemented/feature/2026-07-19-fresh-agent-ralph-workflow-tool.md) Agent Notes.
+The subsystem reference — start requests, `WorkflowMeta`, results, live runs, `workflow/*` events — is docs/subsystems/workflow.md; decisions in the dynamic-workflows and Ralph consumer Agent Notes.

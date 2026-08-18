@@ -119,40 +119,40 @@ function record(root: string, path: string, source: string, zh: string): string 
   return content
 }
 
-const baseSource = '# Guide\n\nEnglish | [中文](guide.zh.md)\n\nAlpha base.\n\nBeta base.\n'
-const baseZh = '# 指南\n\n[English](guide.md) | 中文\n\n甲基础。\n\n乙基础。\n'
+const guideSourcePath = 'packages/guide/README.md'
+const guideZhPath = 'packages/guide/README.zh.md'
+const guideMetaPath = 'packages/guide/README.i18n.yaml'
+const manualSourcePath = 'packages/manual/README.md'
+const manualZhPath = 'packages/manual/README.zh.md'
+const manualMetaPath = 'packages/manual/README.i18n.yaml'
+const baseSource = '# Guide\n\nEnglish | [中文](README.zh.md)\n\nAlpha base.\n\nBeta base.\n'
+const baseZh = '# 指南\n\n[English](README.md) | 中文\n\n甲基础。\n\n乙基础。\n'
 const currentSource = baseSource.replace('Alpha base.', 'Alpha current.')
 const currentZh = baseZh.replace('甲基础。', '甲当前。')
 const otherSource = baseSource.replace('Beta base.', 'Beta other.')
 const otherZh = baseZh.replace('乙基础。', '乙对侧。')
 const mergedSource = currentSource.replace('Beta base.', 'Beta other.')
 const mergedZh = currentZh.replace('乙基础。', '乙对侧。')
-const generatedBaseSource = '# Module graph\n\nAlpha base.\n\nBeta base.\n'
-const generatedBaseZh = '# 模块图\n\n[English](module-graph.md) | 中文\n\n甲基础。\n\n乙基础。\n'
-const generatedCurrentSource = generatedBaseSource.replace('Alpha base.', 'Alpha current.')
-const generatedCurrentZh = generatedBaseZh.replace('甲基础。', '甲当前。')
-const generatedOtherSource = generatedBaseSource.replace('Beta base.', 'Beta other.')
-const generatedOtherZh = generatedBaseZh.replace('乙基础。', '乙对侧。')
-const manualBaseSource = baseSource.replace('guide.zh.md', 'manual.zh.md')
-const manualBaseZh = baseZh.replace('guide.md', 'manual.md')
+const manualBaseSource = baseSource
+const manualBaseZh = baseZh
 const manualCurrentSource = manualBaseSource.replace('Alpha base.', 'Alpha current.')
 const manualCurrentZh = manualBaseZh.replace('甲基础。', '甲当前。')
 const manualOtherSource = manualBaseSource.replace('Alpha base.', 'Alpha other.')
 const manualOtherZh = manualBaseZh.replace('甲基础。', '甲对侧。')
 
 function commitPair(fixture: Fixture, source: string, zh: string, message: string): string {
-  const sidecar = record(fixture.root, 'docs/guide.md', source, zh)
+  const sidecar = record(fixture.root, guideSourcePath, source, zh)
   git(fixture, ['add', '.'])
   git(fixture, ['commit', '-m', message])
   return sidecar
 }
 
 function commitTextCleanPair(fixture: Fixture, source: string, zh: string, message: string): void {
-  const sidecar = record(fixture.root, 'docs/guide.md', source, zh)
+  const sidecar = record(fixture.root, guideSourcePath, source, zh)
   write(
     fixture.root,
-    'docs/guide.i18n.yaml',
-    sidecar.replace('\nguide.zh.md:', '\n# Stable separator for independent line merges.\nguide.zh.md:'),
+    guideMetaPath,
+    sidecar.replace('\nREADME.zh.md:', '\n# Stable separator for independent line merges.\nREADME.zh.md:'),
   )
   git(fixture, ['add', '.'])
   git(fixture, ['commit', '-m', message])
@@ -184,7 +184,7 @@ function startStoppedPairingMerge(fixture: Fixture): void {
     env: fixture.env,
   })
   expect(merge.status).toBe(1)
-  expect(git(fixture, ['diff', '--name-only', '--diff-filter=U'])).toBe('docs/guide.i18n.yaml')
+  expect(git(fixture, ['diff', '--name-only', '--diff-filter=U'])).toBe(guideMetaPath)
 }
 
 function commitMixedPairs(
@@ -193,8 +193,8 @@ function commitMixedPairs(
   manual: { source: string; zh: string },
   message: string,
 ): void {
-  record(fixture.root, 'docs/guide.md', guide.source, guide.zh)
-  record(fixture.root, 'docs/manual.md', manual.source, manual.zh)
+  record(fixture.root, guideSourcePath, guide.source, guide.zh)
+  record(fixture.root, manualSourcePath, manual.source, manual.zh)
   git(fixture, ['add', '.'])
   git(fixture, ['commit', '-m', message])
 }
@@ -229,10 +229,10 @@ function startMixedPairingMerge(fixture: Fixture): void {
 }
 
 function expectMergedPair(fixture: Fixture): void {
-  expect(readFileSync(join(fixture.root, 'docs/guide.md'), 'utf8')).toBe(mergedSource)
-  expect(readFileSync(join(fixture.root, 'docs/guide.zh.md'), 'utf8')).toBe(mergedZh)
-  expect(readFileSync(join(fixture.root, 'docs/guide.i18n.yaml'), 'utf8')).toBe(
-    renderTranslationPairingRecord(translationPairPaths('docs/guide.md'), {
+  expect(readFileSync(join(fixture.root, guideSourcePath), 'utf8')).toBe(mergedSource)
+  expect(readFileSync(join(fixture.root, guideZhPath), 'utf8')).toBe(mergedZh)
+  expect(readFileSync(join(fixture.root, guideMetaPath), 'utf8')).toBe(
+    renderTranslationPairingRecord(translationPairPaths(guideSourcePath), {
       sourceHash: gitBlobHash(Buffer.from(mergedSource)),
       zhHash: gitBlobHash(Buffer.from(mergedZh)),
     }),
@@ -259,7 +259,7 @@ describe('translation pairing merge composition', { timeout: 15_000 }, () => {
 
     const result = mergeTranslationPairingRecords(
       fixture.root,
-      'docs/guide.i18n.yaml',
+      guideMetaPath,
       records.ancestor,
       records.current,
       records.other,
@@ -271,99 +271,61 @@ describe('translation pairing merge composition', { timeout: 15_000 }, () => {
     expect(result.zhHash).toBe(gitBlobHash(Buffer.from(mergedZh)))
   })
 
-  it('merges a generated source without an English language switcher', () => {
-    const fixture = createFixture(false)
-    const ancestor = record(fixture.root, 'docs/module-graph.md', generatedBaseSource, generatedBaseZh)
-    const current = record(fixture.root, 'docs/module-graph.md', generatedCurrentSource, generatedCurrentZh)
-    const other = record(fixture.root, 'docs/module-graph.md', generatedOtherSource, generatedOtherZh)
-
-    const result = mergeTranslationPairingRecords(
-      fixture.root,
-      'docs/module-graph.i18n.yaml',
-      ancestor,
-      current,
-      other,
-    )
-
-    expect(result.sourceContent.toString('utf8')).toBe(
-      generatedCurrentSource.replace('Beta base.', 'Beta other.'),
-    )
-    expect(result.zhContent.toString('utf8')).toBe(generatedCurrentZh.replace('乙基础。', '乙对侧。'))
-  })
-
   it('rejects an authored source without an English language switcher', () => {
     const fixture = createFixture(false)
-    const source = baseSource.replace('English | [中文](guide.zh.md)\n\n', '')
-    const ancestor = record(fixture.root, 'docs/guide.md', source, baseZh)
-    const current = record(fixture.root, 'docs/guide.md', source, baseZh)
-    const other = record(fixture.root, 'docs/guide.md', source, baseZh)
+    const source = baseSource.replace('English | [中文](README.zh.md)\n\n', '')
+    const ancestor = record(fixture.root, guideSourcePath, source, baseZh)
+    const current = record(fixture.root, guideSourcePath, source, baseZh)
+    const other = record(fixture.root, guideSourcePath, source, baseZh)
 
     expect(() => mergeTranslationPairingRecords(
       fixture.root,
-      'docs/guide.i18n.yaml',
+      guideMetaPath,
       ancestor,
       current,
       other,
-    )).toThrow('docs/guide.md clean merge lost its language-switcher link to guide.zh.md')
-  })
-
-  it('rejects generated Chinese content without its English backlink', () => {
-    const fixture = createFixture(false)
-    const zh = generatedBaseZh.replace('[English](module-graph.md) | 中文\n\n', '')
-    const ancestor = record(fixture.root, 'docs/module-graph.md', generatedBaseSource, zh)
-    const current = record(fixture.root, 'docs/module-graph.md', generatedBaseSource, zh)
-    const other = record(fixture.root, 'docs/module-graph.md', generatedBaseSource, zh)
-
-    expect(() => mergeTranslationPairingRecords(
-      fixture.root,
-      'docs/module-graph.i18n.yaml',
-      ancestor,
-      current,
-      other,
-    )).toThrow(
-      'docs/module-graph.zh.md clean merge lost its language-switcher link to module-graph.md',
-    )
+    )).toThrow(`${guideSourcePath} clean merge lost its language-switcher link to README.zh.md`)
   })
 
   it('leaves owner-content conflicts for a human', () => {
     const fixture = createFixture(false)
-    const ancestor = record(fixture.root, 'docs/guide.md', baseSource, baseZh)
+    const ancestor = record(fixture.root, guideSourcePath, baseSource, baseZh)
     const current = record(
       fixture.root,
-      'docs/guide.md',
+      guideSourcePath,
       baseSource.replace('Alpha base.', 'Alpha current.'),
       baseZh.replace('甲基础。', '甲当前。'),
     )
     const other = record(
       fixture.root,
-      'docs/guide.md',
+      guideSourcePath,
       baseSource.replace('Alpha base.', 'Alpha other.'),
       baseZh.replace('甲基础。', '甲对侧。'),
     )
 
     expect(() => mergeTranslationPairingRecords(
       fixture.root,
-      'docs/guide.i18n.yaml',
+      guideMetaPath,
       ancestor,
       current,
       other,
-    )).toThrow('docs/guide.md has content conflicts')
+    )).toThrow(`${guideSourcePath} has content conflicts`)
   })
 
   it('rejects structurally divergent clean owner merges', () => {
     const fixture = createFixture(false)
-    const ancestor = record(fixture.root, 'docs/guide.md', baseSource, baseZh)
-    const current = record(fixture.root, 'docs/guide.md', currentSource, currentZh)
+    const ancestor = record(fixture.root, guideSourcePath, baseSource, baseZh)
+    const current = record(fixture.root, guideSourcePath, currentSource, currentZh)
     const other = record(
       fixture.root,
-      'docs/guide.md',
+      guideSourcePath,
       `${otherSource}\n## Extra\n`,
       otherZh,
     )
 
     expect(() => mergeTranslationPairingRecords(
       fixture.root,
-      'docs/guide.i18n.yaml',
+      guideMetaPath,
       ancestor,
       current,
       other,
@@ -372,16 +334,16 @@ describe('translation pairing merge composition', { timeout: 15_000 }, () => {
 
   it('refuses owners assigned to another merge strategy', () => {
     const fixture = createFixture(false)
-    write(fixture.root, '.gitattributes', 'docs/*.md merge=custom-owner\n')
+    write(fixture.root, '.gitattributes', 'packages/guide/README*.md merge=custom-owner\n')
     const records = createDivergedPair(fixture)
 
     expect(() => mergeTranslationPairingRecords(
       fixture.root,
-      'docs/guide.i18n.yaml',
+      guideMetaPath,
       records.ancestor,
       records.current,
       records.other,
-    )).toThrow('docs/guide.md uses merge=custom-owner')
+    )).toThrow(`${guideSourcePath} uses merge=custom-owner`)
   })
 
   it('refuses unspecified owners affected by merge.default', () => {
@@ -391,7 +353,7 @@ describe('translation pairing merge composition', { timeout: 15_000 }, () => {
 
     expect(() => mergeTranslationPairingRecords(
       fixture.root,
-      'docs/guide.i18n.yaml',
+      guideMetaPath,
       records.ancestor,
       records.current,
       records.other,
@@ -425,16 +387,16 @@ describe('translation pairing merge composition', { timeout: 15_000 }, () => {
     expect(result.stderr).toContain('runtime is unavailable; leaving an ordinary text conflict')
     expect(git(fixture, ['rev-parse', 'HEAD'])).toBe(headBefore)
     expect(git(fixture, ['rev-parse', '--verify', 'MERGE_HEAD'])).not.toBe('')
-    expect(git(fixture, ['diff', '--name-only', '--diff-filter=U'])).toBe('docs/guide.i18n.yaml')
-    expect(git(fixture, ['ls-files', '--unmerged', '--', 'docs/guide.i18n.yaml']).split('\n')).toHaveLength(3)
-    const conflicted = readFileSync(join(fixture.root, 'docs/guide.i18n.yaml'), 'utf8')
-    expect(conflicted).toContain('<<<<<<< docs/guide.i18n.yaml:current')
+    expect(git(fixture, ['diff', '--name-only', '--diff-filter=U'])).toBe(guideMetaPath)
+    expect(git(fixture, ['ls-files', '--unmerged', '--', guideMetaPath]).split('\n')).toHaveLength(3)
+    const conflicted = readFileSync(join(fixture.root, guideMetaPath), 'utf8')
+    expect(conflicted).toContain(`<<<<<<< ${guideMetaPath}:current`)
     for (const record of [records.current, records.other]) {
       const dataLines = record.split('\n').filter(line => line !== '' && !line.startsWith('#')).join('\n')
       expect(conflicted).toContain(dataLines)
     }
 
-    expect(resolveTranslationPairingConflicts(fixture.root)).toEqual(['docs/guide.i18n.yaml'])
+    expect(resolveTranslationPairingConflicts(fixture.root)).toEqual([guideMetaPath])
     expectMergedPair(fixture)
   })
 
@@ -448,8 +410,8 @@ describe('translation pairing merge composition', { timeout: 15_000 }, () => {
 
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('runtime is unavailable; leaving an ordinary text conflict')
-    expect(readFileSync(join(fixture.root, 'docs/guide.i18n.yaml'), 'utf8')).toContain(
-      '<<<<<<< docs/guide.i18n.yaml:current',
+    expect(readFileSync(join(fixture.root, guideMetaPath), 'utf8')).toContain(
+      `<<<<<<< ${guideMetaPath}:current`,
     )
   })
 
@@ -459,22 +421,22 @@ describe('translation pairing merge composition', { timeout: 15_000 }, () => {
     const result = startMergeWithFakeNode(fixture)
 
     expect(result.status).toBe(1)
-    expect(git(fixture, ['diff', '--name-only', '--diff-filter=U'])).toBe('docs/guide.i18n.yaml')
-    const canonicalRecord = renderTranslationPairingRecord(translationPairPaths('docs/guide.md'), {
+    expect(git(fixture, ['diff', '--name-only', '--diff-filter=U'])).toBe(guideMetaPath)
+    const canonicalRecord = renderTranslationPairingRecord(translationPairPaths(guideSourcePath), {
       sourceHash: gitBlobHash(Buffer.from(currentSource)),
       zhHash: gitBlobHash(Buffer.from(otherZh)),
     })
-    expect(readFileSync(join(fixture.root, 'docs/guide.i18n.yaml'), 'utf8')).toBe(
+    expect(readFileSync(join(fixture.root, guideMetaPath), 'utf8')).toBe(
       canonicalRecord.replace(
-        '\nguide.zh.md:',
-        '\n# Stable separator for independent line merges.\nguide.zh.md:',
+        '\nREADME.zh.md:',
+        '\n# Stable separator for independent line merges.\nREADME.zh.md:',
       ),
     )
 
-    expect(resolveTranslationPairingConflicts(fixture.root)).toEqual(['docs/guide.i18n.yaml'])
-    expect(readFileSync(join(fixture.root, 'docs/guide.md'), 'utf8')).toBe(currentSource)
-    expect(readFileSync(join(fixture.root, 'docs/guide.zh.md'), 'utf8')).toBe(otherZh)
-    expect(readFileSync(join(fixture.root, 'docs/guide.i18n.yaml'), 'utf8')).toBe(canonicalRecord)
+    expect(resolveTranslationPairingConflicts(fixture.root)).toEqual([guideMetaPath])
+    expect(readFileSync(join(fixture.root, guideSourcePath), 'utf8')).toBe(currentSource)
+    expect(readFileSync(join(fixture.root, guideZhPath), 'utf8')).toBe(otherZh)
+    expect(readFileSync(join(fixture.root, guideMetaPath), 'utf8')).toBe(canonicalRecord)
   })
 
   it('leaves a staged merge when the pre-merge-commit hook rejects it', () => {
@@ -507,7 +469,7 @@ describe('translation pairing merge composition', { timeout: 15_000 }, () => {
     expect(git(fixture, ['rev-parse', '--verify', 'MERGE_HEAD'])).not.toBe('')
     expect(git(fixture, ['diff', '--name-only', '--diff-filter=U'])).toBe('')
     expect(git(fixture, ['diff', '--cached', '--name-only']).split('\n')).toContain(
-      'docs/guide.i18n.yaml',
+      guideMetaPath,
     )
     expectMergedPair(fixture)
   })
@@ -525,11 +487,11 @@ describe('translation pairing merge composition', { timeout: 15_000 }, () => {
     expect(result.stderr).toContain('pnpm run resolve-translation-pairing-conflicts')
   })
 
-  it('resolves an already-stopped generated-only conflict from index stages', () => {
+  it('resolves an already-stopped pairing conflict from index stages', () => {
     const fixture = createFixture(false)
     startStoppedPairingMerge(fixture)
 
-    expect(resolveTranslationPairingConflicts(fixture.root)).toEqual(['docs/guide.i18n.yaml'])
+    expect(resolveTranslationPairingConflicts(fixture.root)).toEqual([guideMetaPath])
 
     expect(git(fixture, ['diff', '--name-only', '--diff-filter=U'])).toBe('')
     expectMergedPair(fixture)
@@ -538,24 +500,24 @@ describe('translation pairing merge composition', { timeout: 15_000 }, () => {
   it('refuses to confirm unstaged owner bytes after a stopped merge', () => {
     const fixture = createFixture(false)
     startStoppedPairingMerge(fixture)
-    write(fixture.root, 'docs/guide.md', `${mergedSource}\nunstaged\n`)
+    write(fixture.root, guideSourcePath, `${mergedSource}\nunstaged\n`)
 
     expect(() => resolveTranslationPairingConflicts(fixture.root)).toThrow(
-      'docs/guide.md has unstaged content',
+      `${guideSourcePath} has unstaged content`,
     )
-    expect(git(fixture, ['diff', '--name-only', '--diff-filter=U'])).toBe('docs/guide.i18n.yaml')
+    expect(git(fixture, ['diff', '--name-only', '--diff-filter=U'])).toBe(guideMetaPath)
   })
 
   it('refuses to overwrite an edited sidecar after a stopped merge', () => {
     const fixture = createFixture(false)
     startStoppedPairingMerge(fixture)
-    write(fixture.root, 'docs/guide.i18n.yaml', 'manually resolved\n')
+    write(fixture.root, guideMetaPath, 'manually resolved\n')
 
     expect(() => resolveTranslationPairingConflicts(fixture.root)).toThrow(
-      'docs/guide.i18n.yaml has edited conflict content',
+      `${guideMetaPath} has edited conflict content`,
     )
-    expect(readFileSync(join(fixture.root, 'docs/guide.i18n.yaml'), 'utf8')).toBe('manually resolved\n')
-    expect(git(fixture, ['diff', '--name-only', '--diff-filter=U'])).toBe('docs/guide.i18n.yaml')
+    expect(readFileSync(join(fixture.root, guideMetaPath), 'utf8')).toBe('manually resolved\n')
+    expect(git(fixture, ['diff', '--name-only', '--diff-filter=U'])).toBe(guideMetaPath)
   })
 
   it('resolves safe records while leaving an owner-conflicted pair untouched', () => {
@@ -563,13 +525,13 @@ describe('translation pairing merge composition', { timeout: 15_000 }, () => {
     startMixedPairingMerge(fixture)
 
     expect(() => resolveTranslationPairingConflicts(fixture.root)).toThrow(
-      'docs/manual.i18n.yaml: docs/manual.md has content conflicts',
+      `${manualMetaPath}: ${manualSourcePath} has content conflicts`,
     )
 
     expect(git(fixture, ['diff', '--name-only', '--diff-filter=U']).split('\n')).toEqual([
-      'docs/manual.i18n.yaml',
-      'docs/manual.md',
-      'docs/manual.zh.md',
+      manualMetaPath,
+      manualSourcePath,
+      manualZhPath,
     ])
     expectMergedPair(fixture)
   })

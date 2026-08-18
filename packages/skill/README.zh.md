@@ -13,4 +13,4 @@
 
 该能力位于核心控制主干之外，可以使用本地、嵌入式或远程提供方，而无需更改面向模型的约定。
 
-子系统参考——发现优先级、目录快照、`skill` 加载器——见 [docs/subsystems/skills.md](../../docs/subsystems/skills.md)。
+子系统参考——发现优先级、目录快照、`skill` 加载器——见 docs/subsystems/skills.md。

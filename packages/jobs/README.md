@@ -10,6 +10,6 @@ This family gives long-running tools one owner-isolated background-job protocol 
 | [`jobs-local/`](jobs-local/README.md) | Implements the process-local job registry | registers on `ctx.jobs` |
 | [`tool-jobs/`](tool-jobs/README.md) | Exposes job control and completion notices to the model | registers on `ctx.tools` |
 
-See the [background-job runtime](../../.agents/notes/implemented/architecture/2026-06-20-generic-long-running-tool-runtime.md) and [job-registry](../../.agents/notes/implemented/architecture/2026-07-26-job-registry-seam.md) decisions.
+See the background-job runtime and job-registry decisions.
 
-The subsystem reference — the id scheme, the owner-fenced contract, snapshots — is [docs/subsystems/jobs.md](../../docs/subsystems/jobs.md); design in the [background-job runtime](../../.agents/notes/implemented/architecture/2026-06-20-generic-long-running-tool-runtime.md) and [job-registry contract](../../.agents/notes/implemented/architecture/2026-07-26-job-registry-seam.md) Agent Notes.
+The subsystem reference — the id scheme, the owner-fenced contract, snapshots — is docs/subsystems/jobs.md; design in the background-job runtime and job-registry contract Agent Notes.

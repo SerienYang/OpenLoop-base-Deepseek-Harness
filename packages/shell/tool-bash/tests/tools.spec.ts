@@ -272,9 +272,9 @@ describe('bash tool', () => {
     // print "Terminated" to stderr for the killed sleep — environment
     // dependent — so assert the marker, not the exact body.)
     const ctx = await setup()
-    const result = await call(ctx, 'bash', { command: 'trap "exit 0" TERM; sleep 60', description: 'test command', timeoutMs: 100 })
+    const result = await call(ctx, 'bash', { command: 'trap "exit 0" TERM; sleep 60', description: 'test command', timeoutMs: 2_000 })
     expect(result.isError).toBe(false)
-    expect(text(result)).toContain('[timed out after 100ms]')
+    expect(text(result)).toContain('[timed out after 2000ms]')
     expect(text(result)).not.toContain('[exit code:')
   })
 

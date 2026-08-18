@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-The shared process substrate for one execution world: executable lookup, fully-specified managed child-process trees with raw or collected stdio, and one deep terminal-process primitive that owns PTY allocation, foreground groups, and provider-observable session cleanup. Command defaulting, shell semantics, deadlines, protocol framing, readiness, and presentation stay with consumers — the [bash executors](../shell/README.md), [LSP host](../lsp/README.md), [PTY shell backend](../terminal/README.md), and [ACP subagent backend](../subagent/README.md). See the [subprocess seam Agent Note](../../.agents/notes/implemented/architecture/2026-07-26-subprocess-seam.md).
+The shared process substrate for one execution world: executable lookup, fully-specified managed child-process trees with raw or collected stdio, and one deep terminal-process primitive that owns PTY allocation, foreground groups, and provider-observable session cleanup. Command defaulting, shell semantics, deadlines, protocol framing, readiness, and presentation stay with consumers — the [bash executors](../shell/README.md), [LSP host](../lsp/README.md), [PTY shell backend](../terminal/README.md), and [ACP subagent backend](../subagent/README.md). See the subprocess seam Agent Note.
 
 | Package | ctx key | Role |
 |---|---|---|
@@ -11,4 +11,4 @@ The shared process substrate for one execution world: executable lookup, fully-s
 
 The service owns process lifetime across consumer reloads; consumers own what a process means (a bash command, a future non-shell runner) and every default that shapes one.
 
-The subsystem reference — spawn specs, output readers, outcomes, the `DSH_*` environment — is [docs/subsystems/subprocess.md](../../docs/subsystems/subprocess.md); the seam decision in the [subprocess seam Agent Note](../../.agents/notes/implemented/architecture/2026-07-26-subprocess-seam.md).
+The subsystem reference — spawn specs, output readers, outcomes, the `DSH_*` environment — is docs/subsystems/subprocess.md; the seam decision in the subprocess seam Agent Note.

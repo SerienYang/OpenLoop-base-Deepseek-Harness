@@ -16,4 +16,4 @@ The capability family spans the canonical executor seam, its implementations, th
 
 A leaf `cordis.yml` selects one executor implementation and the model-facing tools it needs. A sandboxed composition also selects a `ctx.sandbox` provider; the [ACP example](../../examples/acp-agent/) shows one complete wiring.
 
-The subsystem reference — request/spec vocabulary, results, background processes, the service, and events — is [docs/subsystems/shell.md](../../docs/subsystems/shell.md).
+The subsystem reference — request/spec vocabulary, results, background processes, the service, and events — is docs/subsystems/shell.md.

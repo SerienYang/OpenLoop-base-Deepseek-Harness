@@ -16,7 +16,6 @@ import {
   languageSwitcherTargets,
   linksTo,
   parseTranslationMarkdown,
-  requiresSourceLanguageSwitcher,
   translationStructureDiff,
   translationStructureSignature,
 } from './translation-pairing.ts'
@@ -167,7 +166,7 @@ function assertMergedPairStructure(paths: TranslationPairPaths, source: Buffer, 
   const zhTree = parseTranslationMarkdown(zh.toString('utf8'))
   const sourceSwitcherTargets = languageSwitcherTargets(paths.source)
   const zhSwitcherTargets = languageSwitcherTargets(paths.zh)
-  if (requiresSourceLanguageSwitcher(paths.source) && !linksTo(sourceTree, zhSwitcherTargets)) {
+  if (!linksTo(sourceTree, zhSwitcherTargets)) {
     throw new Error(`${paths.source} clean merge lost its language-switcher link to ${basename(paths.zh)}`)
   }
   if (!linksTo(zhTree, sourceSwitcherTargets)) {

@@ -22,7 +22,7 @@ Publication is package opt-in, and business packages without the corresponding p
 
 ## Repository-specific Cordis projection
 
-The root package export includes the model-driven extraction, completeness checks, and deterministic text renderers used by this repository's Cordis catalogs. They accept a `CordisCatalogPolicy`; repository-owned type links, foundation/exemption classifications, and inherited Cordis entries remain in `scripts/gen-cordis-catalog.ts` and are passed in explicitly. The generator package therefore contains projection mechanics, not a hidden copy of this repository's documentation taxonomy.
+The root package export includes the model-driven extraction, completeness checks, and deterministic text renderers used by this repository's Cordis runtime catalogs. They accept a `CordisCatalogPolicy`; repository-owned runtime classifications and inherited Cordis entries remain in `scripts/cordis-inspect-policy.ts` and are passed in explicitly. The generator package therefore contains projection mechanics, not a hidden copy of repository policy.
 
 ## Model Experience
 

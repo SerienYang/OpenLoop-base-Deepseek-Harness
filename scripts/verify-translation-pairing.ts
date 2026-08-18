@@ -7,7 +7,6 @@
  * checks exact index bytes for hooks. A check or write named with pair paths
  * touches only those pairs, so update iteration does not pay for a corpus
  * scan. Translation quality remains a review responsibility.
- * See `docs/i18n/README.md` for the owning contract.
  */
 
 import { existsSync, globSync, readFileSync, writeFileSync } from 'node:fs'
@@ -25,7 +24,6 @@ import {
   parseTranslationPairingCliArgs,
   parseTranslationPairingManifest,
   partitionGeneratedRegions,
-  requiresSourceLanguageSwitcher,
   isTranslationScopeFile,
   TRANSLATION_SCOPE_GLOB_EXCLUDES,
   translationStructureDiff,
@@ -65,8 +63,6 @@ function repositoryFileExists(file: string): boolean {
 const SCOPE_PATTERNS = [
   '**/*.md',
   '**/*.i18n.yaml',
-  '.agents/notes/**/*.md',
-  '.agents/notes/**/*.i18n.yaml',
 ]
 
 const manifestContent = readRepositoryFile('scripts/translation-pairing.manifest.json')
@@ -120,7 +116,7 @@ if (request.scope === 'pairs') {
   })
   if (rejected.length > 0 || (!indexMode && absent.length > 0)) {
     for (const anchor of rejected) {
-      console.error(`verify-translation-pairing: ${anchor} is not an in-scope pair (excluded or outside the documentation corpus; see docs/i18n/README.md)`)
+      console.error(`verify-translation-pairing: ${anchor} is excluded or outside the active bilingual documentation corpus`)
     }
     for (const anchor of absent) {
       console.error(`verify-translation-pairing: ${anchor} names no pair on disk (none of its three files exist)`)
@@ -172,7 +168,7 @@ for (const source of sources) {
   if (isExcluded(source)) continue
   const { zh } = translationPairPaths(source)
   if (!repositoryFileExists(zh)) {
-    errors.push(`${source}: in-scope documentation must merge bilingual (docs/i18n/README.md); add the counterpart and record the pair`)
+    errors.push(`${source}: in-scope documentation must include its bilingual counterpart and pairing record`)
     state.set(source, 'missing')
   }
 }
@@ -258,7 +254,7 @@ for (const source of [...pairAnchors].sort()) {
   if (!linksTo(zhTree, sourceSwitcherTargets)) {
     errors.push(`${zh}: missing language switcher — no link to ${basename(source)}`)
   }
-  if (requiresSourceLanguageSwitcher(source) && !linksTo(sourceTree, zhSwitcherTargets)) {
+  if (!linksTo(sourceTree, zhSwitcherTargets)) {
     errors.push(`${source}: missing language switcher — no link back to ${basename(zh)}`)
   }
   for (const divergence of translationStructureDiff(
@@ -289,11 +285,11 @@ if (listMode) {
 
 if (errors.length === 0) {
   console.log(request.scope === 'pairs'
-    ? `verify-translation-pairing: ${pairAnchors.size} named ${indexMode ? 'staged ' : ''}pair(s) consistent; the corpus-wide check still runs in doc-sync.`
+    ? `verify-translation-pairing: ${pairAnchors.size} named ${indexMode ? 'staged ' : ''}pair(s) consistent.`
     : `verify-translation-pairing: ${pairAnchors.size} pair(s) checked across all in-scope documentation, all consistent.`)
   process.exit(0)
 }
 
-console.error('verify-translation-pairing: bilingual pairing rules violated (see docs/i18n/README.md):')
+console.error('verify-translation-pairing: bilingual pairing rules violated:')
 for (const message of errors) console.error(`  ${message}`)
 process.exit(1)

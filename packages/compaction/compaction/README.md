@@ -12,7 +12,7 @@ This package owns the Service Definition role of the compaction capability, spli
 | `@deepseek-ai/dsh-compaction-basic` | Service Provider: `ctx.tokenMeter` pressure + token-budget retention + `llm.stream()` summarization |
 | `@deepseek-ai/dsh-command-compact` | Consumer: the human `/compact` command over `ctx.compaction.compactNow()` |
 
-Unlike the bash seam, this Service Definition depends on `@deepseek-ai/dsh-session` and `@deepseek-ai/dsh-llm` — the contract's verbs are defined over a `Session` and its output is the `ContentBlock` vocabulary, so they cannot be expressed without naming those packages. That deviation from the "Service Definition depends only on cordis" guidance is intentional and recorded in the [compaction capability-seam Agent Note](../../../.agents/notes/implemented/feature/2026-06-18-compaction-capability-seam.md).
+Unlike the bash seam, this Service Definition depends on `@deepseek-ai/dsh-session` and `@deepseek-ai/dsh-llm` — the contract's verbs are defined over a `Session` and its output is the `ContentBlock` vocabulary, so they cannot be expressed without naming those packages. That deviation from the "Service Definition depends only on cordis" guidance is intentional and recorded in the compaction capability-seam Agent Note.
 
 ## Service API (`ctx.compaction`)
 
@@ -24,7 +24,7 @@ All three operations are **abstract** — the backend owns trigger policy, reten
 | `compactNow(agent, signal)` | Explicitly compact one useful balanced older span even below automatic pressure. It synchronously reserves idle turn admission before yielding, writes nothing when no useful span exists, records a standalone `compaction/* { turn: null }` attempt before summarization, and awaits its durability checkpoint before release. Expected operational failures use `ManualCompactionError`; cancellation rethrows the exact abort reason. |
 | `compactRegion(start, end, agent, signal?)` | Forcibly summarize surface nodes `[start, end]` (inclusive seqs) from `agent.session` into a single replacement node whose source comes from `compactCheckpointSource(compactionId)`. **Throws** if a compaction is already in progress, if `start`/`end` aren't surface nodes, or if `start` is positioned after `end` on the surface. The range is a SURFACE-POSITION span, not a numeric seq interval — after a prior replace lands a fresh high-seq summary node at the shadowed range's position, surface order no longer tracks seq order. |
 
-`CompactionResult` keeps the raw summary and bookkeeping-event seqs available to callers alongside the shadowed range and token accounting; its drift-checked shape lives in the [compaction data-structure reference](../../../docs/subsystems/compaction.md#compactionresult).
+`CompactionResult` keeps the raw summary and bookkeeping-event seqs available to callers alongside the shadowed range and token accounting; its drift-checked shape lives in the compaction data-structure reference.
 
 `compactIfNeeded` and `compactNow` take a required `signal`; `compactRegion`'s is optional. A backend that summarizes via `ctx.llm.stream()` **must** forward it into the call's `GenerateOptions.signal`, so an abort or fiber dispose tears down the in-flight summarization. Automatic and explicit-region brackets recover their numeric owner from the currently open turn. Manual brackets require no open turn and stamp `turn: null`.
 
@@ -60,7 +60,7 @@ The lock is the durable bracket, not a `WeakSet`, wrapper mutex, or client-side 
 
 ## Events
 
-The `compaction/*` events extend `SessionEventMap` (merge-extensible) via declaration merging — they are session events, not cordis `Events`, and all three are log-only (no `surfaceOp`). Per-event payloads and semantics are in the generated [persistence log event catalog](../../../docs/persistence-catalog.md).
+The `compaction/*` events extend `SessionEventMap` (merge-extensible) via declaration merging — they are session events, not cordis `Events`, and all three are log-only (no `surfaceOp`). Per-event payloads and semantics are in the generated persistence log event catalog.
 
 ## Implementing a backend
 
@@ -68,7 +68,7 @@ Subclass `CompactionEngine`, implement `compactIfNeeded`, `compactNow`, and `com
 
 ## Recognizing a checkpoint outside the host program (`./checkpoint`)
 
-`compactCheckpointSource()`, `CompactionCheckpointSource`, and `isCompactCheckpointSource()` are declared on the `@deepseek-ai/dsh-compaction/checkpoint` subpath and re-exported from the root, so host-side consumers keep reading them from the root. The constructor requires the owning `CompactionId`, preventing backends from writing an uncorrelated marker that the package invariant must reject. The leaf imports no cordis and declares no module augmentation (the [`dsh-commands/brand`](../../interaction/commands/README.md) shape), which is what lets a client or wire program name the checkpoint source: the package **root** cannot enter such a program at all, because it reaches `dsh-session`'s root and that `Context` merge declares the host `sessions` service against the client's own (`TS2717` — one program per side, per [development.md](../../../docs/development.md#typescript-project-layout)). The web client's transcript adapter pins its plugin literal to the leaf's source type, so renaming the plugin id there is a compile error here.
+`compactCheckpointSource()`, `CompactionCheckpointSource`, and `isCompactCheckpointSource()` are declared on the `@deepseek-ai/dsh-compaction/checkpoint` subpath and re-exported from the root, so host-side consumers keep reading them from the root. The constructor requires the owning `CompactionId`, preventing backends from writing an uncorrelated marker that the package invariant must reject. The leaf imports no cordis and declares no module augmentation (the [`dsh-commands/brand`](../../interaction/commands/README.md) shape), which is what lets a client or wire program name the checkpoint source: the package **root** cannot enter such a program at all, because it reaches `dsh-session`'s root and that `Context` merge declares the host `sessions` service against the client's own (`TS2717` — one program per side, per development.md). The web client's transcript adapter pins its plugin literal to the leaf's source type, so renaming the plugin id there is a compile error here.
 
 ## Model Experience
 

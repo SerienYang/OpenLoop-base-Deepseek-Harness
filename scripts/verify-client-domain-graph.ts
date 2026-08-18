@@ -1,7 +1,7 @@
 /**
  * Enforce intra-package domain layering inside `packages/client/*\/src/client/`.
- * verify-module-graph covers package-level edges; this gate covers the
- * directory level: domain directories may import `contract/` and never each
+ * Workspace constraints cover package-level edges; this gate covers the
+ * directory level. Domain directories may import `contract/` and never each
  * other, and only the assembly point (`apply.ts` / `index.ts`) may import
  * across domains.
  *

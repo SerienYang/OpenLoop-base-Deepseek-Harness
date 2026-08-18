@@ -15,4 +15,4 @@
 
 当一个包获得产品约定和产品消费方时，它会移出 `test-support/`。
 
-不变式约定记录在 [docs/subsystems/invariants.md](../../docs/subsystems/invariants.md)。
+不变式约定记录在 docs/subsystems/invariants.md。

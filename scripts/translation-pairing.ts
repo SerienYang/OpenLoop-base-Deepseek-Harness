@@ -75,49 +75,6 @@ export function blobHash(content: Buffer): string {
   return hash.digest('hex')
 }
 
-const PAIR_META_LINE = /^([^:#]+\.md): ([0-9a-f]{40})$/
-
-/**
- * Parse a `foo.i18n.yaml` consistency record into basename → recorded blob
- * hash, or undefined when any non-comment line deviates from the exact
- * `<basename>.md: <40-hex>` format or repeats a key. Consumers must
- * additionally require exactly the two expected basenames — a renamed key is
- * a malformed record, never a silently-missing entry.
- * @param content - Sidecar file text.
- * @returns The recorded map, or undefined for a malformed record.
- */
-export function parsePairMeta(content: string): Map<string, string> | undefined {
-  const out = new Map<string, string>()
-  for (const line of content.split('\n')) {
-    if (line === '' || line.startsWith('#')) continue
-    const match = PAIR_META_LINE.exec(line)
-    if (!match?.[1] || !match[2]) return undefined
-    if (out.has(match[1])) return undefined
-    out.set(match[1], match[2])
-  }
-  return out
-}
-
-/**
- * Render a `foo.i18n.yaml` consistency record.
- * @param source - Repo-relative English path.
- * @param sourceHash - Blob hash of the English side.
- * @param zh - Repo-relative Chinese path.
- * @param zhHash - Blob hash of the Chinese side.
- * @returns The exact sidecar file content.
- */
-export function renderPairMeta(source: string, sourceHash: string, zh: string, zhHash: string): string {
-  return [
-    '# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each',
-    '# side as of the last confirmed-consistent state. Both languages carry equal authority;',
-    '# after editing either side, bring the other along and re-record with:',
-    `#   pnpm run verify-translation-pairing --write ${source}`,
-    `${basename(source)}: ${sourceHash}`,
-    `${basename(zh)}: ${zhHash}`,
-    '',
-  ].join('\n')
-}
-
 /** Validated fields of `scripts/translation-pairing.manifest.json`. */
 export interface TranslationPairingManifest {
   /** Source documents exempt from pairing because they are generated, instructional, or bilingual by construction. */
@@ -125,7 +82,6 @@ export interface TranslationPairingManifest {
 }
 
 const README_ARTIFACT = /(?:^|\/)readme(?:\.md|\.zh\.md|\.i18n\.yaml)$/i
-const ROOT_CONTRIBUTING_ARTIFACT = /^contributing(?:\.md|\.zh\.md|\.i18n\.yaml)$/i
 const NON_SOURCE_DIRECTORIES = new Set([
   'node_modules',
   'lib',
@@ -144,7 +100,6 @@ const NON_SOURCE_DIRECTORIES = new Set([
 
 /** Glob traversal exclusions corresponding to the non-source path predicate. */
 export const TRANSLATION_SCOPE_GLOB_EXCLUDES = [
-  '.agents/notes/archived/**',
   '**/node_modules/**',
   '**/lib/**',
   '**/.pnpm-store/**',
@@ -178,12 +133,12 @@ function isTranslationSourceExcluded(file: string): boolean {
 
 /** Whether one discovered Markdown or sidecar path belongs to the bilingual source corpus. */
 export function isTranslationScopeFile(file: string): boolean {
-  return !file.startsWith('.agents/notes/archived/')
-    && !isTranslationSourceExcluded(file) && (README_ARTIFACT.test(file)
-    || ROOT_CONTRIBUTING_ARTIFACT.test(file)
-    || file.startsWith('.agents/notes/')
-    || file.startsWith('docs/')
-    || file.startsWith('python/'))
+  const readmeRoot = ['apps/', 'examples/', 'native/', 'packages/']
+    .some(prefix => file.startsWith(prefix))
+  return !isTranslationSourceExcluded(file) && (
+    (readmeRoot && README_ARTIFACT.test(file))
+    || file.startsWith('python/')
+  )
 }
 
 /** Read the manifest exclusion list or fail before enforcement starts. */
@@ -319,28 +274,6 @@ export function linksTo(tree: Nodes, targets: string | readonly string[]): boole
   }
   visit(tree)
   return found
-}
-
-/** Generated English sources cannot carry a switcher without making their generator stale. */
-export function requiresSourceLanguageSwitcher(source: string): boolean {
-  return ![
-    'docs/agent-lifecycle.md',
-    'docs/capability-seams.md',
-    'docs/config-catalog.md',
-    'docs/cordis-api/context.md',
-    'docs/cordis-api/events.md',
-    'docs/cordis-api/fiber.md',
-    // Excluded from pairing, but kept here for generated-category completeness and direct spec coverage.
-    'docs/cordis-api/inherited.md',
-    'docs/cordis-api/registry.md',
-    'docs/cordis-api/service.md',
-    'docs/event-producer-consumer.md',
-    'docs/graph-atlas.md',
-    'docs/module-graph.md',
-    'docs/persistence-catalog.md',
-    'docs/tool-catalog.md',
-    'docs/tool-execution-pipeline.md',
-  ].includes(source)
 }
 
 /** Collect the ordered structural signature, skipping accepted switcher targets. */

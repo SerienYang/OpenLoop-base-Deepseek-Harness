@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1236" height="618" viewBox="0 0 1236 618" role="img" aria-labelledby="title description">
+  <title id="title">OpenLoop brand banner</title>
+  <desc id="description">A local-first agent that evolves with you. Built on DeepSeek Harness.</desc>
+
+  <rect width="1236" height="618" fill="#fbfbfa"/>
+
+  <g transform="translate(80 70) scale(0.052734375)">
+    <rect x="64" y="64" width="896" height="896" rx="224" fill="#f7f8fa" stroke="#d7dbe2" stroke-width="24"/>
+    <path d="M646.4 274.4A272 272 0 1 0 784 488" fill="none" stroke="#111316" stroke-width="104" stroke-linecap="round"/>
+  </g>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', 'Segoe UI', sans-serif">
+    <text x="148" y="106" fill="#111316" font-size="28" font-weight="700" letter-spacing="-0.5">OpenLoop</text>
+
+    <line x1="80" y1="149" x2="584" y2="149" stroke="#e1e4e8" stroke-width="1"/>
+
+    <text x="80" y="238" fill="#101216" font-size="52" font-weight="720" letter-spacing="-2">A local-first agent</text>
+    <text x="80" y="301" fill="#101216" font-size="52" font-weight="720" letter-spacing="-2">that evolves with you.</text>
+
+    <text x="82" y="363" fill="#666d76" font-size="19" font-weight="450">Built on DeepSeek Harness.</text>
+
+    <line x1="80" y1="477" x2="584" y2="477" stroke="#e1e4e8" stroke-width="1"/>
+
+    <text x="82" y="523" fill="#20242a" font-size="15" font-weight="650">Local-first</text>
+    <circle cx="193" cy="518" r="2.25" fill="#c8cdd3"/>
+    <text x="214" y="523" fill="#20242a" font-size="15" font-weight="650">Self-evolving</text>
+    <circle cx="349" cy="518" r="2.25" fill="#c8cdd3"/>
+    <text x="370" y="523" fill="#20242a" font-size="15" font-weight="650">Everything is a plugin</text>
+  </g>
+
+  <g fill="none" stroke-linecap="round">
+    <circle cx="922" cy="309" r="218" stroke="#e4e7ea" stroke-width="1.5" stroke-dasharray="650 720" transform="rotate(-66 922 309)"/>
+    <circle cx="922" cy="309" r="192" stroke="#cbd1d7" stroke-width="2" stroke-dasharray="505 702" transform="rotate(-78 922 309)"/>
+    <circle cx="922" cy="309" r="177" stroke="#d8dde2" stroke-width="1.5" stroke-dasharray="352 760" transform="rotate(27 922 309)"/>
+  </g>
+
+  <g transform="translate(687 74) scale(0.46)">
+    <path d="M646.4 274.4A272 272 0 1 0 784 488" fill="none" stroke="#101216" stroke-width="104" stroke-linecap="round"/>
+  </g>
+
+  <g fill="none" stroke="#cbd1d7" stroke-width="1.25">
+    <path d="M1147 92h9v9"/>
+    <path d="M1156 516v9h-9"/>
+  </g>
+</svg>

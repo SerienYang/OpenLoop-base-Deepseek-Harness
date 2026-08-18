@@ -22,7 +22,7 @@ TypeScript 项目分析器和模型驱动的 Typert 生成器。在生成任何�
 
 ## 本仓库的 Cordis 投影
 
-包根导出中包含本仓库 Cordis 目录使用的模型驱动提取逻辑、完整性检查和确定性文本渲染器。它们接受 `CordisCatalogPolicy`；由仓库持有的类型链接、基础类型／豁免类型分类和继承的 Cordis 条目仍位于 `scripts/gen-cordis-catalog.ts`，并由调用方显式传入。因此，生成器包只包含投影机制，不会隐式复制本仓库的文档分类体系。
+包根导出中包含本仓库 Cordis 运行时目录使用的模型驱动提取逻辑、完整性检查和确定性文本渲染器。它们接受 `CordisCatalogPolicy`；由仓库持有的运行时类型分类和继承 Cordis 条目位于 `scripts/cordis-inspect-policy.ts`，并由调用方显式传入。因此，生成器包只包含投影机制，不会隐式复制仓库策略。
 
 ## 模型体验
 

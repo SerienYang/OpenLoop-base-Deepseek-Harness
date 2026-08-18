@@ -102,16 +102,27 @@ const coverageExemptExcludes = coverageExemptRaw === '1'
 
 // These suites exercise process-global state, process APIs, or timing-sensitive process I/O
 // that worker threads cannot isolate reliably under aggregate gate contention.
-// Keep the narrow exception in forks while the rest of the inventory avoids per-file processes.
+// Keep the narrow exception in one serial fork lane while the ordinary inventory stays parallel.
 const processBoundTests = [
+  'packages/boot/app-boot/tests/user-patches.spec.ts',
+  'packages/hooks/hooks-claude-code/tests/coverage-*.spec.ts',
+  'packages/hooks/hooks-codex/tests/coverage-*.spec.ts',
+  'packages/shell/bash-local/tests/executor.spec.ts',
+  'packages/shell/tool-bash/tests/tools.spec.ts',
   'packages/session/session-persistence-jsonl/tests/jsonl.spec.ts',
   'packages/subagent/subagent-acp/tests/subagent-acp.spec.ts',
+  'packages/subagent/*/tests/real-product.spec.ts',
   'packages/subprocess/subprocess-local/tests/process-exit.spec.ts',
   'packages/subprocess/subprocess-local/tests/spawn.spec.ts',
+  'packages/terminal/terminal-bash/tests/local.spec.ts',
   'packages/context/time-context/tests/time-context.spec.ts',
   'packages/llm/llm-pi-ai/tests/adapter.spec.ts',
   'packages/boot/app-boot/tests/app-boot.spec.ts',
   'packages/workflow/workflow-worker-thread/tests/session.spec.ts',
+  'scripts/gen-cordis-inspect-catalog.spec.ts',
+  'scripts/gen-session-event-types.spec.ts',
+  'scripts/install-lefthook.spec.ts',
+  'scripts/oxlint-contract.spec.ts',
 ]
 
 export default defineConfig({
@@ -133,6 +144,7 @@ export default defineConfig({
           // MaybeLocal in cjs_lexer::Parse) from worker threads on macOS,
           // Linux, and Windows. Forked workers avoid that shared thread path.
           pool: 'forks',
+          maxWorkers: 4,
           setupFiles: ['./scripts/test-invariants.ts'],
           include: testIncludes,
           exclude: [
@@ -148,6 +160,8 @@ export default defineConfig({
           name: 'process-bound',
           execArgv: vitestExecArgv,
           pool: 'forks',
+          fileParallelism: false,
+          maxWorkers: 1,
           setupFiles: ['./scripts/test-invariants.ts'],
           include: processBoundTests,
           exclude: [
@@ -266,10 +280,9 @@ export default defineConfig({
         ...windowsRunnerCoverageExclusions,
         ...pwshCoverageExclusions,
       ],
-      // 100% or it doesn't merge (docs/testing.md: excessive tests are welcome).
+      // Enforce the coverage threshold per file so one large file cannot hide another.
       // Per-file so a well-covered big file can't subsidize a bare one.
-      // Every v8 ignore comment must carry a reason — see the quality-gates Agent Note
-      // (.agents/notes/implemented/process/2026-06-11-quality-gates.md).
+      // Every v8 ignore comment must carry a reason.
       thresholds: {
         perFile: true,
         statements: 100,

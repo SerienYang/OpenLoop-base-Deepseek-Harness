@@ -23,7 +23,7 @@ Owned access compares the job's `SessionId` with the caller's. Ids such as `bash
 
 Implementations also owe the lifecycle semantics of the contract: registrations outlive producer and controller fibers, owner and service disposal cancel live work and await compliant producers, and settlement is first-wins — one terminal record, one round of contained listener notification, released waiters.
 
-See the [job type catalog](../../../docs/subsystems/jobs.md), the [runtime Agent Note](../../../.agents/notes/implemented/architecture/2026-06-20-generic-long-running-tool-runtime.md), and the [seam Agent Note](../../../.agents/notes/implemented/architecture/2026-07-26-job-registry-seam.md).
+See the job type catalog, the runtime Agent Note, and the seam Agent Note.
 
 ## Model Experience
 

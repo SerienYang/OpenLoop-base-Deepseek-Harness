@@ -6,7 +6,7 @@ These tests boot the real web composition in-process and drive it with a real
 Chromium over real HTTP. The lane's mechanics — modes, fixtures, goldens, and
 the deliberate composition divergences from `dsh web` — are documented in
 [`scaffold.ts`](scaffold.ts) and the
-[browser e2e Agent Note](../../../.agents/notes/implemented/testing/2026-07-24-web-gui-browser-e2e-lane.md).
+browser e2e Agent Note.
 
 ## These are Host-face tests
 

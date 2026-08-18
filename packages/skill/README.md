@@ -13,4 +13,4 @@ This family discovers reusable agent instructions and exposes them to the model 
 
 This capability remains outside the core control spine and can use local, embedded, or remote providers without changing the model-facing contract.
 
-The subsystem reference — discovery priority, catalog snapshots, the `skill` loader — is [docs/subsystems/skills.md](../../docs/subsystems/skills.md).
+The subsystem reference — discovery priority, catalog snapshots, the `skill` loader — is docs/subsystems/skills.md.

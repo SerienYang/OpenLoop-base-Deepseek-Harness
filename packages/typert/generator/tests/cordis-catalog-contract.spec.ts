@@ -1,6 +1,6 @@
 /**
  * Model-extraction and negative-path contracts for the Cordis catalog generator
- * (`scripts/gen-cordis-catalog.ts`).
+ * used by `scripts/gen-cordis-inspect-catalog.ts`.
  */
 
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'

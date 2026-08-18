@@ -11,4 +11,4 @@ This family provides authorized retrieval over live and durable session logs, in
 | [`session-log-export/`](session-log-export/README.md) | Adds the Web `/export` command, shared browser download state, and result modal over the Host ZIP endpoint | `ctx.sessionLogDownload` |
 | [`tool-session-query/`](tool-session-query/README.md) | Exposes workspace-authorized session queries to the model | registers on `ctx.tools` |
 
-The subsystem reference — logical records, bounded reads, traces, filters, result pages — is [docs/subsystems/session-query.md](../../docs/subsystems/session-query.md).
+The subsystem reference — logical records, bounded reads, traces, filters, result pages — is docs/subsystems/session-query.md.

@@ -26,7 +26,7 @@ Schedule owns deterministic calendar normalization. Local times inside a dayligh
 
 ## Management tools
 
-The generated [tool catalog](../../../docs/tool-catalog.md) owns the argument and output schemas for `schedule_create`, `schedule_list`, and `schedule_delete`. Their canonical values use camelCase record fields even though model input uses `after_seconds` and `time_zone`.
+The generated tool catalog owns the argument and output schemas for `schedule_create`, `schedule_list`, and `schedule_delete`. Their canonical values use camelCase record fields even though model input uses `after_seconds` and `time_zone`.
 
 One Agent-scoped queue serializes each accepted management transaction and the live owner's due transaction from preflight through any post-append barrier. `schedule_create` requires exactly one of `after_seconds`, `at`, or `every_seconds`, validates shape-only failures before entering the queue, then checkpoints, allocates a never-reused id, appends create, and checkpoints again. `schedule_list` returns active records in creation order with `state: "scheduled" | "overdue"` and `deliveryMode: "session-local"`. `schedule_delete` rejects an empty or whitespace-padded id before the queue and appends only for an active id; an unknown or terminal id returns `{ id, deleted: false, code: "schedule_not_found" }` after preflight.
 

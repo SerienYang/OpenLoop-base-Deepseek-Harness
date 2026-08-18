@@ -10,4 +10,4 @@ The Schedule family owns reminders whose durable state lives in the original Ses
 
 The package deliberately exposes no public Schedule service or mutable database. Tools and runtime append to the Session stream; due work enters the same conversation through the Agent's ordinary follow-up queue.
 
-See [Session-local Schedule](../../docs/subsystems/schedule.md) for the durable record, transition, view, and delivery contracts.
+See Session-local Schedule for the durable record, transition, view, and delivery contracts.

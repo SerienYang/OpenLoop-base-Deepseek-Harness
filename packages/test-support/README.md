@@ -15,4 +15,4 @@ These packages support repository development, tests, and examples rather than p
 
 A package moves out of `test-support/` when it gains a product contract and product consumers.
 
-The invariants contract is documented in [docs/subsystems/invariants.md](../../docs/subsystems/invariants.md).
+The invariants contract is documented in docs/subsystems/invariants.md.
