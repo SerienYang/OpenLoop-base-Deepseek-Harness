@@ -1,8 +1,20 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   parseOpenloopArtifactManifest,
   parseOpenloopBuildManifest,
 } from '../src/index.ts'
+
+interface PackageManifest {
+  readonly name?: string
+  readonly private?: boolean
+  readonly openloop?: { readonly face?: string }
+  readonly dependencies?: Readonly<Record<string, string>>
+  readonly peerDependencies?: Readonly<Record<string, string>>
+  readonly devDependencies?: Readonly<Record<string, string>>
+  readonly exports?: Readonly<Record<string, unknown>>
+  readonly files?: readonly string[]
+}
 
 const sha256 = 'a'.repeat(64)
 
@@ -31,6 +43,44 @@ function artifactManifest() {
     },
   }
 }
+
+describe('OpenLoop build contract package', () => {
+  it('ships the required private host package surface', () => {
+    const manifest = JSON.parse(
+      readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+    ) as PackageManifest
+
+    expect(manifest).toMatchObject({
+      name: '@openloop/build-contract',
+      private: true,
+      openloop: { face: 'host' },
+      dependencies: {
+        '@deepseek-ai/schemastery': 'workspace:^',
+      },
+      exports: {
+        '.': {
+          types: './lib/types/index.d.ts',
+          default: './lib/index.js',
+        },
+        './invariant': {
+          types: './lib/types/invariant.d.ts',
+          default: './lib/invariant.js',
+        },
+      },
+    })
+    expect(manifest.files).toEqual([
+      'lib/index.js',
+      'lib/invariant.js',
+      'lib/types/**/*.d.ts',
+    ])
+    for (const dependency of ['@deepseek-ai/cordis', '@deepseek-ai/dsh-invariants']) {
+      expect(manifest.peerDependencies?.[dependency]).toBe('workspace:^')
+      expect(manifest.devDependencies?.[dependency]).toBe(
+        manifest.peerDependencies?.[dependency],
+      )
+    }
+  })
+})
 
 describe('OpenLoop build manifest contract', () => {
   it('parses the complete manifest', () => {
