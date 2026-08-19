@@ -12,7 +12,6 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -20,6 +19,7 @@ import {
   parseOpenloopBuildManifest,
 } from '../../packages/openloop/build-contract/src/index.ts'
 
+const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url))
 const requiredOptions = new Map([
   ['--core', 'core'],
   ['--sidecar', 'sidecar'],
@@ -51,26 +51,6 @@ function optionValue(args, index, option) {
     throw new Error(`${option} requires a value`)
   }
   return value
-}
-
-function commonTrustedRoot(paths) {
-  if (paths.some(path => !isAbsolute(path))) return resolve(process.cwd())
-  const absolutePaths = paths.map(path => resolve(path))
-  let root = dirname(absolutePaths[0])
-  while (!absolutePaths.every(path => isWithin(root, path))) {
-    const parent = dirname(root)
-    if (parent === root) return root
-    root = parent
-  }
-  return root
-}
-
-function trustedRootFor(path) {
-  const cwd = resolve(process.cwd())
-  if (!isAbsolute(path) || isWithin(cwd, resolve(path))) return cwd
-  const temporaryRoot = resolve(tmpdir())
-  if (isWithin(temporaryRoot, resolve(path))) return temporaryRoot
-  return dirname(resolve(path))
 }
 
 function assertNoSymlinkComponents(path, trustedRoot, label, allowMissing = false) {
@@ -123,7 +103,11 @@ function existingInput(path, label, allowDirectory, trustedRoot) {
     const expected = allowDirectory ? 'a regular file or directory' : 'a regular file'
     throw new Error(`${label} input must be ${expected}: ${path}`)
   }
-  return realpathSync(absolute)
+  const real = realpathSync(absolute)
+  if (!isWithin(realpathSync(trustedRoot), real)) {
+    throw new Error(`${label} input must resolve inside its trusted root: ${path}`)
+  }
+  return real
 }
 
 function directoryFiles(root, directory = root) {
@@ -156,7 +140,7 @@ function lengthBytes(value) {
 
 /** Hash one regular file or a deterministic relative-path directory stream. */
 export function hashArtifact(path, dependencies = {}) {
-  const trustedRoot = dependencies.trustedRoot ?? trustedRootFor(path)
+  const trustedRoot = dependencies.trustedRoot ?? repositoryRoot
   const real = existingInput(path, 'artifact', true, trustedRoot)
   const stat = lstatSync(real)
   if (stat.isFile()) {
@@ -207,7 +191,11 @@ function outputTarget(path, inputs, trustedRoot) {
   assertNoInputOverlap(targetBeforeCreate(absolute), inputs, path)
   mkdirSync(dirname(absolute), { recursive: true })
   assertNoSymlinkComponents(dirname(absolute), trustedRoot, 'output')
-  const target = join(realpathSync(dirname(absolute)), basename(absolute))
+  const parent = realpathSync(dirname(absolute))
+  if (!isWithin(realpathSync(trustedRoot), parent)) {
+    throw new Error(`output parent must resolve inside its trusted root: ${path}`)
+  }
+  const target = join(parent, basename(absolute))
   assertNoInputOverlap(target, inputs, path)
   if (existsSync(target)) {
     const stat = lstatSync(target)
@@ -233,17 +221,7 @@ function canonicalJson(value) {
 
 /** Validate inputs, hash artifacts, and atomically write a canonical manifest. */
 export function generateArtifactManifest(options, dependencies = {}) {
-  const suppliedPaths = [
-    options.core,
-    options.sidecar,
-    options.web,
-    options.bundleGraph,
-    options.out,
-    ...artifactOrder.slice(3)
-      .map(name => options[name])
-      .filter(path => path !== undefined),
-  ]
-  const trustedRoot = dependencies.trustedRoot ?? commonTrustedRoot(suppliedPaths)
+  const trustedRoot = dependencies.trustedRoot ?? repositoryRoot
   const core = existingInput(options.core, 'core', false, trustedRoot)
   const sidecar = existingInput(options.sidecar, 'sidecar', false, trustedRoot)
   const web = existingInput(options.web, 'web', true, trustedRoot)

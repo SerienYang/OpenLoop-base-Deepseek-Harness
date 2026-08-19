@@ -11,13 +11,13 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   parseOpenloopBuildManifest,
 } from '../../packages/openloop/build-contract/src/index.ts'
 
+const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url))
 const baselinePath = fileURLToPath(new URL('./upstream-baseline.json', import.meta.url))
 const integerOptions = new Map([
   ['--runtime-version', 'runtimeVersion'],
@@ -57,14 +57,6 @@ function integerValue(value, option) {
 function isWithin(parent, candidate) {
   const child = relative(parent, candidate)
   return child === '' || (child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child))
-}
-
-function trustedRootFor(path) {
-  const cwd = resolve(process.cwd())
-  if (!isAbsolute(path) || isWithin(cwd, resolve(path))) return cwd
-  const temporaryRoot = resolve(tmpdir())
-  if (isWithin(temporaryRoot, resolve(path))) return temporaryRoot
-  return dirname(resolve(path))
 }
 
 function assertNoSymlinkComponents(path, trustedRoot, label, allowMissing = false) {
@@ -175,6 +167,9 @@ function atomicWrite(path, content, protectedPaths, trustedRoot) {
   mkdirSync(dirname(absolute), { recursive: true })
   assertNoSymlinkComponents(dirname(absolute), trustedRoot, 'output')
   const parent = realpathSync(dirname(absolute))
+  if (!isWithin(realpathSync(trustedRoot), parent)) {
+    throw new Error(`output parent must resolve inside its trusted root: ${path}`)
+  }
   const target = join(parent, basename(absolute))
   if (protectedPaths.includes(target)) {
     throw new Error(`output must not overwrite the approved baseline: ${path}`)
@@ -196,14 +191,11 @@ function atomicWrite(path, content, protectedPaths, trustedRoot) {
 /** Generate, validate, atomically write, and hash one canonical core manifest. */
 export function generateBuildManifest(options, dependencies = {}) {
   const approvedBaselinePath = dependencies.baselinePath ?? baselinePath
-  const baselineTrustedRoot = dependencies.trustedRoot
-    ?? trustedRootFor(approvedBaselinePath)
-  const outputTrustedRoot = dependencies.trustedRoot
-    ?? trustedRootFor(options.out)
+  const trustedRoot = dependencies.trustedRoot ?? repositoryRoot
   const identity = approvedBaseline(
     approvedBaselinePath,
     dependencies.now ?? Date.now(),
-    baselineTrustedRoot,
+    trustedRoot,
   )
   const manifest = parseOpenloopBuildManifest({
     appVersion: options.appVersion ?? '0.1.0',
@@ -218,7 +210,7 @@ export function generateBuildManifest(options, dependencies = {}) {
   })
   const bytes = canonicalJson(manifest)
   const sha256 = createHash('sha256').update(bytes).digest('hex')
-  atomicWrite(options.out, bytes, [realpathSync(approvedBaselinePath)], outputTrustedRoot)
+  atomicWrite(options.out, bytes, [realpathSync(approvedBaselinePath)], trustedRoot)
   return { manifest, bytes, sha256 }
 }
 

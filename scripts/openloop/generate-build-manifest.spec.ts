@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { OpenloopBuildManifest } from '../../packages/openloop/build-contract/src/index.ts'
 
@@ -34,6 +34,7 @@ interface BuildGeneratorModule {
     dependencies?: {
       readonly baselinePath?: string
       readonly now?: number
+      readonly trustedRoot?: string
     },
   ) => {
     readonly manifest: OpenloopBuildManifest
@@ -121,8 +122,15 @@ describe('OpenLoop build manifest generator', () => {
   })
 
   it('uses approved baseline identity and sensible initial defaults', () => {
-    const out = join(temporaryRoot(), 'core.json')
-    const result = generateBuildManifest({ channel: 'test', out })
+    const root = temporaryRoot()
+    const out = join(root, 'core.json')
+    const result = generateBuildManifest(
+      { channel: 'test', out },
+      {
+        baselinePath: writeBaseline(root),
+        trustedRoot: root,
+      },
+    )
 
     expect(result.manifest).toEqual({
       appVersion: '0.1.0',
@@ -146,9 +154,13 @@ describe('OpenLoop build manifest generator', () => {
     const root = temporaryRoot()
     const first = join(root, 'first.json')
     const second = join(root, 'nested/second.json')
+    const dependencies = {
+      baselinePath: writeBaseline(root),
+      trustedRoot: root,
+    }
 
-    const firstResult = generateBuildManifest({ channel: 'test', out: first })
-    const secondResult = generateBuildManifest({ channel: 'test', out: second })
+    const firstResult = generateBuildManifest({ channel: 'test', out: first }, dependencies)
+    const secondResult = generateBuildManifest({ channel: 'test', out: second }, dependencies)
 
     expect(readFileSync(first)).toEqual(readFileSync(second))
     expect(firstResult.sha256).toBe(secondResult.sha256)
@@ -156,13 +168,31 @@ describe('OpenLoop build manifest generator', () => {
   })
 
   it('validates explicit version overrides before writing', () => {
-    const out = join(temporaryRoot(), 'core.json')
+    const root = temporaryRoot()
+    const out = join(root, 'core.json')
 
     expect(() => generateBuildManifest({
       channel: 'test',
       out,
       runtimeVersion: 0,
+    }, {
+      baselinePath: writeBaseline(root),
+      trustedRoot: root,
     })).toThrow(/runtimeVersion/iu)
+  })
+
+  it('uses the repository as the default trusted root', () => {
+    const root = temporaryRoot()
+    const baseline = writeBaseline(root)
+
+    expect(() => generateBuildManifest(
+      { channel: 'test', out: join(root, 'core.json') },
+      { baselinePath: baseline },
+    )).toThrow(/trusted root/iu)
+    expect(() => generateBuildManifest({
+      channel: 'test',
+      out: relative(process.cwd(), join(root, 'relative-core.json')),
+    })).toThrow(/trusted root/iu)
   })
 
   it('refuses to overwrite its approved baseline input', () => {
@@ -171,7 +201,10 @@ describe('OpenLoop build manifest generator', () => {
 
     expect(() => generateBuildManifest(
       { channel: 'test', out: baseline },
-      { baselinePath: baseline },
+      {
+        baselinePath: baseline,
+        trustedRoot: dirname(baseline),
+      },
     )).toThrow(/output.*baseline|baseline.*output/iu)
     expect(readFileSync(baseline, 'utf8')).toBe(source)
   })
@@ -189,6 +222,7 @@ describe('OpenLoop build manifest generator', () => {
         {
           baselinePath: baseline,
           now: Date.parse('2026-08-20T00:00:00Z'),
+          trustedRoot: root,
         },
       )
 
@@ -221,6 +255,7 @@ describe('OpenLoop build manifest generator', () => {
       {
         baselinePath: baseline,
         now: Date.parse('2026-08-20T00:00:00Z'),
+        trustedRoot: root,
       },
     )).toThrow(/baseline|approvedAt|capturedAt|sourceType|sourceRef|commit/iu)
   })
@@ -229,13 +264,17 @@ describe('OpenLoop build manifest generator', () => {
     const root = temporaryRoot()
     const real = join(root, 'real')
     const alias = join(root, 'alias')
-    mkdirSync(real)
-    const baseline = writeBaseline(real)
+    const nested = join(real, 'nested')
+    mkdirSync(nested, { recursive: true })
+    const baseline = writeBaseline(nested)
     symlinkSync(real, alias, 'dir')
 
     expect(() => generateBuildManifest(
       { channel: 'test', out: join(root, 'core.json') },
-      { baselinePath: join(alias, 'upstream-baseline.json') },
+      {
+        baselinePath: join(alias, 'nested/upstream-baseline.json'),
+        trustedRoot: root,
+      },
     )).toThrow(/symlink/iu)
     expect(readFileSync(baseline, 'utf8')).toContain('"sourceType": "release"')
   })
@@ -245,13 +284,16 @@ describe('OpenLoop build manifest generator', () => {
     const baseline = writeBaseline(root)
     const realOutput = join(root, 'real-output')
     const outputAlias = join(root, 'output-alias')
-    mkdirSync(realOutput)
+    mkdirSync(join(realOutput, 'nested'), { recursive: true })
     symlinkSync(realOutput, outputAlias, 'dir')
 
     expect(() => generateBuildManifest(
-      { channel: 'test', out: join(outputAlias, 'core.json') },
-      { baselinePath: baseline },
+      { channel: 'test', out: join(outputAlias, 'nested/core.json') },
+      {
+        baselinePath: baseline,
+        trustedRoot: root,
+      },
     )).toThrow(/symlink/iu)
-    expect(() => readFileSync(join(realOutput, 'core.json'))).toThrow()
+    expect(() => readFileSync(join(realOutput, 'nested/core.json'))).toThrow()
   })
 })

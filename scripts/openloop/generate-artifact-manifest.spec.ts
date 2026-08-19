@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { OpenloopArtifactManifest } from '../../packages/openloop/build-contract/src/index.ts'
 
@@ -31,8 +31,14 @@ interface ArtifactOptions {
 
 interface ArtifactGeneratorModule {
   readonly parseArtifactManifestArguments: (args: string[]) => Record<string, unknown>
-  readonly hashArtifact: (path: string) => string
-  readonly generateArtifactManifest: (options: ArtifactOptions) => {
+  readonly hashArtifact: (
+    path: string,
+    dependencies?: { readonly trustedRoot?: string },
+  ) => string
+  readonly generateArtifactManifest: (
+    options: ArtifactOptions,
+    dependencies?: { readonly trustedRoot?: string },
+  ) => {
     readonly manifest: OpenloopArtifactManifest
     readonly bytes: string
     readonly sha256: string
@@ -107,22 +113,24 @@ describe('OpenLoop artifact manifest generator', () => {
 
   it('hashes the exact validated core bytes as manifest identity', () => {
     const paths = fixture()
+    const dependencies = { trustedRoot: dirname(paths.core) }
     const coreBytes = readFileSync(paths.core)
-    const result = generateArtifactManifest(paths)
+    const result = generateArtifactManifest(paths, dependencies)
 
     expect(result.manifest.coreManifestSha256).toBe(
       createHash('sha256').update(coreBytes).digest('hex'),
     )
     expect(result.manifest.artifacts).toEqual({
-      sidecar: hashArtifact(paths.sidecar),
-      web: hashArtifact(paths.web),
-      bundleGraph: hashArtifact(paths.bundleGraph),
+      sidecar: hashArtifact(paths.sidecar, dependencies),
+      web: hashArtifact(paths.web, dependencies),
+      bundleGraph: hashArtifact(paths.bundleGraph, dependencies),
     })
   })
 
   it('writes deterministic bytes and ignores directory creation order and mtimes', () => {
     const paths = fixture()
     const otherWeb = join(temporaryRoot(), 'web')
+    const dependencies = { trustedRoot: dirname(paths.core) }
     mkdirSync(join(paths.web, 'assets'))
     writeFileSync(join(paths.web, 'assets/z.js'), 'z')
     writeFileSync(join(paths.web, 'assets/a.js'), 'a')
@@ -131,17 +139,20 @@ describe('OpenLoop artifact manifest generator', () => {
     writeFileSync(join(otherWeb, 'assets/z.js'), 'z')
     writeFileSync(join(otherWeb, 'index.html'), '<main>OpenLoop</main>')
 
-    expect(hashArtifact(paths.web)).toBe(hashArtifact(otherWeb))
+    expect(hashArtifact(paths.web, dependencies)).toBe(
+      hashArtifact(otherWeb, { trustedRoot: dirname(otherWeb) }),
+    )
 
-    const first = generateArtifactManifest(paths)
+    const first = generateArtifactManifest(paths, dependencies)
     const firstBytes = readFileSync(paths.out)
-    const second = generateArtifactManifest(paths)
+    const second = generateArtifactManifest(paths, dependencies)
     expect(readFileSync(paths.out)).toEqual(firstBytes)
     expect(second.sha256).toBe(first.sha256)
   })
 
   it('includes optional release artifacts only when supplied', () => {
     const paths = fixture()
+    const dependencies = { trustedRoot: dirname(paths.core) }
     const optional = {
       app: join(paths.web, 'OpenLoop.app'),
       dmg: join(paths.web, 'OpenLoop.dmg'),
@@ -151,7 +162,7 @@ describe('OpenLoop artifact manifest generator', () => {
     }
     for (const [name, path] of Object.entries(optional)) writeFileSync(path, name)
 
-    const result = generateArtifactManifest({ ...paths, ...optional })
+    const result = generateArtifactManifest({ ...paths, ...optional }, dependencies)
 
     expect(Object.keys(result.manifest.artifacts)).toEqual([
       'sidecar',
@@ -163,7 +174,23 @@ describe('OpenLoop artifact manifest generator', () => {
       'ffmpeg',
       'ffprobe',
     ])
-    expect(result.manifest.artifacts.ffprobe).toBe(hashArtifact(optional.ffprobe))
+    expect(result.manifest.artifacts.ffprobe).toBe(
+      hashArtifact(optional.ffprobe, dependencies),
+    )
+  })
+
+  it('uses the repository as the default trusted root', () => {
+    const paths = fixture()
+
+    expect(() => generateArtifactManifest(paths)).toThrow(/trusted root/iu)
+    expect(() => hashArtifact(paths.sidecar)).toThrow(/trusted root/iu)
+    expect(() => generateArtifactManifest({
+      ...paths,
+      core: relative(process.cwd(), paths.core),
+    })).toThrow(/trusted root/iu)
+    expect(() => hashArtifact(
+      relative(process.cwd(), paths.sidecar),
+    )).toThrow(/trusted root/iu)
   })
 
   it('rejects invalid core manifests, missing inputs, and direct or nested symlinks', () => {
@@ -172,24 +199,36 @@ describe('OpenLoop artifact manifest generator', () => {
       ...coreManifest(),
       dshCommit: 'short',
     }))
-    expect(() => generateArtifactManifest(invalid)).toThrow(/dshCommit/iu)
+    expect(() => generateArtifactManifest(
+      invalid,
+      { trustedRoot: dirname(invalid.core) },
+    )).toThrow(/dshCommit/iu)
 
     const missing = fixture()
     rmSync(missing.sidecar)
-    expect(() => generateArtifactManifest(missing)).toThrow(/sidecar.*missing|missing.*sidecar/iu)
+    expect(() => generateArtifactManifest(
+      missing,
+      { trustedRoot: dirname(missing.core) },
+    )).toThrow(/sidecar.*missing|missing.*sidecar/iu)
 
     const escaped = fixture()
     const outside = join(temporaryRoot(), 'outside.js')
     writeFileSync(outside, 'outside')
     symlinkSync(outside, join(escaped.web, 'linked.js'))
-    expect(() => generateArtifactManifest(escaped)).toThrow(/symlink/iu)
+    expect(() => generateArtifactManifest(
+      escaped,
+      { trustedRoot: dirname(escaped.core) },
+    )).toThrow(/symlink/iu)
 
     const direct = fixture()
     const realSidecar = join(dirname(direct.sidecar), 'real-sidecar')
     writeFileSync(realSidecar, 'sidecar bytes')
     rmSync(direct.sidecar)
     symlinkSync(realSidecar, direct.sidecar)
-    expect(() => generateArtifactManifest(direct)).toThrow(/symlink/iu)
+    expect(() => generateArtifactManifest(
+      direct,
+      { trustedRoot: dirname(direct.core) },
+    )).toThrow(/symlink/iu)
   })
 
   it('rejects an intermediate symlink component in an input path', () => {
@@ -197,19 +236,20 @@ describe('OpenLoop artifact manifest generator', () => {
     const root = dirname(paths.core)
     const real = join(root, 'real-inputs')
     const alias = join(root, 'input-alias')
-    mkdirSync(real)
-    writeFileSync(join(real, 'sidecar'), 'sidecar bytes')
+    mkdirSync(join(real, 'nested'), { recursive: true })
+    writeFileSync(join(real, 'nested/sidecar'), 'sidecar bytes')
     symlinkSync(real, alias, 'dir')
 
     expect(() => generateArtifactManifest({
       ...paths,
-      sidecar: join(alias, 'sidecar'),
-    })).toThrow(/symlink/iu)
+      sidecar: join(alias, 'nested/sidecar'),
+    }, { trustedRoot: root })).toThrow(/symlink/iu)
 
-    const nested = join(real, 'nested')
-    mkdirSync(nested)
-    writeFileSync(join(nested, 'artifact'), 'artifact bytes')
-    expect(() => hashArtifact(join(alias, 'nested/artifact'))).toThrow(/symlink/iu)
+    writeFileSync(join(real, 'nested/artifact'), 'artifact bytes')
+    expect(() => hashArtifact(
+      join(alias, 'nested/artifact'),
+      { trustedRoot: root },
+    )).toThrow(/symlink/iu)
   })
 
   it('rejects output overlap and a symlinked output parent using resolved paths', () => {
@@ -218,7 +258,7 @@ describe('OpenLoop artifact manifest generator', () => {
     expect(() => generateArtifactManifest({
       ...overlap,
       out: nestedOutput,
-    })).toThrow(/overlap/iu)
+    }, { trustedRoot: dirname(overlap.core) })).toThrow(/overlap/iu)
     expect(existsSync(dirname(nestedOutput))).toBe(false)
 
     const webAlias = join(dirname(overlap.web), 'web-alias')
@@ -226,19 +266,19 @@ describe('OpenLoop artifact manifest generator', () => {
     expect(() => generateArtifactManifest({
       ...overlap,
       out: join(webAlias, 'artifact-manifest.json'),
-    })).toThrow(/symlink|overlap/iu)
+    }, { trustedRoot: dirname(overlap.core) })).toThrow(/symlink|overlap/iu)
 
     const redirected = fixture()
     const root = dirname(redirected.core)
     const realOutput = join(root, 'real-output')
     const outputAlias = join(root, 'output-alias')
-    mkdirSync(realOutput)
+    mkdirSync(join(realOutput, 'nested'), { recursive: true })
     symlinkSync(realOutput, outputAlias, 'dir')
     expect(() => generateArtifactManifest({
       ...redirected,
-      out: join(outputAlias, 'artifact-manifest.json'),
-    })).toThrow(/symlink/iu)
-    expect(() => readFileSync(join(realOutput, 'artifact-manifest.json')))
+      out: join(outputAlias, 'nested/artifact-manifest.json'),
+    }, { trustedRoot: root })).toThrow(/symlink/iu)
+    expect(() => readFileSync(join(realOutput, 'nested/artifact-manifest.json')))
       .toThrow()
   })
 })
