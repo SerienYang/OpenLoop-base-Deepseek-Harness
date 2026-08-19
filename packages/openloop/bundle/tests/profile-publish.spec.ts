@@ -13,7 +13,7 @@ import { ensureOpenloopProfile } from '../src/profile.ts'
 
 const state = vi.hoisted(() => ({
   initFailure: false,
-  manifestConflict: false,
+  manifestConflict: undefined as string | undefined,
   openedPaths: new Map<number, string>(),
   partialWriteFailure: undefined as string | undefined,
   publishFailure: undefined as string | undefined,
@@ -36,8 +36,8 @@ vi.mock('node:fs', async (importOriginal) => {
       if (state.publishFailure !== undefined && isProfileFile(path, state.publishFailure)) {
         throw Object.assign(new Error(`injected publish failure for ${state.publishFailure}`), { code: 'EACCES' })
       }
-      if (state.manifestConflict && isProfileFile(path, 'package.json')) {
-        actual.writeFileSync(path, '{"name":"user-race-winner"}\n', { encoding: 'utf8', flag: 'wx' })
+      if (state.manifestConflict !== undefined && isProfileFile(path, 'package.json')) {
+        actual.writeFileSync(path, state.manifestConflict, { encoding: 'utf8', flag: 'wx' })
         throw Object.assign(new Error('injected user manifest race'), { code: 'EEXIST' })
       }
       const descriptor = actual.openSync(path, flags, mode)
@@ -70,7 +70,10 @@ vi.mock('@deepseek-ai/dsh-app-boot', async (importOriginal) => {
       mkdirSync(dir, { recursive: true })
       fs.writeFileSync(join(dir, 'package.json'), '{"name":"staged-openloop"}\n')
       fs.writeFileSync(join(dir, 'cordis.patch.yml'), '[]\n')
-      fs.writeFileSync(join(dir, 'pnpm-workspace.yaml'), 'packages:\n  - .\n')
+      fs.writeFileSync(
+        join(dir, 'pnpm-workspace.yaml'),
+        'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\n',
+      )
       if (state.initFailure) throw new Error('injected staging initialization failure')
     },
   }
@@ -80,7 +83,7 @@ const tmp = (): string => mkdtempSync(join(tmpdir(), 'openloop-profile-publish-'
 
 beforeEach(() => {
   state.initFailure = false
-  state.manifestConflict = false
+  state.manifestConflict = undefined
   state.openedPaths.clear()
   state.partialWriteFailure = undefined
   state.publishFailure = undefined
@@ -147,12 +150,25 @@ describe('OpenLoop profile atomic publication', () => {
   it('rolls back only its supporting files when a user manifest wins the final O_EXCL race', () => {
     const home = tmp()
     const profileDir = join(home, 'profiles', 'openloop')
-    state.manifestConflict = true
+    state.manifestConflict = '{"name":"user-race-winner"}\n'
 
     expect(ensureOpenloopProfile(home)).toBe(profileDir)
 
     expect(readFileSync(join(profileDir, 'package.json'), 'utf8'))
       .toBe('{"name":"user-race-winner"}\n')
+    expect(existsSync(join(profileDir, 'cordis.patch.yml'))).toBe(false)
+    expect(existsSync(join(profileDir, 'pnpm-workspace.yaml'))).toBe(false)
+  })
+
+  it('rejects an invalid manifest that wins the final O_EXCL race and rolls back its supporting files', () => {
+    const home = tmp()
+    const profileDir = join(home, 'profiles', 'openloop')
+    state.manifestConflict = 'partial'
+
+    expect(() => ensureOpenloopProfile(home))
+      .toThrow(/package\.json.*parseable JSON/i)
+
+    expect(readFileSync(join(profileDir, 'package.json'), 'utf8')).toBe('partial')
     expect(existsSync(join(profileDir, 'cordis.patch.yml'))).toBe(false)
     expect(existsSync(join(profileDir, 'pnpm-workspace.yaml'))).toBe(false)
   })

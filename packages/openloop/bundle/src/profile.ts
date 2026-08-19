@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import {
   closeSync,
-  existsSync,
   fstatSync,
   lstatSync,
   mkdirSync,
@@ -16,8 +15,10 @@ import {
 import { dirname, join } from 'node:path'
 import {
   initProfile,
+  loadOverlayPatches,
   resolveProfileDir,
 } from '@deepseek-ai/dsh-app-boot'
+import { load as loadYaml } from 'js-yaml'
 
 /** Ordered DSH bundle layers for the OpenLoop desktop profile. */
 export const OPENLOOP_PROFILE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@openloop/bundle'] as const
@@ -49,6 +50,74 @@ interface CreatedProfileFile {
 
 function errorCode(error: unknown): string | undefined {
   return (error as NodeJS.ErrnoException | null)?.code
+}
+
+function readRegularProfileFile(path: string): Buffer {
+  const stat = lstatSync(path)
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error(`OpenLoop profile path ${path} must be a regular file, not a symbolic link or special file`)
+  }
+  try {
+    return readFileSync(path)
+  } catch (error) {
+    throw new Error(`OpenLoop profile file must be readable: ${path}: ${String(error)}`)
+  }
+}
+
+function assertProfileManifest(path: string): void {
+  const content = readRegularProfileFile(path)
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(content.toString('utf8'))
+  } catch (error) {
+    throw new Error(`OpenLoop profile manifest ${path} must contain parseable JSON: ${String(error)}`)
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`OpenLoop profile manifest ${path} must contain a JSON object`)
+  }
+}
+
+function hasValidProfileManifest(path: string): boolean {
+  try {
+    lstatSync(path)
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return false
+    throw error
+  }
+  assertProfileManifest(path)
+  return true
+}
+
+function assertProfilePatch(path: string): void {
+  readRegularProfileFile(path)
+  loadOverlayPatches('OpenLoop profile', path)
+}
+
+function assertProfileWorkspace(path: string): void {
+  let parsed: unknown
+  try {
+    parsed = loadYaml(readRegularProfileFile(path).toString('utf8'))
+  } catch (error) {
+    throw new Error(`OpenLoop profile workspace ${path} must contain a parseable YAML object: ${String(error)}`)
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`OpenLoop profile workspace ${path} must contain a YAML object`)
+  }
+  const workspace = parsed as Record<string, unknown>
+  if (!Array.isArray(workspace.packages) || !workspace.packages.includes('.')) {
+    throw new Error(`OpenLoop profile workspace ${path} packages must contain "."`)
+  }
+  if (workspace.nodeLinker !== 'hoisted') {
+    throw new Error(`OpenLoop profile workspace ${path} nodeLinker must equal "hoisted"`)
+  }
+  if (workspace.autoInstallPeers !== false) {
+    throw new Error(`OpenLoop profile workspace ${path} autoInstallPeers must equal false`)
+  }
+}
+
+function assertProfileSupportFiles(profileDir: string): void {
+  assertProfilePatch(join(profileDir, 'cordis.patch.yml'))
+  assertProfileWorkspace(join(profileDir, 'pnpm-workspace.yaml'))
 }
 
 function readLockOwner(lockPath: string): ProfileInitLockOwner | undefined {
@@ -135,7 +204,7 @@ function acquireProfileInitLock(profileDir: string, manifestPath: string): Profi
       if (errorCode(error) !== 'EEXIST') throw error
       assertDirectoryIsNotSymlink(profileParent, 'OpenLoop profile parent')
       assertDirectoryIsNotSymlink(profileDir, 'OpenLoop profile directory')
-      if (existsSync(manifestPath)) return undefined
+      if (hasValidProfileManifest(manifestPath)) return undefined
       const owner = readLockOwner(lockPath)
       if (recoverStaleProfileInitLock(lockPath, owner)) continue
       throw new Error(
@@ -253,6 +322,7 @@ function publishStagedProfile(profileDir: string, stagingDir: string): void {
     }
     staged.set(filename, readFileSync(path))
   }
+  assertProfileManifest(join(stagingDir, PROFILE_MANIFEST))
 
   try {
     mkdirSync(profileDir, { mode: 0o700 })
@@ -262,17 +332,21 @@ function publishStagedProfile(profileDir: string, stagingDir: string): void {
   assertDirectoryIsNotSymlink(profileDir, 'OpenLoop profile directory')
 
   const createdSupportFiles: CreatedProfileFile[] = []
+  let createdManifest: CreatedProfileFile | undefined
   try {
     for (const filename of PROFILE_SUPPORT_FILES) {
       const created = createProfileFile(join(profileDir, filename), stagedFile(staged, filename))
       if (created !== undefined) createdSupportFiles.push(created)
     }
-    const manifest = createProfileFile(
+    assertProfileSupportFiles(profileDir)
+    createdManifest = createProfileFile(
       join(profileDir, PROFILE_MANIFEST),
       stagedFile(staged, PROFILE_MANIFEST),
     )
-    if (manifest === undefined) rollbackCreatedFiles(createdSupportFiles)
+    assertProfileManifest(join(profileDir, PROFILE_MANIFEST))
+    if (createdManifest === undefined) rollbackCreatedFiles(createdSupportFiles)
   } catch (error) {
+    if (createdManifest !== undefined) rollbackCreatedFile(createdManifest)
     rollbackCreatedFiles(createdSupportFiles)
     throw error
   }
@@ -302,14 +376,14 @@ export function ensureOpenloopProfile(home?: string): string {
   const manifestPath = join(dir, PROFILE_MANIFEST)
   assertDirectoryIsNotSymlink(profileParent, 'OpenLoop profile parent')
   assertDirectoryIsNotSymlink(dir, 'OpenLoop profile directory')
-  if (existsSync(manifestPath)) return dir
+  if (hasValidProfileManifest(manifestPath)) return dir
 
   const lock = acquireProfileInitLock(dir, manifestPath)
   if (lock === undefined) return dir
   try {
     assertDirectoryIsNotSymlink(profileParent, 'OpenLoop profile parent')
     assertDirectoryIsNotSymlink(dir, 'OpenLoop profile directory')
-    if (existsSync(manifestPath)) return dir
+    if (hasValidProfileManifest(manifestPath)) return dir
     initializeAndPublishProfile(dir)
   } finally {
     releaseProfileInitLock(lock)

@@ -89,6 +89,89 @@ describe('OpenLoop profile', () => {
     expect(existsSync(join(dir, 'pnpm-workspace.yaml'))).toBe(false)
   })
 
+  it.runIf(process.platform !== 'win32')('rejects a dangling profile manifest symlink', () => {
+    const home = tmp()
+    const dir = join(home, 'profiles', 'openloop')
+    const missingTarget = join(dir, 'missing-package.json')
+    mkdirSync(dir, { recursive: true })
+    symlinkSync(missingTarget, join(dir, 'package.json'))
+
+    expect(() => ensureOpenloopProfile(home))
+      .toThrow(/package\.json.*regular file/i)
+    expect(existsSync(missingTarget)).toBe(false)
+    expect(existsSync(join(dir, 'cordis.patch.yml'))).toBe(false)
+    expect(existsSync(join(dir, 'pnpm-workspace.yaml'))).toBe(false)
+  })
+
+  it.runIf(process.platform !== 'win32')('rejects a profile manifest symlink to an external file', () => {
+    const home = tmp()
+    const external = tmp()
+    const dir = join(home, 'profiles', 'openloop')
+    const externalManifest = join(external, 'package.json')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(externalManifest, '{"name":"external"}\n')
+    symlinkSync(externalManifest, join(dir, 'package.json'))
+
+    expect(() => ensureOpenloopProfile(home))
+      .toThrow(/package\.json.*regular file/i)
+    expect(readFileSync(externalManifest, 'utf8')).toBe('{"name":"external"}\n')
+    expect(existsSync(join(dir, 'cordis.patch.yml'))).toBe(false)
+    expect(existsSync(join(dir, 'pnpm-workspace.yaml'))).toBe(false)
+  })
+
+  it('rejects a directory at the profile manifest path', () => {
+    const home = tmp()
+    const dir = join(home, 'profiles', 'openloop')
+    mkdirSync(join(dir, 'package.json'), { recursive: true })
+
+    expect(() => ensureOpenloopProfile(home))
+      .toThrow(/package\.json.*regular file/i)
+    expect(existsSync(join(dir, 'cordis.patch.yml'))).toBe(false)
+    expect(existsSync(join(dir, 'pnpm-workspace.yaml'))).toBe(false)
+  })
+
+  it('rejects an existing scalar patch without committing profile fragments', () => {
+    const home = tmp()
+    const dir = join(home, 'profiles', 'openloop')
+    const patch = 'partial\n'
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'cordis.patch.yml'), patch)
+
+    expect(() => ensureOpenloopProfile(home))
+      .toThrow(/cordis\.patch\.yml.*YAML array/i)
+    expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')).toBe(patch)
+    expect(existsSync(join(dir, 'pnpm-workspace.yaml'))).toBe(false)
+    expect(existsSync(join(dir, 'package.json'))).toBe(false)
+  })
+
+  it('rejects an incomplete existing workspace without committing profile fragments', () => {
+    const home = tmp()
+    const dir = join(home, 'profiles', 'openloop')
+    const workspace = 'packages:\n  - .\n'
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'pnpm-workspace.yaml'), workspace)
+
+    expect(() => ensureOpenloopProfile(home))
+      .toThrow(/pnpm-workspace\.yaml.*nodeLinker.*hoisted/i)
+    expect(readFileSync(join(dir, 'pnpm-workspace.yaml'), 'utf8')).toBe(workspace)
+    expect(existsSync(join(dir, 'cordis.patch.yml'))).toBe(false)
+    expect(existsSync(join(dir, 'package.json'))).toBe(false)
+  })
+
+  it('preserves a valid existing custom patch array while creating the profile manifest', () => {
+    const home = tmp()
+    const dir = join(home, 'profiles', 'openloop')
+    const patch = '- id: user-owned\n  disabled: true\n'
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'cordis.patch.yml'), patch)
+
+    expect(ensureOpenloopProfile(home)).toBe(dir)
+
+    expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')).toBe(patch)
+    expect(existsSync(join(dir, 'pnpm-workspace.yaml'))).toBe(true)
+    expect(existsSync(join(dir, 'package.json'))).toBe(true)
+  })
+
   it.runIf(process.platform !== 'win32')('refuses an existing manifest through a symlinked profile directory', () => {
     const home = tmp()
     const external = tmp()
