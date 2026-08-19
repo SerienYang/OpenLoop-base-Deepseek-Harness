@@ -272,7 +272,12 @@ function disallowedReservedPaths(
       result.push(prefix === '' ? key : `${prefix}.${key}`)
     }
   }
-  if ('$value' in value) return result
+  if ('$value' in value) {
+    for (const key of Object.keys(value).filter(key => !key.startsWith('$'))) {
+      result.push(prefix === '' ? key : `${prefix}.${key}`)
+    }
+    return result
+  }
   for (const [key, child] of Object.entries(value)) {
     if (key.startsWith('$')) continue
     disallowedReservedPaths(
@@ -507,6 +512,22 @@ describe('OpenLoop design tokens', () => {
       'color.brand.$ref is outside the approved named token architecture',
       'color.semantic.$type is outside the approved named token architecture',
     ]))
+  })
+
+  test('rejects token and group hybrids with hidden child tokens', () => {
+    const document = structuredClone(readDocument())
+    if (!isRecord(document.color)) throw new TypeError('Missing color group')
+    if (!isRecord(document.color.brand)) throw new TypeError('Missing brand group')
+    if (!isRecord(document.color.brand.ink)) {
+      throw new TypeError('Missing brand ink token')
+    }
+    document.color.brand.ink.hidden = {
+      $value: '{color.palette.neutral.0}',
+    }
+
+    expect(documentProblems(document)).toContain(
+      'color.brand.ink.hidden is outside the approved named token architecture',
+    )
   })
 
   test('rejects malformed concrete colors anywhere in the document', () => {
