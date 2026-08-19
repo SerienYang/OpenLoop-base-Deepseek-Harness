@@ -128,6 +128,24 @@ const EXPECTED_DARK_ALIASES = {
   'status.danger.border': 'color.palette.danger.600',
 } as const
 
+const EXPECTED_TOKEN_PATHS = [
+  ...Object.keys(EXPECTED_PALETTE),
+  ...Object.keys(EXPECTED_BRAND_ALIASES),
+  ...Object.keys(EXPECTED_LIGHT_ALIASES)
+    .map(role => `color.semantic.light.${role}`),
+  ...Object.keys(EXPECTED_DARK_ALIASES)
+    .map(role => `color.semantic.dark.${role}`),
+]
+
+const EXPECTED_GROUP_PATHS = new Set(
+  EXPECTED_TOKEN_PATHS.flatMap((tokenPath) => {
+    const segments = tokenPath.split('.')
+    return segments
+      .slice(1)
+      .map((_, index) => segments.slice(0, index + 1).join('.'))
+  }),
+)
+
 const CONTRAST_PAIRS = [
   ['text.primary', 'background.surface', 7],
   ['text.secondary', 'background.surface', 4.5],
@@ -289,6 +307,31 @@ function disallowedReservedPaths(
   return result
 }
 
+function inspectGroupShape(
+  value: unknown,
+  prefix = '',
+  groups = new Set<string>(),
+  problems: string[] = [],
+): {
+  readonly groups: ReadonlySet<string>
+  readonly problems: readonly string[]
+} {
+  if (!isRecord(value)) return { groups, problems }
+  if ('$value' in value) return { groups, problems }
+  if (prefix !== '') groups.add(prefix)
+
+  for (const [key, child] of Object.entries(value)) {
+    if (key.startsWith('$')) continue
+    const childPath = prefix === '' ? key : `${prefix}.${key}`
+    if (!isRecord(child)) {
+      problems.push(`${childPath} must be a token or token group`)
+      continue
+    }
+    inspectGroupShape(child, childPath, groups, problems)
+  }
+  return { groups, problems }
+}
+
 function documentProblems(document: Record<string, unknown>): string[] {
   const problems: string[] = []
   const rootGroups = Object.keys(document)
@@ -317,6 +360,18 @@ function documentProblems(document: Record<string, unknown>): string[] {
     problems.push(
       `${tokenPath} is outside the approved named token architecture`,
     )
+  }
+  const shape = inspectGroupShape(document)
+  problems.push(...shape.problems)
+  for (const groupPath of shape.groups) {
+    if (!EXPECTED_GROUP_PATHS.has(groupPath)) {
+      problems.push(`unexpected token group: ${groupPath}`)
+    }
+  }
+  for (const groupPath of EXPECTED_GROUP_PATHS) {
+    if (!shape.groups.has(groupPath)) {
+      problems.push(`missing token group: ${groupPath}`)
+    }
   }
 
   for (const [tokenPath, value] of flattenTokens(document)) {
@@ -528,6 +583,19 @@ describe('OpenLoop design tokens', () => {
     expect(documentProblems(document)).toContain(
       'color.brand.ink.hidden is outside the approved named token architecture',
     )
+  })
+
+  test('rejects hidden empty groups and primitive group children', () => {
+    const document = structuredClone(readDocument())
+    if (!isRecord(document.color)) throw new TypeError('Missing color group')
+    if (!isRecord(document.color.brand)) throw new TypeError('Missing brand group')
+    document.color.brand.empty = {}
+    document.color.brand.raw = '#FF00FF'
+
+    expect(documentProblems(document)).toEqual(expect.arrayContaining([
+      'unexpected token group: color.brand.empty',
+      'color.brand.raw must be a token or token group',
+    ]))
   })
 
   test('rejects malformed concrete colors anywhere in the document', () => {
