@@ -1,168 +1,198 @@
-// Cross-process timing is represented by deterministic filesystem outcomes:
-// another owner holds the lock, then our process acquires it after that owner
-// has published the manifest.
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { fork, type ChildProcess } from 'node:child_process'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, normalize } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ensureOpenloopProfile } from '../src/profile.ts'
 
-type LockOutcome = 'acquired' | 'contended'
+interface LockOwner {
+  readonly pid: number
+  readonly createdAt: number
+  readonly token: string
+}
 
 const state = vi.hoisted(() => ({
-  initCalls: 0,
-  initError: undefined as Error | undefined,
-  lockAttempts: [] as string[],
-  lockOutcomes: [] as LockOutcome[],
-  manifestChecks: 0,
-  manifestResults: [] as boolean[],
-  ownerText: JSON.stringify({
-    pid: 41_041,
-    createdAt: 1_700_000_000_000,
-    token: 'competing-owner',
-  }),
-  ownerWrites: [] as string[],
-  removals: [] as string[],
+  changeTokenAfterQuarantine: false,
+  manifestOnContentionAt: undefined as string | undefined,
 }))
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
   return {
     ...actual,
-    existsSync(path: Parameters<typeof actual.existsSync>[0]): boolean {
-      if (String(path).endsWith('/profiles/openloop/package.json')) {
-        state.manifestChecks += 1
-        return state.manifestResults.shift() ?? false
-      }
-      return actual.existsSync(path)
-    },
-    lstatSync(path: Parameters<typeof actual.lstatSync>[0], ...args: never[]) {
-      if (String(path) === '/virtual/home/profiles') {
-        return {
-          isDirectory: () => true,
-          isSymbolicLink: () => false,
-        }
-      }
-      if (String(path) === '/virtual/home/profiles/.openloop.init.lock') {
-        return {
-          isDirectory: () => true,
-          isSymbolicLink: () => false,
-        }
-      }
-      if (String(path).endsWith('/profiles/openloop')) {
-        throw Object.assign(new Error('ENOENT: virtual missing profile'), { code: 'ENOENT' })
-      }
-      return (actual.lstatSync as (path: unknown, ...rest: never[]) => unknown)(path, ...args)
-    },
     mkdirSync(path: Parameters<typeof actual.mkdirSync>[0], options?: Parameters<typeof actual.mkdirSync>[1]) {
-      const text = String(path)
-      if (text === '/virtual/home/profiles') return undefined
-      if (text === '/virtual/home/profiles/.openloop.init.lock') {
-        state.lockAttempts.push(text)
-        if ((state.lockOutcomes.shift() ?? 'contended') === 'contended') {
-          throw Object.assign(new Error(`EEXIST: ${text}`), { code: 'EEXIST' })
-        }
-        return undefined
+      const text = normalize(String(path))
+      if (state.manifestOnContentionAt !== undefined && text === normalize(state.manifestOnContentionAt)) {
+        state.manifestOnContentionAt = undefined
+        actual.mkdirSync(join(text, '..', 'openloop'), { recursive: true })
+        actual.writeFileSync(join(text, '..', 'openloop', 'package.json'), '{"name":"winner"}\n')
       }
       return actual.mkdirSync(path, options as never)
     },
-    readFileSync(path: Parameters<typeof actual.readFileSync>[0], options?: Parameters<typeof actual.readFileSync>[1]) {
-      if (String(path).endsWith('/.openloop.init.lock/owner.json')) return state.ownerText
-      return actual.readFileSync(path, options as never)
-    },
-    rmSync(path: Parameters<typeof actual.rmSync>[0], options?: Parameters<typeof actual.rmSync>[1]): void {
-      if (String(path) === '/virtual/home/profiles/.openloop.init.lock') {
-        state.removals.push(String(path))
-        return
+    renameSync(oldPath: Parameters<typeof actual.renameSync>[0], newPath: Parameters<typeof actual.renameSync>[1]): void {
+      actual.renameSync(oldPath, newPath)
+      if (state.changeTokenAfterQuarantine
+        && normalize(String(oldPath)).endsWith(normalize(join('profiles', '.openloop.init.lock')))) {
+        state.changeTokenAfterQuarantine = false
+        const ownerPath = join(String(newPath), 'owner.json')
+        const owner = JSON.parse(actual.readFileSync(ownerPath, 'utf8')) as LockOwner
+        actual.writeFileSync(ownerPath, `${JSON.stringify({ ...owner, token: 'changed-owner-token' })}\n`)
       }
-      actual.rmSync(path, options)
-    },
-    writeFileSync(
-      path: Parameters<typeof actual.writeFileSync>[0],
-      data: Parameters<typeof actual.writeFileSync>[1],
-      options?: Parameters<typeof actual.writeFileSync>[2],
-    ): void {
-      if (String(path).endsWith('/.openloop.init.lock/owner.json')) {
-        if (typeof data !== 'string') throw new TypeError('lock owner metadata must be text')
-        state.ownerText = data
-        state.ownerWrites.push(data)
-        return
-      }
-      actual.writeFileSync(path, data, options)
     },
   }
 })
 
-vi.mock('@deepseek-ai/dsh-app-boot', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@deepseek-ai/dsh-app-boot')>()
-  return {
-    ...actual,
-    initProfile(): void {
-      state.initCalls += 1
-      if (state.initError !== undefined) throw state.initError
-    },
-  }
-})
+const children = new Set<ChildProcess>()
+const tmp = (): string => mkdtempSync(join(tmpdir(), 'openloop-profile-lock-'))
+const lockPath = (home: string): string => join(home, 'profiles', '.openloop.init.lock')
+
+function writeLock(home: string, owner: LockOwner): string {
+  const path = lockPath(home)
+  mkdirSync(path, { recursive: true })
+  writeFileSync(join(path, 'owner.json'), `${JSON.stringify(owner)}\n`)
+  return path
+}
+
+function waitForMessage(child: ChildProcess, type: string): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const onMessage = (message: unknown): void => {
+      if (typeof message !== 'object' || message === null
+        || (message as Record<string, unknown>)['type'] !== type) return
+      cleanup()
+      resolve(message as Record<string, unknown>)
+    }
+    const onError = (error: Error): void => {
+      cleanup()
+      reject(error)
+    }
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+      cleanup()
+      reject(new Error(`lock holder exited before ${type}: code=${String(code)} signal=${String(signal)}`))
+    }
+    const cleanup = (): void => {
+      child.off('message', onMessage)
+      child.off('error', onError)
+      child.off('exit', onExit)
+    }
+    child.on('message', onMessage)
+    child.on('error', onError)
+    child.on('exit', onExit)
+  })
+}
 
 beforeEach(() => {
-  state.initCalls = 0
-  state.initError = undefined
-  state.lockAttempts = []
-  state.lockOutcomes = []
-  state.manifestChecks = 0
-  state.manifestResults = []
-  state.ownerText = JSON.stringify({
-    pid: 41_041,
-    createdAt: 1_700_000_000_000,
-    token: 'competing-owner',
-  })
-  state.ownerWrites = []
-  state.removals = []
+  state.changeTokenAfterQuarantine = false
+  state.manifestOnContentionAt = undefined
+})
+
+afterEach(() => {
   vi.restoreAllMocks()
+  for (const child of children) child.kill()
+  children.clear()
 })
 
 describe('OpenLoop profile initialization lock', () => {
-  it('waits for a competing initializer, then reuses the manifest found after lock acquisition', () => {
-    state.manifestResults = [false, true]
-    state.lockOutcomes = ['contended', 'acquired']
-
-    expect(ensureOpenloopProfile('/virtual/home'))
-      .toBe('/virtual/home/profiles/openloop')
-
-    expect(state.lockAttempts).toEqual([
-      '/virtual/home/profiles/.openloop.init.lock',
-      '/virtual/home/profiles/.openloop.init.lock',
-    ])
-    expect(state.manifestChecks).toBe(2)
-    expect(state.initCalls).toBe(0)
-    expect(state.removals).toEqual(['/virtual/home/profiles/.openloop.init.lock'])
-    const owner = JSON.parse(state.ownerWrites[0]!) as Record<string, unknown>
-    expect(owner['pid']).toBe(process.pid)
-    expect(typeof owner['createdAt']).toBe('number')
-    expect(typeof owner['token']).toBe('string')
-  })
-
-  it('fails loud on timeout without deleting another process lock', () => {
-    state.manifestResults = [false]
-    state.lockOutcomes = ['contended']
-    let now = 1_700_000_000_000
-    vi.spyOn(Date, 'now').mockImplementation(() => {
-      now += 60_000
-      return now
+  it('recovers a conservatively stale lock only when its owner is definitely dead', () => {
+    const home = tmp()
+    const owner = { pid: 41_041, createdAt: 1, token: 'dead-owner' }
+    const path = writeLock(home, owner)
+    vi.spyOn(process, 'kill').mockImplementation((pid) => {
+      expect(pid).toBe(owner.pid)
+      throw Object.assign(new Error('no such process'), { code: 'ESRCH' })
     })
 
-    expect(() => ensureOpenloopProfile('/virtual/home'))
-      .toThrow(/timed out.*41041.*1700000000000/i)
-    expect(state.initCalls).toBe(0)
-    expect(state.ownerWrites).toEqual([])
-    expect(state.removals).toEqual([])
+    expect(ensureOpenloopProfile(home)).toBe(join(home, 'profiles', 'openloop'))
+
+    expect(existsSync(join(home, 'profiles', 'openloop', 'package.json'))).toBe(true)
+    expect(existsSync(path)).toBe(false)
   })
 
-  it('cleans up its own lock when profile initialization throws', () => {
-    state.manifestResults = [false, false]
-    state.lockOutcomes = ['acquired']
-    state.initError = new Error('injected profile initialization failure')
+  it('reuses a manifest published between lock contention and the required recheck', () => {
+    const home = tmp()
+    const owner = { pid: process.pid, createdAt: Date.now(), token: 'live-owner' }
+    const path = writeLock(home, owner)
+    state.manifestOnContentionAt = path
 
-    expect(() => ensureOpenloopProfile('/virtual/home'))
-      .toThrow('injected profile initialization failure')
-    expect(state.initCalls).toBe(1)
-    expect(state.removals).toEqual(['/virtual/home/profiles/.openloop.init.lock'])
+    expect(ensureOpenloopProfile(home)).toBe(join(home, 'profiles', 'openloop'))
+
+    expect(readFileSync(join(path, 'owner.json'), 'utf8'))
+      .toBe(`${JSON.stringify(owner)}\n`)
+  })
+
+  it('fails immediately on a live lock without blocking an event-loop timer', async () => {
+    const home = tmp()
+    const owner = { pid: process.pid, createdAt: Date.now(), token: 'live-owner' }
+    const path = writeLock(home, owner)
+    let timerFired = false
+    const timer = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        timerFired = true
+        resolve()
+      }, 0)
+    })
+    const startedAt = performance.now()
+
+    expect(() => ensureOpenloopProfile(home))
+      .toThrow(/already in progress.*live-owner/i)
+
+    expect(performance.now() - startedAt).toBeLessThan(500)
+    await timer
+    expect(timerFired).toBe(true)
+    expect(readFileSync(join(path, 'owner.json'), 'utf8'))
+      .toBe(`${JSON.stringify(owner)}\n`)
+  })
+
+  it('does not delete a quarantined lock when its owner token changes', () => {
+    const home = tmp()
+    const owner = { pid: 41_042, createdAt: 1, token: 'observed-owner' }
+    const path = writeLock(home, owner)
+    state.changeTokenAfterQuarantine = true
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('no such process'), { code: 'ESRCH' })
+    })
+
+    expect(() => ensureOpenloopProfile(home))
+      .toThrow(/ownership changed.*refusing to remove/i)
+
+    expect(existsSync(path)).toBe(true)
+    expect(JSON.parse(readFileSync(join(path, 'owner.json'), 'utf8'))).toMatchObject({
+      pid: owner.pid,
+      token: 'changed-owner-token',
+    })
+  })
+
+  it('fails immediately and preserves a live lock held by an independent process', async () => {
+    const home = tmp()
+    const child = fork(
+      fileURLToPath(new URL('./fixtures/profile-lock-holder.ts', import.meta.url)),
+      [home],
+      {
+        execArgv: ['--import', 'tsx/esm'],
+        stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+      },
+    )
+    children.add(child)
+    const ready = await waitForMessage(child, 'ready')
+    const expectedLockPath = normalize(lockPath(home))
+    expect(normalize(String(ready['lockPath']))).toBe(expectedLockPath)
+    const ownerBefore = readFileSync(join(expectedLockPath, 'owner.json'), 'utf8')
+    const startedAt = performance.now()
+
+    expect(() => ensureOpenloopProfile(home))
+      .toThrow(new RegExp(`already in progress.*${child.pid}`, 'i'))
+
+    expect(performance.now() - startedAt).toBeLessThan(500)
+    expect(readFileSync(join(expectedLockPath, 'owner.json'), 'utf8')).toBe(ownerBefore)
+    const released = waitForMessage(child, 'released')
+    child.send({ type: 'release' })
+    await released
+    children.delete(child)
   })
 })

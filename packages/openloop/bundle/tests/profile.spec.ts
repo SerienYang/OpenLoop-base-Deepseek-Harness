@@ -89,25 +89,28 @@ describe('OpenLoop profile', () => {
     expect(existsSync(join(dir, 'pnpm-workspace.yaml'))).toBe(false)
   })
 
-  it('refuses to initialize through a symlinked profile directory', () => {
+  it.runIf(process.platform !== 'win32')('refuses an existing manifest through a symlinked profile directory', () => {
     const home = tmp()
     const external = tmp()
     mkdirSync(join(home, 'profiles'), { recursive: true })
+    writeFileSync(join(external, 'package.json'), '{"name":"external"}\n')
     symlinkSync(external, join(home, 'profiles', 'openloop'), 'dir')
 
     expect(() => ensureOpenloopProfile(home)).toThrow(/symbolic link/i)
-    expect(existsSync(join(external, 'package.json'))).toBe(false)
+    expect(readFileSync(join(external, 'package.json'), 'utf8')).toBe('{"name":"external"}\n')
     expect(existsSync(join(external, 'cordis.patch.yml'))).toBe(false)
     expect(existsSync(join(external, 'pnpm-workspace.yaml'))).toBe(false)
   })
 
-  it('refuses to initialize through a symlinked profiles parent directory', () => {
+  it.runIf(process.platform !== 'win32')('refuses an existing manifest through a symlinked profiles parent directory', () => {
     const home = tmp()
     const external = tmp()
+    mkdirSync(join(external, 'openloop'))
+    writeFileSync(join(external, 'openloop', 'package.json'), '{"name":"external"}\n')
     symlinkSync(external, join(home, 'profiles'), 'dir')
 
     expect(() => ensureOpenloopProfile(home)).toThrow(/profile parent.*symbolic link/i)
-    expect(existsSync(join(external, 'openloop', 'package.json'))).toBe(false)
+    expect(readFileSync(join(external, 'openloop', 'package.json'), 'utf8')).toBe('{"name":"external"}\n')
     expect(existsSync(join(external, '.openloop.init.lock'))).toBe(false)
   })
 

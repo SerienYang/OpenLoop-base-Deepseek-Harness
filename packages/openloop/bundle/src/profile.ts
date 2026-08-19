@@ -1,10 +1,16 @@
 import { randomUUID } from 'node:crypto'
 import {
+  closeSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
+  openSync,
   readFileSync,
+  renameSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -18,9 +24,10 @@ export const OPENLOOP_PROFILE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/
 
 const PROFILE_INIT_LOCK_DIRECTORY = '.openloop.init.lock'
 const PROFILE_INIT_LOCK_OWNER = 'owner.json'
-const PROFILE_INIT_LOCK_TIMEOUT_MS = 5_000
-const PROFILE_INIT_LOCK_POLL_MS = 25
-const lockWaitState = new Int32Array(new SharedArrayBuffer(4))
+const PROFILE_INIT_LOCK_STALE_MS = 5 * 60_000
+const PROFILE_STAGE_PREFIX = '.openloop.profile-stage-'
+const PROFILE_MANIFEST = 'package.json'
+const PROFILE_SUPPORT_FILES = ['cordis.patch.yml', 'pnpm-workspace.yaml'] as const
 
 interface ProfileInitLockOwner {
   readonly pid: number
@@ -33,12 +40,15 @@ interface ProfileInitLock {
   readonly owner: ProfileInitLockOwner
 }
 
-function errorCode(error: unknown): string | undefined {
-  return (error as NodeJS.ErrnoException | null)?.code
+interface CreatedProfileFile {
+  readonly path: string
+  readonly content: Buffer
+  readonly dev: number
+  readonly ino: number
 }
 
-function waitForLockPoll(): void {
-  Atomics.wait(lockWaitState, 0, 0, PROFILE_INIT_LOCK_POLL_MS)
+function errorCode(error: unknown): string | undefined {
+  return (error as NodeJS.ErrnoException | null)?.code
 }
 
 function readLockOwner(lockPath: string): ProfileInitLockOwner | undefined {
@@ -58,34 +68,80 @@ function readLockOwner(lockPath: string): ProfileInitLockOwner | undefined {
   }
 }
 
-function lockOwnerDiagnostic(lockPath: string): string {
-  const owner = readLockOwner(lockPath)
+function lockOwnerDiagnostic(owner: ProfileInitLockOwner | undefined): string {
   return owner === undefined
     ? 'owner metadata is missing, invalid, or unsafe'
-    : `owner pid ${owner.pid}, createdAt ${owner.createdAt}`
+    : `owner pid ${owner.pid}, createdAt ${owner.createdAt}, token ${owner.token}`
 }
 
-function acquireProfileInitLock(profileDir: string): ProfileInitLock {
+function restoreQuarantinedLock(quarantinePath: string, lockPath: string): void {
+  try {
+    renameSync(quarantinePath, lockPath)
+  } catch (error) {
+    throw new Error(
+      `OpenLoop profile initialization lock ownership changed after quarantine at ${quarantinePath}; `
+      + `refusing to remove it and failed to restore ${lockPath}: ${String(error)}`,
+    )
+  }
+}
+
+function quarantinePathFor(lockPath: string): string {
+  return `${lockPath}.quarantine-${process.pid}-${randomUUID()}`
+}
+
+function recoverStaleProfileInitLock(lockPath: string, observed: ProfileInitLockOwner | undefined): boolean {
+  if (observed === undefined
+    || Date.now() - observed.createdAt <= PROFILE_INIT_LOCK_STALE_MS) {
+    return false
+  }
+
+  try {
+    process.kill(observed.pid, 0)
+    return false
+  } catch (error) {
+    if (errorCode(error) !== 'ESRCH') return false
+  }
+
+  const quarantinePath = quarantinePathFor(lockPath)
+  try {
+    renameSync(lockPath, quarantinePath)
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return true
+    throw error
+  }
+
+  const quarantined = readLockOwner(quarantinePath)
+  if (quarantined?.token !== observed.token) {
+    restoreQuarantinedLock(quarantinePath, lockPath)
+    throw new Error(
+      `OpenLoop profile initialization lock ownership changed at ${lockPath}; `
+      + 'refusing to remove the quarantined lock',
+    )
+  }
+  rmSync(quarantinePath, { recursive: true })
+  return true
+}
+
+function acquireProfileInitLock(profileDir: string, manifestPath: string): ProfileInitLock | undefined {
   const profileParent = dirname(profileDir)
   const lockPath = join(profileParent, PROFILE_INIT_LOCK_DIRECTORY)
   mkdirSync(profileParent, { recursive: true, mode: 0o700 })
   assertDirectoryIsNotSymlink(profileParent, 'OpenLoop profile parent')
-  const deadline = Date.now() + PROFILE_INIT_LOCK_TIMEOUT_MS
 
   for (;;) {
     try {
       mkdirSync(lockPath, { mode: 0o700 })
     } catch (error) {
       if (errorCode(error) !== 'EEXIST') throw error
-      if (Date.now() >= deadline) {
-        throw new Error(
-          `OpenLoop profile initialization timed out after ${PROFILE_INIT_LOCK_TIMEOUT_MS}ms `
-          + `waiting for ${lockPath} (${lockOwnerDiagnostic(lockPath)}); `
-          + 'the existing lock was left untouched',
-        )
-      }
-      waitForLockPoll()
-      continue
+      assertDirectoryIsNotSymlink(profileParent, 'OpenLoop profile parent')
+      assertDirectoryIsNotSymlink(profileDir, 'OpenLoop profile directory')
+      if (existsSync(manifestPath)) return undefined
+      const owner = readLockOwner(lockPath)
+      if (recoverStaleProfileInitLock(lockPath, owner)) continue
+      throw new Error(
+        `OpenLoop profile initialization is already in progress at ${lockPath} `
+        + `(${lockOwnerDiagnostic(owner)}); the existing lock was left untouched`,
+      )
     }
 
     const owner: ProfileInitLockOwner = {
@@ -115,7 +171,17 @@ function releaseProfileInitLock(lock: ProfileInitLock): void {
       + 'refusing to remove a lock owned by another process',
     )
   }
-  rmSync(lock.path, { recursive: true })
+  const quarantinePath = quarantinePathFor(lock.path)
+  renameSync(lock.path, quarantinePath)
+  const quarantined = readLockOwner(quarantinePath)
+  if (quarantined?.token !== lock.owner.token) {
+    restoreQuarantinedLock(quarantinePath, lock.path)
+    throw new Error(
+      `OpenLoop profile initialization lock ownership changed at ${lock.path}; `
+      + 'refusing to remove a lock owned by another process',
+    )
+  }
+  rmSync(quarantinePath, { recursive: true })
 }
 
 function assertDirectoryIsNotSymlink(path: string, label: string): void {
@@ -128,6 +194,102 @@ function assertDirectoryIsNotSymlink(path: string, label: string): void {
   }
 }
 
+function rollbackCreatedFile(file: CreatedProfileFile): void {
+  try {
+    const stat = lstatSync(file.path)
+    if (!stat.isFile() || stat.isSymbolicLink()
+      || stat.dev !== file.dev || stat.ino !== file.ino
+      || !readFileSync(file.path).equals(file.content)) {
+      return
+    }
+    unlinkSync(file.path)
+  } catch (error) {
+    if (errorCode(error) !== 'ENOENT') throw error
+  }
+}
+
+function rollbackCreatedFiles(files: readonly CreatedProfileFile[]): void {
+  for (const file of [...files].reverse()) rollbackCreatedFile(file)
+}
+
+function createProfileFile(path: string, content: Buffer): CreatedProfileFile | undefined {
+  let descriptor: number
+  try {
+    descriptor = openSync(path, 'wx', 0o600)
+  } catch (error) {
+    if (errorCode(error) === 'EEXIST') return undefined
+    throw error
+  }
+
+  const stat = fstatSync(descriptor)
+  const created = { path, content, dev: stat.dev, ino: stat.ino }
+  try {
+    writeFileSync(descriptor, content)
+  } catch (error) {
+    const partial = { ...created, content: readFileSync(path) }
+    closeSync(descriptor)
+    rollbackCreatedFile(partial)
+    throw error
+  }
+  closeSync(descriptor)
+  return created
+}
+
+function stagedFile(staged: ReadonlyMap<string, Buffer>, filename: string): Buffer {
+  const content = staged.get(filename)
+  if (content === undefined) {
+    throw new Error(`OpenLoop staged profile is missing ${filename}`)
+  }
+  return content
+}
+
+function publishStagedProfile(profileDir: string, stagingDir: string): void {
+  const staged = new Map<string, Buffer>()
+  for (const filename of [...PROFILE_SUPPORT_FILES, PROFILE_MANIFEST]) {
+    const path = join(stagingDir, filename)
+    const stat = lstatSync(path)
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error(`OpenLoop staged profile file must be a regular file: ${path}`)
+    }
+    staged.set(filename, readFileSync(path))
+  }
+
+  try {
+    mkdirSync(profileDir, { mode: 0o700 })
+  } catch (error) {
+    if (errorCode(error) !== 'EEXIST') throw error
+  }
+  assertDirectoryIsNotSymlink(profileDir, 'OpenLoop profile directory')
+
+  const createdSupportFiles: CreatedProfileFile[] = []
+  try {
+    for (const filename of PROFILE_SUPPORT_FILES) {
+      const created = createProfileFile(join(profileDir, filename), stagedFile(staged, filename))
+      if (created !== undefined) createdSupportFiles.push(created)
+    }
+    const manifest = createProfileFile(
+      join(profileDir, PROFILE_MANIFEST),
+      stagedFile(staged, PROFILE_MANIFEST),
+    )
+    if (manifest === undefined) rollbackCreatedFiles(createdSupportFiles)
+  } catch (error) {
+    rollbackCreatedFiles(createdSupportFiles)
+    throw error
+  }
+}
+
+function initializeAndPublishProfile(profileDir: string): void {
+  const profileParent = dirname(profileDir)
+  const stagingRoot = mkdtempSync(join(profileParent, PROFILE_STAGE_PREFIX))
+  const stagingDir = join(stagingRoot, 'openloop')
+  try {
+    initProfile(stagingDir, OPENLOOP_PROFILE_BUNDLES)
+    publishStagedProfile(profileDir, stagingDir)
+  } finally {
+    rmSync(stagingRoot, { recursive: true, force: true })
+  }
+}
+
 /**
  * Resolve and, when absent, initialize the OpenLoop profile.
  * An existing manifest makes the whole profile user-owned and read-only here.
@@ -136,14 +298,19 @@ function assertDirectoryIsNotSymlink(path: string, label: string): void {
  */
 export function ensureOpenloopProfile(home?: string): string {
   const dir = resolveProfileDir('openloop', home)
-  const manifestPath = join(dir, 'package.json')
+  const profileParent = dirname(dir)
+  const manifestPath = join(dir, PROFILE_MANIFEST)
+  assertDirectoryIsNotSymlink(profileParent, 'OpenLoop profile parent')
+  assertDirectoryIsNotSymlink(dir, 'OpenLoop profile directory')
   if (existsSync(manifestPath)) return dir
 
-  const lock = acquireProfileInitLock(dir)
+  const lock = acquireProfileInitLock(dir, manifestPath)
+  if (lock === undefined) return dir
   try {
-    if (existsSync(manifestPath)) return dir
+    assertDirectoryIsNotSymlink(profileParent, 'OpenLoop profile parent')
     assertDirectoryIsNotSymlink(dir, 'OpenLoop profile directory')
-    initProfile(dir, OPENLOOP_PROFILE_BUNDLES)
+    if (existsSync(manifestPath)) return dir
+    initializeAndPublishProfile(dir)
   } finally {
     releaseProfileInitLock(lock)
   }
