@@ -1,5 +1,14 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { join, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { load } from 'js-yaml'
@@ -53,6 +62,26 @@ function writeJson(path: string, value: object): void {
 
 function readJson(path: string): JsonFixture {
   return JSON.parse(readFileSync(path, 'utf8')) as JsonFixture
+}
+
+function snapshotTree(root: string): Record<string, string> {
+  const snapshot: Record<string, string> = {}
+
+  function visit(directory: string, prefix: string): void {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      const relativePath = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+      if (entry.isDirectory()) {
+        snapshot[`${relativePath}/`] = 'directory'
+        visit(path, relativePath)
+      } else {
+        snapshot[relativePath] = readFileSync(path).toString('base64')
+      }
+    }
+  }
+
+  visit(root, '')
+  return snapshot
 }
 
 async function loadCordisPlugin(path: string): Promise<{
@@ -128,6 +157,18 @@ describe('OpenLoop package scaffolder', () => {
       { path: './packages/openloop/window-state' },
     ])
     expect(readJson(join(root, 'tsconfig.client.json')).references).toEqual([])
+  })
+
+  it('accepts a relative repository root', async () => {
+    const { scaffoldPackage } = await import(scaffoldModulePath)
+    const absoluteRoot = fixtureRoot()
+    const root = relative(process.cwd(), absoluteRoot)
+
+    expect(scaffoldPackage({ root, name: 'window-state', face: 'host' }))
+      .toBe('packages/openloop/window-state')
+    expect(readJson(join(absoluteRoot, 'tsconfig.host.json')).references).toEqual([
+      { path: './packages/openloop/window-state' },
+    ])
   })
 
   it('treats a client bundle as a Cordis plugin without requiring a service', async () => {
@@ -256,6 +297,60 @@ describe('OpenLoop package scaffolder', () => {
     expect(load(readFileSync(join(bundleDirectory, 'cordis.patch.yml'), 'utf8'))).toEqual([
       { insert: [{ id: 'window-state', name: '@openloop/window-state' }] },
     ])
+  })
+
+  it('restores the exact pre-state after a late transaction failure and reruns cleanly', async () => {
+    const { scaffoldPackage } = await import(scaffoldModulePath)
+    const root = fixtureRoot()
+    const directory = join(root, 'packages/openloop/workbench')
+    mkdirSync(join(directory, 'tests'), { recursive: true })
+    writeFileSync(join(directory, 'tests/contract.spec.ts'), 'pre-existing test bytes\n')
+
+    const bundleDirectory = join(root, 'packages/openloop/desktop')
+    writeJson(join(bundleDirectory, 'package.json'), {
+      name: '@openloop/desktop',
+      private: true,
+      dependencies: {},
+    })
+    const patchPath = join(bundleDirectory, 'cordis.patch.yml')
+    writeFileSync(patchPath, '[]\n')
+    const before = snapshotTree(root)
+    let renames = 0
+
+    expect(() => scaffoldPackage({
+      root,
+      name: 'workbench',
+      face: 'client',
+      clientBundle: true,
+      bundleRow: 'desktop',
+      service: 'workbench',
+    }, {
+      rename(source: string, destination: string) {
+        renames += 1
+        if (destination === patchPath) throw new Error('injected late transaction failure')
+        renameSync(source, destination)
+      },
+    })).toThrow('injected late transaction failure')
+
+    expect(renames).toBeGreaterThan(5)
+    expect(snapshotTree(root)).toEqual(before)
+
+    expect(scaffoldPackage({
+      root,
+      name: 'workbench',
+      face: 'client',
+      clientBundle: true,
+      bundleRow: 'desktop',
+      service: 'workbench',
+    })).toBe('packages/openloop/workbench')
+    expect(readFileSync(join(directory, 'tests/contract.spec.ts'), 'utf8'))
+      .toBe('pre-existing test bytes\n')
+    expect(readJson(join(root, 'tsconfig.client.json')).references).toEqual([
+      { path: './packages/openloop/workbench' },
+    ])
+    expect(readJson(join(bundleDirectory, 'package.json')).dependencies).toEqual({
+      '@openloop/workbench': 'workspace:*',
+    })
   })
 
   it.each([

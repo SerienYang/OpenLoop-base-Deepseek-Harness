@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   existsSync,
-  lstatSync,
   readFileSync,
+  realpathSync,
   readdirSync,
+  statSync,
 } from 'node:fs'
 import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -98,11 +100,21 @@ function repoPath(root, value, label) {
   if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
     throw new Error(`${label} must stay inside the repository: ${value}`)
   }
-  const normalized = rel.split(sep).join('/')
-  if (!existsSync(absolute) || !lstatSync(absolute).isFile()) {
+  if (!existsSync(absolute) || !statSync(absolute).isFile()) {
     throw new Error(`${label} does not exist: ${value}`)
   }
-  return { absolute, relative: normalized }
+  const realRoot = realpathSync(root)
+  const realAbsolute = realpathSync(absolute)
+  const realRelative = relative(realRoot, realAbsolute)
+  if (realRelative === '..'
+    || realRelative.startsWith(`..${sep}`)
+    || isAbsolute(realRelative)) {
+    throw new Error(`${label} must resolve inside the repository: ${value}`)
+  }
+  return {
+    absolute,
+    relative: rel.split(sep).join('/'),
+  }
 }
 
 function walkFiles(root, start = root) {
@@ -114,21 +126,6 @@ function walkFiles(root, start = root) {
     else if (entry.isFile() && scannedExtensions.has(extname(entry.name))) files.push(absolute)
   }
   return files
-}
-
-function matchingLines(root, files, patterns) {
-  const matches = []
-  for (const absolute of files) {
-    const lines = readFileSync(absolute, 'utf8').split(/\r?\n/u)
-    for (let index = 0; index < lines.length; index += 1) {
-      if (!patterns.some(pattern => pattern.test(lines[index]))) continue
-      matches.push({
-        file: relative(root, absolute).split(sep).join('/'),
-        line: index + 1,
-      })
-    }
-  }
-  return matches
 }
 
 function normalizedRelativePath(root, absolute) {
@@ -158,6 +155,34 @@ function calleeSegments(expression) {
   return undefined
 }
 
+function normalizeMarkerText(value) {
+  const scanner = ts.createScanner(
+    ts.ScriptTarget.Latest,
+    true,
+    ts.LanguageVariant.Standard,
+    value,
+  )
+  const tokens = []
+  for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
+    tokens.push([
+      token,
+      scanner.getTokenText().replace(/\r\n?/gu, '\n'),
+    ])
+  }
+  return JSON.stringify(tokens)
+}
+
+export function markerFingerprint(marker) {
+  return createHash('sha256')
+    .update(JSON.stringify({
+      kind: marker.kind,
+      callee: marker.callee,
+      source: normalizeMarkerText(marker.source),
+      title: normalizeMarkerText(marker.title),
+    }))
+    .digest('hex')
+}
+
 function javascriptTestDeclarations(root, absolute) {
   const source = readFileSync(absolute, 'utf8')
   const sourceFile = ts.createSourceFile(
@@ -173,14 +198,30 @@ function javascriptTestDeclarations(root, absolute) {
   function visit(node) {
     if (ts.isCallExpression(node)) {
       const segments = calleeSegments(node.expression)
-      if (segments !== undefined && testDeclarationNames.has(segments[0])) {
+      if (segments !== undefined && segments.slice(1).includes('only')) {
         const line = sourceFile.getLineAndCharacterOfPosition(node.expression.getStart(sourceFile)).line + 1
         const key = `${file}:${line}`
-        if (segments.includes('only')) focused.set(key, { file, line })
-        if (node.arguments[0] !== undefined
-          && ts.isStringLiteralLike(node.arguments[0])
-          && segments.some(segment => unconditionalSkipNames.has(segment))) {
-          skips.set(key, { file, line })
+        if (!focused.has(key)) focused.set(key, { file, line })
+      }
+      if (segments !== undefined && testDeclarationNames.has(segments[0])) {
+        const kind = segments.slice(1).find(segment => unconditionalSkipNames.has(segment))
+        if (kind !== undefined) {
+          const line = sourceFile.getLineAndCharacterOfPosition(node.expression.getStart(sourceFile)).line + 1
+          const key = `${file}:${line}`
+          if (!skips.has(key)) {
+            const sourceText = node.getText(sourceFile)
+            const title = node.arguments[0]?.getText(sourceFile) ?? ''
+            skips.set(key, {
+              file,
+              line,
+              fingerprint: markerFingerprint({
+                kind,
+                callee: segments.join('.'),
+                source: sourceText,
+                title,
+              }),
+            })
+          }
         }
       }
     }
@@ -196,15 +237,35 @@ function javascriptTestDeclarations(root, absolute) {
 
 function focusedDeclarations(root, files) {
   return files
-    .filter(file => extname(file) !== '.rs')
+    .filter(file => extname(file) !== '.rs' && isKnownTestFile(root, file))
     .flatMap(file => javascriptTestDeclarations(root, file).focused)
+}
+
+function rustSkipDeclarations(root, absolute) {
+  const file = normalizedRelativePath(root, absolute)
+  const skips = []
+  const lines = readFileSync(absolute, 'utf8').split(/\r?\n/u)
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!rustIgnorePattern.test(lines[index])) continue
+    skips.push({
+      file,
+      line: index + 1,
+      fingerprint: markerFingerprint({
+        kind: 'ignore',
+        callee: '#[ignore]',
+        source: lines[index],
+        title: '',
+      }),
+    })
+  }
+  return skips
 }
 
 function skipDeclarations(root, files) {
   return files
     .filter(file => isKnownTestFile(root, file))
     .flatMap(file => extname(file) === '.rs'
-      ? matchingLines(root, [file], [rustIgnorePattern])
+      ? rustSkipDeclarations(root, file)
       : javascriptTestDeclarations(root, file).skips)
 }
 
@@ -229,13 +290,15 @@ function readAllowlist(root, now) {
     if (typeof entry?.file !== 'string'
       || !Number.isInteger(entry?.line)
       || entry.line < 1
+      || typeof entry?.fingerprint !== 'string'
+      || !/^[a-f0-9]{64}$/u.test(entry.fingerprint)
       || typeof entry?.owner !== 'string'
       || entry.owner.trim() === ''
       || typeof entry?.reason !== 'string'
       || entry.reason.trim() === ''
       || typeof entry?.expires !== 'string'
       || !/^\d{4}-\d{2}-\d{2}$/.test(entry.expires)) {
-      throw new Error(`${allowlistPath}: skip entries require file, line, owner, reason, and YYYY-MM-DD expires`)
+      throw new Error(`${allowlistPath}: skip entries require file, line, fingerprint, owner, reason, and YYYY-MM-DD expires`)
     }
     if (!isIsoCalendarDate(entry.expires)) {
       throw new Error(`${allowlistPath}: skip expiry must be a real YYYY-MM-DD calendar date`)
@@ -253,6 +316,9 @@ function validateSkips(root, files, allowlist) {
     const entry = allowlist.get(key)
     if (entry === undefined) throw new Error(`${key}: skip is not present in the allowlist`)
     if (entry.expired) throw new Error(`${key}: skip allowlist entry is expired`)
+    if (entry.fingerprint !== skip.fingerprint) {
+      throw new Error(`${key}: skip allowlist fingerprint does not match marker`)
+    }
   }
 }
 

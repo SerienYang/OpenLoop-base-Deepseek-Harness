@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -13,6 +13,12 @@ function fixtureRoot(): string {
     version: 1,
     skips: [],
   }))
+  return root
+}
+
+function outsideFixtureRoot(): string {
+  const root = mkdtempSync(join(tmpdir(), 'openloop-gate-outside-'))
+  roots.push(root)
   return root
 }
 
@@ -259,6 +265,94 @@ describe('OpenLoop focused test gate', () => {
     )).rejects.toThrow('target does not exist: scripts/openloop/missing.spec.ts')
   })
 
+  it('rejects a test target that resolves outside the repository through a symlink', async () => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    const outside = outsideFixtureRoot()
+    write(outside, 'suite.spec.ts', "it('outside', () => {})\n")
+    symlinkSync(outside, join(root, 'linked-tests'), 'dir')
+
+    await expect(runGateTests(
+      ['vitest', '--files', 'linked-tests/suite.spec.ts'],
+      {
+        root,
+        runCommand: () => {
+          throw new Error('must not execute')
+        },
+      },
+    )).rejects.toThrow(
+      'target must resolve inside the repository: linked-tests/suite.spec.ts',
+    )
+  })
+
+  it('rejects a Cargo manifest that resolves outside the repository through a symlink', async () => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    const outside = outsideFixtureRoot()
+    write(outside, 'Cargo.toml', '[package]\nname = "outside"\nversion = "0.1.0"\n')
+    symlinkSync(outside, join(root, 'linked-native'), 'dir')
+
+    await expect(runGateTests(
+      ['cargo', '--manifest', 'linked-native/Cargo.toml', '--test', 'desktop'],
+      {
+        root,
+        runCommand: () => {
+          throw new Error('must not execute')
+        },
+      },
+    )).rejects.toThrow(
+      'Cargo manifest must resolve inside the repository: linked-native/Cargo.toml',
+    )
+  })
+
+  it('rejects a WDIO config that resolves outside the repository through a symlink', async () => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    const outside = outsideFixtureRoot()
+    write(outside, 'wdio.conf.ts', 'export const config = {}\n')
+    symlinkSync(outside, join(root, 'linked-config'), 'dir')
+    write(root, 'target/openloop', 'binary')
+    write(root, 'tests/window.e2e.ts', "describe('window', () => {})\n")
+
+    await expect(runGateTests([
+      'wdio',
+      '--config', 'linked-config/wdio.conf.ts',
+      '--binary', 'target/openloop',
+      '--file', 'tests/window.e2e.ts',
+    ], {
+      root,
+      runCommand: () => {
+        throw new Error('must not execute')
+      },
+    })).rejects.toThrow(
+      'WDIO config must resolve inside the repository: linked-config/wdio.conf.ts',
+    )
+  })
+
+  it('rejects a WDIO binary that resolves outside the repository through a symlink', async () => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    const outside = outsideFixtureRoot()
+    write(outside, 'openloop', 'binary')
+    symlinkSync(outside, join(root, 'linked-bin'), 'dir')
+    write(root, 'wdio.conf.ts', 'export const config = {}\n')
+    write(root, 'tests/window.e2e.ts', "describe('window', () => {})\n")
+
+    await expect(runGateTests([
+      'wdio',
+      '--config', 'wdio.conf.ts',
+      '--binary', 'linked-bin/openloop',
+      '--file', 'tests/window.e2e.ts',
+    ], {
+      root,
+      runCommand: () => {
+        throw new Error('must not execute')
+      },
+    })).rejects.toThrow(
+      'WDIO binary must resolve inside the repository: linked-bin/openloop',
+    )
+  })
+
   it('rejects zero discovered Vitest tests', async () => {
     const { runGateTests } = await import(gateModulePath)
     const root = fixtureRoot()
@@ -331,6 +425,8 @@ describe('OpenLoop focused test gate', () => {
     ["describe.concurrent.only('focused', () => {})", 1],
     ["describe['concurrent']['only']('focused', () => {})", 1],
     ["\n\nit['only'].each([1])('focused', () => {})", 3],
+    ["const spec = test\nspec.only('focused', () => {})", 2],
+    ["import { test as check } from 'vitest'\ncheck['only']('focused', () => {})", 2],
   ])('rejects focused call expression %s', async (source, line) => {
     const { runGateTests } = await import(gateModulePath)
     const root = fixtureRoot()
@@ -347,6 +443,8 @@ describe('OpenLoop focused test gate', () => {
     "describe.skip.each([1])('platform', () => {})",
     "it['skip'].each([1])('platform', () => {})",
     "suite['todo']('platform', () => {})",
+    'test.skip(platformTitle, () => {})',
+    'test.todo(`platform ${target}`)',
   ])('rejects unlisted skip call expression %s', async (source) => {
     const { runGateTests } = await import(gateModulePath)
     const root = fixtureRoot()
@@ -370,11 +468,97 @@ describe('OpenLoop focused test gate', () => {
     await expect(runGateTests(['scan-repo'], { root })).resolves.toBeUndefined()
   })
 
-  it('rejects unlisted or expired skips and accepts complete future entries', async () => {
-    const { runGateTests } = await import(gateModulePath)
+  it('requires a matching marker fingerprint and rejects same-line replacements', async () => {
+    const { markerFingerprint, runGateTests } = await import(gateModulePath)
     const root = fixtureRoot()
     const testPath = 'scripts/openloop/platform.spec.ts'
-    write(root, testPath, `it${'.skip'}('platform', () => {})\n`)
+    const source = "it.skip('platform', () => {})"
+    write(root, testPath, `${source}\n`)
+    const entry = {
+      file: testPath,
+      line: 1,
+      owner: 'desktop-foundation',
+      reason: 'Requires the signed test fixture.',
+      expires: '2026-09-01',
+    }
+
+    write(root, 'scripts/openloop/test-skip-allowlist.json', JSON.stringify({
+      version: 1,
+      skips: [entry],
+    }))
+    await expect(runGateTests(['scan-repo'], {
+      root,
+      now: new Date('2026-08-20T00:00:00Z'),
+    })).rejects.toThrow(
+      'scripts/openloop/test-skip-allowlist.json: skip entries require file, line, fingerprint, owner, reason, and YYYY-MM-DD expires',
+    )
+
+    write(root, 'scripts/openloop/test-skip-allowlist.json', JSON.stringify({
+      version: 1,
+      skips: [{ ...entry, fingerprint: '0'.repeat(64) }],
+    }))
+    await expect(runGateTests(['scan-repo'], {
+      root,
+      now: new Date('2026-08-20T00:00:00Z'),
+    })).rejects.toThrow(`${testPath}:1: skip allowlist fingerprint does not match marker`)
+
+    const fingerprint = markerFingerprint({
+      kind: 'skip',
+      callee: 'it.skip',
+      source,
+      title: "'platform'",
+    })
+    expect(fingerprint).toMatch(/^[a-f0-9]{64}$/)
+    expect(markerFingerprint({
+      kind: 'skip',
+      callee: 'it.skip',
+      source: "it.skip( 'signed fixture', () => {} )",
+      title: "'signed fixture'",
+    })).toBe(markerFingerprint({
+      kind: 'skip',
+      callee: 'it.skip',
+      source: "it.skip(\n  'signed fixture',\n  () => {}\n)",
+      title: "  'signed fixture'  ",
+    }))
+    expect(markerFingerprint({
+      kind: 'skip',
+      callee: 'it.skip',
+      source: "it.skip('signed fixture', () => {})",
+      title: "'signed fixture'",
+    })).not.toBe(markerFingerprint({
+      kind: 'skip',
+      callee: 'it.skip',
+      source: "it.skip('signed  fixture', () => {})",
+      title: "'signed  fixture'",
+    }))
+    write(root, 'scripts/openloop/test-skip-allowlist.json', JSON.stringify({
+      version: 1,
+      skips: [{ ...entry, fingerprint }],
+    }))
+    await expect(runGateTests(['scan-repo'], {
+      root,
+      now: new Date('2026-08-20T00:00:00Z'),
+    })).resolves.toBeUndefined()
+
+    write(root, testPath, "it.skip('replacement', () => {})\n")
+    await expect(runGateTests(['scan-repo'], {
+      root,
+      now: new Date('2026-08-20T00:00:00Z'),
+    })).rejects.toThrow(`${testPath}:1: skip allowlist fingerprint does not match marker`)
+  })
+
+  it('rejects unlisted or expired skips and accepts complete future entries', async () => {
+    const { markerFingerprint, runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    const testPath = 'scripts/openloop/platform.spec.ts'
+    const source = `it${'.skip'}('platform', () => {})`
+    const fingerprint = markerFingerprint({
+      kind: 'skip',
+      callee: 'it.skip',
+      source,
+      title: "'platform'",
+    })
+    write(root, testPath, `${source}\n`)
     const commandResult = {
       status: 0,
       stdout: JSON.stringify({ numTotalTests: 2, numPassedTests: 1, numPendingTests: 1 }),
@@ -392,6 +576,7 @@ describe('OpenLoop focused test gate', () => {
       skips: [{
         file: testPath,
         line: 1,
+        fingerprint,
         owner: 'desktop-foundation',
         reason: 'Requires the signed test fixture.',
         expires: '2026-08-19',
@@ -408,6 +593,7 @@ describe('OpenLoop focused test gate', () => {
       skips: [{
         file: testPath,
         line: 1,
+        fingerprint,
         owner: 'desktop-foundation',
         reason: 'Requires the signed test fixture.',
         expires: '2026-09-01',
@@ -424,15 +610,23 @@ describe('OpenLoop focused test gate', () => {
     "it['skip'].each([1])('platform', () => {})",
     "test.todo('platform')",
   ])('accepts allowlisted skip call expression %s', async (source) => {
-    const { runGateTests } = await import(gateModulePath)
+    const { markerFingerprint, runGateTests } = await import(gateModulePath)
     const root = fixtureRoot()
     const testPath = 'scripts/openloop/platform.spec.ts'
     write(root, testPath, `${source}\n`)
+    const segments = source.startsWith("it['skip']")
+      ? { kind: 'skip', callee: 'it.skip.each' }
+      : { kind: 'todo', callee: 'test.todo' }
     write(root, 'scripts/openloop/test-skip-allowlist.json', JSON.stringify({
       version: 1,
       skips: [{
         file: testPath,
         line: 1,
+        fingerprint: markerFingerprint({
+          ...segments,
+          source,
+          title: "'platform'",
+        }),
         owner: 'desktop-foundation',
         reason: 'Requires the signed test fixture.',
         expires: '2026-09-01',
@@ -455,6 +649,7 @@ describe('OpenLoop focused test gate', () => {
       skips: [{
         file: testPath,
         line: 1,
+        fingerprint: '0'.repeat(64),
         owner: 'desktop-foundation',
         reason: 'Requires the signed test fixture.',
         expires: '2026-99-99',

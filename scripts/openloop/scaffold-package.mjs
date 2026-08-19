@@ -5,6 +5,9 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
+  rmdirSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
@@ -62,8 +65,8 @@ function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'))
 }
 
-function writeJson(path, value) {
-  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`)
+function jsonText(value) {
+  return `${JSON.stringify(value, null, 2)}\n`
 }
 
 function validateName(value, option) {
@@ -287,16 +290,87 @@ function validateTargetDirectory(root, name) {
   return directory
 }
 
-export function scaffoldPackage(options) {
+function transactionDirectories(root, outputs) {
+  const directories = new Set()
+  for (const output of outputs) {
+    let current = dirname(output.path)
+    while (current !== root) {
+      if (!existsSync(current)) directories.add(current)
+      const parent = dirname(current)
+      if (parent === current) throw new Error(`transaction output escapes root: ${output.path}`)
+      current = parent
+    }
+  }
+  return [...directories].sort((left, right) => left.length - right.length)
+}
+
+function writeTransaction(root, outputs, dependencies) {
+  const rename = dependencies.rename ?? renameSync
+  const originals = new Map(outputs.map(output => [
+    output.path,
+    existsSync(output.path) ? readFileSync(output.path) : undefined,
+  ]))
+  const directories = transactionDirectories(root, outputs)
+  const nonce = `${process.pid}-${Date.now()}`
+  const staged = outputs.map((output, index) => ({
+    ...output,
+    temporary: `${output.path}.openloop-scaffold-${nonce}-${index}.tmp`,
+  }))
+
+  try {
+    for (const directory of directories) mkdirSync(directory)
+    for (const output of staged) writeFileSync(output.temporary, output.content)
+    for (const output of staged) rename(output.temporary, output.path)
+  } catch (error) {
+    const rollbackErrors = []
+    for (const output of staged) {
+      if (!existsSync(output.temporary)) continue
+      try {
+        unlinkSync(output.temporary)
+      } catch (cleanupError) {
+        rollbackErrors.push(cleanupError)
+      }
+    }
+    for (const output of [...outputs].reverse()) {
+      const original = originals.get(output.path)
+      try {
+        if (original === undefined) {
+          if (existsSync(output.path)) unlinkSync(output.path)
+          continue
+        }
+        const temporary = `${output.path}.openloop-rollback-${nonce}.tmp`
+        writeFileSync(temporary, original)
+        renameSync(temporary, output.path)
+      } catch (rollbackError) {
+        rollbackErrors.push(rollbackError)
+      }
+    }
+    for (const directory of [...directories].reverse()) {
+      if (!existsSync(directory) || readdirSync(directory).length > 0) continue
+      try {
+        rmdirSync(directory)
+      } catch (cleanupError) {
+        rollbackErrors.push(cleanupError)
+      }
+    }
+    if (rollbackErrors.length > 0) {
+      throw new AggregateError([error, ...rollbackErrors], 'scaffold transaction and rollback failed')
+    }
+    throw error
+  }
+}
+
+export function scaffoldPackage(options, dependencies = {}) {
   const {
-    root,
+    root: requestedRoot,
     name,
     face,
     clientBundle = false,
     bundleRow,
     service,
   } = options
-  if (typeof root !== 'string') throw new Error('root is required')
+  if (typeof requestedRoot !== 'string') throw new Error('root is required')
+  const root = resolve(requestedRoot)
   validateName(name, '--name')
   if (!faces.has(face)) throw new Error('--face must be host, client, or pure')
   if (clientBundle && face !== 'client') {
@@ -312,30 +386,57 @@ export function scaffoldPackage(options) {
     ? undefined
     : prepareBundle(root, bundleRow, fullPackageName, rowId)
   const cordisPlugin = clientBundle || service !== undefined || bundle !== undefined
-
-  mkdirSync(join(directory, 'src'), { recursive: true })
-  writeJson(
-    join(directory, 'package.json'),
-    packageManifest({ name, face, clientBundle, service, cordisPlugin }),
-  )
-  writeFileSync(
-    join(directory, 'src', 'index.ts'),
-    packageIndex(name, service, cordisPlugin),
-  )
+  const outputs = [
+    {
+      path: join(directory, 'package.json'),
+      content: jsonText(packageManifest({ name, face, clientBundle, service, cordisPlugin })),
+    },
+    {
+      path: join(directory, 'src', 'index.ts'),
+      content: packageIndex(name, service, cordisPlugin),
+    },
+  ]
   if (clientBundle) {
-    mkdirSync(join(directory, 'src', 'client'), { recursive: true })
-    writeFileSync(join(directory, 'src', 'client', 'index.ts'), clientIndex(name))
-    writeFileSync(join(directory, 'tsdown.config.ts'), clientBundleConfig(name))
+    outputs.push(
+      {
+        path: join(directory, 'src', 'client', 'index.ts'),
+        content: clientIndex(name),
+      },
+      {
+        path: join(directory, 'tsdown.config.ts'),
+        content: clientBundleConfig(name),
+      },
+    )
   }
-  writeFileSync(join(directory, 'README.md'), packageReadme(name, face, service))
-  writeJson(join(directory, 'tsconfig.json'), packageTsconfig(face, cordisPlugin))
-  writeJson(aggregate.path, aggregate.config)
+  outputs.push(
+    {
+      path: join(directory, 'README.md'),
+      content: packageReadme(name, face, service),
+    },
+    {
+      path: join(directory, 'tsconfig.json'),
+      content: jsonText(packageTsconfig(face, cordisPlugin)),
+    },
+    {
+      path: aggregate.path,
+      content: jsonText(aggregate.config),
+    },
+  )
 
   if (bundle !== undefined) {
-    writeJson(bundle.manifestPath, bundle.manifest)
-    writeFileSync(bundle.patchPath, dump(bundle.document, { lineWidth: -1, noRefs: true }))
+    outputs.push(
+      {
+        path: bundle.manifestPath,
+        content: jsonText(bundle.manifest),
+      },
+      {
+        path: bundle.patchPath,
+        content: dump(bundle.document, { lineWidth: -1, noRefs: true }),
+      },
+    )
   }
 
+  writeTransaction(root, outputs, dependencies)
   return relative(root, directory)
 }
 
