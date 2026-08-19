@@ -9,6 +9,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 import { hasTypertRemoteNavigation, isForbiddenPublicationFile } from './publication-payload.ts'
 import { collectProjectReferenceFaceViolations } from './project-reference-faces.ts'
+import { collectOpenLoopWorkspaceViolations } from './openloop/workspace-conventions.ts'
 
 const root = resolve(import.meta.dirname, '..')
 // vendor/* is single-level; packages/<group>/<pkg> nests one level deeper
@@ -223,6 +224,7 @@ function checkWorkspace({ dir, manifest }: WorkspaceManifest): string[] {
   const errors: string[] = []
   const label = manifest.name ?? dir
   const isLandlockPackageDir = dir.startsWith('native/landlock-run/packages/')
+  const isOpenLoopPackageDir = dir.startsWith('packages/openloop/')
   const isPublicLandlockPackage = isLandlockPackageDir
     && manifest.name !== undefined
     && publicLandlockPackages.has(manifest.name)
@@ -240,6 +242,10 @@ function checkWorkspace({ dir, manifest }: WorkspaceManifest): string[] {
       || manifest.repository.directory !== expectedDirectory) {
       errors.push(`${label}: published Landlock package repository must use ${repositoryUrl} with directory ${expectedDirectory} for trusted publishing`)
     }
+  } else if (isOpenLoopPackageDir) {
+    // Product-owned @openloop packages are a narrow private namespace
+    // exception. Their naming, privacy, face, and Cordis rules are checked by
+    // collectOpenLoopWorkspaceViolations below.
   } else if (releaseMemberDirectory.test(dir)) {
     // Release members state that they are publishable: npm refuses a private
     // package, and the repository field is how a consumer finds the source of
@@ -412,6 +418,7 @@ const errors = [
   ...checkWorkspaceProtocol(manifests),
   ...checkHierarchyShape(),
   ...collectProjectReferenceFaceViolations(root),
+  ...collectOpenLoopWorkspaceViolations(root),
 ]
 if (errors.length > 0) {
   console.error(errors.join('\n'))

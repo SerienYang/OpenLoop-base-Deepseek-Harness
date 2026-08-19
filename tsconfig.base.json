@@ -97,6 +97,9 @@
       "@deepseek-ai/dsh-agent/invariant": ["./packages/core/agent/src/invariant.ts"],
       "@deepseek-ai/dsh-scope/invariant": ["./packages/core/scope/src/invariant.ts"],
       "@deepseek-ai/dsh-agent-loop/invariant": ["./packages/core/agent-loop/src/invariant.ts"],
+      "@openloop/*/client": ["./packages/openloop/*/src/client"],
+      "@openloop/*/invariant": ["./packages/openloop/*/src/invariant.ts"],
+      "@openloop/*": ["./packages/openloop/*/src"],
       "@deepseek-ai/dsh-*/invariant": [
         "./packages/core/*/src/invariant.ts",
         "./packages/prompt/*/src/invariant.ts",
