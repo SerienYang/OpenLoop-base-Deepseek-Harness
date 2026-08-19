@@ -34,7 +34,6 @@ const scannedExtensions = new Set([
   '.tsx',
 ])
 const globCharacters = /[*?[{]/
-const onlyPattern = /\b(?:describe|it|suite|test)(?:\.[$\w]+)*\.only(?:\.[$\w]+)*\s*\(/
 const rustIgnorePattern = /#\s*\[\s*ignore(?:\s*=|\s*\])/
 const testDeclarationNames = new Set(['describe', 'it', 'suite', 'test'])
 const unconditionalSkipNames = new Set(['fixme', 'skip', 'todo'])
@@ -159,7 +158,7 @@ function calleeSegments(expression) {
   return undefined
 }
 
-function javascriptSkipDeclarations(root, absolute) {
+function javascriptTestDeclarations(root, absolute) {
   const source = readFileSync(absolute, 'utf8')
   const sourceFile = ts.createSourceFile(
     absolute,
@@ -167,26 +166,38 @@ function javascriptSkipDeclarations(root, absolute) {
     ts.ScriptTarget.Latest,
     true,
   )
-  const matches = new Map()
+  const file = normalizedRelativePath(root, absolute)
+  const focused = new Map()
+  const skips = new Map()
 
   function visit(node) {
-    if (ts.isCallExpression(node)
-      && node.arguments[0] !== undefined
-      && ts.isStringLiteralLike(node.arguments[0])) {
+    if (ts.isCallExpression(node)) {
       const segments = calleeSegments(node.expression)
-      if (segments !== undefined
-        && testDeclarationNames.has(segments[0])
-        && segments.some(segment => unconditionalSkipNames.has(segment))) {
+      if (segments !== undefined && testDeclarationNames.has(segments[0])) {
         const line = sourceFile.getLineAndCharacterOfPosition(node.expression.getStart(sourceFile)).line + 1
-        const file = normalizedRelativePath(root, absolute)
-        matches.set(`${file}:${line}`, { file, line })
+        const key = `${file}:${line}`
+        if (segments.includes('only')) focused.set(key, { file, line })
+        if (node.arguments[0] !== undefined
+          && ts.isStringLiteralLike(node.arguments[0])
+          && segments.some(segment => unconditionalSkipNames.has(segment))) {
+          skips.set(key, { file, line })
+        }
       }
     }
     ts.forEachChild(node, visit)
   }
 
   visit(sourceFile)
-  return [...matches.values()]
+  return {
+    focused: [...focused.values()],
+    skips: [...skips.values()],
+  }
+}
+
+function focusedDeclarations(root, files) {
+  return files
+    .filter(file => extname(file) !== '.rs')
+    .flatMap(file => javascriptTestDeclarations(root, file).focused)
 }
 
 function skipDeclarations(root, files) {
@@ -194,7 +205,7 @@ function skipDeclarations(root, files) {
     .filter(file => isKnownTestFile(root, file))
     .flatMap(file => extname(file) === '.rs'
       ? matchingLines(root, [file], [rustIgnorePattern])
-      : javascriptSkipDeclarations(root, file))
+      : javascriptTestDeclarations(root, file).skips)
 }
 
 function isIsoCalendarDate(value) {
@@ -247,7 +258,7 @@ function validateSkips(root, files, allowlist) {
 
 function scanRepository(root, allowlist) {
   const files = walkFiles(root)
-  const focused = matchingLines(root, files, [onlyPattern])
+  const focused = focusedDeclarations(root, files)
   if (focused.length > 0) {
     const match = focused[0]
     throw new Error(`${match.file}:${match.line}: forbidden focused test marker`)

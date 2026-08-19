@@ -308,31 +308,50 @@ describe('OpenLoop focused test gate', () => {
     })).rejects.toThrow('packages/core/example/tests/example.spec.ts:1: forbidden focused test marker')
   })
 
-  it.each([
-    'test.concurrent' + '.only',
-    'describe.concurrent' + '.only',
-    'it.concurrent' + '.only',
-    'suite.concurrent' + '.only',
-  ])('rejects chained focused marker %s', async (marker) => {
+  it('ignores focused and skip marker text in strings, templates, and comments', async () => {
     const { runGateTests } = await import(gateModulePath)
     const root = fixtureRoot()
     const testPath = 'packages/core/example/tests/example.spec.ts'
-    write(root, testPath, `${marker}('focused', () => {})\n`)
+    write(root, testPath, [
+      "const focused = 'test.only('",
+      'const chained = `describe.concurrent.only(`',
+      "const skipped = '.skip('",
+      "const skipChain = 'it.skip.each([1])('",
+      '// suite.only(',
+      '/* test.skip( */',
+      "test('uses marker text', () => 'test.only(')",
+    ].join('\n'))
 
-    await expect(runGateTests(['scan-repo'], { root }))
-      .rejects.toThrow(`${testPath}:1: forbidden focused test marker`)
+    await expect(runGateTests(['scan-repo'], { root })).resolves.toBeUndefined()
   })
 
   it.each([
-    'test' + '.skip.each',
-    'describe' + '.skip.each',
-    'it' + '.skip.each',
-    'suite' + '.skip.each',
-  ])('rejects chained skip marker %s', async (marker) => {
+    ["test.only('focused', () => {})", 1],
+    ["test['only']('focused', () => {})", 1],
+    ["describe.concurrent.only('focused', () => {})", 1],
+    ["describe['concurrent']['only']('focused', () => {})", 1],
+    ["\n\nit['only'].each([1])('focused', () => {})", 3],
+  ])('rejects focused call expression %s', async (source, line) => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    const testPath = 'packages/core/example/tests/example.spec.ts'
+    write(root, testPath, `${source}\n`)
+
+    await expect(runGateTests(['scan-repo'], { root }))
+      .rejects.toThrow(`${testPath}:${line}: forbidden focused test marker`)
+  })
+
+  it.each([
+    "test.skip('platform', () => {})",
+    "test['skip']('platform', () => {})",
+    "describe.skip.each([1])('platform', () => {})",
+    "it['skip'].each([1])('platform', () => {})",
+    "suite['todo']('platform', () => {})",
+  ])('rejects unlisted skip call expression %s', async (source) => {
     const { runGateTests } = await import(gateModulePath)
     const root = fixtureRoot()
     const testPath = 'packages/core/example/tests/platform.spec.ts'
-    write(root, testPath, `${marker}([1])('platform', () => {})\n`)
+    write(root, testPath, `${source}\n`)
 
     await expect(runGateTests(['scan-repo'], { root }))
       .rejects.toThrow(`${testPath}:1: skip is not present in the allowlist`)
@@ -397,6 +416,31 @@ describe('OpenLoop focused test gate', () => {
     await expect(runGateTests(['vitest', '--files', testPath], {
       root,
       runCommand: () => commandResult,
+      now: new Date('2026-08-20T00:00:00Z'),
+    })).resolves.toBeUndefined()
+  })
+
+  it.each([
+    "it['skip'].each([1])('platform', () => {})",
+    "test.todo('platform')",
+  ])('accepts allowlisted skip call expression %s', async (source) => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    const testPath = 'scripts/openloop/platform.spec.ts'
+    write(root, testPath, `${source}\n`)
+    write(root, 'scripts/openloop/test-skip-allowlist.json', JSON.stringify({
+      version: 1,
+      skips: [{
+        file: testPath,
+        line: 1,
+        owner: 'desktop-foundation',
+        reason: 'Requires the signed test fixture.',
+        expires: '2026-09-01',
+      }],
+    }))
+
+    await expect(runGateTests(['scan-repo'], {
+      root,
       now: new Date('2026-08-20T00:00:00Z'),
     })).resolves.toBeUndefined()
   })
