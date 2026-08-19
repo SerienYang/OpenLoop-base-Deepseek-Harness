@@ -373,8 +373,20 @@ function documentProblems(document: Record<string, unknown>): string[] {
       problems.push(`missing token group: ${groupPath}`)
     }
   }
+  const tokens = flattenTokens(document)
+  const expectedTokens = new Set(EXPECTED_TOKEN_PATHS)
+  for (const tokenPath of tokens.keys()) {
+    if (!expectedTokens.has(tokenPath)) {
+      problems.push(`unexpected token: ${tokenPath}`)
+    }
+  }
+  for (const tokenPath of expectedTokens) {
+    if (!tokens.has(tokenPath)) {
+      problems.push(`missing token: ${tokenPath}`)
+    }
+  }
 
-  for (const [tokenPath, value] of flattenTokens(document)) {
+  for (const [tokenPath, value] of tokens) {
     if (typeof value === 'string') continue
     let color: ColorValue
     try {
@@ -596,6 +608,21 @@ describe('OpenLoop design tokens', () => {
       'unexpected token group: color.brand.empty',
       'color.brand.raw must be a token or token group',
     ]))
+  })
+
+  test('rejects extra tokens attached directly to approved groups', () => {
+    const document = structuredClone(readDocument())
+    if (!isRecord(document.color)) throw new TypeError('Missing color group')
+    if (!isRecord(document.color.semantic)) {
+      throw new TypeError('Missing semantic group')
+    }
+    document.color.semantic.rogue = {
+      $value: '{color.palette.neutral.0}',
+    }
+
+    expect(documentProblems(document)).toContain(
+      'unexpected token: color.semantic.rogue',
+    )
   })
 
   test('rejects malformed concrete colors anywhere in the document', () => {
