@@ -158,6 +158,30 @@ describe('OpenLoop profile', () => {
     expect(existsSync(join(dir, 'package.json'))).toBe(false)
   })
 
+  it.each([
+    ['number', "packages: ['.', 42]\nnodeLinker: hoisted\nautoInstallPeers: false\n"],
+    ['empty string', "packages: ['.', '']\nnodeLinker: hoisted\nautoInstallPeers: false\n"],
+    ['object', "packages: ['.', {}]\nnodeLinker: hoisted\nautoInstallPeers: false\n"],
+  ])('rejects a workspace with a %s package member without committing profile fragments', (_member, workspace) => {
+    const home = tmp()
+    const dir = join(home, 'profiles', 'openloop')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'pnpm-workspace.yaml'), workspace)
+
+    let failure: unknown
+    try {
+      ensureOpenloopProfile(home)
+    } catch (error) {
+      failure = error
+    }
+    expect(readFileSync(join(dir, 'pnpm-workspace.yaml'), 'utf8')).toBe(workspace)
+    expect(existsSync(join(dir, 'cordis.patch.yml'))).toBe(false)
+    expect(existsSync(join(dir, 'package.json'))).toBe(false)
+    expect(failure).toEqual(expect.objectContaining({
+      message: expect.stringMatching(/pnpm-workspace\.yaml.*packages.*non-empty strings/i),
+    }))
+  })
+
   it('preserves a valid existing custom patch array while creating the profile manifest', () => {
     const home = tmp()
     const dir = join(home, 'profiles', 'openloop')

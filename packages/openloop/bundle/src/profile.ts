@@ -104,8 +104,14 @@ function assertProfileWorkspace(path: string): void {
     throw new Error(`OpenLoop profile workspace ${path} must contain a YAML object`)
   }
   const workspace = parsed as Record<string, unknown>
-  if (!Array.isArray(workspace.packages) || !workspace.packages.includes('.')) {
-    throw new Error(`OpenLoop profile workspace ${path} packages must contain "."`)
+  const packages = workspace.packages
+  if (!Array.isArray(packages)
+    || packages.length === 0
+    || !packages.every(value => typeof value === 'string' && value.length > 0)
+    || !packages.includes('.')) {
+    throw new Error(
+      `OpenLoop profile workspace ${path} packages must be a non-empty array of non-empty strings containing "."`,
+    )
   }
   if (workspace.nodeLinker !== 'hoisted') {
     throw new Error(`OpenLoop profile workspace ${path} nodeLinker must equal "hoisted"`)
