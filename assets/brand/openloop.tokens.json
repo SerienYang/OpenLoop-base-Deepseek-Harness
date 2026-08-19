@@ -1,0 +1,386 @@
+{
+  "$description": "OpenLoop brand and semantic color tokens. Component, typography, spacing, and motion tokens are intentionally out of scope.",
+  "color": {
+    "$type": "color",
+    "$description": "Monochrome brand foundation with restrained status colors.",
+    "palette": {
+      "$description": "Concrete sRGB values. Product code should consume brand or semantic aliases instead of palette values.",
+      "neutral": {
+        "0": {
+          "$value": { "colorSpace": "srgb", "components": [1, 1, 1], "alpha": 1, "hex": "#FFFFFF" }
+        },
+        "50": {
+          "$value": { "colorSpace": "srgb", "components": [0.984314, 0.984314, 0.980392], "alpha": 1, "hex": "#FBFBFA" }
+        },
+        "100": {
+          "$value": { "colorSpace": "srgb", "components": [0.968627, 0.972549, 0.980392], "alpha": 1, "hex": "#F7F8FA" }
+        },
+        "200": {
+          "$value": { "colorSpace": "srgb", "components": [0.933333, 0.945098, 0.952941], "alpha": 1, "hex": "#EEF1F3" }
+        },
+        "300": {
+          "$value": { "colorSpace": "srgb", "components": [0.882353, 0.894118, 0.909804], "alpha": 1, "hex": "#E1E4E8" }
+        },
+        "400": {
+          "$value": { "colorSpace": "srgb", "components": [0.784314, 0.803922, 0.827451], "alpha": 1, "hex": "#C8CDD3" }
+        },
+        "500": {
+          "$value": { "colorSpace": "srgb", "components": [0.682353, 0.705882, 0.737255], "alpha": 1, "hex": "#AEB4BC" }
+        },
+        "600": {
+          "$value": { "colorSpace": "srgb", "components": [0.552941, 0.588235, 0.627451], "alpha": 1, "hex": "#8D96A0" }
+        },
+        "700": {
+          "$value": { "colorSpace": "srgb", "components": [0.4, 0.427451, 0.462745], "alpha": 1, "hex": "#666D76" }
+        },
+        "800": {
+          "$value": { "colorSpace": "srgb", "components": [0.231373, 0.258824, 0.290196], "alpha": 1, "hex": "#3B424A" }
+        },
+        "900": {
+          "$value": { "colorSpace": "srgb", "components": [0.12549, 0.141176, 0.164706], "alpha": 1, "hex": "#20242A" }
+        },
+        "950": {
+          "$value": { "colorSpace": "srgb", "components": [0.066667, 0.07451, 0.086275], "alpha": 1, "hex": "#111316" }
+        },
+        "1000": {
+          "$value": { "colorSpace": "srgb", "components": [0.043137, 0.05098, 0.058824], "alpha": 1, "hex": "#0B0D0F" }
+        }
+      },
+      "success": {
+        "50": {
+          "$value": { "colorSpace": "srgb", "components": [0.929412, 0.972549, 0.945098], "alpha": 1, "hex": "#EDF8F1" }
+        },
+        "400": {
+          "$value": { "colorSpace": "srgb", "components": [0.372549, 0.72549, 0.529412], "alpha": 1, "hex": "#5FB987" }
+        },
+        "600": {
+          "$value": { "colorSpace": "srgb", "components": [0.14902, 0.478431, 0.294118], "alpha": 1, "hex": "#267A4B" }
+        },
+        "700": {
+          "$value": { "colorSpace": "srgb", "components": [0.121569, 0.376471, 0.239216], "alpha": 1, "hex": "#1F603D" }
+        },
+        "900": {
+          "$value": { "colorSpace": "srgb", "components": [0.070588, 0.180392, 0.12549], "alpha": 1, "hex": "#122E20" }
+        }
+      },
+      "warning": {
+        "50": {
+          "$value": { "colorSpace": "srgb", "components": [1, 0.968627, 0.901961], "alpha": 1, "hex": "#FFF7E6" }
+        },
+        "400": {
+          "$value": { "colorSpace": "srgb", "components": [0.894118, 0.631373, 0.105882], "alpha": 1, "hex": "#E4A11B" }
+        },
+        "700": {
+          "$value": { "colorSpace": "srgb", "components": [0.541176, 0.352941, 0], "alpha": 1, "hex": "#8A5A00" }
+        },
+        "800": {
+          "$value": { "colorSpace": "srgb", "components": [0.431373, 0.278431, 0], "alpha": 1, "hex": "#6E4700" }
+        },
+        "900": {
+          "$value": { "colorSpace": "srgb", "components": [0.2, 0.145098, 0.031373], "alpha": 1, "hex": "#332508" }
+        }
+      },
+      "danger": {
+        "50": {
+          "$value": { "colorSpace": "srgb", "components": [1, 0.945098, 0.941176], "alpha": 1, "hex": "#FFF1F0" }
+        },
+        "400": {
+          "$value": { "colorSpace": "srgb", "components": [0.976471, 0.439216, 0.4], "alpha": 1, "hex": "#F97066" }
+        },
+        "600": {
+          "$value": { "colorSpace": "srgb", "components": [0.705882, 0.137255, 0.094118], "alpha": 1, "hex": "#B42318" }
+        },
+        "700": {
+          "$value": { "colorSpace": "srgb", "components": [0.568627, 0.12549, 0.094118], "alpha": 1, "hex": "#912018" }
+        },
+        "900": {
+          "$value": { "colorSpace": "srgb", "components": [0.227451, 0.090196, 0.082353], "alpha": 1, "hex": "#3A1715" }
+        }
+      }
+    },
+    "brand": {
+      "$description": "Stable OpenLoop brand roles shared by artwork and product surfaces.",
+      "ink": {
+        "$value": "{color.palette.neutral.950}"
+      },
+      "paper": {
+        "$value": "{color.palette.neutral.50}"
+      },
+      "line": {
+        "$value": "{color.palette.neutral.300}"
+      },
+      "muted": {
+        "$value": "{color.palette.neutral.700}"
+      }
+    },
+    "semantic": {
+      "$description": "Role-based application colors. Light and Dark expose identical token paths.",
+      "light": {
+        "background": {
+          "canvas": {
+            "$value": "{color.palette.neutral.100}"
+          },
+          "surface": {
+            "$value": "{color.palette.neutral.0}"
+          },
+          "subtle": {
+            "$value": "{color.palette.neutral.50}"
+          },
+          "inverse": {
+            "$value": "{color.palette.neutral.1000}"
+          }
+        },
+        "text": {
+          "primary": {
+            "$value": "{color.palette.neutral.950}"
+          },
+          "secondary": {
+            "$value": "{color.palette.neutral.700}"
+          },
+          "tertiary": {
+            "$value": "{color.palette.neutral.600}"
+          },
+          "inverse": {
+            "$value": "{color.palette.neutral.50}"
+          },
+          "disabled": {
+            "$value": "{color.palette.neutral.500}"
+          }
+        },
+        "border": {
+          "subtle": {
+            "$value": "{color.palette.neutral.300}"
+          },
+          "default": {
+            "$value": "{color.palette.neutral.400}"
+          },
+          "strong": {
+            "$value": "{color.palette.neutral.700}"
+          },
+          "focus": {
+            "$value": "{color.palette.neutral.950}"
+          }
+        },
+        "action": {
+          "primary": {
+            "background": {
+              "$value": "{color.palette.neutral.950}"
+            },
+            "foreground": {
+              "$value": "{color.palette.neutral.50}"
+            },
+            "hover-background": {
+              "$value": "{color.palette.neutral.900}"
+            },
+            "pressed-background": {
+              "$value": "{color.palette.neutral.1000}"
+            },
+            "disabled-background": {
+              "$value": "{color.palette.neutral.300}"
+            },
+            "disabled-foreground": {
+              "$value": "{color.palette.neutral.600}"
+            }
+          }
+        },
+        "state": {
+          "active": {
+            "background": {
+              "$value": "{color.palette.neutral.50}"
+            },
+            "foreground": {
+              "$value": "{color.palette.neutral.950}"
+            }
+          },
+          "selected": {
+            "background": {
+              "$value": "{color.palette.neutral.200}"
+            },
+            "foreground": {
+              "$value": "{color.palette.neutral.950}"
+            }
+          }
+        },
+        "status": {
+          "info": {
+            "foreground": {
+              "$value": "{color.palette.neutral.700}"
+            },
+            "surface": {
+              "$value": "{color.palette.neutral.100}"
+            },
+            "border": {
+              "$value": "{color.palette.neutral.400}"
+            }
+          },
+          "success": {
+            "foreground": {
+              "$value": "{color.palette.success.600}"
+            },
+            "surface": {
+              "$value": "{color.palette.success.50}"
+            },
+            "border": {
+              "$value": "{color.palette.success.400}"
+            }
+          },
+          "warning": {
+            "foreground": {
+              "$value": "{color.palette.warning.700}"
+            },
+            "surface": {
+              "$value": "{color.palette.warning.50}"
+            },
+            "border": {
+              "$value": "{color.palette.warning.400}"
+            }
+          },
+          "danger": {
+            "foreground": {
+              "$value": "{color.palette.danger.600}"
+            },
+            "surface": {
+              "$value": "{color.palette.danger.50}"
+            },
+            "border": {
+              "$value": "{color.palette.danger.400}"
+            }
+          }
+        }
+      },
+      "dark": {
+        "background": {
+          "canvas": {
+            "$value": "{color.palette.neutral.1000}"
+          },
+          "surface": {
+            "$value": "{color.palette.neutral.950}"
+          },
+          "subtle": {
+            "$value": "{color.palette.neutral.900}"
+          },
+          "inverse": {
+            "$value": "{color.palette.neutral.50}"
+          }
+        },
+        "text": {
+          "primary": {
+            "$value": "{color.palette.neutral.100}"
+          },
+          "secondary": {
+            "$value": "{color.palette.neutral.500}"
+          },
+          "tertiary": {
+            "$value": "{color.palette.neutral.600}"
+          },
+          "inverse": {
+            "$value": "{color.palette.neutral.950}"
+          },
+          "disabled": {
+            "$value": "{color.palette.neutral.700}"
+          }
+        },
+        "border": {
+          "subtle": {
+            "$value": "{color.palette.neutral.900}"
+          },
+          "default": {
+            "$value": "{color.palette.neutral.800}"
+          },
+          "strong": {
+            "$value": "{color.palette.neutral.600}"
+          },
+          "focus": {
+            "$value": "{color.palette.neutral.500}"
+          }
+        },
+        "action": {
+          "primary": {
+            "background": {
+              "$value": "{color.palette.neutral.100}"
+            },
+            "foreground": {
+              "$value": "{color.palette.neutral.950}"
+            },
+            "hover-background": {
+              "$value": "{color.palette.neutral.200}"
+            },
+            "pressed-background": {
+              "$value": "{color.palette.neutral.0}"
+            },
+            "disabled-background": {
+              "$value": "{color.palette.neutral.800}"
+            },
+            "disabled-foreground": {
+              "$value": "{color.palette.neutral.600}"
+            }
+          }
+        },
+        "state": {
+          "active": {
+            "background": {
+              "$value": "{color.palette.neutral.900}"
+            },
+            "foreground": {
+              "$value": "{color.palette.neutral.100}"
+            }
+          },
+          "selected": {
+            "background": {
+              "$value": "{color.palette.neutral.800}"
+            },
+            "foreground": {
+              "$value": "{color.palette.neutral.100}"
+            }
+          }
+        },
+        "status": {
+          "info": {
+            "foreground": {
+              "$value": "{color.palette.neutral.500}"
+            },
+            "surface": {
+              "$value": "{color.palette.neutral.900}"
+            },
+            "border": {
+              "$value": "{color.palette.neutral.700}"
+            }
+          },
+          "success": {
+            "foreground": {
+              "$value": "{color.palette.success.400}"
+            },
+            "surface": {
+              "$value": "{color.palette.success.900}"
+            },
+            "border": {
+              "$value": "{color.palette.success.600}"
+            }
+          },
+          "warning": {
+            "foreground": {
+              "$value": "{color.palette.warning.400}"
+            },
+            "surface": {
+              "$value": "{color.palette.warning.900}"
+            },
+            "border": {
+              "$value": "{color.palette.warning.700}"
+            }
+          },
+          "danger": {
+            "foreground": {
+              "$value": "{color.palette.danger.400}"
+            },
+            "surface": {
+              "$value": "{color.palette.danger.900}"
+            },
+            "border": {
+              "$value": "{color.palette.danger.600}"
+            }
+          }
+        }
+      }
+    }
+  }
+}
