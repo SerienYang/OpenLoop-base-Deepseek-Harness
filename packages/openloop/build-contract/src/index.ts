@@ -49,8 +49,8 @@ const dshCommitPattern = /^[0-9a-f]{40}$/u
 
 const semver = z.string().pattern(semverPattern).required()
 const sha256 = z.string().pattern(sha256Pattern).required()
-const positiveInteger = z.number().step(1).min(1).required()
-const nonnegativeInteger = z.number().step(1).min(0).required()
+const positiveInteger = z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).required()
+const nonnegativeInteger = z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).required()
 
 /** Schemastery schema for the immutable core build manifest. */
 export const OpenloopBuildManifestSchema: z<OpenloopBuildManifest> = z.object({

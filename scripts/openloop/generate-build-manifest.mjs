@@ -33,7 +33,7 @@ const stringOptions = new Map([
   ['--plugin-package-spec-version', 'pluginPackageSpecVersion'],
 ])
 const baselineSourceTypes = new Set(['release', 'tag', 'approved_commit'])
-const isoTimestampPattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/u
+const isoTimestampPattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/u
 
 function optionValue(args, index, option) {
   const value = args[index + 1]
@@ -111,8 +111,12 @@ function baselineTimestamp(value, field, now) {
     throw new Error(`upstream baseline ${field} must be a valid ISO timestamp`)
   }
   const match = isoTimestampPattern.exec(value)
-  const parsed = Date.parse(value)
-  if (match === null || !Number.isFinite(parsed)) {
+  if (match === null) {
+    throw new Error(`upstream baseline ${field} must be a valid ISO timestamp`)
+  }
+  const wholeSecond = `${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}Z`
+  const parsed = Date.parse(wholeSecond)
+  if (!Number.isFinite(parsed)) {
     throw new Error(`upstream baseline ${field} must be a valid ISO timestamp`)
   }
   const date = new Date(parsed)
@@ -128,10 +132,22 @@ function baselineTimestamp(value, field, now) {
   if (actual.some((component, index) => component !== expected[index])) {
     throw new Error(`upstream baseline ${field} must be a valid ISO timestamp`)
   }
-  if (parsed > now) {
+  const fraction = (match[7] ?? '').replace(/0+$/u, '')
+  const milliseconds = parsed + Number(fraction.slice(0, 3).padEnd(3, '0'))
+  if (milliseconds > now
+    || (milliseconds === now && /[1-9]/u.test(fraction.slice(3)))) {
     throw new Error(`upstream baseline ${field} must not be in the future`)
   }
-  return parsed
+  return { parsed, fraction }
+}
+
+function compareTimestamps(left, right) {
+  if (left.parsed !== right.parsed) return left.parsed < right.parsed ? -1 : 1
+  const width = Math.max(left.fraction.length, right.fraction.length)
+  const leftFraction = left.fraction.padEnd(width, '0')
+  const rightFraction = right.fraction.padEnd(width, '0')
+  if (leftFraction === rightFraction) return 0
+  return leftFraction < rightFraction ? -1 : 1
 }
 
 function approvedBaseline(path, now, trustedRoot) {
@@ -143,15 +159,17 @@ function approvedBaseline(path, now, trustedRoot) {
   if (!baselineSourceTypes.has(value.sourceType)) {
     throw new Error('upstream baseline sourceType must be release, tag, or approved_commit')
   }
-  if (typeof value.sourceRef !== 'string' || value.sourceRef.trim().length === 0) {
-    throw new Error('upstream baseline sourceRef must be a non-empty string')
+  if (typeof value.sourceRef !== 'string'
+    || value.sourceRef.length === 0
+    || value.sourceRef.trim() !== value.sourceRef) {
+    throw new Error('upstream baseline sourceRef must be a non-empty trimmed string')
   }
   if (typeof value.commit !== 'string' || !/^[0-9a-f]{40}$/u.test(value.commit)) {
     throw new Error('upstream baseline commit must be 40 lowercase hexadecimal characters')
   }
   const approvedAt = baselineTimestamp(value.approvedAt, 'approvedAt', now)
   const capturedAt = baselineTimestamp(value.capturedAt, 'capturedAt', now)
-  if (capturedAt < approvedAt) {
+  if (compareTimestamps(capturedAt, approvedAt) < 0) {
     throw new Error('upstream baseline capturedAt must not precede approvedAt')
   }
   return { dshTag: value.sourceRef, dshCommit: value.commit }
@@ -159,6 +177,13 @@ function approvedBaseline(path, now, trustedRoot) {
 
 function canonicalJson(value) {
   return `${JSON.stringify(value, null, 2)}\n`
+}
+
+function sameFileIdentity(left, right) {
+  if (!existsSync(left) || !existsSync(right)) return false
+  const leftStat = lstatSync(left)
+  const rightStat = lstatSync(right)
+  return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino
 }
 
 function atomicWrite(path, content, protectedPaths, trustedRoot) {
@@ -171,14 +196,15 @@ function atomicWrite(path, content, protectedPaths, trustedRoot) {
     throw new Error(`output parent must resolve inside its trusted root: ${path}`)
   }
   const target = join(parent, basename(absolute))
-  if (protectedPaths.includes(target)) {
-    throw new Error(`output must not overwrite the approved baseline: ${path}`)
-  }
   if (existsSync(target)) {
     const stat = lstatSync(target)
     if (stat.isSymbolicLink()) throw new Error(`output must not be a symlink: ${path}`)
     if (!stat.isFile()) throw new Error(`output must be a file path: ${path}`)
   }
+  if (protectedPaths.some(protectedPath => sameFileIdentity(target, protectedPath))) {
+    throw new Error(`output must not overwrite the approved baseline: ${path}`)
+  }
+  if (existsSync(target) && readFileSync(target).equals(Buffer.from(content))) return
   const temporary = join(parent, `.${basename(target)}.${process.pid}.${randomUUID()}.tmp`)
   try {
     writeFileSync(temporary, content, { encoding: 'utf8', flag: 'wx', mode: 0o600 })

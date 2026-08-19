@@ -72,6 +72,18 @@ describe('OpenLoop build manifest contract', () => {
     })).toThrow()
   })
 
+  it.each([
+    'runtimeVersion',
+    'bridgeProtocolVersion',
+    'openloopDataVersion',
+    'dshDataVersion',
+  ])('rejects unsafe integer %s values', (field) => {
+    expect(() => parseOpenloopBuildManifest({
+      ...buildManifest(),
+      [field]: Number.MAX_SAFE_INTEGER + 1,
+    })).toThrow()
+  })
+
   it('accepts the stable channel and semver prereleases', () => {
     expect(parseOpenloopBuildManifest({
       ...buildManifest(),

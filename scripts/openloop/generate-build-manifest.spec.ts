@@ -1,14 +1,17 @@
 import { createHash } from 'node:crypto'
 import {
+  existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, relative } from 'node:path'
+import { basename, dirname, join, relative } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { OpenloopBuildManifest } from '../../packages/openloop/build-contract/src/index.ts'
 
@@ -52,6 +55,12 @@ function temporaryRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'openloop-build-manifest-'))
   roots.push(root)
   return root
+}
+
+function uppercaseAlias(path: string): string {
+  const alias = join(dirname(path), basename(path).toUpperCase())
+  if (!existsSync(alias)) linkSync(path, alias)
+  return alias
 }
 
 function writeBaseline(
@@ -167,6 +176,44 @@ describe('OpenLoop build manifest generator', () => {
     expect(firstResult.bytes.endsWith('\n')).toBe(true)
   })
 
+  it('preserves the output inode when canonical bytes are unchanged', () => {
+    const root = temporaryRoot()
+    const out = join(root, 'core.json')
+    const dependencies = {
+      baselinePath: writeBaseline(root),
+      trustedRoot: root,
+    }
+
+    generateBuildManifest({ channel: 'test', out }, dependencies)
+    const firstInode = statSync(out).ino
+    generateBuildManifest({ channel: 'test', out }, dependencies)
+
+    expect(statSync(out).ino).toBe(firstInode)
+  })
+
+  it('compares existing output as exact bytes before preserving its inode', () => {
+    const root = temporaryRoot()
+    const out = join(root, 'core.json')
+    const dependencies = {
+      baselinePath: writeBaseline(root, { sourceRef: 'dsh-\uFFFD' }),
+      trustedRoot: root,
+    }
+    const result = generateBuildManifest({ channel: 'test', out }, dependencies)
+    const expected = Buffer.from(result.bytes)
+    const replacement = Buffer.from('\uFFFD')
+    const replacementIndex = expected.indexOf(replacement)
+    const lossyEquivalent = Buffer.concat([
+      expected.subarray(0, replacementIndex),
+      Buffer.from([0xff]),
+      expected.subarray(replacementIndex + replacement.length),
+    ])
+    writeFileSync(out, lossyEquivalent)
+
+    generateBuildManifest({ channel: 'test', out }, dependencies)
+
+    expect(readFileSync(out)).toEqual(expected)
+  })
+
   it('validates explicit version overrides before writing', () => {
     const root = temporaryRoot()
     const out = join(root, 'core.json')
@@ -209,6 +256,21 @@ describe('OpenLoop build manifest generator', () => {
     expect(readFileSync(baseline, 'utf8')).toBe(source)
   })
 
+  it('refuses a case alias of its approved baseline input', () => {
+    const root = temporaryRoot()
+    const baseline = writeBaseline(root)
+    const source = readFileSync(baseline, 'utf8')
+
+    expect(() => generateBuildManifest(
+      { channel: 'test', out: uppercaseAlias(baseline) },
+      {
+        baselinePath: baseline,
+        trustedRoot: root,
+      },
+    )).toThrow(/output.*baseline|baseline.*output/iu)
+    expect(readFileSync(baseline, 'utf8')).toBe(source)
+  })
+
   it.each(['release', 'tag', 'approved_commit'])(
     'accepts the %s baseline source type and preserves sourceRef as dshTag',
     (sourceType) => {
@@ -233,6 +295,8 @@ describe('OpenLoop build manifest generator', () => {
   it.each([
     ['unknown source type', { sourceType: 'branch' }],
     ['empty source ref', { sourceRef: '   ' }],
+    ['source ref with leading whitespace', { sourceRef: ' dsh-v0.1.0-rc.7' }],
+    ['source ref with trailing whitespace', { sourceRef: 'dsh-v0.1.0-rc.7 ' }],
     ['short commit', { commit: '99f6f02' }],
     ['uppercase commit', { commit: 'A'.repeat(40) }],
     ['missing approvedAt', { approvedAt: undefined }],
@@ -258,6 +322,23 @@ describe('OpenLoop build manifest generator', () => {
         trustedRoot: root,
       },
     )).toThrow(/baseline|approvedAt|capturedAt|sourceType|sourceRef|commit/iu)
+  })
+
+  it('compares arbitrary fractional seconds without millisecond truncation', () => {
+    const root = temporaryRoot()
+    const baseline = writeBaseline(root, {
+      approvedAt: '2026-08-18T12:12:25.0009Z',
+      capturedAt: '2026-08-18T12:12:25.0001Z',
+    })
+
+    expect(() => generateBuildManifest(
+      { channel: 'test', out: join(root, 'core.json') },
+      {
+        baselinePath: baseline,
+        now: Date.parse('2026-08-20T00:00:00Z'),
+        trustedRoot: root,
+      },
+    )).toThrow(/capturedAt.*approvedAt|precede/iu)
   })
 
   it('rejects an intermediate symlink in the baseline path', () => {

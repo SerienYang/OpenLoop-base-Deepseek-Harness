@@ -44,6 +44,7 @@ const artifactOrder = [
   'ffmpeg',
   'ffprobe',
 ]
+const artifactHashDomain = Buffer.from('openloop-artifact-sha256\0v1\0')
 
 function optionValue(args, index, option) {
   const value = args[index + 1]
@@ -110,26 +111,9 @@ function existingInput(path, label, allowDirectory, trustedRoot) {
   return real
 }
 
-function directoryFiles(root, directory = root) {
-  const files = []
-  const entries = readdirSync(directory, { withFileTypes: true })
+function sortedDirectoryEntries(directory) {
+  return readdirSync(directory, { withFileTypes: true })
     .sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)))
-  for (const entry of entries) {
-    const path = join(directory, entry.name)
-    const stat = lstatSync(path)
-    if (stat.isSymbolicLink()) throw new Error(`artifact directory contains symlink: ${path}`)
-    if (stat.isDirectory()) {
-      files.push(...directoryFiles(root, path))
-    } else if (stat.isFile()) {
-      files.push({
-        path,
-        relative: relative(root, path).split(sep).join('/'),
-      })
-    } else {
-      throw new Error(`artifact directory contains a non-file entry: ${path}`)
-    }
-  }
-  return files
 }
 
 function lengthBytes(value) {
@@ -138,24 +122,37 @@ function lengthBytes(value) {
   return bytes
 }
 
-/** Hash one regular file or a deterministic relative-path directory stream. */
-export function hashArtifact(path, dependencies = {}) {
-  const trustedRoot = dependencies.trustedRoot ?? repositoryRoot
-  const real = existingInput(path, 'artifact', true, trustedRoot)
-  const stat = lstatSync(real)
+function hashArtifactNode(hash, root, path) {
+  const stat = lstatSync(path)
+  if (stat.isSymbolicLink()) throw new Error(`artifact directory contains symlink: ${path}`)
+  const relativePath = path === root ? '' : relative(root, path).split(sep).join('/')
+  const pathBytes = Buffer.from(relativePath)
   if (stat.isFile()) {
-    return createHash('sha256').update(readFileSync(real)).digest('hex')
-  }
-
-  const hash = createHash('sha256')
-  for (const file of directoryFiles(real)) {
-    const pathBytes = Buffer.from(file.relative)
-    const content = readFileSync(file.path)
+    const content = readFileSync(path)
+    hash.update('F')
     hash.update(lengthBytes(pathBytes.length))
     hash.update(pathBytes)
     hash.update(lengthBytes(content.length))
     hash.update(content)
+    return
   }
+  if (!stat.isDirectory()) {
+    throw new Error(`artifact directory contains a non-file entry: ${path}`)
+  }
+  const entries = sortedDirectoryEntries(path)
+  hash.update('D')
+  hash.update(lengthBytes(pathBytes.length))
+  hash.update(pathBytes)
+  hash.update(lengthBytes(entries.length))
+  for (const entry of entries) hashArtifactNode(hash, root, join(path, entry.name))
+}
+
+/** Hash one regular file or a deterministic relative-path directory stream. */
+export function hashArtifact(path, dependencies = {}) {
+  const trustedRoot = dependencies.trustedRoot ?? repositoryRoot
+  const real = existingInput(path, 'artifact', true, trustedRoot)
+  const hash = createHash('sha256').update(artifactHashDomain)
+  hashArtifactNode(hash, real, real)
   return hash.digest('hex')
 }
 
@@ -164,16 +161,26 @@ function isWithin(parent, candidate) {
   return child === '' || (child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child))
 }
 
+function sameFileIdentity(left, right) {
+  if (!existsSync(left) || !existsSync(right)) return false
+  const leftStat = lstatSync(left)
+  const rightStat = lstatSync(right)
+  return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino
+}
+
 function assertNoInputOverlap(target, inputs, path) {
+  const resolvedTarget = existsSync(target) ? realpathSync(target) : target
   for (const input of inputs) {
     const stat = lstatSync(input)
-    if ((stat.isDirectory() && isWithin(input, target)) || input === target) {
+    if ((stat.isDirectory() && isWithin(input, resolvedTarget))
+      || sameFileIdentity(input, target)) {
       throw new Error(`output must not overlap an artifact input: ${path}`)
     }
   }
 }
 
 function targetBeforeCreate(path) {
+  if (existsSync(path)) return realpathSync(path)
   let ancestor = dirname(path)
   const suffix = [basename(path)]
   while (!existsSync(ancestor)) {
@@ -206,6 +213,7 @@ function outputTarget(path, inputs, trustedRoot) {
 }
 
 function atomicWrite(target, content) {
+  if (existsSync(target) && readFileSync(target).equals(Buffer.from(content))) return
   const temporary = join(dirname(target), `.${basename(target)}.${process.pid}.${randomUUID()}.tmp`)
   try {
     writeFileSync(temporary, content, { encoding: 'utf8', flag: 'wx', mode: 0o600 })

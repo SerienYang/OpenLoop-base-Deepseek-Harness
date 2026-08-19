@@ -1,15 +1,17 @@
 import { createHash } from 'node:crypto'
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, relative } from 'node:path'
+import { basename, dirname, join, relative } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { OpenloopArtifactManifest } from '../../packages/openloop/build-contract/src/index.ts'
 
@@ -55,6 +57,12 @@ function temporaryRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'openloop-artifact-manifest-'))
   roots.push(root)
   return root
+}
+
+function uppercaseAlias(path: string): string {
+  const alias = join(dirname(path), basename(path).toUpperCase())
+  if (!existsSync(alias)) linkSync(path, alias)
+  return alias
 }
 
 function coreManifest(): Record<string, unknown> {
@@ -148,6 +156,52 @@ describe('OpenLoop artifact manifest generator', () => {
     const second = generateArtifactManifest(paths, dependencies)
     expect(readFileSync(paths.out)).toEqual(firstBytes)
     expect(second.sha256).toBe(first.sha256)
+  })
+
+  it('uses the versioned artifact hash domain and distinguishes root types', () => {
+    const root = temporaryRoot()
+    const emptyFile = join(root, 'empty-file')
+    const emptyDirectory = join(root, 'empty-directory')
+    writeFileSync(emptyFile, '')
+    mkdirSync(emptyDirectory)
+    const dependencies = { trustedRoot: root }
+
+    expect(hashArtifact(emptyFile, dependencies)).toBe(
+      '1b02ed3de0dc5556730ae94551e2198cb95d5692e6fe20a0ab1122a565925886',
+    )
+    expect(hashArtifact(emptyDirectory, dependencies)).toBe(
+      '681c21e2e58bd5ae06f448af5d298bb1a6d0f0b5cab1294e51f2b58c25bbbd2b',
+    )
+  })
+
+  it('includes empty directory entries and entry types in directory hashes', () => {
+    const root = temporaryRoot()
+    const empty = join(root, 'empty')
+    const nestedEmpty = join(root, 'nested-empty')
+    const fileTree = join(root, 'file-tree')
+    const directoryTree = join(root, 'directory-tree')
+    mkdirSync(empty)
+    mkdirSync(join(nestedEmpty, 'entry'), { recursive: true })
+    mkdirSync(fileTree)
+    writeFileSync(join(fileTree, 'entry'), '')
+    mkdirSync(join(directoryTree, 'entry'), { recursive: true })
+    const dependencies = { trustedRoot: root }
+
+    expect(hashArtifact(empty, dependencies))
+      .not.toBe(hashArtifact(nestedEmpty, dependencies))
+    expect(hashArtifact(fileTree, dependencies))
+      .not.toBe(hashArtifact(directoryTree, dependencies))
+  })
+
+  it('preserves the output inode when canonical bytes are unchanged', () => {
+    const paths = fixture()
+    const dependencies = { trustedRoot: dirname(paths.core) }
+
+    generateArtifactManifest(paths, dependencies)
+    const firstInode = statSync(paths.out).ino
+    generateArtifactManifest(paths, dependencies)
+
+    expect(statSync(paths.out).ino).toBe(firstInode)
   })
 
   it('includes optional release artifacts only when supplied', () => {
@@ -280,5 +334,16 @@ describe('OpenLoop artifact manifest generator', () => {
     }, { trustedRoot: root })).toThrow(/symlink/iu)
     expect(() => readFileSync(join(realOutput, 'nested/artifact-manifest.json')))
       .toThrow()
+  })
+
+  it('rejects a case alias of the core manifest input', () => {
+    const paths = fixture()
+    const coreBytes = readFileSync(paths.core)
+
+    expect(() => generateArtifactManifest({
+      ...paths,
+      out: uppercaseAlias(paths.core),
+    }, { trustedRoot: dirname(paths.core) })).toThrow(/overlap/iu)
+    expect(readFileSync(paths.core)).toEqual(coreBytes)
   })
 })
