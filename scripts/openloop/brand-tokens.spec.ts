@@ -23,6 +23,7 @@ const EXPECTED_PALETTE = {
   'color.palette.neutral.400': '#C8CDD3',
   'color.palette.neutral.500': '#AEB4BC',
   'color.palette.neutral.600': '#8D96A0',
+  'color.palette.neutral.650': '#6E7781',
   'color.palette.neutral.700': '#666D76',
   'color.palette.neutral.800': '#3B424A',
   'color.palette.neutral.900': '#20242A',
@@ -59,7 +60,7 @@ const EXPECTED_LIGHT_ALIASES = {
   'background.inverse': 'color.palette.neutral.1000',
   'text.primary': 'color.palette.neutral.950',
   'text.secondary': 'color.palette.neutral.700',
-  'text.tertiary': 'color.palette.neutral.600',
+  'text.tertiary': 'color.palette.neutral.650',
   'text.inverse': 'color.palette.neutral.50',
   'text.disabled': 'color.palette.neutral.500',
   'border.subtle': 'color.palette.neutral.300',
@@ -149,6 +150,7 @@ const EXPECTED_GROUP_PATHS = new Set(
 const CONTRAST_PAIRS = [
   ['text.primary', 'background.surface', 7],
   ['text.secondary', 'background.surface', 4.5],
+  ['text.tertiary', 'background.surface', 4.5],
   ['text.inverse', 'background.inverse', 7],
   ['action.primary.foreground', 'action.primary.background', 7],
   ['status.info.foreground', 'status.info.surface', 4.5],
@@ -307,6 +309,43 @@ function disallowedReservedPaths(
   return result
 }
 
+function invalidMetadataProblems(
+  value: unknown,
+  prefix = '',
+  problems: string[] = [],
+): string[] {
+  if (!isRecord(value)) return problems
+  const metadataPath = (key: string): string =>
+    prefix === '' ? key : `${prefix}.${key}`
+
+  if ('$description' in value && typeof value.$description !== 'string') {
+    problems.push(`${metadataPath('$description')} must be a string`)
+  }
+  if (
+    '$deprecated' in value
+    && typeof value.$deprecated !== 'boolean'
+    && typeof value.$deprecated !== 'string'
+  ) {
+    problems.push(
+      `${metadataPath('$deprecated')} must be a boolean or string`,
+    )
+  }
+  if ('$extensions' in value && !isRecord(value.$extensions)) {
+    problems.push(`${metadataPath('$extensions')} must be an object`)
+  }
+
+  if ('$value' in value) return problems
+  for (const [key, child] of Object.entries(value)) {
+    if (key.startsWith('$')) continue
+    invalidMetadataProblems(
+      child,
+      prefix === '' ? key : `${prefix}.${key}`,
+      problems,
+    )
+  }
+  return problems
+}
+
 function inspectGroupShape(
   value: unknown,
   prefix = '',
@@ -380,6 +419,7 @@ function documentProblems(document: Record<string, unknown>): string[] {
       `${tokenPath} is outside the approved named token architecture`,
     )
   }
+  problems.push(...invalidMetadataProblems(document))
   problems.push(...invalidNameProblems(document))
   const shape = inspectGroupShape(document)
   problems.push(...shape.problems)
@@ -598,6 +638,24 @@ describe('OpenLoop design tokens', () => {
     expect(documentProblems(document)).toEqual(expect.arrayContaining([
       'color.brand.$ref is outside the approved named token architecture',
       'color.semantic.$type is outside the approved named token architecture',
+    ]))
+  })
+
+  test('rejects malformed DTCG metadata values', () => {
+    const document = structuredClone(readDocument())
+    if (!isRecord(document.color)) throw new TypeError('Missing color group')
+    if (!isRecord(document.color.brand)) throw new TypeError('Missing brand group')
+    if (!isRecord(document.color.semantic)) {
+      throw new TypeError('Missing semantic group')
+    }
+    document.$description = {}
+    document.color.brand.$deprecated = []
+    document.color.semantic.$extensions = 42
+
+    expect(documentProblems(document)).toEqual(expect.arrayContaining([
+      '$description must be a string',
+      'color.brand.$deprecated must be a boolean or string',
+      'color.semantic.$extensions must be an object',
     ]))
   })
 

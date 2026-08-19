@@ -30,6 +30,9 @@
         "600": {
           "$value": { "colorSpace": "srgb", "components": [0.552941, 0.588235, 0.627451], "alpha": 1, "hex": "#8D96A0" }
         },
+        "650": {
+          "$value": { "colorSpace": "srgb", "components": [0.431373, 0.466667, 0.505882], "alpha": 1, "hex": "#6E7781" }
+        },
         "700": {
           "$value": { "colorSpace": "srgb", "components": [0.4, 0.427451, 0.462745], "alpha": 1, "hex": "#666D76" }
         },
@@ -138,7 +141,7 @@
             "$value": "{color.palette.neutral.700}"
           },
           "tertiary": {
-            "$value": "{color.palette.neutral.600}"
+            "$value": "{color.palette.neutral.650}"
           },
           "inverse": {
             "$value": "{color.palette.neutral.50}"
