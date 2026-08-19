@@ -11,7 +11,8 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
-import { basename, dirname, join, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   parseOpenloopBuildManifest,
@@ -31,6 +32,8 @@ const stringOptions = new Map([
   ['--ui-sdk-version', 'uiSdkVersion'],
   ['--plugin-package-spec-version', 'pluginPackageSpecVersion'],
 ])
+const baselineSourceTypes = new Set(['release', 'tag', 'approved_commit'])
+const isoTimestampPattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/u
 
 function optionValue(args, index, option) {
   const value = args[index + 1]
@@ -51,21 +54,58 @@ function integerValue(value, option) {
   return parsed
 }
 
+function isWithin(parent, candidate) {
+  const child = relative(parent, candidate)
+  return child === '' || (child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child))
+}
+
+function trustedRootFor(path) {
+  const cwd = resolve(process.cwd())
+  if (!isAbsolute(path) || isWithin(cwd, resolve(path))) return cwd
+  const temporaryRoot = resolve(tmpdir())
+  if (isWithin(temporaryRoot, resolve(path))) return temporaryRoot
+  return dirname(resolve(path))
+}
+
+function assertNoSymlinkComponents(path, trustedRoot, label, allowMissing = false) {
+  const absolute = resolve(path)
+  const root = resolve(trustedRoot)
+  if (!isWithin(root, absolute)) {
+    throw new Error(`${label} must stay inside its trusted root: ${path}`)
+  }
+  if (lstatSync(root).isSymbolicLink()) {
+    throw new Error(`${label} trusted root must not be a symlink: ${trustedRoot}`)
+  }
+  const child = relative(root, absolute)
+  let current = root
+  for (const component of child === '' ? [] : child.split(sep)) {
+    current = join(current, component)
+    if (!existsSync(current)) {
+      if (allowMissing) return
+      continue
+    }
+    if (lstatSync(current).isSymbolicLink()) {
+      throw new Error(`${label} path contains symlink: ${current}`)
+    }
+  }
+}
+
 /** Parse the build-manifest CLI without accepting precomputed artifact hashes. */
 export function parseBuildManifestArguments(args) {
   const normalized = args[0] === '--' ? args.slice(1) : args
   const options = {}
   for (let index = 0; index < normalized.length; index += 1) {
     const option = normalized[index]
-    const value = optionValue(normalized, index, option)
     const integerField = integerOptions.get(option)
     const stringField = stringOptions.get(option)
+    const field = integerField ?? stringField
+    if (field === undefined) throw new Error(`unknown option ${option}`)
+    if (options[field] !== undefined) throw new Error(`${option} may be specified only once`)
+    const value = optionValue(normalized, index, option)
     if (integerField !== undefined) {
       options[integerField] = integerValue(value, option)
-    } else if (stringField !== undefined) {
-      options[stringField] = value
     } else {
-      throw new Error(`unknown option ${option}`)
+      options[stringField] = value
     }
     index += 1
   }
@@ -74,19 +114,53 @@ export function parseBuildManifestArguments(args) {
   return options
 }
 
-function approvedBaseline(path) {
+function baselineTimestamp(value, field, now) {
+  if (typeof value !== 'string') {
+    throw new Error(`upstream baseline ${field} must be a valid ISO timestamp`)
+  }
+  const match = isoTimestampPattern.exec(value)
+  const parsed = Date.parse(value)
+  if (match === null || !Number.isFinite(parsed)) {
+    throw new Error(`upstream baseline ${field} must be a valid ISO timestamp`)
+  }
+  const date = new Date(parsed)
+  const expected = match.slice(1, 7).map(Number)
+  const actual = [
+    date.getUTCFullYear(),
+    date.getUTCMonth() + 1,
+    date.getUTCDate(),
+    date.getUTCHours(),
+    date.getUTCMinutes(),
+    date.getUTCSeconds(),
+  ]
+  if (actual.some((component, index) => component !== expected[index])) {
+    throw new Error(`upstream baseline ${field} must be a valid ISO timestamp`)
+  }
+  if (parsed > now) {
+    throw new Error(`upstream baseline ${field} must not be in the future`)
+  }
+  return parsed
+}
+
+function approvedBaseline(path, now, trustedRoot) {
+  assertNoSymlinkComponents(path, trustedRoot, 'upstream baseline')
   const value = JSON.parse(readFileSync(path, 'utf8'))
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('upstream baseline must be an object')
   }
-  if (value.sourceType !== 'release') {
-    throw new Error('upstream baseline sourceType must be release')
+  if (!baselineSourceTypes.has(value.sourceType)) {
+    throw new Error('upstream baseline sourceType must be release, tag, or approved_commit')
   }
-  if (typeof value.sourceRef !== 'string' || value.sourceRef.length === 0) {
+  if (typeof value.sourceRef !== 'string' || value.sourceRef.trim().length === 0) {
     throw new Error('upstream baseline sourceRef must be a non-empty string')
   }
   if (typeof value.commit !== 'string' || !/^[0-9a-f]{40}$/u.test(value.commit)) {
     throw new Error('upstream baseline commit must be 40 lowercase hexadecimal characters')
+  }
+  const approvedAt = baselineTimestamp(value.approvedAt, 'approvedAt', now)
+  const capturedAt = baselineTimestamp(value.capturedAt, 'capturedAt', now)
+  if (capturedAt < approvedAt) {
+    throw new Error('upstream baseline capturedAt must not precede approvedAt')
   }
   return { dshTag: value.sourceRef, dshCommit: value.commit }
 }
@@ -95,9 +169,11 @@ function canonicalJson(value) {
   return `${JSON.stringify(value, null, 2)}\n`
 }
 
-function atomicWrite(path, content, protectedPaths) {
+function atomicWrite(path, content, protectedPaths, trustedRoot) {
   const absolute = resolve(path)
+  assertNoSymlinkComponents(dirname(absolute), trustedRoot, 'output', true)
   mkdirSync(dirname(absolute), { recursive: true })
+  assertNoSymlinkComponents(dirname(absolute), trustedRoot, 'output')
   const parent = realpathSync(dirname(absolute))
   const target = join(parent, basename(absolute))
   if (protectedPaths.includes(target)) {
@@ -120,7 +196,15 @@ function atomicWrite(path, content, protectedPaths) {
 /** Generate, validate, atomically write, and hash one canonical core manifest. */
 export function generateBuildManifest(options, dependencies = {}) {
   const approvedBaselinePath = dependencies.baselinePath ?? baselinePath
-  const identity = approvedBaseline(approvedBaselinePath)
+  const baselineTrustedRoot = dependencies.trustedRoot
+    ?? trustedRootFor(approvedBaselinePath)
+  const outputTrustedRoot = dependencies.trustedRoot
+    ?? trustedRootFor(options.out)
+  const identity = approvedBaseline(
+    approvedBaselinePath,
+    dependencies.now ?? Date.now(),
+    baselineTrustedRoot,
+  )
   const manifest = parseOpenloopBuildManifest({
     appVersion: options.appVersion ?? '0.1.0',
     channel: options.channel,
@@ -134,7 +218,7 @@ export function generateBuildManifest(options, dependencies = {}) {
   })
   const bytes = canonicalJson(manifest)
   const sha256 = createHash('sha256').update(bytes).digest('hex')
-  atomicWrite(options.out, bytes, [realpathSync(approvedBaselinePath)])
+  atomicWrite(options.out, bytes, [realpathSync(approvedBaselinePath)], outputTrustedRoot)
   return { manifest, bytes, sha256 }
 }
 

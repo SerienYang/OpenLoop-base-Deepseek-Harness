@@ -19,21 +19,16 @@ export interface OpenloopBuildManifest {
   readonly dshDataVersion: number
 }
 
-/** Content identity for one generated or packaged artifact. */
-export interface OpenloopArtifactDigest {
-  readonly sha256: string
-}
-
 /** Required build artifacts plus optional release-only products. */
 export interface OpenloopArtifacts {
-  readonly sidecar: OpenloopArtifactDigest
-  readonly web: OpenloopArtifactDigest
-  readonly bundleGraph: OpenloopArtifactDigest
-  readonly app?: OpenloopArtifactDigest
-  readonly dmg?: OpenloopArtifactDigest
-  readonly updater?: OpenloopArtifactDigest
-  readonly ffmpeg?: OpenloopArtifactDigest
-  readonly ffprobe?: OpenloopArtifactDigest
+  readonly sidecar: string
+  readonly web: string
+  readonly bundleGraph: string
+  readonly app?: string
+  readonly dmg?: string
+  readonly updater?: string
+  readonly ffmpeg?: string
+  readonly ffprobe?: string
 }
 
 /** Artifact identities bound to the exact bytes of one core manifest. */
@@ -71,22 +66,19 @@ export const OpenloopBuildManifestSchema: z<OpenloopBuildManifest> = z.object({
   dshDataVersion: nonnegativeInteger,
 })
 
-const artifactDigestSchema: z<OpenloopArtifactDigest> = z.object({
-  sha256,
-})
-const optionalArtifactDigestSchema = artifactDigestSchema.default(
-  undefined as unknown as OpenloopArtifactDigest,
+const optionalSha256 = z.string().pattern(sha256Pattern).default(
+  undefined as unknown as string,
 )
 
 const artifactsSchema: z<OpenloopArtifacts> = z.object({
-  sidecar: artifactDigestSchema.required(),
-  web: artifactDigestSchema.required(),
-  bundleGraph: artifactDigestSchema.required(),
-  app: optionalArtifactDigestSchema,
-  dmg: optionalArtifactDigestSchema,
-  updater: optionalArtifactDigestSchema,
-  ffmpeg: optionalArtifactDigestSchema,
-  ffprobe: optionalArtifactDigestSchema,
+  sidecar: sha256,
+  web: sha256,
+  bundleGraph: sha256,
+  app: optionalSha256,
+  dmg: optionalSha256,
+  updater: optionalSha256,
+  ffmpeg: optionalSha256,
+  ffprobe: optionalSha256,
 })
 
 /** Schemastery schema for hashes emitted after packaging. */
@@ -153,8 +145,5 @@ export function parseOpenloopArtifactManifest(value: unknown): OpenloopArtifactM
   assertExactFields(manifest, ['coreManifestSha256', 'artifacts'], 'artifact manifest')
   const artifacts = record(manifest.artifacts, 'artifact manifest artifacts')
   assertExactFields(artifacts, artifactFields, 'artifact manifest artifacts')
-  for (const [name, digest] of Object.entries(artifacts)) {
-    assertExactFields(record(digest, `artifact ${name}`), ['sha256'], `artifact ${name}`)
-  }
   return resolveStrict(OpenloopArtifactManifestSchema, value)
 }

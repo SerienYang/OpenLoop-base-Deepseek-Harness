@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -8,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { OpenloopArtifactManifest } from '../../packages/openloop/build-contract/src/index.ts'
 
@@ -113,9 +114,9 @@ describe('OpenLoop artifact manifest generator', () => {
       createHash('sha256').update(coreBytes).digest('hex'),
     )
     expect(result.manifest.artifacts).toEqual({
-      sidecar: { sha256: hashArtifact(paths.sidecar) },
-      web: { sha256: hashArtifact(paths.web) },
-      bundleGraph: { sha256: hashArtifact(paths.bundleGraph) },
+      sidecar: hashArtifact(paths.sidecar),
+      web: hashArtifact(paths.web),
+      bundleGraph: hashArtifact(paths.bundleGraph),
     })
   })
 
@@ -162,12 +163,10 @@ describe('OpenLoop artifact manifest generator', () => {
       'ffmpeg',
       'ffprobe',
     ])
-    expect(result.manifest.artifacts.ffprobe).toEqual({
-      sha256: hashArtifact(optional.ffprobe),
-    })
+    expect(result.manifest.artifacts.ffprobe).toBe(hashArtifact(optional.ffprobe))
   })
 
-  it('rejects invalid core manifests, missing inputs, and symlinks in directory inputs', () => {
+  it('rejects invalid core manifests, missing inputs, and direct or nested symlinks', () => {
     const invalid = fixture()
     writeFileSync(invalid.core, JSON.stringify({
       ...coreManifest(),
@@ -184,5 +183,62 @@ describe('OpenLoop artifact manifest generator', () => {
     writeFileSync(outside, 'outside')
     symlinkSync(outside, join(escaped.web, 'linked.js'))
     expect(() => generateArtifactManifest(escaped)).toThrow(/symlink/iu)
+
+    const direct = fixture()
+    const realSidecar = join(dirname(direct.sidecar), 'real-sidecar')
+    writeFileSync(realSidecar, 'sidecar bytes')
+    rmSync(direct.sidecar)
+    symlinkSync(realSidecar, direct.sidecar)
+    expect(() => generateArtifactManifest(direct)).toThrow(/symlink/iu)
+  })
+
+  it('rejects an intermediate symlink component in an input path', () => {
+    const paths = fixture()
+    const root = dirname(paths.core)
+    const real = join(root, 'real-inputs')
+    const alias = join(root, 'input-alias')
+    mkdirSync(real)
+    writeFileSync(join(real, 'sidecar'), 'sidecar bytes')
+    symlinkSync(real, alias, 'dir')
+
+    expect(() => generateArtifactManifest({
+      ...paths,
+      sidecar: join(alias, 'sidecar'),
+    })).toThrow(/symlink/iu)
+
+    const nested = join(real, 'nested')
+    mkdirSync(nested)
+    writeFileSync(join(nested, 'artifact'), 'artifact bytes')
+    expect(() => hashArtifact(join(alias, 'nested/artifact'))).toThrow(/symlink/iu)
+  })
+
+  it('rejects output overlap and a symlinked output parent using resolved paths', () => {
+    const overlap = fixture()
+    const nestedOutput = join(overlap.web, 'generated/artifact-manifest.json')
+    expect(() => generateArtifactManifest({
+      ...overlap,
+      out: nestedOutput,
+    })).toThrow(/overlap/iu)
+    expect(existsSync(dirname(nestedOutput))).toBe(false)
+
+    const webAlias = join(dirname(overlap.web), 'web-alias')
+    symlinkSync(overlap.web, webAlias, 'dir')
+    expect(() => generateArtifactManifest({
+      ...overlap,
+      out: join(webAlias, 'artifact-manifest.json'),
+    })).toThrow(/symlink|overlap/iu)
+
+    const redirected = fixture()
+    const root = dirname(redirected.core)
+    const realOutput = join(root, 'real-output')
+    const outputAlias = join(root, 'output-alias')
+    mkdirSync(realOutput)
+    symlinkSync(realOutput, outputAlias, 'dir')
+    expect(() => generateArtifactManifest({
+      ...redirected,
+      out: join(outputAlias, 'artifact-manifest.json'),
+    })).toThrow(/symlink/iu)
+    expect(() => readFileSync(join(realOutput, 'artifact-manifest.json')))
+      .toThrow()
   })
 })

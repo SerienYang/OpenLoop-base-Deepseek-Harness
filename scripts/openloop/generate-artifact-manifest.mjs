@@ -12,6 +12,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -52,6 +53,49 @@ function optionValue(args, index, option) {
   return value
 }
 
+function commonTrustedRoot(paths) {
+  if (paths.some(path => !isAbsolute(path))) return resolve(process.cwd())
+  const absolutePaths = paths.map(path => resolve(path))
+  let root = dirname(absolutePaths[0])
+  while (!absolutePaths.every(path => isWithin(root, path))) {
+    const parent = dirname(root)
+    if (parent === root) return root
+    root = parent
+  }
+  return root
+}
+
+function trustedRootFor(path) {
+  const cwd = resolve(process.cwd())
+  if (!isAbsolute(path) || isWithin(cwd, resolve(path))) return cwd
+  const temporaryRoot = resolve(tmpdir())
+  if (isWithin(temporaryRoot, resolve(path))) return temporaryRoot
+  return dirname(resolve(path))
+}
+
+function assertNoSymlinkComponents(path, trustedRoot, label, allowMissing = false) {
+  const absolute = resolve(path)
+  const root = resolve(trustedRoot)
+  if (!isWithin(root, absolute)) {
+    throw new Error(`${label} must stay inside its trusted root: ${path}`)
+  }
+  if (lstatSync(root).isSymbolicLink()) {
+    throw new Error(`${label} trusted root must not be a symlink: ${trustedRoot}`)
+  }
+  const child = relative(root, absolute)
+  let current = root
+  for (const component of child === '' ? [] : child.split(sep)) {
+    current = join(current, component)
+    if (!existsSync(current)) {
+      if (allowMissing) return
+      continue
+    }
+    if (lstatSync(current).isSymbolicLink()) {
+      throw new Error(`${label} path contains symlink: ${current}`)
+    }
+  }
+}
+
 /** Parse required and optional artifact paths without accepting caller hashes. */
 export function parseArtifactManifestArguments(args) {
   const normalized = args[0] === '--' ? args.slice(1) : args
@@ -70,11 +114,11 @@ export function parseArtifactManifestArguments(args) {
   return options
 }
 
-function existingInput(path, label, allowDirectory) {
+function existingInput(path, label, allowDirectory, trustedRoot) {
   const absolute = resolve(path)
+  assertNoSymlinkComponents(absolute, trustedRoot, `${label} input`)
   if (!existsSync(absolute)) throw new Error(`${label} input is missing: ${path}`)
   const stat = lstatSync(absolute)
-  if (stat.isSymbolicLink()) throw new Error(`${label} input must not be a symlink: ${path}`)
   if (!stat.isFile() && !(allowDirectory && stat.isDirectory())) {
     const expected = allowDirectory ? 'a regular file or directory' : 'a regular file'
     throw new Error(`${label} input must be ${expected}: ${path}`)
@@ -111,8 +155,9 @@ function lengthBytes(value) {
 }
 
 /** Hash one regular file or a deterministic relative-path directory stream. */
-export function hashArtifact(path) {
-  const real = existingInput(path, 'artifact', true)
+export function hashArtifact(path, dependencies = {}) {
+  const trustedRoot = dependencies.trustedRoot ?? trustedRootFor(path)
+  const real = existingInput(path, 'artifact', true, trustedRoot)
   const stat = lstatSync(real)
   if (stat.isFile()) {
     return createHash('sha256').update(readFileSync(real)).digest('hex')
@@ -135,22 +180,35 @@ function isWithin(parent, candidate) {
   return child === '' || (child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child))
 }
 
-function outputTarget(path, inputs) {
-  const absolute = resolve(path)
-  for (const input of inputs) {
-    const stat = lstatSync(input)
-    if ((stat.isDirectory() && isWithin(input, absolute)) || input === absolute) {
-      throw new Error(`output must not overlap an artifact input: ${path}`)
-    }
-  }
-  mkdirSync(dirname(absolute), { recursive: true })
-  const target = join(realpathSync(dirname(absolute)), basename(absolute))
+function assertNoInputOverlap(target, inputs, path) {
   for (const input of inputs) {
     const stat = lstatSync(input)
     if ((stat.isDirectory() && isWithin(input, target)) || input === target) {
       throw new Error(`output must not overlap an artifact input: ${path}`)
     }
   }
+}
+
+function targetBeforeCreate(path) {
+  let ancestor = dirname(path)
+  const suffix = [basename(path)]
+  while (!existsSync(ancestor)) {
+    suffix.unshift(basename(ancestor))
+    const parent = dirname(ancestor)
+    if (parent === ancestor) break
+    ancestor = parent
+  }
+  return resolve(realpathSync(ancestor), ...suffix)
+}
+
+function outputTarget(path, inputs, trustedRoot) {
+  const absolute = resolve(path)
+  assertNoSymlinkComponents(dirname(absolute), trustedRoot, 'output', true)
+  assertNoInputOverlap(targetBeforeCreate(absolute), inputs, path)
+  mkdirSync(dirname(absolute), { recursive: true })
+  assertNoSymlinkComponents(dirname(absolute), trustedRoot, 'output')
+  const target = join(realpathSync(dirname(absolute)), basename(absolute))
+  assertNoInputOverlap(target, inputs, path)
   if (existsSync(target)) {
     const stat = lstatSync(target)
     if (stat.isSymbolicLink()) throw new Error(`output must not be a symlink: ${path}`)
@@ -174,15 +232,26 @@ function canonicalJson(value) {
 }
 
 /** Validate inputs, hash artifacts, and atomically write a canonical manifest. */
-export function generateArtifactManifest(options) {
-  const core = existingInput(options.core, 'core', false)
-  const sidecar = existingInput(options.sidecar, 'sidecar', false)
-  const web = existingInput(options.web, 'web', true)
-  const bundleGraph = existingInput(options.bundleGraph, 'bundle graph', false)
+export function generateArtifactManifest(options, dependencies = {}) {
+  const suppliedPaths = [
+    options.core,
+    options.sidecar,
+    options.web,
+    options.bundleGraph,
+    options.out,
+    ...artifactOrder.slice(3)
+      .map(name => options[name])
+      .filter(path => path !== undefined),
+  ]
+  const trustedRoot = dependencies.trustedRoot ?? commonTrustedRoot(suppliedPaths)
+  const core = existingInput(options.core, 'core', false, trustedRoot)
+  const sidecar = existingInput(options.sidecar, 'sidecar', false, trustedRoot)
+  const web = existingInput(options.web, 'web', true, trustedRoot)
+  const bundleGraph = existingInput(options.bundleGraph, 'bundle graph', false, trustedRoot)
   const paths = { sidecar, web, bundleGraph }
   for (const name of artifactOrder.slice(3)) {
     if (options[name] !== undefined) {
-      paths[name] = existingInput(options[name], name, true)
+      paths[name] = existingInput(options[name], name, true, trustedRoot)
     }
   }
 
@@ -196,9 +265,10 @@ export function generateArtifactManifest(options) {
   parseOpenloopBuildManifest(coreValue)
 
   const artifacts = {}
+  const realTrustedRoot = realpathSync(trustedRoot)
   for (const name of artifactOrder) {
     const path = paths[name]
-    if (path !== undefined) artifacts[name] = { sha256: hashArtifact(path) }
+    if (path !== undefined) artifacts[name] = hashArtifact(path, { trustedRoot: realTrustedRoot })
   }
   const manifest = parseOpenloopArtifactManifest({
     coreManifestSha256: createHash('sha256').update(coreBytes).digest('hex'),
@@ -206,7 +276,7 @@ export function generateArtifactManifest(options) {
   })
   const bytes = canonicalJson(manifest)
   const sha256 = createHash('sha256').update(bytes).digest('hex')
-  const target = outputTarget(options.out, [core, ...Object.values(paths)])
+  const target = outputTarget(options.out, [core, ...Object.values(paths)], trustedRoot)
   atomicWrite(target, bytes)
   return { manifest, bytes, sha256 }
 }

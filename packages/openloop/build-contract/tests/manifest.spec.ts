@@ -25,9 +25,9 @@ function artifactManifest() {
   return {
     coreManifestSha256: sha256,
     artifacts: {
-      sidecar: { sha256 },
-      web: { sha256 },
-      bundleGraph: { sha256 },
+      sidecar: sha256,
+      web: sha256,
+      bundleGraph: sha256,
     },
   }
 }
@@ -87,11 +87,11 @@ describe('OpenLoop artifact manifest contract', () => {
       ...artifactManifest(),
       artifacts: {
         ...artifactManifest().artifacts,
-        app: { sha256 },
-        dmg: { sha256 },
-        updater: { sha256 },
-        ffmpeg: { sha256 },
-        ffprobe: { sha256 },
+        app: sha256,
+        dmg: sha256,
+        updater: sha256,
+        ffmpeg: sha256,
+        ffprobe: sha256,
       },
     }
 
@@ -116,14 +116,21 @@ describe('OpenLoop artifact manifest contract', () => {
       ...artifactManifest(),
       artifacts: {
         ...artifactManifest().artifacts,
-        sidecar: { sha256: 'abc' },
+        sidecar: 'abc',
       },
-    })).toThrow(/sha256/iu)
+    })).toThrow(/sidecar/iu)
     expect(() => parseOpenloopArtifactManifest({
       ...artifactManifest(),
       artifacts: {
         ...artifactManifest().artifacts,
-        symbols: { sha256 },
+        sidecar: { sha256 },
+      },
+    })).toThrow(/sidecar/iu)
+    expect(() => parseOpenloopArtifactManifest({
+      ...artifactManifest(),
+      artifacts: {
+        ...artifactManifest().artifacts,
+        symbols: sha256,
       },
     })).toThrow(/unknown field.*symbols/iu)
   })

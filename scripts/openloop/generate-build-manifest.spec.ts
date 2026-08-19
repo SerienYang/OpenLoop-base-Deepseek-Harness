@@ -1,5 +1,12 @@
 import { createHash } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -24,7 +31,10 @@ interface BuildGeneratorModule {
   readonly parseBuildManifestArguments: (args: string[]) => Record<string, unknown>
   readonly generateBuildManifest: (
     options: BuildOptions,
-    dependencies?: { readonly baselinePath?: string },
+    dependencies?: {
+      readonly baselinePath?: string
+      readonly now?: number
+    },
   ) => {
     readonly manifest: OpenloopBuildManifest
     readonly bytes: string
@@ -41,6 +51,22 @@ function temporaryRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'openloop-build-manifest-'))
   roots.push(root)
   return root
+}
+
+function writeBaseline(
+  root: string,
+  overrides: Record<string, unknown> = {},
+): string {
+  const baseline = join(root, 'upstream-baseline.json')
+  writeFileSync(baseline, `${JSON.stringify({
+    sourceType: 'release',
+    sourceRef: 'dsh-v0.1.0-rc.7',
+    commit: '99f6f02fecdb7dff40c3fbc9470f5907c29f74ca',
+    approvedAt: '2026-08-18T12:12:25Z',
+    capturedAt: '2026-08-18T12:12:25Z',
+    ...overrides,
+  }, null, 2)}\n`)
+  return baseline
 }
 
 afterEach(() => {
@@ -79,6 +105,19 @@ describe('OpenLoop build manifest generator', () => {
       '--out', 'core.json',
       '--sidecar-sha256', 'a'.repeat(64),
     ])).toThrow(/unknown option.*sidecar/iu)
+  })
+
+  it('rejects duplicate options exactly once', () => {
+    expect(() => parseBuildManifestArguments([
+      '--channel', 'test',
+      '--channel', 'stable',
+      '--out', 'core.json',
+    ])).toThrow('--channel may be specified only once')
+    expect(() => parseBuildManifestArguments([
+      '--channel', 'test',
+      '--out', 'first.json',
+      '--out', 'second.json',
+    ])).toThrow('--out may be specified only once')
   })
 
   it('uses approved baseline identity and sensible initial defaults', () => {
@@ -127,18 +166,92 @@ describe('OpenLoop build manifest generator', () => {
   })
 
   it('refuses to overwrite its approved baseline input', () => {
-    const baseline = join(temporaryRoot(), 'upstream-baseline.json')
-    const source = `${JSON.stringify({
-      sourceType: 'release',
-      sourceRef: 'dsh-v0.1.0-rc.7',
-      commit: '99f6f02fecdb7dff40c3fbc9470f5907c29f74ca',
-    }, null, 2)}\n`
-    writeFileSync(baseline, source)
+    const baseline = writeBaseline(temporaryRoot())
+    const source = readFileSync(baseline, 'utf8')
 
     expect(() => generateBuildManifest(
       { channel: 'test', out: baseline },
       { baselinePath: baseline },
     )).toThrow(/output.*baseline|baseline.*output/iu)
     expect(readFileSync(baseline, 'utf8')).toBe(source)
+  })
+
+  it.each(['release', 'tag', 'approved_commit'])(
+    'accepts the %s baseline source type and preserves sourceRef as dshTag',
+    (sourceType) => {
+      const root = temporaryRoot()
+      const baseline = writeBaseline(root, {
+        sourceType,
+        sourceRef: `${sourceType}-reference`,
+      })
+      const result = generateBuildManifest(
+        { channel: 'test', out: join(root, 'core.json') },
+        {
+          baselinePath: baseline,
+          now: Date.parse('2026-08-20T00:00:00Z'),
+        },
+      )
+
+      expect(result.manifest.dshTag).toBe(`${sourceType}-reference`)
+    },
+  )
+
+  it.each([
+    ['unknown source type', { sourceType: 'branch' }],
+    ['empty source ref', { sourceRef: '   ' }],
+    ['short commit', { commit: '99f6f02' }],
+    ['uppercase commit', { commit: 'A'.repeat(40) }],
+    ['missing approvedAt', { approvedAt: undefined }],
+    ['missing capturedAt', { capturedAt: undefined }],
+    ['invalid approvedAt', { approvedAt: 'not-a-date' }],
+    ['invalid capturedAt', { capturedAt: 'not-a-date' }],
+    ['impossible approvedAt', { approvedAt: '2026-02-30T12:00:00Z' }],
+    ['future approvedAt', { approvedAt: '2026-08-21T00:00:00Z' }],
+    ['future capturedAt', { capturedAt: '2026-08-21T00:00:00Z' }],
+    ['capture before approval', {
+      approvedAt: '2026-08-19T00:00:00Z',
+      capturedAt: '2026-08-18T00:00:00Z',
+    }],
+  ])('rejects malformed baseline metadata: %s', (_label, overrides) => {
+    const root = temporaryRoot()
+    const baseline = writeBaseline(root, overrides)
+
+    expect(() => generateBuildManifest(
+      { channel: 'test', out: join(root, 'core.json') },
+      {
+        baselinePath: baseline,
+        now: Date.parse('2026-08-20T00:00:00Z'),
+      },
+    )).toThrow(/baseline|approvedAt|capturedAt|sourceType|sourceRef|commit/iu)
+  })
+
+  it('rejects an intermediate symlink in the baseline path', () => {
+    const root = temporaryRoot()
+    const real = join(root, 'real')
+    const alias = join(root, 'alias')
+    mkdirSync(real)
+    const baseline = writeBaseline(real)
+    symlinkSync(real, alias, 'dir')
+
+    expect(() => generateBuildManifest(
+      { channel: 'test', out: join(root, 'core.json') },
+      { baselinePath: join(alias, 'upstream-baseline.json') },
+    )).toThrow(/symlink/iu)
+    expect(readFileSync(baseline, 'utf8')).toContain('"sourceType": "release"')
+  })
+
+  it('refuses to write through a symlinked output parent', () => {
+    const root = temporaryRoot()
+    const baseline = writeBaseline(root)
+    const realOutput = join(root, 'real-output')
+    const outputAlias = join(root, 'output-alias')
+    mkdirSync(realOutput)
+    symlinkSync(realOutput, outputAlias, 'dir')
+
+    expect(() => generateBuildManifest(
+      { channel: 'test', out: join(outputAlias, 'core.json') },
+      { baselinePath: baseline },
+    )).toThrow(/symlink/iu)
+    expect(() => readFileSync(join(realOutput, 'core.json'))).toThrow()
   })
 })
