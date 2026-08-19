@@ -44,6 +44,27 @@ function stringRecord(value: unknown, label: string): Record<string, string> {
   return object as Record<string, string>
 }
 
+type RustVersion = readonly [major: number, minor: number, patch: number]
+
+function rustVersion(value: unknown, label: string): RustVersion {
+  if (typeof value !== 'string') throw new TypeError(`${label} must be a string`)
+  const match = /^(\d+)\.(\d+)(?:\.(\d+))?$/u.exec(value)
+  if (match === null) throw new TypeError(`${label} must be a Rust version`)
+  return [
+    Number.parseInt(match[1], 10),
+    Number.parseInt(match[2], 10),
+    Number.parseInt(match[3] ?? '0', 10),
+  ]
+}
+
+function compareRustVersions(left: RustVersion, right: RustVersion): number {
+  for (let index = 0; index < left.length; index += 1) {
+    const difference = left[index] - right[index]
+    if (difference !== 0) return difference
+  }
+  return 0
+}
+
 function parseCsp(value: unknown): ReadonlyMap<string, readonly string[]> {
   if (typeof value !== 'string') throw new TypeError('security.csp must be a string')
   return new Map(
@@ -261,6 +282,39 @@ describe('Openloop desktop foundation configuration', () => {
     expect(dependencies.serde_json).toBe('=1.0.151')
     expect(buildDependencies.serde_json).toBe('=1.0.151')
     expect(buildDependencies.sha2).toBe('=0.10.9')
+  })
+
+  test('declares a Rust baseline at least as high as the locked dependency closure', () => {
+    const cargo = record(
+      parseToml(readText('apps/openloop-desktop/src-tauri/Cargo.toml')),
+      'Cargo.toml',
+    )
+    const cargoPackage = record(cargo.package, 'Cargo.toml package')
+    const metadata = record(JSON.parse(execFileSync(
+      'cargo',
+      ['metadata', '--locked', '--format-version', '1'],
+      { cwd: tauriRoot, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
+    )), 'cargo metadata')
+    if (!Array.isArray(metadata.packages)) {
+      throw new TypeError('cargo metadata packages must be an array')
+    }
+    const lockedRustVersions = metadata.packages.flatMap((value, index) => {
+      const rustVersionValue = record(value, `cargo metadata packages[${index}]`).rust_version
+      return rustVersionValue === null ? [] : [
+        rustVersion(rustVersionValue, `cargo metadata packages[${index}].rust_version`),
+      ]
+    })
+    const highestLockedRustVersion = lockedRustVersions.reduce(
+      (highest, candidate) =>
+        compareRustVersions(candidate, highest) > 0 ? candidate : highest,
+    )
+    const declaredRustVersion = rustVersion(
+      cargoPackage['rust-version'],
+      'Cargo.toml package.rust-version',
+    )
+
+    expect(compareRustVersions(declaredRustVersion, highestLockedRustVersion))
+      .toBeGreaterThanOrEqual(0)
   })
 
   test('defines one local main window with a channel-derived identifier and strict CSP', () => {
