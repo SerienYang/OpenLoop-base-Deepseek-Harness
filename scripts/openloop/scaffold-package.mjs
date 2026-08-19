@@ -13,6 +13,7 @@ import {
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { dump, load } from 'js-yaml'
+import ts from 'typescript'
 
 const faces = new Set(['host', 'client', 'pure'])
 const packageNamePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
@@ -65,6 +66,46 @@ function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'))
 }
 
+function readJsonConfig(path) {
+  const parsed = ts.parseConfigFileTextToJson(path, readFileSync(path, 'utf8'))
+  if (parsed.error !== undefined) {
+    throw new Error(ts.flattenDiagnosticMessageText(parsed.error.messageText, '\n'))
+  }
+  return parsed.config
+}
+
+function appendAggregateReference(path, reference) {
+  const source = readFileSync(path, 'utf8')
+  const sourceFile = ts.parseJsonText(path, source)
+  if (sourceFile.parseDiagnostics.length > 0) {
+    const diagnostic = sourceFile.parseDiagnostics[0]
+    throw new Error(ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'))
+  }
+  const statement = sourceFile.statements[0]
+  const object = statement !== undefined
+    && ts.isExpressionStatement(statement)
+    && ts.isObjectLiteralExpression(statement.expression)
+    ? statement.expression
+    : undefined
+  const property = object?.properties.find(property =>
+    ts.isPropertyAssignment(property)
+      && property.name.getText(sourceFile).replace(/^["']|["']$/gu, '') === 'references')
+  if (property === undefined
+    || !ts.isPropertyAssignment(property)
+    || !ts.isArrayLiteralExpression(property.initializer)) {
+    throw new Error(`${path} must contain a references array`)
+  }
+
+  const array = property.initializer
+  const lineStart = source.lastIndexOf('\n', property.getStart(sourceFile) - 1) + 1
+  const indent = source.slice(lineStart, property.getStart(sourceFile))
+  const entry = `{ "path": ${JSON.stringify(reference)} }`
+  const insertion = array.elements.length === 0
+    ? `\n${indent}  ${entry}\n${indent}`
+    : `,\n${indent}  ${entry}`
+  return `${source.slice(0, array.elements.end)}${insertion}${source.slice(array.elements.end)}`
+}
+
 function jsonText(value) {
   return `${JSON.stringify(value, null, 2)}\n`
 }
@@ -86,8 +127,8 @@ function packageReference(name) {
 function prepareAggregate(root, name, face) {
   const expectedPath = aggregatePath(root, face)
   const otherPath = aggregatePath(root, face === 'client' ? 'host' : 'client')
-  const expected = readJson(expectedPath)
-  const other = readJson(otherPath)
+  const expected = readJsonConfig(expectedPath)
+  const other = readJsonConfig(otherPath)
   const reference = packageReference(name)
   const expectedCount = (expected.references ?? []).filter(entry => entry.path === reference).length
   const otherCount = (other.references ?? []).filter(entry => entry.path === reference).length
@@ -95,10 +136,12 @@ function prepareAggregate(root, name, face) {
   if (expectedCount > 1 || otherCount > 0) {
     throw new Error(`${reference} must belong to exactly one aggregate`)
   }
-  if (expectedCount === 0) {
-    expected.references = [...(expected.references ?? []), { path: reference }]
+  return {
+    path: expectedPath,
+    content: expectedCount === 0
+      ? appendAggregateReference(expectedPath, reference)
+      : readFileSync(expectedPath, 'utf8'),
   }
-  return { path: expectedPath, config: expected }
 }
 
 function bundleRows(document) {
@@ -419,7 +462,7 @@ export function scaffoldPackage(options, dependencies = {}) {
     },
     {
       path: aggregate.path,
-      content: jsonText(aggregate.config),
+      content: aggregate.content,
     },
   )
 

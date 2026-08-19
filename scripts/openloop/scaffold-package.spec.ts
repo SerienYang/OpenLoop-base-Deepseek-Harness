@@ -171,6 +171,23 @@ describe('OpenLoop package scaffolder', () => {
     ])
   })
 
+  it('updates JSONC compiler aggregates used by the repository', async () => {
+    const { scaffoldPackage } = await import(scaffoldModulePath)
+    const root = fixtureRoot()
+    writeFileSync(join(root, 'tsconfig.host.json'), `{
+  // Host aggregate.
+  "files": [],
+  "references": [],
+}
+`)
+
+    scaffoldPackage({ root, name: 'build-contract', face: 'host' })
+
+    const aggregate = readFileSync(join(root, 'tsconfig.host.json'), 'utf8')
+    expect(aggregate).toContain('// Host aggregate.')
+    expect(aggregate).toContain('"path": "./packages/openloop/build-contract"')
+  })
+
   it('treats a client bundle as a Cordis plugin without requiring a service', async () => {
     const { scaffoldPackage } = await import(scaffoldModulePath)
     const root = fixtureRoot()
