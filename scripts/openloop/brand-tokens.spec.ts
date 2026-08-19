@@ -254,20 +254,28 @@ function contrastRatio(foreground: ColorValue, background: ColorValue): number {
   return (lighter + 0.05) / (darker + 0.05)
 }
 
-function disallowedStructuralPaths(
+function disallowedReservedPaths(
   value: unknown,
   prefix = '',
   result: string[] = [],
 ): string[] {
   if (!isRecord(value)) return result
-  for (const key of ['$extends', '$root']) {
-    if (key in value) {
+  const allowed = new Set([
+    '$deprecated',
+    '$description',
+    '$extensions',
+    ...('$value' in value ? ['$value'] : []),
+    ...(prefix === 'color' ? ['$type'] : []),
+  ])
+  for (const key of Object.keys(value)) {
+    if (key.startsWith('$') && !allowed.has(key)) {
       result.push(prefix === '' ? key : `${prefix}.${key}`)
     }
   }
+  if ('$value' in value) return result
   for (const [key, child] of Object.entries(value)) {
     if (key.startsWith('$')) continue
-    disallowedStructuralPaths(
+    disallowedReservedPaths(
       child,
       prefix === '' ? key : `${prefix}.${key}`,
       result,
@@ -300,7 +308,7 @@ function documentProblems(document: Record<string, unknown>): string[] {
       'color may only contain brand, palette, and semantic token groups',
     )
   }
-  for (const tokenPath of disallowedStructuralPaths(document)) {
+  for (const tokenPath of disallowedReservedPaths(document)) {
     problems.push(
       `${tokenPath} is outside the approved named token architecture`,
     )
@@ -483,6 +491,22 @@ describe('OpenLoop design tokens', () => {
     expect(documentProblems(document)).toContain(
       'color.brand.$extends is outside the approved named token architecture',
     )
+  })
+
+  test('rejects reserved properties that override explicit color semantics', () => {
+    const document = structuredClone(readDocument())
+    if (!isRecord(document.color)) throw new TypeError('Missing color group')
+    if (!isRecord(document.color.brand)) throw new TypeError('Missing brand group')
+    if (!isRecord(document.color.semantic)) {
+      throw new TypeError('Missing semantic group')
+    }
+    document.color.brand.$ref = '#/color/palette/neutral'
+    document.color.semantic.$type = 'dimension'
+
+    expect(documentProblems(document)).toEqual(expect.arrayContaining([
+      'color.brand.$ref is outside the approved named token architecture',
+      'color.semantic.$type is outside the approved named token architecture',
+    ]))
   })
 
   test('rejects malformed concrete colors anywhere in the document', () => {
