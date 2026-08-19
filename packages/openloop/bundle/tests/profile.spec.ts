@@ -3,6 +3,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -86,6 +87,28 @@ describe('OpenLoop profile', () => {
 
     expect(existsSync(join(dir, 'cordis.patch.yml'))).toBe(false)
     expect(existsSync(join(dir, 'pnpm-workspace.yaml'))).toBe(false)
+  })
+
+  it('refuses to initialize through a symlinked profile directory', () => {
+    const home = tmp()
+    const external = tmp()
+    mkdirSync(join(home, 'profiles'), { recursive: true })
+    symlinkSync(external, join(home, 'profiles', 'openloop'), 'dir')
+
+    expect(() => ensureOpenloopProfile(home)).toThrow(/symbolic link/i)
+    expect(existsSync(join(external, 'package.json'))).toBe(false)
+    expect(existsSync(join(external, 'cordis.patch.yml'))).toBe(false)
+    expect(existsSync(join(external, 'pnpm-workspace.yaml'))).toBe(false)
+  })
+
+  it('refuses to initialize through a symlinked profiles parent directory', () => {
+    const home = tmp()
+    const external = tmp()
+    symlinkSync(external, join(home, 'profiles'), 'dir')
+
+    expect(() => ensureOpenloopProfile(home)).toThrow(/profile parent.*symbolic link/i)
+    expect(existsSync(join(external, 'openloop', 'package.json'))).toBe(false)
+    expect(existsSync(join(external, '.openloop.init.lock'))).toBe(false)
   })
 
   it('resolves every bundle manifest and parses every declared patch as a YAML list', () => {
