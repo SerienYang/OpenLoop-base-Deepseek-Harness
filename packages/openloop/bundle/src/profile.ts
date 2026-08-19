@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import {
   closeSync,
   fstatSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -269,17 +270,69 @@ function assertDirectoryIsNotSymlink(path: string, label: string): void {
   }
 }
 
-function rollbackCreatedFile(file: CreatedProfileFile): void {
+function rollbackRecoveryError(originalPath: string, quarantinePath: string, reason: unknown): Error {
+  return new Error(
+    `OpenLoop profile rollback could not safely restore ${quarantinePath} to ${originalPath}; `
+    + `refusing to delete or overwrite either path: ${String(reason)}`,
+  )
+}
+
+function restoreQuarantinedProfileFile(originalPath: string, quarantinePath: string): void {
+  let stat
   try {
-    const stat = lstatSync(file.path)
-    if (!stat.isFile() || stat.isSymbolicLink()
-      || stat.dev !== file.dev || stat.ino !== file.ino
-      || !readFileSync(file.path).equals(file.content)) {
-      return
-    }
-    unlinkSync(file.path)
+    stat = lstatSync(quarantinePath)
   } catch (error) {
-    if (errorCode(error) !== 'ENOENT') throw error
+    throw rollbackRecoveryError(originalPath, quarantinePath, error)
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw rollbackRecoveryError(
+      originalPath,
+      quarantinePath,
+      'the quarantined path is not a regular non-symbolic-link file',
+    )
+  }
+
+  try {
+    linkSync(quarantinePath, originalPath)
+  } catch (error) {
+    throw rollbackRecoveryError(originalPath, quarantinePath, error)
+  }
+  try {
+    unlinkSync(quarantinePath)
+  } catch (error) {
+    throw rollbackRecoveryError(originalPath, quarantinePath, error)
+  }
+}
+
+function rollbackCreatedFile(file: CreatedProfileFile): void {
+  const quarantinePath = quarantinePathFor(file.path)
+  try {
+    renameSync(file.path, quarantinePath)
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return
+    throw error
+  }
+
+  let matchesCreatedFile = false
+  try {
+    const stat = lstatSync(quarantinePath)
+    matchesCreatedFile = stat.isFile()
+      && !stat.isSymbolicLink()
+      && stat.dev === file.dev
+      && stat.ino === file.ino
+      && readFileSync(quarantinePath).equals(file.content)
+  } catch {
+    matchesCreatedFile = false
+  }
+
+  if (!matchesCreatedFile) {
+    restoreQuarantinedProfileFile(file.path, quarantinePath)
+    return
+  }
+  try {
+    unlinkSync(quarantinePath)
+  } catch (error) {
+    throw rollbackRecoveryError(file.path, quarantinePath, error)
   }
 }
 

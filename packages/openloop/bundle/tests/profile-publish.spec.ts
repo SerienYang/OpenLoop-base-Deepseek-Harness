@@ -12,16 +12,33 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ensureOpenloopProfile } from '../src/profile.ts'
 
 const state = vi.hoisted(() => ({
+  captureOnRollbackRename: undefined as {
+    readonly filename: string
+    readonly content: string
+    readonly occupant?: string
+  } | undefined,
   initFailure: false,
   manifestConflict: undefined as string | undefined,
   openedPaths: new Map<number, string>(),
   partialWriteFailure: undefined as string | undefined,
   publishFailure: undefined as string | undefined,
+  quarantinePaths: [] as string[],
+  replaceAfterRollbackRead: undefined as {
+    readonly filename: string
+    readonly content: string
+    reads: number
+  } | undefined,
   stagingDirs: [] as string[],
 }))
 
 function isProfileFile(path: unknown, filename: string): boolean {
   return normalize(String(path)).endsWith(normalize(join('profiles', 'openloop', filename)))
+}
+
+function isRollbackQuarantine(path: unknown, filename: string): boolean {
+  const normalized = normalize(String(path))
+  const marker = `${normalize(join('profiles', 'openloop', filename))}.quarantine-`
+  return normalized.includes(marker)
 }
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -43,6 +60,44 @@ vi.mock('node:fs', async (importOriginal) => {
       const descriptor = actual.openSync(path, flags, mode)
       state.openedPaths.set(descriptor, String(path))
       return descriptor
+    },
+    readFileSync(path: Parameters<typeof actual.readFileSync>[0], options?: Parameters<typeof actual.readFileSync>[1]) {
+      const result = actual.readFileSync(path, options as never)
+      const replacement = state.replaceAfterRollbackRead
+      if (replacement !== undefined
+        && (isProfileFile(path, replacement.filename) || isRollbackQuarantine(path, replacement.filename))) {
+        replacement.reads += 1
+        if (replacement.reads === 2) {
+          const readPath = String(path)
+          const marker = '.quarantine-'
+          const originalPath = readPath.includes(marker)
+            ? readPath.slice(0, readPath.indexOf(marker))
+            : readPath
+          const replacementPath = `${originalPath}.user-race`
+          actual.writeFileSync(replacementPath, replacement.content, { encoding: 'utf8', flag: 'wx' })
+          actual.renameSync(replacementPath, originalPath)
+          state.replaceAfterRollbackRead = undefined
+        }
+      }
+      return result
+    },
+    renameSync(oldPath: Parameters<typeof actual.renameSync>[0], newPath: Parameters<typeof actual.renameSync>[1]): void {
+      const capture = state.captureOnRollbackRename
+      if (capture !== undefined
+        && isProfileFile(oldPath, capture.filename)
+        && isRollbackQuarantine(newPath, capture.filename)) {
+        const replacementPath = `${String(oldPath)}.captured-race`
+        actual.writeFileSync(replacementPath, capture.content, { encoding: 'utf8', flag: 'wx' })
+        actual.renameSync(replacementPath, oldPath)
+        actual.renameSync(oldPath, newPath)
+        state.quarantinePaths.push(String(newPath))
+        if (capture.occupant !== undefined) {
+          actual.writeFileSync(oldPath, capture.occupant, { encoding: 'utf8', flag: 'wx' })
+        }
+        state.captureOnRollbackRename = undefined
+        return
+      }
+      actual.renameSync(oldPath, newPath)
     },
     writeFileSync(
       path: Parameters<typeof actual.writeFileSync>[0],
@@ -82,11 +137,14 @@ vi.mock('@deepseek-ai/dsh-app-boot', async (importOriginal) => {
 const tmp = (): string => mkdtempSync(join(tmpdir(), 'openloop-profile-publish-'))
 
 beforeEach(() => {
+  state.captureOnRollbackRename = undefined
   state.initFailure = false
   state.manifestConflict = undefined
   state.openedPaths.clear()
   state.partialWriteFailure = undefined
   state.publishFailure = undefined
+  state.quarantinePaths = []
+  state.replaceAfterRollbackRead = undefined
   state.stagingDirs = []
 })
 
@@ -131,6 +189,69 @@ describe('OpenLoop profile atomic publication', () => {
     expect(existsSync(join(profileDir, 'package.json'))).toBe(false)
     expect(existsSync(join(profileDir, 'cordis.patch.yml'))).toBe(false)
     expect(existsSync(join(profileDir, 'pnpm-workspace.yaml'))).toBe(false)
+  })
+
+  it('preserves a user file atomically replacing a rollback candidate after its validation read', () => {
+    const home = tmp()
+    const profileDir = join(home, 'profiles', 'openloop')
+    const patchPath = join(profileDir, 'cordis.patch.yml')
+    state.partialWriteFailure = 'cordis.patch.yml'
+    state.replaceAfterRollbackRead = {
+      filename: 'cordis.patch.yml',
+      content: '# user replacement after validation\n',
+      reads: 0,
+    }
+
+    expect(() => ensureOpenloopProfile(home))
+      .toThrow('injected partial write for cordis.patch.yml')
+
+    expect(readFileSync(patchPath, 'utf8')).toBe('# user replacement after validation\n')
+  })
+
+  it('restores a non-owned regular file captured by rollback quarantine', () => {
+    const home = tmp()
+    const profileDir = join(home, 'profiles', 'openloop')
+    const patchPath = join(profileDir, 'cordis.patch.yml')
+    state.partialWriteFailure = 'cordis.patch.yml'
+    state.captureOnRollbackRename = {
+      filename: 'cordis.patch.yml',
+      content: '# user file captured by quarantine\n',
+    }
+
+    expect(() => ensureOpenloopProfile(home))
+      .toThrow('injected partial write for cordis.patch.yml')
+
+    expect(readFileSync(patchPath, 'utf8')).toBe('# user file captured by quarantine\n')
+    expect(state.quarantinePaths).toHaveLength(1)
+    expect(existsSync(state.quarantinePaths[0]!)).toBe(false)
+  })
+
+  it('keeps quarantine and fails loud when the original path is occupied during restore', () => {
+    const home = tmp()
+    const profileDir = join(home, 'profiles', 'openloop')
+    const patchPath = join(profileDir, 'cordis.patch.yml')
+    state.partialWriteFailure = 'cordis.patch.yml'
+    state.captureOnRollbackRename = {
+      filename: 'cordis.patch.yml',
+      content: '# user file held in quarantine\n',
+      occupant: '# concurrent path occupant\n',
+    }
+
+    let failure: unknown
+    try {
+      ensureOpenloopProfile(home)
+    } catch (error) {
+      failure = error
+    }
+
+    expect(state.quarantinePaths).toHaveLength(1)
+    const quarantinePath = state.quarantinePaths[0]!
+    expect(failure).toEqual(expect.objectContaining({
+      message: expect.stringContaining(patchPath),
+    }))
+    expect((failure as Error).message).toContain(quarantinePath)
+    expect(readFileSync(patchPath, 'utf8')).toBe('# concurrent path occupant\n')
+    expect(readFileSync(quarantinePath, 'utf8')).toBe('# user file held in quarantine\n')
   })
 
   it('preserves existing supporting files while committing a new manifest last', () => {
