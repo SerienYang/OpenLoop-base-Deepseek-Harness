@@ -228,6 +228,7 @@ function checkWorkspace({ dir, manifest }: WorkspaceManifest): string[] {
   const label = manifest.name ?? dir
   const isLandlockPackageDir = dir.startsWith('native/landlock-run/packages/')
   const isOpenLoopPackageDir = dir.startsWith('packages/openloop/')
+  const isOpenLoopAppDir = /^apps\/openloop-[^/]+$/u.test(dir)
   const isPublicLandlockPackage = isLandlockPackageDir
     && manifest.name !== undefined
     && publicLandlockPackages.has(manifest.name)
@@ -249,6 +250,14 @@ function checkWorkspace({ dir, manifest }: WorkspaceManifest): string[] {
     // Product-owned @openloop packages are a narrow private namespace
     // exception. Their naming, privacy, face, and Cordis rules are checked by
     // collectOpenLoopWorkspaceViolations below.
+  } else if (isOpenLoopAppDir) {
+    const expectedName = `@openloop/${dir.slice('apps/openloop-'.length)}`
+    if (manifest.name !== expectedName) {
+      errors.push(`${label}: OpenLoop app package name must be ${expectedName}`)
+    }
+    if (manifest.private !== true) {
+      errors.push(`${label}: OpenLoop app packages must set "private": true`)
+    }
   } else if (releaseMemberDirectory.test(dir)) {
     // Release members state that they are publishable: npm refuses a private
     // package, and the repository field is how a consumer finds the source of

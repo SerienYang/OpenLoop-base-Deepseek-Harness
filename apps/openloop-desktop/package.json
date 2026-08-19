@@ -1,0 +1,23 @@
+{
+  "name": "@openloop/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "manifest:test": "node ../../scripts/openloop/generate-build-manifest.mjs --channel test --out ../../dist-openloop/openloop-core.json --app-version 0.1.0",
+    "frontend:dev": "vite",
+    "frontend:build": "tsc && vite build",
+    "dev": "pnpm manifest:test && tauri dev",
+    "build": "pnpm manifest:test && tauri build --target aarch64-apple-darwin --bundles app",
+    "tauri": "tauri",
+    "icon": "tauri icon ../../assets/brand/openloop-icon.svg --output src-tauri/icons"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.11.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
+    "typescript": "6.0.3",
+    "vite": "8.0.16"
+  }
+}
