@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { Context } from '@deepseek-ai/cordis'
 import { load } from 'js-yaml'
 import { afterEach, describe, expect, it } from 'vitest'
 
@@ -11,11 +12,35 @@ interface JsonFixture {
   readonly [key: string]: unknown
   readonly references?: ReadonlyArray<{ readonly path?: string }>
   readonly dependencies?: Readonly<Record<string, string>>
+  readonly scripts?: Readonly<Record<string, string>>
+  readonly exports?: Readonly<Record<string, unknown>>
+  readonly dsh?: {
+    readonly client?: {
+      readonly inject?: readonly string[]
+      readonly platform?: string
+    }
+  }
 }
 
 function fixtureRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), 'openloop-scaffold-'))
+  const root = mkdtempSync(join(import.meta.dirname, '.scaffold-fixture-'))
   roots.push(root)
+  writeJson(join(root, 'tsconfig.base.json'), {
+    compilerOptions: {
+      composite: true,
+      module: 'esnext',
+      moduleResolution: 'bundler',
+      target: 'es2024',
+    },
+  })
+  writeJson(join(root, 'tsconfig.base.client.json'), {
+    extends: './tsconfig.base.json',
+    compilerOptions: {},
+  })
+  writeJson(join(root, 'vendor/cordis/tsconfig.json'), {
+    extends: '../../tsconfig.base.json',
+    files: [],
+  })
   writeJson(join(root, 'tsconfig.host.json'), { files: [], references: [] })
   writeJson(join(root, 'tsconfig.client.json'), { files: [], references: [] })
   return root
@@ -28,6 +53,18 @@ function writeJson(path: string, value: object): void {
 
 function readJson(path: string): JsonFixture {
   return JSON.parse(readFileSync(path, 'utf8')) as JsonFixture
+}
+
+async function loadCordisPlugin(path: string): Promise<{
+  readonly ctx: Context
+  readonly plugin: Record<string, unknown>
+}> {
+  const plugin = await import(pathToFileURL(path).href) as Record<string, unknown>
+  const ctx = new Context()
+  const entry = (plugin.default ?? plugin) as Parameters<Context['plugin']>[0]
+  const fiber = ctx.plugin(entry)
+  await fiber
+  return { ctx, plugin }
 }
 
 afterEach(() => {
@@ -50,6 +87,20 @@ describe('OpenLoop package scaffolder', () => {
       clientBundle: true,
       bundleRow: 'desktop',
       service: 'workbench',
+    })
+  })
+
+  it('accepts the leading separator forwarded by the root pnpm command', async () => {
+    const { parseScaffoldArguments } = await import(scaffoldModulePath)
+
+    expect(parseScaffoldArguments([
+      '--',
+      '--name', 'workbench',
+      '--face', 'client',
+    ])).toEqual({
+      name: 'workbench',
+      face: 'client',
+      clientBundle: false,
     })
   })
 
@@ -90,10 +141,39 @@ describe('OpenLoop package scaffolder', () => {
       clientBundle: true,
     })
 
-    expect(readJson(join(root, 'packages/openloop/window-client/package.json'))).toMatchObject({
+    const directory = join(root, 'packages/openloop/window-client')
+    expect(readJson(join(directory, 'package.json'))).toMatchObject({
       openloop: { face: 'client', cordisPlugin: true },
+      exports: {
+        '.': {
+          types: './lib/types/index.d.ts',
+          default: './lib/index.js',
+        },
+        './client': {
+          types: './lib/types/client/index.d.ts',
+          default: './lib/client.js',
+        },
+      },
+      dsh: {
+        client: {
+          inject: [],
+          platform: 'web',
+        },
+      },
+      scripts: {
+        bundle: 'tsdown',
+        watch: 'tsdown --watch',
+      },
       peerDependencies: { '@deepseek-ai/cordis': 'workspace:^' },
       devDependencies: { '@deepseek-ai/cordis': 'workspace:^' },
+    })
+    expect(readFileSync(join(directory, 'tsdown.config.ts'), 'utf8')).toContain(
+      "clientBundle('@openloop/window-client', ['lib/types/index.js'])",
+    )
+    await expect(loadCordisPlugin(join(directory, 'src/client/index.ts'))).resolves.toMatchObject({
+      plugin: {
+        apply: expect.any(Function),
+      },
     })
   })
 
@@ -140,6 +220,41 @@ describe('OpenLoop package scaffolder', () => {
     })
     expect(load(readFileSync(join(bundleDirectory, 'cordis.patch.yml'), 'utf8'))).toEqual([
       { insert: [{ id: 'workbench', name: '@openloop/workbench' }] },
+    ])
+    const loaded = await loadCordisPlugin(join(directory, 'src/index.ts'))
+    expect(loaded.plugin.default).toBeTypeOf('function')
+    expect((loaded.ctx as unknown as Record<string, unknown>).workbench).toBeInstanceOf(
+      loaded.plugin.default,
+    )
+  })
+
+  it('generates a loadable namespace plugin for a bundle row without a service', async () => {
+    const { scaffoldPackage } = await import(scaffoldModulePath)
+    const root = fixtureRoot()
+    const bundleDirectory = join(root, 'packages/openloop/desktop')
+    writeJson(join(bundleDirectory, 'package.json'), {
+      name: '@openloop/desktop',
+      private: true,
+      dependencies: {},
+    })
+    writeFileSync(join(bundleDirectory, 'cordis.patch.yml'), '[]\n')
+
+    scaffoldPackage({
+      root,
+      name: 'window-state',
+      face: 'host',
+      bundleRow: 'desktop',
+    })
+
+    const loaded = await loadCordisPlugin(
+      join(root, 'packages/openloop/window-state/src/index.ts'),
+    )
+    expect(loaded.plugin).toMatchObject({
+      name: 'window-state',
+      apply: expect.any(Function),
+    })
+    expect(load(readFileSync(join(bundleDirectory, 'cordis.patch.yml'), 'utf8'))).toEqual([
+      { insert: [{ id: 'window-state', name: '@openloop/window-state' }] },
     ])
   })
 

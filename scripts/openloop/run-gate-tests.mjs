@@ -31,9 +31,9 @@ const scannedExtensions = new Set([
   '.tsx',
 ])
 const globCharacters = /[*?[{]/
-const onlyPattern = /\b(?:describe|it|suite|test)(?:\.describe)?\.only\s*\(/
+const onlyPattern = /\b(?:describe|it|suite|test)(?:\.[$\w]+)*\.only(?:\.[$\w]+)*\s*\(/
 const skipPatterns = [
-  /\b(?:describe|it|suite|test)(?:\.describe)?\.(?:fixme|skip|skipIf|todo)\s*\(/,
+  /\b(?:describe|it|suite|test)(?:\.[$\w]+)*\.(?:fixme|skip|skipIf|todo)(?:\.[$\w]+)*\s*\(/,
   /\bctx\.skip\s*\(/,
   /#\s*\[\s*ignore(?:\s*=|\s*\])/,
 ]
@@ -131,6 +131,12 @@ function matchingLines(root, files, patterns) {
   return matches
 }
 
+function isIsoCalendarDate(value) {
+  const parsed = new Date(`${value}T00:00:00.000Z`)
+  return !Number.isNaN(parsed.valueOf())
+    && parsed.toISOString().slice(0, 10) === value
+}
+
 function readAllowlist(root, now) {
   const path = resolve(root, allowlistPath)
   if (!existsSync(path)) throw new Error(`missing skip allowlist: ${allowlistPath}`)
@@ -153,6 +159,9 @@ function readAllowlist(root, now) {
       || typeof entry?.expires !== 'string'
       || !/^\d{4}-\d{2}-\d{2}$/.test(entry.expires)) {
       throw new Error(`${allowlistPath}: skip entries require file, line, owner, reason, and YYYY-MM-DD expires`)
+    }
+    if (!isIsoCalendarDate(entry.expires)) {
+      throw new Error(`${allowlistPath}: skip expiry must be a real YYYY-MM-DD calendar date`)
     }
     if (entries.has(key)) throw new Error(`${allowlistPath}: duplicate skip entry ${key}`)
     entries.set(key, { ...entry, expired: entry.expires <= today })

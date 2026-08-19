@@ -8,13 +8,35 @@ const roots: string[] = []
 function fixtureRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'openloop-workspace-'))
   roots.push(root)
+  writeJson(join(root, 'tsconfig.host.json'), { files: [], references: [] })
+  writeJson(join(root, 'tsconfig.client.json'), { files: [], references: [] })
   return root
+}
+
+function writeJson(path: string, value: object): void {
+  mkdirSync(join(path, '..'), { recursive: true })
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`)
 }
 
 function writeManifest(root: string, name: string, manifest: object): void {
   const directory = join(root, 'packages', 'openloop', name)
   mkdirSync(directory, { recursive: true })
   writeFileSync(join(directory, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`)
+}
+
+function writeAggregates(
+  root: string,
+  host: readonly string[],
+  client: readonly string[],
+): void {
+  writeJson(join(root, 'tsconfig.host.json'), {
+    files: [],
+    references: host.map(path => ({ path: `./packages/openloop/${path}` })),
+  })
+  writeJson(join(root, 'tsconfig.client.json'), {
+    files: [],
+    references: client.map(path => ({ path: `./packages/openloop/${path}` })),
+  })
 }
 
 afterEach(() => {
@@ -30,6 +52,7 @@ describe('OpenLoop workspace conventions', () => {
       private: true,
       openloop: { face: 'pure' },
     })
+    writeAggregates(root, ['window-state'], [])
 
     expect(collectOpenLoopWorkspaceViolations(root)).toEqual([])
   })
@@ -64,6 +87,7 @@ describe('OpenLoop workspace conventions', () => {
         '@deepseek-ai/cordis': 'workspace:*',
       },
     })
+    writeAggregates(root, ['desktop-service'], [])
 
     expect(collectOpenLoopWorkspaceViolations(root)).toEqual([
       'packages/openloop/desktop-service/package.json: @deepseek-ai/cordis peer (workspace:^) and dev (workspace:*) ranges must match',
@@ -78,10 +102,56 @@ describe('OpenLoop workspace conventions', () => {
       private: true,
       openloop: { face: 'host', cordisPlugin: true },
     })
+    writeAggregates(root, ['lifecycle'], [])
 
     expect(collectOpenLoopWorkspaceViolations(root)).toEqual([
       'packages/openloop/lifecycle/package.json: Cordis plugin must declare @deepseek-ai/cordis as a peerDependency',
       'packages/openloop/lifecycle/package.json: Cordis plugin must also declare @deepseek-ai/cordis as a devDependency',
+    ])
+  })
+
+  it('rejects a declared Client face referenced only by the Host aggregate', async () => {
+    const { collectOpenLoopWorkspaceViolations } = await import('./workspace-conventions.ts')
+    const root = fixtureRoot()
+    writeManifest(root, 'workbench', {
+      name: '@openloop/workbench',
+      private: true,
+      openloop: { face: 'client' },
+    })
+    writeAggregates(root, ['workbench'], [])
+
+    expect(collectOpenLoopWorkspaceViolations(root)).toEqual([
+      'packages/openloop/workbench/package.json: openloop.face client requires exactly one tsconfig.client.json reference and no tsconfig.host.json reference (found client=0, host=1)',
+    ])
+  })
+
+  it('rejects a package referenced by both compiler aggregates', async () => {
+    const { collectOpenLoopWorkspaceViolations } = await import('./workspace-conventions.ts')
+    const root = fixtureRoot()
+    writeManifest(root, 'lifecycle', {
+      name: '@openloop/lifecycle',
+      private: true,
+      openloop: { face: 'host' },
+    })
+    writeAggregates(root, ['lifecycle'], ['lifecycle'])
+
+    expect(collectOpenLoopWorkspaceViolations(root)).toEqual([
+      'packages/openloop/lifecycle/package.json: openloop.face host requires exactly one tsconfig.host.json reference and no tsconfig.client.json reference (found host=1, client=1)',
+    ])
+  })
+
+  it('keeps pure packages exclusively in the Host aggregate', async () => {
+    const { collectOpenLoopWorkspaceViolations } = await import('./workspace-conventions.ts')
+    const root = fixtureRoot()
+    writeManifest(root, 'protocol', {
+      name: '@openloop/protocol',
+      private: true,
+      openloop: { face: 'pure' },
+    })
+    writeAggregates(root, [], ['protocol'])
+
+    expect(collectOpenLoopWorkspaceViolations(root)).toEqual([
+      'packages/openloop/protocol/package.json: openloop.face pure requires exactly one tsconfig.host.json reference and no tsconfig.client.json reference (found host=0, client=1)',
     ])
   })
 })

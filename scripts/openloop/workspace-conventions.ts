@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import ts from 'typescript'
 
 export const openLoopFaces = ['host', 'client', 'pure'] as const
 
@@ -17,6 +18,10 @@ interface OpenLoopManifest {
   devDependencies?: Record<string, string>
 }
 
+interface AggregateConfig {
+  references?: ReadonlyArray<{ path?: unknown }>
+}
+
 const cordisPackage = '@deepseek-ai/cordis'
 
 function readManifest(path: string): OpenLoopManifest {
@@ -30,6 +35,20 @@ function isCordisPlugin(manifest: OpenLoopManifest): boolean {
     || manifest.devDependencies?.[cordisPackage] !== undefined
 }
 
+function aggregateReferences(root: string, face: 'host' | 'client'): readonly string[] {
+  const path = join(root, `tsconfig.${face}.json`)
+  if (!existsSync(path)) return []
+  const parsed = ts.readConfigFile(path, file => ts.sys.readFile(file))
+  if (parsed.error !== undefined) {
+    const message = ts.flattenDiagnosticMessageText(parsed.error.messageText, '\n')
+    throw new Error(`tsconfig.${face}.json: ${message}`)
+  }
+  const config = parsed.config as AggregateConfig
+  return (config.references ?? [])
+    .map(reference => reference.path)
+    .filter((reference): reference is string => typeof reference === 'string')
+}
+
 /**
  * Validate the product-owned package namespace without changing DSH's public
  * package policy.
@@ -39,6 +58,10 @@ export function collectOpenLoopWorkspaceViolations(root: string): string[] {
   if (!existsSync(packagesRoot)) return []
 
   const errors: string[] = []
+  const aggregates = {
+    host: aggregateReferences(root, 'host'),
+    client: aggregateReferences(root, 'client'),
+  }
   const packageDirectories = readdirSync(packagesRoot, { withFileTypes: true })
     .filter(entry => entry.isDirectory())
     .sort((left, right) => left.name.localeCompare(right.name))
@@ -56,8 +79,20 @@ export function collectOpenLoopWorkspaceViolations(root: string): string[] {
     if (manifest.private !== true) {
       errors.push(`${relativeManifestPath}: OpenLoop packages must set "private": true`)
     }
-    if (!openLoopFaces.includes(manifest.openloop?.face as OpenLoopFace)) {
+    const face = manifest.openloop?.face
+    if (!openLoopFaces.includes(face as OpenLoopFace)) {
       errors.push(`${relativeManifestPath}: openloop.face must be exactly one of host, client, or pure`)
+    } else {
+      const expectedFace = face === 'client' ? 'client' : 'host'
+      const otherFace = expectedFace === 'client' ? 'host' : 'client'
+      const reference = `./packages/openloop/${entry.name}`
+      const expectedCount = aggregates[expectedFace].filter(path => path === reference).length
+      const otherCount = aggregates[otherFace].filter(path => path === reference).length
+      if (expectedCount !== 1 || otherCount !== 0) {
+        errors.push(
+          `${relativeManifestPath}: openloop.face ${String(face)} requires exactly one tsconfig.${expectedFace}.json reference and no tsconfig.${otherFace}.json reference (found ${expectedFace}=${expectedCount}, ${otherFace}=${otherCount})`,
+        )
+      }
     }
 
     if (!isCordisPlugin(manifest)) continue

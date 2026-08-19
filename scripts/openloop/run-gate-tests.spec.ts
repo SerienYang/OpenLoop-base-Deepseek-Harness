@@ -218,6 +218,36 @@ describe('OpenLoop focused test gate', () => {
     })).rejects.toThrow('packages/core/example/tests/example.spec.ts:1: forbidden focused test marker')
   })
 
+  it.each([
+    'test.concurrent' + '.only',
+    'describe.concurrent' + '.only',
+    'it.concurrent' + '.only',
+    'suite.concurrent' + '.only',
+  ])('rejects chained focused marker %s', async (marker) => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    const testPath = 'packages/core/example/tests/example.spec.ts'
+    write(root, testPath, `${marker}('focused', () => {})\n`)
+
+    await expect(runGateTests(['scan-repo'], { root }))
+      .rejects.toThrow(`${testPath}:1: forbidden focused test marker`)
+  })
+
+  it.each([
+    'test' + '.skip.each',
+    'describe' + '.skip.each',
+    'it' + '.skip.each',
+    'suite' + '.skip.each',
+  ])('rejects chained skip marker %s', async (marker) => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    const testPath = 'scripts/openloop/platform.spec.ts'
+    write(root, testPath, `${marker}([1])('platform', () => {})\n`)
+
+    await expect(runGateTests(['scan-repo'], { root }))
+      .rejects.toThrow(`${testPath}:1: skip is not present in the allowlist`)
+  })
+
   it('rejects unlisted or expired skips and accepts complete future entries', async () => {
     const { runGateTests } = await import(gateModulePath)
     const root = fixtureRoot()
@@ -266,6 +296,30 @@ describe('OpenLoop focused test gate', () => {
       runCommand: () => commandResult,
       now: new Date('2026-08-20T00:00:00Z'),
     })).resolves.toBeUndefined()
+  })
+
+  it('rejects an impossible ISO calendar expiry', async () => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    const testPath = 'scripts/openloop/platform.spec.ts'
+    write(root, testPath, `it${'.skip'}('platform', () => {})\n`)
+    write(root, 'scripts/openloop/test-skip-allowlist.json', JSON.stringify({
+      version: 1,
+      skips: [{
+        file: testPath,
+        line: 1,
+        owner: 'desktop-foundation',
+        reason: 'Requires the signed test fixture.',
+        expires: '2026-99-99',
+      }],
+    }))
+
+    await expect(runGateTests(['scan-repo'], {
+      root,
+      now: new Date('2026-08-20T00:00:00Z'),
+    })).rejects.toThrow(
+      'scripts/openloop/test-skip-allowlist.json: skip expiry must be a real YYYY-MM-DD calendar date',
+    )
   })
 
   it('validates Playwright and WDIO nonzero result summaries', async () => {
