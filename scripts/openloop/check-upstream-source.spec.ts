@@ -49,12 +49,15 @@ interface RadarModule {
     url: string,
     options?: {
       fetchImpl?: typeof fetch
+      token?: string
       timeoutMs?: number
     },
   ) => Promise<unknown>
   readonly loadLiveRadarInput: (options?: {
+    env?: NodeJS.ProcessEnv
     fetchImpl?: typeof fetch
     maxIssuePages?: number
+    token?: string
     timeoutMs?: number
     repository?: string
   }) => Promise<Record<string, unknown>>
@@ -64,9 +67,11 @@ interface RadarModule {
   readonly runRadarCli: (
     args: string[],
     dependencies?: {
+      env?: NodeJS.ProcessEnv
       stdinText?: string
       readFile?: (path: string) => string
       fetchImpl?: typeof fetch
+      token?: string
       writeStdout?: (value: string) => void
     },
   ) => Promise<number>
@@ -126,6 +131,7 @@ async function radar(): Promise<RadarModule> {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllEnvs()
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
@@ -394,6 +400,127 @@ describe('read-only GitHub API handling', () => {
       /\/repos\/example\/openloop\/issues\?state=open&per_page=100$/u.test(url)
     ))).toBe(true)
     expect(urls.some(url => /\/releases\/latest/u.test(url))).toBe(false)
+  })
+
+  it('authenticates every live GitHub GET, including paginated origin issues', async () => {
+    const { loadLiveRadarInput } = await radar()
+    const token = 'github-token-for-header-coverage'
+    const requests: Array<{ headers: Headers; url: string }> = []
+    const fetchImpl = vi.fn(async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      const url = typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url
+      requests.push({ headers: new Headers(init?.headers), url })
+      if (url.includes('/releases?')) return Response.json([release()])
+      if (url.includes('/tags?')) return Response.json([tag()])
+      if (url.endsWith('/commits/master')) {
+        return Response.json({ sha: branchCommit })
+      }
+      if (url.endsWith('/issues?state=open&per_page=100')) {
+        return Response.json([], {
+          headers: {
+            link: '<https://api.github.com/repos/example/openloop/issues?state=open&per_page=100&page=2>; rel="next"',
+          },
+        })
+      }
+      if (url.endsWith('/issues?state=open&per_page=100&page=2')) {
+        return Response.json([])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    }) as typeof fetch
+
+    await loadLiveRadarInput({
+      fetchImpl,
+      repository: 'example/openloop',
+      token,
+    })
+
+    expect(requests.map(request => request.url)).toEqual([
+      'https://api.github.com/repos/deepseek-ai/deepseek-harness/releases?per_page=100',
+      'https://api.github.com/repos/deepseek-ai/deepseek-harness/tags?per_page=100',
+      'https://api.github.com/repos/deepseek-ai/deepseek-harness/commits/master',
+      'https://api.github.com/repos/example/openloop/issues?state=open&per_page=100',
+      'https://api.github.com/repos/example/openloop/issues?state=open&per_page=100&page=2',
+    ])
+    for (const { headers } of requests) {
+      expect(headers.get('authorization')).toBe(`Bearer ${token}`)
+      expect(headers.get('accept')).toBe('application/vnd.github+json')
+      expect(headers.get('x-github-api-version')).toBe('2022-11-28')
+    }
+  })
+
+  it('reads GITHUB_TOKEN for live API requests when no token is injected', async () => {
+    const { loadLiveRadarInput } = await radar()
+    const token = 'github-token-from-env'
+    const authorizations: Array<string | null> = []
+    vi.stubEnv('GITHUB_TOKEN', token)
+    const fetchImpl = vi.fn(async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      const url = typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url
+      authorizations.push(new Headers(init?.headers).get('authorization'))
+      if (url.includes('/releases?')) return Response.json([release()])
+      if (url.includes('/tags?')) return Response.json([tag()])
+      if (url.endsWith('/commits/master')) {
+        return Response.json({ sha: branchCommit })
+      }
+      if (url.includes('/issues?')) return Response.json([])
+      throw new Error(`unexpected URL ${url}`)
+    }) as typeof fetch
+
+    await loadLiveRadarInput({
+      fetchImpl,
+      repository: 'example/openloop',
+    })
+
+    expect(authorizations).toEqual(Array.from({ length: 4 }, () => `Bearer ${token}`))
+  })
+
+  it('keeps public GitHub GET requests anonymous when token is empty', async () => {
+    const { fetchGitHubJson } = await radar()
+    let headers = new Headers()
+    const fetchImpl = vi.fn(async (
+      _input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      headers = new Headers(init?.headers)
+      return Response.json({ ok: true })
+    }) as typeof fetch
+
+    await fetchGitHubJson('https://api.github.test/resource', {
+      fetchImpl,
+      token: '',
+    })
+
+    expect(headers.get('authorization')).toBeNull()
+    expect(headers.get('accept')).toBe('application/vnd.github+json')
+    expect(headers.get('x-github-api-version')).toBe('2022-11-28')
+  })
+
+  it('redacts the token from request failure messages', async () => {
+    const { fetchGitHubJson } = await radar()
+    const token = 'github-token-that-must-stay-secret'
+    const fetchImpl = vi.fn(async () => {
+      throw new Error(`transport rejected Authorization: Bearer ${token}`)
+    }) as typeof fetch
+
+    const failure = await fetchGitHubJson('https://api.github.test/resource', {
+      fetchImpl,
+      token,
+    }).catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).not.toContain(token)
   })
 
   it('follows paginated open issues and extracts one hidden marker per issue', async () => {
@@ -672,17 +799,21 @@ describe('offline dry-run CLI', () => {
     const fetchImpl = vi.fn(() => {
       throw new Error('offline mode must not access the network')
     }) as typeof fetch
+    const dependencies = {
+      get env(): NodeJS.ProcessEnv {
+        throw new Error('offline mode must not read GITHUB_TOKEN')
+      },
+      fetchImpl,
+      stdinText: JSON.stringify(input),
+      readFile: () => {
+        throw new Error('stdin input must not read a file')
+      },
+      writeStdout: (value: string) => output.push(value),
+    }
 
     const status = await runRadarCli(
       ['--offline', '--input-file', '-', '--dry-run'],
-      {
-        stdinText: JSON.stringify(input),
-        readFile: () => {
-          throw new Error('stdin input must not read a file')
-        },
-        fetchImpl,
-        writeStdout: value => output.push(value),
-      },
+      dependencies,
     )
 
     expect(status).toBe(0)
@@ -744,14 +875,19 @@ describe('upstream radar workflow', () => {
 
     const steps = workflow.jobs?.radar?.steps ?? []
     const checkout = steps.find(step => step.uses === 'actions/checkout@v4')
+    const detect = steps.find(step => step.id === 'detect')
     expect(checkout?.with).toMatchObject({
       'persist-credentials': false,
     })
-    expect(steps.some(step => step.id === 'detect'
-      && typeof step.run === 'string'
-      && step.run.includes('openloop:radar')
-      && step.run.includes('--repository "$GITHUB_REPOSITORY"')
-      && step.run.includes('GITHUB_OUTPUT'))).toBe(true)
+    expect(detect).toMatchObject({
+      env: {
+        GITHUB_TOKEN: '${{ github.token }}',
+      },
+    })
+    expect(typeof detect?.run === 'string'
+      && detect.run.includes('openloop:radar')
+      && detect.run.includes('--repository "$GITHUB_REPOSITORY"')
+      && detect.run.includes('GITHUB_OUTPUT')).toBe(true)
     expect(steps.at(-1)?.uses).toBe('actions/github-script@v7')
   })
 

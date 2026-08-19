@@ -38,6 +38,8 @@ jobs:
 
       - name: Detect upstream source
         id: detect
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: pnpm --silent openloop:radar -- --repository "$GITHUB_REPOSITORY" --dry-run --github-output >> "$GITHUB_OUTPUT"
 
       - name: Create or update upstream report

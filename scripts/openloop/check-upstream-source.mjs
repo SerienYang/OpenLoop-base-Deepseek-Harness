@@ -340,9 +340,20 @@ export function escapeGitHubOutput(value) {
     .replaceAll('\n', '%0A')
 }
 
+function nonEmptyToken(value) {
+  if (typeof value !== 'string') return undefined
+  const token = value.trim()
+  return token.length > 0 ? token : undefined
+}
+
+function liveGitHubToken(options) {
+  return nonEmptyToken(options.token ?? (options.env ?? process.env).GITHUB_TOKEN)
+}
+
 async function fetchGitHubResource(url, options = {}) {
   const fetchImpl = options.fetchImpl ?? fetch
   const timeoutMs = options.timeoutMs ?? 10_000
+  const token = nonEmptyToken(options.token)
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
     throw new Error('GitHub API timeout must be a positive integer')
   }
@@ -355,6 +366,7 @@ async function fetchGitHubResource(url, options = {}) {
         accept: 'application/vnd.github+json',
         'user-agent': 'openloop-upstream-radar',
         'x-github-api-version': '2022-11-28',
+        ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
       },
       signal: controller.signal,
     })
@@ -379,6 +391,10 @@ async function fetchGitHubResource(url, options = {}) {
     if (controller.signal.aborted
       || (error instanceof Error && error.name === 'AbortError')) {
       throw new Error(`GitHub API timeout for ${url}`)
+    }
+    if (token !== undefined) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(message.replaceAll(token, '[REDACTED]'))
     }
     throw error
   } finally {
@@ -457,6 +473,7 @@ async function loadOpenRadarIssues(repositoryValue, options) {
   }
   const fetchOptions = {
     fetchImpl: options.fetchImpl,
+    token: options.token,
     timeoutMs: options.timeoutMs,
   }
   const pages = []
@@ -490,15 +507,17 @@ async function loadOpenRadarIssues(repositoryValue, options) {
 /** Read upstream candidates and current-repository issues without mutation. */
 export async function loadLiveRadarInput(options = {}) {
   const repository = githubRepository(options.repository)
+  const token = liveGitHubToken(options)
   const fetchOptions = {
     fetchImpl: options.fetchImpl,
+    token,
     timeoutMs: options.timeoutMs,
   }
   const [releases, tags, branch, issues] = await Promise.all([
     fetchGitHubJson(`${apiRoot}/releases?per_page=100`, fetchOptions),
     fetchGitHubJson(`${apiRoot}/tags?per_page=100`, fetchOptions),
     fetchGitHubJson(`${apiRoot}/commits/${upstreamBranch}`, fetchOptions),
-    loadOpenRadarIssues(repository, options),
+    loadOpenRadarIssues(repository, { ...options, token }),
   ])
   return { releases, tags, branch, issues }
 }
@@ -581,8 +600,10 @@ export async function runRadarCli(args, dependencies = {}) {
     input = parseJsonInput(source, `offline input ${options.inputFile}`)
   } else {
     const live = await loadLiveRadarInput({
+      env: dependencies.env,
       fetchImpl: dependencies.fetchImpl,
       repository: options.repository,
+      token: dependencies.token,
     })
     input = {
       baseline: parseJsonInput(readFile(baselinePath), 'upstream baseline'),
