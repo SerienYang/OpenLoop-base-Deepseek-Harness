@@ -9,6 +9,7 @@ import {
 } from 'node:fs'
 import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import ts from 'typescript'
 
 const allowlistPath = 'scripts/openloop/test-skip-allowlist.json'
 const ignoredDirectories = new Set([
@@ -23,20 +24,20 @@ const ignoredDirectories = new Set([
 ])
 const scannedExtensions = new Set([
   '.cjs',
+  '.cts',
   '.js',
   '.jsx',
   '.mjs',
+  '.mts',
   '.rs',
   '.ts',
   '.tsx',
 ])
 const globCharacters = /[*?[{]/
 const onlyPattern = /\b(?:describe|it|suite|test)(?:\.[$\w]+)*\.only(?:\.[$\w]+)*\s*\(/
-const skipPatterns = [
-  /\b(?:describe|it|suite|test)(?:\.[$\w]+)*\.(?:fixme|skip|skipIf|todo)(?:\.[$\w]+)*\s*\(/,
-  /\bctx\.skip\s*\(/,
-  /#\s*\[\s*ignore(?:\s*=|\s*\])/,
-]
+const rustIgnorePattern = /#\s*\[\s*ignore(?:\s*=|\s*\])/
+const testDeclarationNames = new Set(['describe', 'it', 'suite', 'test'])
+const unconditionalSkipNames = new Set(['fixme', 'skip', 'todo'])
 
 function optionMap(args, required) {
   const values = {}
@@ -131,6 +132,71 @@ function matchingLines(root, files, patterns) {
   return matches
 }
 
+function normalizedRelativePath(root, absolute) {
+  return relative(root, absolute).split(sep).join('/')
+}
+
+function isKnownTestFile(root, absolute) {
+  const path = normalizedRelativePath(root, absolute)
+  if (extname(path) === '.rs') return true
+  return path.includes('/tests/')
+    || /\.(?:e2e|spec|test)\.[cm]?[jt]sx?$/u.test(path)
+}
+
+function calleeSegments(expression) {
+  if (ts.isIdentifier(expression)) return [expression.text]
+  if (ts.isPropertyAccessExpression(expression)) {
+    const parent = calleeSegments(expression.expression)
+    return parent === undefined ? undefined : [...parent, expression.name.text]
+  }
+  if (ts.isElementAccessExpression(expression)
+    && expression.argumentExpression !== undefined
+    && ts.isStringLiteralLike(expression.argumentExpression)) {
+    const parent = calleeSegments(expression.expression)
+    return parent === undefined ? undefined : [...parent, expression.argumentExpression.text]
+  }
+  if (ts.isCallExpression(expression)) return calleeSegments(expression.expression)
+  return undefined
+}
+
+function javascriptSkipDeclarations(root, absolute) {
+  const source = readFileSync(absolute, 'utf8')
+  const sourceFile = ts.createSourceFile(
+    absolute,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+  )
+  const matches = new Map()
+
+  function visit(node) {
+    if (ts.isCallExpression(node)
+      && node.arguments[0] !== undefined
+      && ts.isStringLiteralLike(node.arguments[0])) {
+      const segments = calleeSegments(node.expression)
+      if (segments !== undefined
+        && testDeclarationNames.has(segments[0])
+        && segments.some(segment => unconditionalSkipNames.has(segment))) {
+        const line = sourceFile.getLineAndCharacterOfPosition(node.expression.getStart(sourceFile)).line + 1
+        const file = normalizedRelativePath(root, absolute)
+        matches.set(`${file}:${line}`, { file, line })
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+
+  visit(sourceFile)
+  return [...matches.values()]
+}
+
+function skipDeclarations(root, files) {
+  return files
+    .filter(file => isKnownTestFile(root, file))
+    .flatMap(file => extname(file) === '.rs'
+      ? matchingLines(root, [file], [rustIgnorePattern])
+      : javascriptSkipDeclarations(root, file))
+}
+
 function isIsoCalendarDate(value) {
   const parsed = new Date(`${value}T00:00:00.000Z`)
   return !Number.isNaN(parsed.valueOf())
@@ -170,20 +236,13 @@ function readAllowlist(root, now) {
 }
 
 function validateSkips(root, files, allowlist) {
-  const skips = matchingLines(root, files, skipPatterns)
+  const skips = skipDeclarations(root, files)
   for (const skip of skips) {
     const key = `${skip.file}:${skip.line}`
     const entry = allowlist.get(key)
     if (entry === undefined) throw new Error(`${key}: skip is not present in the allowlist`)
     if (entry.expired) throw new Error(`${key}: skip allowlist entry is expired`)
   }
-}
-
-function isOpenLoopOwned(path) {
-  return path.startsWith('scripts/openloop/')
-    || path.startsWith('packages/openloop/')
-    || path.startsWith('runtime/openloop/')
-    || /^apps\/openloop-[^/]+\//.test(path)
 }
 
 function scanRepository(root, allowlist) {
@@ -193,11 +252,7 @@ function scanRepository(root, allowlist) {
     const match = focused[0]
     throw new Error(`${match.file}:${match.line}: forbidden focused test marker`)
   }
-  validateSkips(
-    root,
-    files.filter(file => isOpenLoopOwned(relative(root, file).split(sep).join('/'))),
-    allowlist,
-  )
+  validateSkips(root, files, allowlist)
 }
 
 function parseJsonOutput(stdout, label) {
@@ -223,7 +278,10 @@ function assertVitestResult(result) {
     throw new Error('Vitest discovered zero tests')
   }
   const pending = Number.isInteger(report.numPendingTests) ? report.numPendingTests : 0
-  if (report.numTotalTests - pending <= 0) throw new Error('Vitest executed zero tests')
+  if (report.numTotalTests - pending <= 0) {
+    if (pending > 0) throw new Error('Vitest all discovered tests were skipped')
+    throw new Error('Vitest executed zero tests')
+  }
   assertCommandPassed(result, 'Vitest')
 }
 
@@ -234,8 +292,12 @@ function assertCargoList(result) {
 }
 
 function assertCargoResult(result) {
-  const matches = [...result.stdout.matchAll(/test result: [^.]+\.\s+(\d+) passed;\s+(\d+) failed;/gu)]
+  const matches = [...result.stdout.matchAll(
+    /test result: [^.]+\.\s+(\d+) passed;\s+(\d+) failed;\s+(\d+) ignored;/gu,
+  )]
   const executed = matches.reduce((total, match) => total + Number(match[1]) + Number(match[2]), 0)
+  const skipped = matches.reduce((total, match) => total + Number(match[3]), 0)
+  if (executed === 0 && skipped > 0) throw new Error('Cargo all discovered tests were skipped')
   if (executed === 0) throw new Error('Cargo executed zero tests')
   assertCommandPassed(result, 'Cargo')
 }
@@ -246,6 +308,9 @@ function assertPlaywrightResult(result) {
   const executed = Number(stats.expected ?? 0)
     + Number(stats.unexpected ?? 0)
     + Number(stats.flaky ?? 0)
+  if (executed === 0 && Number(stats.skipped ?? 0) > 0) {
+    throw new Error('Playwright all discovered tests were skipped')
+  }
   if (executed === 0) throw new Error('Playwright executed zero tests')
   assertCommandPassed(result, 'Playwright')
 }
@@ -258,6 +323,8 @@ function assertWdioResult(result) {
     (total, match) => total + Number(match[1]) + Number(match[2]),
     0,
   )
+  const skipped = summaries.reduce((total, match) => total + Number(match[3]), 0)
+  if (executed === 0 && skipped > 0) throw new Error('WDIO all discovered tests were skipped')
   if (executed === 0) throw new Error('WDIO executed zero tests')
   assertCommandPassed(result, 'WDIO')
 }

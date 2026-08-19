@@ -18,10 +18,14 @@ function writeJson(path: string, value: object): void {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`)
 }
 
-function writeManifest(root: string, name: string, manifest: object): void {
-  const directory = join(root, 'packages', 'openloop', name)
+function writePackageManifest(root: string, group: string, name: string, manifest: object): void {
+  const directory = join(root, 'packages', group, name)
   mkdirSync(directory, { recursive: true })
   writeFileSync(join(directory, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`)
+}
+
+function writeManifest(root: string, name: string, manifest: object): void {
+  writePackageManifest(root, 'openloop', name, manifest)
 }
 
 function writeAggregates(
@@ -44,6 +48,23 @@ afterEach(() => {
 })
 
 describe('OpenLoop workspace conventions', () => {
+  it('keeps the upstream DSH namespace mandatory under packages/core', async () => {
+    const { collectDshWorkspaceNamingViolations } = await import('./workspace-conventions.ts')
+    const root = fixtureRoot()
+    writePackageManifest(root, 'core', 'agent-loop', {
+      name: '@openloop/agent-loop',
+    })
+
+    expect(collectDshWorkspaceNamingViolations(root)).toEqual([
+      'packages/core/agent-loop/package.json: DSH packages must use the @deepseek-ai/dsh-* namespace',
+    ])
+
+    writePackageManifest(root, 'core', 'agent-loop', {
+      name: '@deepseek-ai/dsh-agent-loop',
+    })
+    expect(collectDshWorkspaceNamingViolations(root)).toEqual([])
+  })
+
   it('accepts private @openloop packages with exactly one compiler face', async () => {
     const { collectOpenLoopWorkspaceViolations } = await import('./workspace-conventions.ts')
     const root = fixtureRoot()

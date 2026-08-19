@@ -50,6 +50,38 @@ function aggregateReferences(root: string, face: 'host' | 'client'): readonly st
 }
 
 /**
+ * Preserve the upstream package namespace for every DSH package group. The
+ * product-owned packages/openloop group is the only exception.
+ */
+export function collectDshWorkspaceNamingViolations(root: string): string[] {
+  const packagesRoot = join(root, 'packages')
+  if (!existsSync(packagesRoot)) return []
+
+  const errors: string[] = []
+  const groups = readdirSync(packagesRoot, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && entry.name !== 'openloop')
+    .sort((left, right) => left.name.localeCompare(right.name))
+
+  for (const group of groups) {
+    const groupRoot = join(packagesRoot, group.name)
+    const packages = readdirSync(groupRoot, { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .sort((left, right) => left.name.localeCompare(right.name))
+    for (const entry of packages) {
+      const manifestPath = join(groupRoot, entry.name, 'package.json')
+      if (!existsSync(manifestPath)) continue
+      const manifest = readManifest(manifestPath)
+      if (manifest.name?.startsWith('@deepseek-ai/dsh-') === true) continue
+      errors.push(
+        `packages/${group.name}/${entry.name}/package.json: DSH packages must use the @deepseek-ai/dsh-* namespace`,
+      )
+    }
+  }
+
+  return errors
+}
+
+/**
  * Validate the product-owned package namespace without changing DSH's public
  * package policy.
  */

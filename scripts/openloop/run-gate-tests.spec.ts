@@ -139,6 +139,68 @@ describe('OpenLoop focused test gate', () => {
     ])
   })
 
+  it('rejects a nonexistent exact Cargo test target', async () => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    write(root, 'native/app/Cargo.toml', '[package]\nname = "openloop"\nversion = "0.1.0"\n')
+
+    await expect(runGateTests(
+      ['cargo', '--manifest', 'native/app/Cargo.toml', '--test', 'missing'],
+      {
+        root,
+        runCommand: () => ({
+          status: 101,
+          stdout: '',
+          stderr: 'error: no test target named `missing`',
+        }),
+      },
+    )).rejects.toThrow('Cargo test listing failed:\nerror: no test target named `missing`')
+  })
+
+  it('rejects a Cargo target that discovers zero tests', async () => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    write(root, 'native/app/Cargo.toml', '[package]\nname = "openloop"\nversion = "0.1.0"\n')
+
+    await expect(runGateTests(
+      ['cargo', '--manifest', 'native/app/Cargo.toml', '--test', 'desktop'],
+      {
+        root,
+        runCommand: () => ({
+          status: 0,
+          stdout: '0 tests, 0 benchmarks\n',
+          stderr: '',
+        }),
+      },
+    )).rejects.toThrow('Cargo discovered zero tests')
+  })
+
+  it('rejects an all-skipped Cargo result', async () => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    write(root, 'native/app/Cargo.toml', '[package]\nname = "openloop"\nversion = "0.1.0"\n')
+    let invocation = 0
+
+    await expect(runGateTests(
+      ['cargo', '--manifest', 'native/app/Cargo.toml', '--test', 'desktop'],
+      {
+        root,
+        runCommand: () => {
+          invocation += 1
+          if (invocation === 1) {
+            return { status: 0, stdout: 'platform_only: test\n', stderr: '' }
+          }
+          return {
+            status: 0,
+            stdout: 'test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out\n',
+            stderr: '',
+          }
+        },
+      },
+    )).rejects.toThrow('Cargo all discovered tests were skipped')
+    expect(invocation).toBe(2)
+  })
+
   it('passes the exact binary to WDIO and rejects a missing binary', async () => {
     const { runGateTests } = await import(gateModulePath)
     const root = fixtureRoot()
@@ -182,16 +244,26 @@ describe('OpenLoop focused test gate', () => {
     expect(calls[0]?.env?.OPENLOOP_WDIO_BINARY).toBe(join(root, 'target/openloop'))
   })
 
-  it('rejects nonexistent focused targets and zero discovered tests', async () => {
+  it('rejects a nonexistent exact Vitest file before invoking the runner', async () => {
     const { runGateTests } = await import(gateModulePath)
     const root = fixtureRoot()
 
     await expect(runGateTests(
       ['vitest', '--files', 'scripts/openloop/missing.spec.ts'],
-      { root, runCommand: () => ({ status: 0, stdout: '{}', stderr: '' }) },
+      {
+        root,
+        runCommand: () => {
+          throw new Error('must not execute')
+        },
+      },
     )).rejects.toThrow('target does not exist: scripts/openloop/missing.spec.ts')
+  })
 
+  it('rejects zero discovered Vitest tests', async () => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
     write(root, 'scripts/openloop/empty.spec.ts', 'export {}\n')
+
     await expect(runGateTests(
       ['vitest', '--files', 'scripts/openloop/empty.spec.ts'],
       {
@@ -203,6 +275,24 @@ describe('OpenLoop focused test gate', () => {
         }),
       },
     )).rejects.toThrow('Vitest discovered zero tests')
+  })
+
+  it('rejects an all-skipped Vitest result', async () => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    write(root, 'scripts/openloop/platform.spec.ts', "it('platform', () => {})\n")
+
+    await expect(runGateTests(
+      ['vitest', '--files', 'scripts/openloop/platform.spec.ts'],
+      {
+        root,
+        runCommand: () => ({
+          status: 0,
+          stdout: JSON.stringify({ numTotalTests: 2, numPendingTests: 2 }),
+          stderr: '',
+        }),
+      },
+    )).rejects.toThrow('Vitest all discovered tests were skipped')
   })
 
   it('performs a repository-wide focused-marker scan in every mode', async () => {
@@ -241,11 +331,24 @@ describe('OpenLoop focused test gate', () => {
   ])('rejects chained skip marker %s', async (marker) => {
     const { runGateTests } = await import(gateModulePath)
     const root = fixtureRoot()
-    const testPath = 'scripts/openloop/platform.spec.ts'
+    const testPath = 'packages/core/example/tests/platform.spec.ts'
     write(root, testPath, `${marker}([1])('platform', () => {})\n`)
 
     await expect(runGateTests(['scan-repo'], { root }))
       .rejects.toThrow(`${testPath}:1: skip is not present in the allowlist`)
+  })
+
+  it('ignores conditional skips, runtime skips, and skip text in fixtures', async () => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    write(root, 'packages/core/example/tests/platform.spec.ts', [
+      "describe.skipIf(process.platform === 'win32')('platform', () => {})",
+      'const suite = process.platform === "darwin" ? describe : describe.skip',
+      "it('uses a source fixture', () => 'test.skip.each([1])')",
+      "it('checks runtime availability', (ctx) => { if (!available) ctx.skip() })",
+    ].join('\n'))
+
+    await expect(runGateTests(['scan-repo'], { root })).resolves.toBeUndefined()
   })
 
   it('rejects unlisted or expired skips and accepts complete future entries', async () => {
@@ -322,10 +425,83 @@ describe('OpenLoop focused test gate', () => {
     )
   })
 
-  it('validates Playwright and WDIO nonzero result summaries', async () => {
+  it('rejects a nonexistent exact Playwright file before invoking the runner', async () => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+
+    await expect(runGateTests(['playwright', '--file', 'tests/missing.spec.ts'], {
+      root,
+      runCommand: () => {
+        throw new Error('must not execute')
+      },
+    })).rejects.toThrow('target does not exist: tests/missing.spec.ts')
+  })
+
+  it('rejects a nonexistent exact WDIO file before invoking the runner', async () => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    write(root, 'wdio.conf.ts', 'export const config = {}\n')
+    write(root, 'target/openloop', 'binary')
+
+    await expect(runGateTests([
+      'wdio',
+      '--config', 'wdio.conf.ts',
+      '--binary', 'target/openloop',
+      '--file', 'tests/missing.e2e.ts',
+    ], {
+      root,
+      runCommand: () => {
+        throw new Error('must not execute')
+      },
+    })).rejects.toThrow('target does not exist: tests/missing.e2e.ts')
+  })
+
+  it('rejects an all-skipped Playwright result', async () => {
     const { runGateTests } = await import(gateModulePath)
     const root = fixtureRoot()
     write(root, 'tests/app.spec.ts', "test('app', () => {})\n")
+
+    await expect(runGateTests(['playwright', '--file', 'tests/app.spec.ts'], {
+      root,
+      runCommand: () => ({
+        status: 0,
+        stdout: JSON.stringify({
+          stats: { expected: 0, unexpected: 0, flaky: 0, skipped: 2 },
+        }),
+        stderr: '',
+      }),
+    })).rejects.toThrow('Playwright all discovered tests were skipped')
+  })
+
+  it('rejects an all-skipped WDIO result', async () => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    write(root, 'wdio.conf.ts', 'export const config = {}\n')
+    write(root, 'target/openloop', 'binary')
+    write(root, 'tests/window.e2e.ts', "describe('window', () => {})\n")
+
+    await expect(runGateTests([
+      'wdio',
+      '--config', 'wdio.conf.ts',
+      '--binary', 'target/openloop',
+      '--file', 'tests/window.e2e.ts',
+    ], {
+      root,
+      runCommand: () => ({
+        status: 0,
+        stdout: '0 passed, 0 failed, 2 skipped\n',
+        stderr: '',
+      }),
+    })).rejects.toThrow('WDIO all discovered tests were skipped')
+  })
+
+  it('validates both Playwright and WDIO zero-execution summaries', async () => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    write(root, 'tests/app.spec.ts', "test('app', () => {})\n")
+    write(root, 'wdio.conf.ts', 'export const config = {}\n')
+    write(root, 'target/openloop', 'binary')
+    write(root, 'tests/window.e2e.ts', "describe('window', () => {})\n")
 
     await expect(runGateTests(['playwright', '--file', 'tests/app.spec.ts'], {
       root,
@@ -337,5 +513,19 @@ describe('OpenLoop focused test gate', () => {
         stderr: '',
       }),
     })).rejects.toThrow('Playwright executed zero tests')
+
+    await expect(runGateTests([
+      'wdio',
+      '--config', 'wdio.conf.ts',
+      '--binary', 'target/openloop',
+      '--file', 'tests/window.e2e.ts',
+    ], {
+      root,
+      runCommand: () => ({
+        status: 0,
+        stdout: '0 passed, 0 failed, 0 skipped\n',
+        stderr: '',
+      }),
+    })).rejects.toThrow('WDIO executed zero tests')
   })
 })

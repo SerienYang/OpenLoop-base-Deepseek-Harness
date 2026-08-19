@@ -1,4 +1,26 @@
 {
   "version": 1,
-  "skips": []
+  "skips": [
+    {
+      "file": "packages/typert/generator/tests/cordis-catalog-contract.spec.ts",
+      "line": 127,
+      "owner": "dsh-typert",
+      "reason": "The upstream collectEvents contract suite is intentionally disabled to keep the Typert CI cost bounded until the generator contract is split.",
+      "expires": "2026-12-31"
+    },
+    {
+      "file": "packages/typert/generator/tests/cordis-catalog-contract.spec.ts",
+      "line": 242,
+      "owner": "dsh-typert",
+      "reason": "The upstream collectServices contract suite is intentionally disabled to keep the Typert CI cost bounded until the generator contract is split.",
+      "expires": "2026-12-31"
+    },
+    {
+      "file": "packages/web/web-search-deepseek/tests/deepseek.e2e.ts",
+      "line": 26,
+      "owner": "dsh-web-search",
+      "reason": "The live DeepSeek search endpoint can succeed without structured source blocks, so this probe is not a reliable merge signal.",
+      "expires": "2026-12-31"
+    }
+  ]
 }

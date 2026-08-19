@@ -9,7 +9,10 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 import { hasTypertRemoteNavigation, isForbiddenPublicationFile } from './publication-payload.ts'
 import { collectProjectReferenceFaceViolations } from './project-reference-faces.ts'
-import { collectOpenLoopWorkspaceViolations } from './openloop/workspace-conventions.ts'
+import {
+  collectDshWorkspaceNamingViolations,
+  collectOpenLoopWorkspaceViolations,
+} from './openloop/workspace-conventions.ts'
 
 const root = resolve(import.meta.dirname, '..')
 // vendor/* is single-level; packages/<group>/<pkg> nests one level deeper
@@ -418,6 +421,7 @@ const errors = [
   ...checkWorkspaceProtocol(manifests),
   ...checkHierarchyShape(),
   ...collectProjectReferenceFaceViolations(root),
+  ...collectDshWorkspaceNamingViolations(root),
   ...collectOpenLoopWorkspaceViolations(root),
 ]
 if (errors.length > 0) {
