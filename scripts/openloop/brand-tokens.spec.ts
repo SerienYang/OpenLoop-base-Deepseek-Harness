@@ -332,6 +332,25 @@ function inspectGroupShape(
   return { groups, problems }
 }
 
+function invalidNameProblems(
+  value: unknown,
+  prefix = '',
+  problems: string[] = [],
+): readonly string[] {
+  if (!isRecord(value)) return problems
+  for (const [key, child] of Object.entries(value)) {
+    if (key.startsWith('$')) continue
+    if (/[.{}]/u.test(key)) {
+      problems.push(
+        `${prefix === '' ? 'root' : prefix} key ${JSON.stringify(key)} `
+        + 'contains forbidden DTCG name characters',
+      )
+    }
+    invalidNameProblems(child, prefix === '' ? key : `${prefix}.${key}`, problems)
+  }
+  return problems
+}
+
 function documentProblems(document: Record<string, unknown>): string[] {
   const problems: string[] = []
   const rootGroups = Object.keys(document)
@@ -361,6 +380,7 @@ function documentProblems(document: Record<string, unknown>): string[] {
       `${tokenPath} is outside the approved named token architecture`,
     )
   }
+  problems.push(...invalidNameProblems(document))
   const shape = inspectGroupShape(document)
   problems.push(...shape.problems)
   for (const groupPath of shape.groups) {
@@ -622,6 +642,24 @@ describe('OpenLoop design tokens', () => {
 
     expect(documentProblems(document)).toContain(
       'unexpected token: color.semantic.rogue',
+    )
+  })
+
+  test('rejects DTCG names that can impersonate nested token paths', () => {
+    const document = structuredClone(readDocument())
+    if (!isRecord(document.color)) throw new TypeError('Missing color group')
+    if (!isRecord(document.color.palette)) {
+      throw new TypeError('Missing palette group')
+    }
+    if (!isRecord(document.color.palette.neutral)) {
+      throw new TypeError('Missing neutral palette')
+    }
+    document.color.palette['neutral.0']
+      = document.color.palette.neutral['0']
+    delete document.color.palette.neutral['0']
+
+    expect(documentProblems(document)).toContain(
+      'color.palette key "neutral.0" contains forbidden DTCG name characters',
     )
   })
 
