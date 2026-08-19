@@ -498,6 +498,64 @@ describe('Openloop desktop foundation configuration', () => {
     expect(frontend).not.toMatch(/https?:\/\/(?!ipc\.localhost|localhost:1420)/u)
   })
 
+  test('keeps the bootstrap layout inside narrow browser viewports', () => {
+    const styles = readText('apps/openloop-desktop/src/styles.css')
+    const mobileBreakpoint = '@media (max-width: 759px)'
+    const mobileStyles = styles.slice(styles.indexOf(mobileBreakpoint))
+    const bootstrapStyles = /\.bootstrap\s*\{([^}]*)\}/u.exec(mobileStyles)?.[1]
+
+    expect(styles).toContain(mobileBreakpoint)
+    expect(mobileStyles).toMatch(
+      /html,\s*body,\s*#app\s*\{[^}]*min-width:\s*0;[^}]*min-height:\s*0;/u,
+    )
+    expect(mobileStyles).toMatch(/body\s*\{[^}]*overflow:\s*auto;/u)
+    expect(bootstrapStyles).toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\);/u)
+    expect(bootstrapStyles).toMatch(/gap:\s*\d+px;/u)
+    expect(bootstrapStyles).toMatch(/width:\s*100%;/u)
+    expect(bootstrapStyles).toMatch(/min-height:\s*100%;/u)
+    expect(bootstrapStyles).toMatch(/height:\s*auto;/u)
+    expect(bootstrapStyles).toMatch(/padding:\s*\d+px\s+\d+px\s+\d+px;/u)
+    expect(mobileStyles).toMatch(
+      /\.brand-mark\s*\{[^}]*grid-row:\s*auto;[^}]*width:\s*\d+px;[^}]*height:\s*\d+px;/u,
+    )
+    expect(mobileStyles).toMatch(
+      /\.build-facts\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/u,
+    )
+    expect(mobileStyles).toMatch(
+      /\.build-facts div:last-child\s*\{[^}]*grid-column:\s*1\s*\/\s*-1;/u,
+    )
+    expect(mobileStyles).toMatch(
+      /\.build-facts dd\s*\{[^}]*overflow-wrap:\s*anywhere;[^}]*white-space:\s*normal;/u,
+    )
+    expect(styles).toMatch(/\.status\s*\{[^}]*overflow-wrap:\s*anywhere;/u)
+  })
+
+  test('uses non-negative typography tracking', () => {
+    const styles = readText('apps/openloop-desktop/src/styles.css')
+
+    expect(styles).not.toMatch(/letter-spacing\s*:\s*-\d/u)
+    expect(styles).toMatch(/h1\s*\{[^}]*letter-spacing:\s*0;/u)
+  })
+
+  test('keeps bootstrap failure details out of the browser UI', () => {
+    const mainSource = readText('apps/openloop-desktop/src/main.ts')
+
+    expect(mainSource).toContain("text('bootstrap-status', 'Build manifest unavailable')")
+    expect(mainSource).not.toMatch(/error\.message|String\s*\(\s*error\s*\)/u)
+  })
+
+  test('bundles the existing Openloop brand mark as the favicon', () => {
+    const index = readText('apps/openloop-desktop/index.html')
+    const faviconPath = '../../assets/brand/openloop-icon.svg'
+
+    expect(index).toContain(
+      `<link rel="icon" type="image/svg+xml" href="${faviconPath}">`,
+    )
+    expect(path.resolve(appRoot, faviconPath)).toBe(
+      requiredFile('assets/brand/openloop-icon.svg'),
+    )
+  })
+
   test('keeps generated build and app outputs ignored', () => {
     const gitignore = readText('.gitignore').split(/\r?\n/u)
 

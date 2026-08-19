@@ -58,16 +58,11 @@ async function bootstrap(): Promise<void> {
     text('build-channel', manifest.channel)
     text('build-sha', manifest.dshCommit)
     text('bootstrap-status', 'Embedded build manifest ready')
-  } catch (error) {
+  } catch {
     text('build-version', 'Unavailable')
     text('build-channel', 'Unavailable')
     text('build-sha', 'Unavailable')
-    text(
-      'bootstrap-status',
-      error instanceof Error
-        ? `Build manifest unavailable: ${error.message}`
-        : 'Build manifest unavailable',
-    )
+    text('bootstrap-status', 'Build manifest unavailable')
     document.documentElement.dataset.bootstrap = 'failed'
   }
 }
