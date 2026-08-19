@@ -254,10 +254,66 @@ function contrastRatio(foreground: ColorValue, background: ColorValue): number {
   return (lighter + 0.05) / (darker + 0.05)
 }
 
+function documentProblems(document: Record<string, unknown>): string[] {
+  const problems: string[] = []
+  const rootGroups = Object.keys(document)
+    .filter(key => !key.startsWith('$'))
+    .sort()
+  if (rootGroups.join(',') !== 'color') {
+    problems.push('the token document may only contain the color token group')
+  }
+
+  if (!isRecord(document.color)) {
+    problems.push('color must be a DTCG token group')
+    return problems
+  }
+  if (document.color.$type !== 'color') {
+    problems.push('color must declare the DTCG color type')
+  }
+  const colorGroups = Object.keys(document.color)
+    .filter(key => !key.startsWith('$'))
+    .sort()
+  if (colorGroups.join(',') !== 'brand,palette,semantic') {
+    problems.push(
+      'color may only contain brand, palette, and semantic token groups',
+    )
+  }
+
+  for (const [tokenPath, value] of flattenTokens(document)) {
+    if (typeof value === 'string') continue
+    let color: ColorValue
+    try {
+      color = concreteColor(value, tokenPath)
+    }
+    catch (error) {
+      problems.push(
+        error instanceof Error ? error.message : `${tokenPath} is invalid`,
+      )
+      continue
+    }
+    if (color.components.some(component => component < 0 || component > 1)) {
+      problems.push(`${tokenPath} components must stay in the sRGB 0..1 range`)
+    }
+    if (!/^#[0-9A-F]{6}$/u.test(color.hex)) {
+      problems.push(`${tokenPath} hex must use uppercase six-digit notation`)
+      continue
+    }
+    const expected = hexComponents(color.hex)
+    if (color.components.some((component, index) =>
+      Math.abs(component - (expected[index] ?? -1)) > 0.000001)) {
+      problems.push(`${tokenPath} hex must match its sRGB components`)
+    }
+  }
+
+  return problems
+}
+
 describe('OpenLoop design tokens', () => {
   test('publishes the approved DTCG token file', () => {
     expect(fs.existsSync(tokenFile)).toBe(true)
-    expect(readDocument().color).toMatchObject({ $type: 'color' })
+    const document = readDocument()
+    expect(document.color).toMatchObject({ $type: 'color' })
+    expect(documentProblems(document)).toEqual([])
   })
 
   test('keeps the approved palette and brand aliases exact', () => {
@@ -353,5 +409,47 @@ describe('OpenLoop design tokens', () => {
         ).toBeGreaterThanOrEqual(minimum)
       }
     }
+  })
+
+  test('rejects token groups outside the approved three-layer architecture', () => {
+    const document = structuredClone(readDocument())
+    if (!isRecord(document.color)) throw new TypeError('Missing color group')
+    document.color.rogue = {
+      surprise: {
+        $value: {
+          colorSpace: 'srgb',
+          components: [1, 0, 1],
+          alpha: 1,
+          hex: '#FF00FF',
+        },
+      },
+    }
+
+    expect(documentProblems(document)).toContain(
+      'color may only contain brand, palette, and semantic token groups',
+    )
+  })
+
+  test('rejects malformed concrete colors anywhere in the document', () => {
+    const document = structuredClone(readDocument())
+    if (!isRecord(document.color)) throw new TypeError('Missing color group')
+    if (!isRecord(document.color.palette)) {
+      throw new TypeError('Missing palette group')
+    }
+    if (!isRecord(document.color.palette.neutral)) {
+      throw new TypeError('Missing neutral palette')
+    }
+    if (!isRecord(document.color.palette.neutral['0'])) {
+      throw new TypeError('Missing neutral.0 token')
+    }
+    const token = document.color.palette.neutral['0']
+    if (!isRecord(token.$value)) throw new TypeError('Missing neutral.0 value')
+    token.$value.components = [2, 1, 1]
+    token.$value.hex = '#000000'
+
+    expect(documentProblems(document)).toEqual(expect.arrayContaining([
+      'color.palette.neutral.0 components must stay in the sRGB 0..1 range',
+      'color.palette.neutral.0 hex must match its sRGB components',
+    ]))
   })
 })
