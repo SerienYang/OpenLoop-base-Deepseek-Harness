@@ -254,6 +254,22 @@ function contrastRatio(foreground: ColorValue, background: ColorValue): number {
   return (lighter + 0.05) / (darker + 0.05)
 }
 
+function rootTokenPaths(
+  value: unknown,
+  prefix = '',
+  result: string[] = [],
+): string[] {
+  if (!isRecord(value)) return result
+  if ('$root' in value) {
+    result.push(prefix === '' ? '$root' : `${prefix}.$root`)
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (key.startsWith('$')) continue
+    rootTokenPaths(child, prefix === '' ? key : `${prefix}.${key}`, result)
+  }
+  return result
+}
+
 function documentProblems(document: Record<string, unknown>): string[] {
   const problems: string[] = []
   const rootGroups = Object.keys(document)
@@ -276,6 +292,11 @@ function documentProblems(document: Record<string, unknown>): string[] {
   if (colorGroups.join(',') !== 'brand,palette,semantic') {
     problems.push(
       'color may only contain brand, palette, and semantic token groups',
+    )
+  }
+  for (const tokenPath of rootTokenPaths(document)) {
+    problems.push(
+      `${tokenPath} is outside the approved named token architecture`,
     )
   }
 
@@ -427,6 +448,23 @@ describe('OpenLoop design tokens', () => {
 
     expect(documentProblems(document)).toContain(
       'color may only contain brand, palette, and semantic token groups',
+    )
+  })
+
+  test('rejects DTCG root tokens that bypass named architecture groups', () => {
+    const document = structuredClone(readDocument())
+    if (!isRecord(document.color)) throw new TypeError('Missing color group')
+    document.color.$root = {
+      $value: {
+        colorSpace: 'srgb',
+        components: [1, 0, 1],
+        alpha: 1,
+        hex: '#FF00FF',
+      },
+    }
+
+    expect(documentProblems(document)).toContain(
+      'color.$root is outside the approved named token architecture',
     )
   })
 
