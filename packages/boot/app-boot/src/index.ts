@@ -768,7 +768,9 @@ export async function boot(
   try {
     ctx.baseUrl = pathToFileURL(dirname(absoluteConfigPath)).href + '/'
     ctx.provide('dshHomePath', dshHomePath)
-    await ctx.plugin(Loader)
+    await ctx.plugin(Loader, {
+      ...bareModuleBaseUrl === undefined ? {} : { baseUrl: bareModuleBaseUrl },
+    })
     await prepare?.(ctx)
     stage = 'plugin tree failed to load'
     await mountRootInclude(ctx, absoluteConfigPath, patches, bareModuleBaseUrl)
