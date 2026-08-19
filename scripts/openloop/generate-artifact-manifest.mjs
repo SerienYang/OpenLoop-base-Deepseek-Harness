@@ -168,11 +168,22 @@ function sameFileIdentity(left, right) {
   return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino
 }
 
+function hasFileIdentityAncestor(path, ancestor) {
+  let current = path
+  while (true) {
+    if (sameFileIdentity(current, ancestor)) return true
+    const parent = dirname(current)
+    if (parent === current) return false
+    current = parent
+  }
+}
+
 function assertNoInputOverlap(target, inputs, path) {
   const resolvedTarget = existsSync(target) ? realpathSync(target) : target
   for (const input of inputs) {
     const stat = lstatSync(input)
-    if ((stat.isDirectory() && isWithin(input, resolvedTarget))
+    if ((stat.isDirectory()
+      && (isWithin(input, resolvedTarget) || hasFileIdentityAncestor(target, input)))
       || sameFileIdentity(input, target)) {
       throw new Error(`output must not overlap an artifact input: ${path}`)
     }

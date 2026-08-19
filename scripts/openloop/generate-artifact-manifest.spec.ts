@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -345,5 +346,26 @@ describe('OpenLoop artifact manifest generator', () => {
       out: uppercaseAlias(paths.core),
     }, { trustedRoot: dirname(paths.core) })).toThrow(/overlap/iu)
     expect(readFileSync(paths.core)).toEqual(coreBytes)
+  })
+
+  it('uses directory identity to reject a case alias nested inside an input tree', () => {
+    const paths = fixture()
+    const canonicalWeb = join(dirname(paths.web), 'Web')
+    renameSync(paths.web, canonicalWeb)
+    const caseAlias = paths.web
+    const outputRoot = existsSync(caseAlias) ? caseAlias : canonicalWeb
+    const output = join(outputRoot, 'nested/manifest.json')
+
+    if (existsSync(caseAlias)) {
+      expect(statSync(caseAlias).dev).toBe(statSync(canonicalWeb).dev)
+      expect(statSync(caseAlias).ino).toBe(statSync(canonicalWeb).ino)
+    }
+
+    expect(() => generateArtifactManifest({
+      ...paths,
+      web: canonicalWeb,
+      out: output,
+    }, { trustedRoot: dirname(paths.core) })).toThrow(/overlap/iu)
+    expect(existsSync(output)).toBe(false)
   })
 })
