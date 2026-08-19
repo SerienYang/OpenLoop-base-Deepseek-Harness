@@ -6,12 +6,16 @@ import { fileURLToPath } from 'node:url'
 
 const upstreamRepository = 'deepseek-ai/deepseek-harness'
 const upstreamBranch = 'master'
-const apiRoot = `https://api.github.com/repos/${upstreamRepository}`
+const githubApiRoot = 'https://api.github.com'
+const apiRoot = `${githubApiRoot}/repos/${upstreamRepository}`
 const baselinePath = fileURLToPath(new URL('./upstream-baseline.json', import.meta.url))
 const fullShaPattern = /^[0-9a-f]{40}$/u
 const baselineSourceTypes = new Set(['release', 'tag', 'approved_commit'])
 const candidateSourceTypes = new Set(['release', 'tag', 'branch_head'])
 const issueMarkerPrefix = 'openloop-upstream-radar:issue-key='
+const issueMarkerPattern = /<!-- openloop-upstream-radar:issue-key=[^\s<>]+ -->/gu
+const issuePageSize = 100
+const defaultMaxIssuePages = 100
 const isoTimestampPattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/u
 
 function objectValue(value, label) {
@@ -33,6 +37,15 @@ function fullSha(value, label) {
     throw new Error(`${label} must be a full lowercase 40-character SHA`)
   }
   return value
+}
+
+function githubRepository(value) {
+  const repository = trimmedString(value, 'repository')
+  const match = /^([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9._-]{1,100})$/u.exec(repository)
+  if (match === null || match[2] === '.' || match[2] === '..') {
+    throw new Error('repository must use the GitHub owner/name format')
+  }
+  return repository
 }
 
 function isoTimestamp(value, label) {
@@ -327,8 +340,7 @@ export function escapeGitHubOutput(value) {
     .replaceAll('\n', '%0A')
 }
 
-/** Perform one bounded, read-only GitHub API GET and parse JSON strictly. */
-export async function fetchGitHubJson(url, options = {}) {
+async function fetchGitHubResource(url, options = {}) {
   const fetchImpl = options.fetchImpl ?? fetch
   const timeoutMs = options.timeoutMs ?? 10_000
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
@@ -356,7 +368,10 @@ export async function fetchGitHubJson(url, options = {}) {
     }
     const body = await response.text()
     try {
-      return JSON.parse(body)
+      return {
+        headers: response.headers,
+        value: JSON.parse(body),
+      }
     } catch {
       throw new Error(`GitHub API returned malformed JSON for ${url}`)
     }
@@ -371,18 +386,121 @@ export async function fetchGitHubJson(url, options = {}) {
   }
 }
 
-/** Read all three public upstream candidate surfaces without mutation. */
-export async function loadLiveRadarInput(options = {}) {
+/** Perform one bounded, read-only GitHub API GET and parse JSON strictly. */
+export async function fetchGitHubJson(url, options = {}) {
+  const response = await fetchGitHubResource(url, options)
+  return response.value
+}
+
+function nextLink(value) {
+  if (value === null) return null
+  for (const entry of value.split(',')) {
+    const match = /^\s*<([^>]+)>\s*;\s*rel="([^"]+)"\s*$/u.exec(entry)
+    if (match !== null && match[2].split(/\s+/u).includes('next')) {
+      return match[1]
+    }
+  }
+  return null
+}
+
+function nextIssuesUrl(url, headers, itemCount, repository) {
+  const linked = nextLink(headers.get('link'))
+  if (linked !== null) {
+    const parsed = new URL(linked)
+    if (parsed.origin !== githubApiRoot
+      || parsed.pathname !== `/repos/${repository}/issues`) {
+      throw new Error(`GitHub issues pagination returned an invalid next link: ${linked}`)
+    }
+    return parsed.href
+  }
+  if (itemCount < issuePageSize) return null
+  const parsed = new URL(url)
+  const page = Number(parsed.searchParams.get('page') ?? '1')
+  if (!Number.isSafeInteger(page) || page < 1) {
+    throw new Error(`GitHub issues pagination returned an invalid page URL: ${url}`)
+  }
+  parsed.searchParams.set('page', String(page + 1))
+  return parsed.href
+}
+
+function extractRadarIssues(values) {
+  if (!Array.isArray(values)) {
+    throw new Error('GitHub issues response must be an array')
+  }
+  const issues = []
+  for (const value of values) {
+    const issue = objectValue(value, 'GitHub issue')
+    if (issue.pull_request !== undefined || typeof issue.body !== 'string') {
+      continue
+    }
+    const markers = Array.from(issue.body.matchAll(issueMarkerPattern), match => match[0])
+    if (markers.length === 0) continue
+    if (markers.length > 1) {
+      throw new Error('fail-closed: issue body contains multiple upstream radar issue markers')
+    }
+    if (!Number.isSafeInteger(issue.number) || issue.number < 1) {
+      throw new Error('radar issue number must be a positive integer')
+    }
+    issues.push({
+      number: issue.number,
+      body: markers[0],
+    })
+  }
+  return issues
+}
+
+async function loadOpenRadarIssues(repositoryValue, options) {
+  const repository = githubRepository(repositoryValue)
+  const maxPages = options.maxIssuePages ?? defaultMaxIssuePages
+  if (!Number.isSafeInteger(maxPages) || maxPages < 1) {
+    throw new Error('GitHub issues pagination limit must be a positive integer')
+  }
   const fetchOptions = {
     fetchImpl: options.fetchImpl,
     timeoutMs: options.timeoutMs,
   }
-  const [releases, tags, branch] = await Promise.all([
+  const pages = []
+  const visited = new Set()
+  let url = `${githubApiRoot}/repos/${repository}/issues?state=open&per_page=${issuePageSize}`
+  for (let page = 1; page <= maxPages; page += 1) {
+    if (visited.has(url)) {
+      throw new Error(`GitHub issues pagination returned a cycle at ${url}`)
+    }
+    visited.add(url)
+    const response = await fetchGitHubResource(url, fetchOptions)
+    if (!Array.isArray(response.value)) {
+      throw new Error('GitHub issues response must be an array')
+    }
+    pages.push(...response.value)
+    const next = nextIssuesUrl(
+      url,
+      response.headers,
+      response.value.length,
+      repository,
+    )
+    if (next === null) return extractRadarIssues(pages)
+    if (page === maxPages) {
+      throw new Error(`GitHub issues pagination exceeded ${maxPages} pages`)
+    }
+    url = next
+  }
+  throw new Error(`GitHub issues pagination exceeded ${maxPages} pages`)
+}
+
+/** Read upstream candidates and current-repository issues without mutation. */
+export async function loadLiveRadarInput(options = {}) {
+  const repository = githubRepository(options.repository)
+  const fetchOptions = {
+    fetchImpl: options.fetchImpl,
+    timeoutMs: options.timeoutMs,
+  }
+  const [releases, tags, branch, issues] = await Promise.all([
     fetchGitHubJson(`${apiRoot}/releases?per_page=100`, fetchOptions),
     fetchGitHubJson(`${apiRoot}/tags?per_page=100`, fetchOptions),
     fetchGitHubJson(`${apiRoot}/commits/${upstreamBranch}`, fetchOptions),
+    loadOpenRadarIssues(repository, options),
   ])
-  return { releases, tags, branch }
+  return { releases, tags, branch, issues }
 }
 
 function optionValue(args, index, option) {
@@ -417,6 +535,12 @@ function parseArguments(args) {
       }
       options.inputFile = optionValue(normalized, index, option)
       index += 1
+    } else if (option === '--repository') {
+      if (options.repository !== undefined) {
+        throw new Error('--repository may be specified only once')
+      }
+      options.repository = githubRepository(optionValue(normalized, index, option))
+      index += 1
     } else {
       throw new Error(`unknown option ${option}`)
     }
@@ -427,6 +551,12 @@ function parseArguments(args) {
   }
   if (!options.offline && options.inputFile !== undefined) {
     throw new Error('--input-file requires --offline')
+  }
+  if (options.offline && options.repository !== undefined) {
+    throw new Error('--repository is available only for live input')
+  }
+  if (!options.offline && options.repository === undefined) {
+    throw new Error('--repository is required for live input')
   }
   return options
 }
@@ -452,11 +582,11 @@ export async function runRadarCli(args, dependencies = {}) {
   } else {
     const live = await loadLiveRadarInput({
       fetchImpl: dependencies.fetchImpl,
+      repository: options.repository,
     })
     input = {
       baseline: parseJsonInput(readFile(baselinePath), 'upstream baseline'),
       ...live,
-      issues: [],
     }
   }
   const report = createRadarReport(input)

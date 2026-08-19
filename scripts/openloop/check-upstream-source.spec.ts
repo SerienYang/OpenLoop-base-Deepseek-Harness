@@ -54,7 +54,9 @@ interface RadarModule {
   ) => Promise<unknown>
   readonly loadLiveRadarInput: (options?: {
     fetchImpl?: typeof fetch
+    maxIssuePages?: number
     timeoutMs?: number
+    repository?: string
   }) => Promise<Record<string, unknown>>
   readonly createRadarReport: (
     input: Record<string, unknown>,
@@ -108,6 +110,14 @@ function offlineInput(overrides: Record<string, unknown> = {}): Record<string, u
     issues: [],
     ...overrides,
   }
+}
+
+function markerFor(
+  sourceType: Candidate['sourceType'] = 'release',
+  sourceRef = 'dsh-v0.1.0-rc.8',
+  commit = releaseCommit,
+): string {
+  return `<!-- openloop-upstream-radar:issue-key=upstream-radar:v1:${sourceType}:${encodeURIComponent(sourceRef)}:${commit} -->`
 }
 
 async function radar(): Promise<RadarModule> {
@@ -337,20 +347,26 @@ describe('deterministic report rendering', () => {
 })
 
 describe('read-only GitHub API handling', () => {
-  it('uses list releases, tags, and the master commit endpoints', async () => {
+  it('uses upstream candidate endpoints and the origin repository open issues endpoint', async () => {
     const { loadLiveRadarInput } = await radar()
     const urls: string[] = []
-    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+    const methods: string[] = []
+    const fetchImpl = vi.fn(async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
       const url = typeof input === 'string'
         ? input
         : input instanceof URL
           ? input.href
           : input.url
       urls.push(url)
+      methods.push(init?.method ?? 'GET')
       let value: unknown
       if (url.includes('/releases?')) value = [release()]
       else if (url.includes('/tags?')) value = [tag()]
       else if (url.endsWith('/commits/master')) value = { sha: branchCommit }
+      else if (url.includes('/repos/example/openloop/issues?')) value = []
       else throw new Error(`unexpected URL ${url}`)
       return new Response(JSON.stringify(value), {
         status: 200,
@@ -358,18 +374,154 @@ describe('read-only GitHub API handling', () => {
       })
     }) as typeof fetch
 
-    const input = await loadLiveRadarInput({ fetchImpl })
+    const input = await loadLiveRadarInput({
+      fetchImpl,
+      repository: 'example/openloop',
+    })
 
     expect(input).toEqual({
       releases: [release()],
       tags: [tag()],
       branch: { sha: branchCommit },
+      issues: [],
     })
-    expect(urls).toHaveLength(3)
+    expect(urls).toHaveLength(4)
+    expect(methods).toEqual(['GET', 'GET', 'GET', 'GET'])
     expect(urls.some(url => /\/releases\?per_page=100$/u.test(url))).toBe(true)
     expect(urls.some(url => /\/tags\?per_page=100$/u.test(url))).toBe(true)
     expect(urls.some(url => /\/commits\/master$/u.test(url))).toBe(true)
+    expect(urls.some(url => (
+      /\/repos\/example\/openloop\/issues\?state=open&per_page=100$/u.test(url)
+    ))).toBe(true)
     expect(urls.some(url => /\/releases\/latest/u.test(url))).toBe(false)
+  })
+
+  it('follows paginated open issues and extracts one hidden marker per issue', async () => {
+    const { loadLiveRadarInput } = await radar()
+    const marker = markerFor()
+    const urls: string[] = []
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      urls.push(url)
+      if (url.includes('/releases?')) {
+        return Response.json([release()])
+      }
+      if (url.includes('/tags?')) {
+        return Response.json([tag()])
+      }
+      if (url.endsWith('/commits/master')) {
+        return Response.json({ sha: branchCommit })
+      }
+      if (url.endsWith('/issues?state=open&per_page=100')) {
+        return Response.json(
+          [{ number: 17, body: `context\n${marker}\n` }],
+          {
+            headers: {
+              link: '<https://api.github.com/repos/example/openloop/issues?state=open&per_page=100&page=2>; rel="next"',
+            },
+          },
+        )
+      }
+      if (url.endsWith('/issues?state=open&per_page=100&page=2')) {
+        return Response.json([{ number: 18, body: marker }])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    }) as typeof fetch
+
+    const input = await loadLiveRadarInput({
+      fetchImpl,
+      repository: 'example/openloop',
+    })
+
+    expect(input.issues).toEqual([
+      { number: 17, body: marker },
+      { number: 18, body: marker },
+    ])
+    expect(urls.filter(url => url.includes('/issues?'))).toHaveLength(2)
+  })
+
+  it('uses page numbers when a full issues page has no next link', async () => {
+    const { loadLiveRadarInput } = await radar()
+    const issueUrls: string[] = []
+    const fullPage = Array.from({ length: 100 }, (_, index) => ({
+      number: index + 1,
+      body: null,
+    }))
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.includes('/releases?')) return Response.json([release()])
+      if (url.includes('/tags?')) return Response.json([tag()])
+      if (url.endsWith('/commits/master')) {
+        return Response.json({ sha: branchCommit })
+      }
+      if (url.includes('/issues?')) {
+        issueUrls.push(url)
+        return Response.json(url.includes('page=2') ? [] : fullPage)
+      }
+      throw new Error(`unexpected URL ${url}`)
+    }) as typeof fetch
+
+    await loadLiveRadarInput({
+      fetchImpl,
+      repository: 'example/openloop',
+    })
+
+    expect(issueUrls).toEqual([
+      'https://api.github.com/repos/example/openloop/issues?state=open&per_page=100',
+      'https://api.github.com/repos/example/openloop/issues?state=open&per_page=100&page=2',
+    ])
+  })
+
+  it('fails loudly when issues pagination exceeds its bound', async () => {
+    const { loadLiveRadarInput } = await radar()
+    const fullPage = Array.from({ length: 100 }, (_, index) => ({
+      number: index + 1,
+      body: null,
+    }))
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.includes('/releases?')) return Response.json([release()])
+      if (url.includes('/tags?')) return Response.json([tag()])
+      if (url.endsWith('/commits/master')) {
+        return Response.json({ sha: branchCommit })
+      }
+      if (url.includes('/issues?')) return Response.json(fullPage)
+      throw new Error(`unexpected URL ${url}`)
+    }) as typeof fetch
+
+    await expect(loadLiveRadarInput({
+      fetchImpl,
+      maxIssuePages: 2,
+      repository: 'example/openloop',
+    })).rejects.toThrow(/pagination|pages|limit|bound/iu)
+  })
+
+  it('ignores pull requests and non-string issue bodies', async () => {
+    const { loadLiveRadarInput } = await radar()
+    const marker = markerFor()
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.includes('/releases?')) return Response.json([release()])
+      if (url.includes('/tags?')) return Response.json([tag()])
+      if (url.endsWith('/commits/master')) {
+        return Response.json({ sha: branchCommit })
+      }
+      if (url.includes('/issues?')) {
+        return Response.json([
+          { number: 17, body: marker, pull_request: { url: 'pr' } },
+          { number: 18, body: null },
+          { number: 19, body: marker },
+        ])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    }) as typeof fetch
+
+    const input = await loadLiveRadarInput({
+      fetchImpl,
+      repository: 'example/openloop',
+    })
+
+    expect(input.issues).toEqual([{ number: 19, body: marker }])
   })
 
   it.each([
@@ -408,6 +560,103 @@ describe('read-only GitHub API handling', () => {
       fetchImpl,
       timeoutMs: 5,
     })).rejects.toThrow(/timeout/iu)
+  })
+})
+
+describe('live dry-run CLI', () => {
+  function liveFetch(issues: Record<string, unknown>[]): typeof fetch {
+    return vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.includes('/releases?')) return Response.json([release()])
+      if (url.includes('/tags?')) return Response.json([tag()])
+      if (url.endsWith('/commits/master')) {
+        return Response.json({ sha: branchCommit })
+      }
+      if (url.includes('/repos/example/openloop/issues?')) {
+        return Response.json(issues)
+      }
+      throw new Error(`unexpected URL ${url}`)
+    }) as typeof fetch
+  }
+
+  it('reports update-existing and matching Markdown when one marker exists', async () => {
+    const { runRadarCli } = await radar()
+    const output: string[] = []
+
+    await runRadarCli(
+      ['--repository', 'example/openloop', '--dry-run'],
+      {
+        readFile: () => JSON.stringify(baseline()),
+        fetchImpl: liveFetch([{
+          number: 17,
+          body: `context\n${markerFor()}\n`,
+        }]),
+        writeStdout: value => output.push(value),
+      },
+    )
+
+    const report = JSON.parse(output.join('')) as {
+      decision: { action: string; issueNumber?: number }
+      issue: { body: string }
+    }
+    expect(report.decision).toMatchObject({
+      action: 'update-existing',
+      issueNumber: 17,
+    })
+    expect(report.issue.body).toContain('Decision: **update-existing**')
+  })
+
+  it('reports create when no matching marker exists', async () => {
+    const { runRadarCli } = await radar()
+    const output: string[] = []
+
+    await runRadarCli(
+      ['--repository', 'example/openloop', '--dry-run'],
+      {
+        readFile: () => JSON.stringify(baseline()),
+        fetchImpl: liveFetch([]),
+        writeStdout: value => output.push(value),
+      },
+    )
+
+    const report = JSON.parse(output.join('')) as {
+      decision: { action: string }
+      issue: { body: string }
+    }
+    expect(report.decision.action).toBe('create')
+    expect(report.issue.body).toContain('Decision: **create**')
+  })
+
+  it('fails closed when duplicate exact markers exist', async () => {
+    const { runRadarCli } = await radar()
+    const marker = markerFor()
+
+    await expect(runRadarCli(
+      ['--repository', 'example/openloop', '--dry-run'],
+      {
+        readFile: () => JSON.stringify(baseline()),
+        fetchImpl: liveFetch([
+          { number: 17, body: marker },
+          { number: 18, body: marker },
+        ]),
+      },
+    )).rejects.toThrow(/duplicate|multiple|fail.closed/iu)
+  })
+
+  it('requires an explicit repository only for live input', async () => {
+    const { runRadarCli } = await radar()
+
+    await expect(runRadarCli(
+      ['--dry-run'],
+      { fetchImpl: liveFetch([]) },
+    )).rejects.toThrow(/repository/iu)
+    await expect(runRadarCli(
+      ['--offline', '--input-file', '-', '--dry-run'],
+      {
+        stdinText: JSON.stringify(offlineInput()),
+        writeStdout: () => {},
+      },
+    )).resolves.toBe(0)
   })
 })
 
@@ -501,8 +750,19 @@ describe('upstream radar workflow', () => {
     expect(steps.some(step => step.id === 'detect'
       && typeof step.run === 'string'
       && step.run.includes('openloop:radar')
+      && step.run.includes('--repository "$GITHUB_REPOSITORY"')
       && step.run.includes('GITHUB_OUTPUT'))).toBe(true)
     expect(steps.at(-1)?.uses).toBe('actions/github-script@v7')
+  })
+
+  it('uses the report decision for create and update without re-reading issues', () => {
+    const source = readFileSync('.github/workflows/upstream-radar.yml', 'utf8')
+
+    expect(source).not.toContain('github.paginate')
+    expect(source).not.toContain('issues.listForRepo')
+    expect(source).toContain("report.decision.action === 'update-existing'")
+    expect(source).toContain('issue_number: report.decision.issueNumber')
+    expect(source).toContain("report.decision.action === 'create'")
   })
 
   it('contains no release automation, elevated permissions, or forbidden side effects', () => {
