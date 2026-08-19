@@ -1,0 +1,90 @@
+name: Upstream Radar
+
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upstream-radar-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  radar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Detect upstream source
+        id: detect
+        run: pnpm --silent openloop:radar -- --dry-run --github-output >> "$GITHUB_OUTPUT"
+
+      - name: Create or update upstream report
+        uses: actions/github-script@v7
+        env:
+          RADAR_REPORT: ${{ steps.detect.outputs.report }}
+        with:
+          script: |
+            const encoded = process.env.RADAR_REPORT
+            if (!encoded) {
+              throw new Error('upstream radar report output is missing')
+            }
+            const report = JSON.parse(encoded
+              .replaceAll('%0A', '\n')
+              .replaceAll('%0D', '\r')
+              .replaceAll('%25', '%'))
+            if (report.decision.action === 'no-op') {
+              core.info('Upstream candidate matches the approved baseline')
+              return
+            }
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              per_page: 100,
+            })
+            const matches = issues.filter(issue =>
+              issue.pull_request === undefined
+              && typeof issue.body === 'string'
+              && issue.body.includes(report.issue.marker))
+            if (matches.length > 1) {
+              throw new Error(`fail-closed: duplicate issues for ${report.issue.marker}`)
+            }
+            if (matches.length === 1) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: matches[0].number,
+                title: report.issue.title,
+                body: report.issue.body,
+              })
+              return
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: report.issue.title,
+              body: report.issue.body,
+            })

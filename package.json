@@ -73,6 +73,7 @@
     "constraints": "tsx scripts/check-workspace-constraints.ts",
     "openloop:new-package": "node scripts/openloop/scaffold-package.mjs",
     "openloop:gate-test": "node scripts/openloop/run-gate-tests.mjs",
+    "openloop:radar": "node scripts/openloop/check-upstream-source.mjs",
     "verify:brand-tokens": "vitest run scripts/openloop/brand-tokens.spec.ts",
     "verify:repository-layout": "vitest run scripts/openloop/repository-layout.spec.ts",
     "dsh": "node --import tsx/esm apps/cli/src/bin.ts",
