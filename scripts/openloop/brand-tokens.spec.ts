@@ -254,18 +254,24 @@ function contrastRatio(foreground: ColorValue, background: ColorValue): number {
   return (lighter + 0.05) / (darker + 0.05)
 }
 
-function rootTokenPaths(
+function disallowedStructuralPaths(
   value: unknown,
   prefix = '',
   result: string[] = [],
 ): string[] {
   if (!isRecord(value)) return result
-  if ('$root' in value) {
-    result.push(prefix === '' ? '$root' : `${prefix}.$root`)
+  for (const key of ['$extends', '$root']) {
+    if (key in value) {
+      result.push(prefix === '' ? key : `${prefix}.${key}`)
+    }
   }
   for (const [key, child] of Object.entries(value)) {
     if (key.startsWith('$')) continue
-    rootTokenPaths(child, prefix === '' ? key : `${prefix}.${key}`, result)
+    disallowedStructuralPaths(
+      child,
+      prefix === '' ? key : `${prefix}.${key}`,
+      result,
+    )
   }
   return result
 }
@@ -294,7 +300,7 @@ function documentProblems(document: Record<string, unknown>): string[] {
       'color may only contain brand, palette, and semantic token groups',
     )
   }
-  for (const tokenPath of rootTokenPaths(document)) {
+  for (const tokenPath of disallowedStructuralPaths(document)) {
     problems.push(
       `${tokenPath} is outside the approved named token architecture`,
     )
@@ -465,6 +471,17 @@ describe('OpenLoop design tokens', () => {
 
     expect(documentProblems(document)).toContain(
       'color.$root is outside the approved named token architecture',
+    )
+  })
+
+  test('rejects DTCG group inheritance outside the explicit alias map', () => {
+    const document = structuredClone(readDocument())
+    if (!isRecord(document.color)) throw new TypeError('Missing color group')
+    if (!isRecord(document.color.brand)) throw new TypeError('Missing brand group')
+    document.color.brand.$extends = '{color.palette.neutral}'
+
+    expect(documentProblems(document)).toContain(
+      'color.brand.$extends is outside the approved named token architecture',
     )
   })
 
