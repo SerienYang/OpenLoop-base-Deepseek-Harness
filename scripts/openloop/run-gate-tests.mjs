@@ -155,6 +155,56 @@ function calleeSegments(expression) {
   return undefined
 }
 
+function recognizedTestIdentifiers(sourceFile) {
+  const recognized = new Set(testDeclarationNames)
+  const aliases = []
+
+  function visit(node) {
+    if (ts.isImportDeclaration(node)
+      && ts.isStringLiteralLike(node.moduleSpecifier)
+      && (node.moduleSpecifier.text === 'vitest'
+        || node.moduleSpecifier.text === '@playwright/test')
+      && node.importClause?.namedBindings !== undefined
+      && ts.isNamedImports(node.importClause.namedBindings)) {
+      for (const element of node.importClause.namedBindings.elements) {
+        const imported = element.propertyName?.text ?? element.name.text
+        if (testDeclarationNames.has(imported)) recognized.add(element.name.text)
+      }
+    }
+    if (ts.isVariableDeclaration(node)
+      && ts.isIdentifier(node.name)
+      && node.initializer !== undefined
+      && ts.isIdentifier(node.initializer)
+      && ts.isVariableDeclarationList(node.parent)
+      && (node.parent.flags & (ts.NodeFlags.Const | ts.NodeFlags.Let)) !== 0) {
+      aliases.push([node.name.text, node.initializer.text])
+    }
+    ts.forEachChild(node, visit)
+  }
+
+  visit(sourceFile)
+  for (let changed = true; changed;) {
+    changed = false
+    for (const [alias, target] of aliases) {
+      if (!recognized.has(target) || recognized.has(alias)) continue
+      recognized.add(alias)
+      changed = true
+    }
+  }
+  return recognized
+}
+
+function isNestedCalleeCall(node) {
+  let expression = node
+  while ((ts.isPropertyAccessExpression(expression.parent)
+      || ts.isElementAccessExpression(expression.parent))
+    && expression.parent.expression === expression) {
+    expression = expression.parent
+  }
+  return ts.isCallExpression(expression.parent)
+    && expression.parent.expression === expression
+}
+
 function normalizeMarkerText(value) {
   const scanner = ts.createScanner(
     ts.ScriptTarget.Latest,
@@ -192,36 +242,35 @@ function javascriptTestDeclarations(root, absolute) {
     true,
   )
   const file = normalizedRelativePath(root, absolute)
-  const focused = new Map()
-  const skips = new Map()
+  const recognized = recognizedTestIdentifiers(sourceFile)
+  const focused = []
+  const skips = []
 
   function visit(node) {
-    if (ts.isCallExpression(node)) {
+    if (ts.isCallExpression(node) && !isNestedCalleeCall(node)) {
       const segments = calleeSegments(node.expression)
-      if (segments !== undefined && segments.slice(1).includes('only')) {
+      if (segments !== undefined
+        && recognized.has(segments[0])
+        && segments.slice(1).includes('only')) {
         const line = sourceFile.getLineAndCharacterOfPosition(node.expression.getStart(sourceFile)).line + 1
-        const key = `${file}:${line}`
-        if (!focused.has(key)) focused.set(key, { file, line })
+        focused.push({ file, line })
       }
-      if (segments !== undefined && testDeclarationNames.has(segments[0])) {
+      if (segments !== undefined && recognized.has(segments[0])) {
         const kind = segments.slice(1).find(segment => unconditionalSkipNames.has(segment))
         if (kind !== undefined) {
           const line = sourceFile.getLineAndCharacterOfPosition(node.expression.getStart(sourceFile)).line + 1
-          const key = `${file}:${line}`
-          if (!skips.has(key)) {
-            const sourceText = node.getText(sourceFile)
-            const title = node.arguments[0]?.getText(sourceFile) ?? ''
-            skips.set(key, {
-              file,
-              line,
-              fingerprint: markerFingerprint({
-                kind,
-                callee: segments.join('.'),
-                source: sourceText,
-                title,
-              }),
-            })
-          }
+          const sourceText = node.getText(sourceFile)
+          const title = node.arguments[0]?.getText(sourceFile) ?? ''
+          skips.push({
+            file,
+            line,
+            fingerprint: markerFingerprint({
+              kind,
+              callee: segments.join('.'),
+              source: sourceText,
+              title,
+            }),
+          })
         }
       }
     }
@@ -230,8 +279,8 @@ function javascriptTestDeclarations(root, absolute) {
 
   visit(sourceFile)
   return {
-    focused: [...focused.values()],
-    skips: [...skips.values()],
+    focused,
+    skips,
   }
 }
 
@@ -303,8 +352,15 @@ function readAllowlist(root, now) {
     if (!isIsoCalendarDate(entry.expires)) {
       throw new Error(`${allowlistPath}: skip expiry must be a real YYYY-MM-DD calendar date`)
     }
-    if (entries.has(key)) throw new Error(`${allowlistPath}: duplicate skip entry ${key}`)
-    entries.set(key, { ...entry, expired: entry.expires <= today })
+    let fingerprints = entries.get(key)
+    if (fingerprints === undefined) {
+      fingerprints = new Map()
+      entries.set(key, fingerprints)
+    }
+    if (fingerprints.has(entry.fingerprint)) {
+      throw new Error(`${allowlistPath}: duplicate skip entry ${key}`)
+    }
+    fingerprints.set(entry.fingerprint, { ...entry, expired: entry.expires <= today })
   }
   return entries
 }
@@ -313,12 +369,13 @@ function validateSkips(root, files, allowlist) {
   const skips = skipDeclarations(root, files)
   for (const skip of skips) {
     const key = `${skip.file}:${skip.line}`
-    const entry = allowlist.get(key)
-    if (entry === undefined) throw new Error(`${key}: skip is not present in the allowlist`)
-    if (entry.expired) throw new Error(`${key}: skip allowlist entry is expired`)
-    if (entry.fingerprint !== skip.fingerprint) {
+    const entries = allowlist.get(key)
+    if (entries === undefined) throw new Error(`${key}: skip is not present in the allowlist`)
+    const entry = entries.get(skip.fingerprint)
+    if (entry === undefined) {
       throw new Error(`${key}: skip allowlist fingerprint does not match marker`)
     }
+    if (entry.expired) throw new Error(`${key}: skip allowlist entry is expired`)
   }
 }
 

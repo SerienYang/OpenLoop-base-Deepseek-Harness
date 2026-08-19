@@ -438,6 +438,59 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it.each([
+    [
+      'vitest',
+      [
+        "import { test as spec } from 'vitest'",
+        'const alias = spec',
+        "alias.skip('platform', () => {})",
+      ].join('\n'),
+      3,
+      'skip is not present in the allowlist',
+    ],
+    [
+      '@playwright/test',
+      [
+        "import { test as spec } from '@playwright/test'",
+        'let alias = spec',
+        'const again = alias',
+        "again['only']('focused', () => {})",
+      ].join('\n'),
+      4,
+      'forbidden focused test marker',
+    ],
+  ])('resolves transitive test aliases imported from %s', async (
+    _module,
+    source,
+    line,
+    message,
+  ) => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    const testPath = 'packages/core/example/tests/aliased.spec.ts'
+    write(root, testPath, `${source}\n`)
+
+    await expect(runGateTests(['scan-repo'], { root }))
+      .rejects.toThrow(`${testPath}:${line}: ${message}`)
+  })
+
+  it('ignores marker-like calls not rooted in a recognized test API', async () => {
+    const { runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    const testPath = 'packages/core/example/tests/helpers.spec.ts'
+    write(root, testPath, [
+      'const helper = {',
+      '  only() {},',
+      '  skip() {},',
+      '}',
+      "helper.only('focused')",
+      "helper['skip']('platform')",
+    ].join('\n'))
+
+    await expect(runGateTests(['scan-repo'], { root })).resolves.toBeUndefined()
+  })
+
+  it.each([
     "test.skip('platform', () => {})",
     "test['skip']('platform', () => {})",
     "describe.skip.each([1])('platform', () => {})",
@@ -545,6 +598,48 @@ describe('OpenLoop focused test gate', () => {
       root,
       now: new Date('2026-08-20T00:00:00Z'),
     })).rejects.toThrow(`${testPath}:1: skip allowlist fingerprint does not match marker`)
+  })
+
+  it('matches distinct same-line skips by file, line, and fingerprint', async () => {
+    const { markerFingerprint, runGateTests } = await import(gateModulePath)
+    const root = fixtureRoot()
+    const testPath = 'scripts/openloop/same-line.spec.ts'
+    const first = "it.skip('first', () => {})"
+    const second = "test.skip('second', () => {})"
+    write(root, testPath, `${first}; ${second}\n`)
+    const entry = (source: string, callee: string, title: string) => ({
+      file: testPath,
+      line: 1,
+      fingerprint: markerFingerprint({
+        kind: 'skip',
+        callee,
+        source,
+        title,
+      }),
+      owner: 'desktop-foundation',
+      reason: 'Exercises same-line marker identity.',
+      expires: '2026-09-01',
+    })
+    const firstEntry = entry(first, 'it.skip', "'first'")
+    const secondEntry = entry(second, 'test.skip', "'second'")
+
+    write(root, 'scripts/openloop/test-skip-allowlist.json', JSON.stringify({
+      version: 1,
+      skips: [firstEntry],
+    }))
+    await expect(runGateTests(['scan-repo'], {
+      root,
+      now: new Date('2026-08-20T00:00:00Z'),
+    })).rejects.toThrow(`${testPath}:1: skip allowlist fingerprint does not match marker`)
+
+    write(root, 'scripts/openloop/test-skip-allowlist.json', JSON.stringify({
+      version: 1,
+      skips: [firstEntry, secondEntry],
+    }))
+    await expect(runGateTests(['scan-repo'], {
+      root,
+      now: new Date('2026-08-20T00:00:00Z'),
+    })).resolves.toBeUndefined()
   })
 
   it('rejects unlisted or expired skips and accepts complete future entries', async () => {
