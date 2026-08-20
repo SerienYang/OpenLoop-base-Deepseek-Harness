@@ -468,7 +468,7 @@ describe('Openloop desktop foundation configuration', () => {
     })
   })
 
-  test('embeds validated canonical manifest bytes and exposes no dangerous plugins', () => {
+  test('embeds validated manifests and keeps updater ownership in the Rust Host', () => {
     const buildScript = readText('apps/openloop-desktop/src-tauri/build.rs')
     const library = readText('apps/openloop-desktop/src-tauri/src/lib.rs')
     const cargo = record(
@@ -482,6 +482,15 @@ describe('Openloop desktop foundation configuration', () => {
       ...Object.keys(record(packageJson.devDependencies, 'npm devDependencies')),
     ]
     const dangerous = /(?:^|[-_])(fs|shell|updater|dialog)(?:$|[-_])/u
+    const rustDependencies = record(cargo.dependencies, 'Cargo dependencies')
+    const updaterDependency = record(
+      rustDependencies['tauri-plugin-updater'],
+      'tauri-plugin-updater dependency',
+    )
+    const tauriConfig = readJson('apps/openloop-desktop/src-tauri/tauri.conf.json')
+    const bundle = record(tauriConfig.bundle, 'Tauri bundle configuration')
+    const plugins = record(tauriConfig.plugins, 'Tauri plugin configuration')
+    const updater = record(plugins.updater, 'Tauri updater configuration')
 
     expect(path.resolve(
       tauriRoot,
@@ -501,8 +510,20 @@ describe('Openloop desktop foundation configuration', () => {
     expect(library).toMatch(
       /fn\s+build_manifest\s*\(\s*\)\s*->\s*Result\s*<\s*OpenloopBuildManifest\s*,\s*String\s*>/u,
     )
-    expect(cargoDependencyNames.filter(name => dangerous.test(name))).toEqual([])
+    expect(cargoDependencyNames.filter(name => dangerous.test(name))).toEqual([
+      'tauri-plugin-updater',
+    ])
+    expect(updaterDependency).toMatchObject({ version: '=2.10.1' })
     expect(npmDependencyNames.filter(name => dangerous.test(name))).toEqual([])
+    expect(bundle.createUpdaterArtifacts).toBe(false)
+    expect(updater).toEqual({
+      pubkey: '',
+      endpoints: [
+        'https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-rolling/latest-test-k1.json',
+      ],
+    })
+    expect(library).toContain('tauri_plugin_updater::Builder::new()')
+    expect(library).toContain('.plugin(')
   })
 
   test('uses generated macOS icons and a restrained bootstrap-only frontend', () => {

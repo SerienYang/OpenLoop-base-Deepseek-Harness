@@ -18,6 +18,7 @@ import { describe, expect, it } from 'vitest'
 const modulePath = './build-desktop.mjs'
 const artifactGeneratorPath: string = './generate-artifact-manifest.mjs'
 const temporaryRoots: string[] = []
+const updaterPublicKey = 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkgRTc2MjBGMTg0MkI0RTgxRgpSV1FmNkxSQ0dBOWk1M21sWWVjTzRJelQ1MVRHUHB2V3VjTlNDaDFDQk0wUVRhTG43M1k3R0ZPMwo='
 
 interface ArtifactGeneratorModule {
   readonly generateArtifactManifest: (
@@ -29,6 +30,8 @@ interface ArtifactGeneratorModule {
       readonly bundleGraph: string
       readonly out: string
       readonly app?: string
+      readonly dmg?: string
+      readonly updater?: string
     },
     dependencies: { readonly trustedRoot: string },
   ) => { readonly bytes: string }
@@ -143,6 +146,7 @@ describe('Openloop desktop build orchestrator', () => {
     }
     const builder = new DesktopBuilder({
       root: '/repo',
+      updaterPublicKey,
       options: {
         channel: 'test',
         target: 'aarch64-apple-darwin',
@@ -170,7 +174,7 @@ describe('Openloop desktop build orchestrator', () => {
       'run:pnpm run build',
       '4:runtime',
       '5:base',
-      'run:pnpm exec tauri build --target aarch64-apple-darwin --bundles app --config {"identifier":"ai.openloop.desktop.test"} --ci',
+      `run:pnpm exec tauri build --target aarch64-apple-darwin --bundles app --config {"identifier":"ai.openloop.desktop.test","version":"1.2.3","bundle":{"createUpdaterArtifacts":false},"plugins":{"updater":{"pubkey":"${updaterPublicKey}","endpoints":["https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-rolling/latest-test-k1.json"]}}} --ci`,
       '7:final',
       '8:verify',
     ])
@@ -180,7 +184,7 @@ describe('Openloop desktop build orchestrator', () => {
     ['none', ['--no-bundle'], []],
     ['app', ['--bundles', 'app'], ['app']],
     ['dmg', ['--bundles', 'dmg'], ['app', 'dmg']],
-    ['all', ['--bundles', 'app,dmg'], ['app', 'dmg']],
+    ['all', ['--bundles', 'app,dmg'], ['app', 'dmg', 'updater']],
   ] as const)('maps %s to Tauri and final artifact inputs', async (
     bundle,
     expectedBundleArgs,
@@ -197,6 +201,7 @@ describe('Openloop desktop build orchestrator', () => {
     }
     const builder = new DesktopBuilder({
       root: '/repo',
+      updaterPublicKey,
       options: {
         channel: 'stable',
         target: 'aarch64-apple-darwin',
@@ -230,7 +235,7 @@ describe('Openloop desktop build orchestrator', () => {
       'aarch64-apple-darwin',
       ...expectedBundleArgs,
       '--config',
-      '{"identifier":"ai.openloop.desktop"}',
+      `{"identifier":"ai.openloop.desktop","version":"1.2.3","bundle":{"createUpdaterArtifacts":${bundle === 'all' ? 'true' : 'false'}},"plugins":{"updater":{"pubkey":"${updaterPublicKey}","endpoints":["https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-stable-rolling/latest-stable-k1.json"]}}}`,
       '--ci',
     ])
     expect(tauri?.cwd).toBe('/repo/apps/openloop-desktop')
@@ -244,7 +249,7 @@ describe('Openloop desktop build orchestrator', () => {
       'web',
     ])
     const releaseArtifacts = Object.keys(manifests[1] ?? {})
-      .filter(key => key === 'app' || key === 'dmg')
+      .filter(key => key === 'app' || key === 'dmg' || key === 'updater')
     expect(releaseArtifacts).toEqual(expectedReleaseArtifacts)
     const releaseArtifactNames: readonly string[] = expectedReleaseArtifacts
     if (releaseArtifactNames.includes('app')) {
@@ -257,6 +262,39 @@ describe('Openloop desktop build orchestrator', () => {
         '/repo/apps/openloop-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Openloop_1.2.3_aarch64.dmg',
       )
     }
+    if (releaseArtifactNames.includes('updater')) {
+      expect(manifests[1]?.updater).toBe(
+        '/repo/apps/openloop-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Openloop.app.tar.gz',
+      )
+    }
+  })
+
+  it('fails closed before an all-bundle build when the updater public key is absent', async () => {
+    const { DesktopBuilder } = await import(modulePath) as DesktopModule
+    const events: string[] = []
+    const builder = new DesktopBuilder({
+      root: '/repo',
+      updaterPublicKey: ' \n',
+      options: {
+        channel: 'test',
+        target: 'aarch64-apple-darwin',
+        bundle: 'all',
+      },
+      runner: { run: async () => {
+        events.push('run')
+        return { stdout: '', stderr: '' }
+      } },
+      files: {
+        cleanDist: async () => events.push('clean'),
+        readDesktopPackage: async () => ({ version: '1.2.3' }),
+      },
+      createRuntimeBuilder: () => ({ build: async () => undefined }),
+      generateBuildManifest: () => undefined,
+      generateArtifactManifest: () => undefined,
+    })
+
+    await expect(builder.build()).rejects.toThrow(/OPENLOOP_UPDATER_PUBLIC_KEY/iu)
+    expect(events).toEqual([])
   })
 
   it('deletes only a git-ignored real dist-openloop directory', async () => {
@@ -436,6 +474,9 @@ describe('Openloop desktop build orchestrator', () => {
       'apps/openloop-desktop/src-tauri/target/aarch64-apple-darwin/release',
     )
     const app = join(release, 'bundle/macos/Openloop.app')
+    const updater = join(release, 'bundle/macos/Openloop.app.tar.gz')
+    const updaterSignature = `${updater}.sig`
+    const dmg = join(release, 'bundle/dmg/Openloop_1.2.3_aarch64.dmg')
     const macOS = join(app, 'Contents/MacOS')
     const main = join(macOS, 'openloop-desktop')
     const bundledSidecar = join(macOS, 'openloop-runtime')
@@ -459,6 +500,10 @@ describe('Openloop desktop build orchestrator', () => {
     writeFileSync(runtimeSbom, '{"version":1}\n')
     writeFileSync(join(web, 'index.html'), '<main>Openloop</main>\n')
     writeFileSync(bundleGraph, '{"version":1}\n')
+    mkdirSync(join(release, 'bundle/dmg'), { recursive: true })
+    writeFileSync(updater, 'signed updater archive')
+    writeFileSync(updaterSignature, 'non-empty updater signature\n')
+    writeFileSync(dmg, 'disk image')
     const baseInputs = {
       core,
       sidecar,
@@ -475,7 +520,10 @@ describe('Openloop desktop build orchestrator', () => {
     for (const executable of [sidecar, main, bundledSidecar, helper]) {
       chmodSync(executable, 0o755)
     }
-    generateArtifactManifest({ ...baseInputs, app }, { trustedRoot: root })
+    generateArtifactManifest(
+      { ...baseInputs, app, dmg, updater },
+      { trustedRoot: root },
+    )
     const coreSha256 = createHash('sha256').update(readFileSync(core)).digest('hex')
     const validReadiness = {
       type: 'openloop.runtime.ready',
@@ -517,16 +565,22 @@ describe('Openloop desktop build orchestrator', () => {
       ...baseInputs,
       artifacts,
       app,
-      dmg: undefined,
+      dmg,
+      updater,
+      updaterSignature,
       release,
       options: {
         channel: 'test',
         target: 'aarch64-apple-darwin',
-        bundle: 'app',
+        bundle: 'all',
       },
     }
 
     await expect(verifyDesktopBuild(context, runner)).resolves.toBeUndefined()
+    const finalManifest = JSON.parse(readFileSync(artifacts, 'utf8')) as {
+      readonly artifacts: Record<string, string>
+    }
+    expect(finalManifest.artifacts.updater).toMatch(/^[0-9a-f]{64}$/u)
     expect(commands.filter(command => command.command === 'lipo')).toHaveLength(3)
     expect(commands).toContainEqual({
       command: 'codesign',
@@ -543,6 +597,11 @@ describe('Openloop desktop build orchestrator', () => {
     await expect(verifyDesktopBuild(context, runner))
       .rejects.toThrow(/stderr/iu)
     healthSmokeStderr = ''
+
+    writeFileSync(updaterSignature, '')
+    await expect(verifyDesktopBuild(context, runner))
+      .rejects.toThrow(/signature.*empty|empty.*signature/iu)
+    writeFileSync(updaterSignature, 'non-empty updater signature\n')
 
     const invalidReadinessCases: Array<[string, Record<string, unknown>]> = [
       ['missing type', Object.fromEntries(
@@ -600,6 +659,9 @@ describe('Openloop desktop build orchestrator', () => {
     await expect(verifyDesktopBuild({
       ...context,
       app: undefined,
+      dmg: undefined,
+      updater: undefined,
+      updaterSignature: undefined,
       options: { ...context.options, bundle: 'none' },
     }, rawRunner)).resolves.toBeUndefined()
   })

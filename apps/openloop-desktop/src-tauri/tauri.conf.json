@@ -32,6 +32,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": false,
     "targets": [
       "app"
     ],
@@ -49,6 +50,14 @@
       "minimumSystemVersion": "14.0",
       "signingIdentity": "-",
       "entitlements": "Entitlements.plist"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "endpoints": [
+        "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-rolling/latest-test-k1.json"
+      ]
     }
   }
 }

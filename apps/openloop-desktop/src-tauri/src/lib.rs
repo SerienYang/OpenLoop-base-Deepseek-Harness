@@ -13,6 +13,7 @@ use crate::launcher::{
 pub mod browser;
 pub mod launcher;
 pub mod spikes;
+pub mod update;
 
 #[cfg(target_os = "macos")]
 pub fn build_browser_webview(
@@ -126,6 +127,10 @@ fn validate_embedded_artifact_manifest() -> Result<(), String> {
 #[tauri::command]
 fn build_manifest() -> Result<OpenloopBuildManifest, String> {
     validate_embedded_artifact_manifest()?;
+    embedded_build_manifest()
+}
+
+fn embedded_build_manifest() -> Result<OpenloopBuildManifest, String> {
     serde_json::from_slice(EMBEDDED_BUILD_MANIFEST)
         .map_err(|error| format!("embedded build manifest is invalid: {error}"))
 }
@@ -204,7 +209,22 @@ fn start_runtime(app: &AppHandle) -> Result<Option<RuntimeProcessState>, String>
 }
 
 pub fn run() {
+    let channel = embedded_build_manifest()
+        .and_then(|manifest| {
+            manifest
+                .channel
+                .parse()
+                .map_err(|error: update::channel::ChannelConfigError| error.to_string())
+        })
+        .expect("embedded Openloop release channel is invalid");
+    let updater_config = update::channel::UpdateChannelConfig::embedded(channel)
+        .expect("signed Openloop updater configuration is invalid");
+    let updater_plugin = tauri_plugin_updater::Builder::new()
+        .pubkey(updater_config.public_key())
+        .build();
     let app = tauri::Builder::default()
+        .plugin(updater_plugin)
+        .manage(updater_config)
         .invoke_handler(tauri::generate_handler![build_manifest])
         .setup(|app| {
             if let Some(state) = start_runtime(&app.handle())? {

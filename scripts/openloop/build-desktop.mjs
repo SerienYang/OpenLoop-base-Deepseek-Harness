@@ -74,6 +74,41 @@ function identifierForChannel(channel) {
   return channel === 'stable' ? 'ai.openloop.desktop' : 'ai.openloop.desktop.test'
 }
 
+function updateChannelFor(channel) {
+  if (channel === 'stable') {
+    return {
+      keyEnvironment: 'OPENLOOP_STABLE_UPDATER_PUBLIC_KEY',
+      endpoint: 'https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-stable-rolling/latest-stable-k1.json',
+    }
+  }
+  return {
+    keyEnvironment: 'OPENLOOP_UPDATER_PUBLIC_KEY',
+    endpoint: 'https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-rolling/latest-test-k1.json',
+  }
+}
+
+function validUpdaterPublicKey(value) {
+  if (typeof value !== 'string'
+    || value === ''
+    || value.trim() !== value
+    || value.length % 4 !== 0
+    || !/^[A-Za-z0-9+/]+={0,2}$/u.test(value)) {
+    return false
+  }
+  const decoded = Buffer.from(value, 'base64')
+  if (decoded.toString('base64') !== value) return false
+  const lines = decoded.toString('utf8').trimEnd().split(/\r?\n/u)
+  if (lines.length !== 2
+    || !lines[0].startsWith('untrusted comment: ')
+    || !/^[A-Za-z0-9+/]+={0,2}$/u.test(lines[1])) {
+    return false
+  }
+  const key = Buffer.from(lines[1], 'base64')
+  return key.length === 42
+    && key[0] === 0x45
+    && (key[1] === 0x64 || key[1] === 0x44)
+}
+
 function tauriBundleArguments(bundle) {
   if (bundle === 'none') return ['--no-bundle']
   if (bundle === 'all') return ['--bundles', 'app,dmg']
@@ -277,7 +312,24 @@ function assertFixedVerificationPaths(context) {
   if (context.app !== undefined && resolve(context.app) !== expectedApp) {
     throw new Error(`build-desktop: App must use fixed path ${expectedApp}`)
   }
-  return { root, release, app: expectedApp }
+  const expectedUpdater = join(release, 'bundle/macos/Openloop.app.tar.gz')
+  if (context.updater !== undefined && resolve(context.updater) !== expectedUpdater) {
+    throw new Error(`build-desktop: updater must use fixed path ${expectedUpdater}`)
+  }
+  const expectedUpdaterSignature = `${expectedUpdater}.sig`
+  if (context.updaterSignature !== undefined
+    && resolve(context.updaterSignature) !== expectedUpdaterSignature) {
+    throw new Error(
+      `build-desktop: updater signature must use fixed path ${expectedUpdaterSignature}`,
+    )
+  }
+  return {
+    root,
+    release,
+    app: expectedApp,
+    updater: expectedUpdater,
+    updaterSignature: expectedUpdaterSignature,
+  }
 }
 
 async function assertExecutable(path) {
@@ -354,6 +406,7 @@ export async function verifyDesktopBuild(context, runner) {
     bundleGraph: context.bundleGraph,
     ...(context.app === undefined ? {} : { app: context.app }),
     ...(context.dmg === undefined ? {} : { dmg: context.dmg }),
+    ...(context.updater === undefined ? {} : { updater: context.updater }),
   }
   const expectedKeys = Object.keys(paths)
   const actualKeys = Object.keys(final.manifest.artifacts)
@@ -366,6 +419,18 @@ export async function verifyDesktopBuild(context, runner) {
     const actual = hashArtifact(path, { trustedRoot: fixed.root })
     if (final.manifest.artifacts[label] !== actual) {
       throw new Error(`build-desktop: ${label} hash does not match artifact bytes`)
+    }
+  }
+  if (context.updater !== undefined) {
+    if (context.updaterSignature === undefined) {
+      throw new Error('build-desktop: updater signature path is required')
+    }
+    const signatureMetadata = await lstat(context.updaterSignature)
+    if (signatureMetadata.isSymbolicLink() || !signatureMetadata.isFile()) {
+      throw new Error('build-desktop: updater signature must be a regular file')
+    }
+    if ((await readFile(context.updaterSignature, 'utf8')).trim() === '') {
+      throw new Error('build-desktop: updater signature must not be empty')
     }
   }
 
@@ -488,6 +553,13 @@ export class DesktopBuilder {
       generateBuildManifest,
       generateArtifactManifest,
     } = this.dependencies
+    const updateChannel = updateChannelFor(options.channel)
+    const updaterPublicKey = this.dependencies.updaterPublicKey ?? ''
+    if (options.bundle === 'all' && !validUpdaterPublicKey(updaterPublicKey)) {
+      throw new Error(
+        `build-desktop: ${updateChannel.keyEnvironment} must contain a valid Tauri updater public key for --bundle all`,
+      )
+    }
     const dist = join(this.root, 'dist-openloop')
     const core = join(dist, 'openloop-core.json')
     const artifacts = join(dist, 'openloop-artifacts.json')
@@ -503,6 +575,8 @@ export class DesktopBuilder {
       'release',
     )
     const app = join(release, 'bundle/macos/Openloop.app')
+    const updater = join(release, 'bundle/macos/Openloop.app.tar.gz')
+    const updaterSignature = `${updater}.sig`
 
     await files.cleanDist(this.root, dist, runner)
     const desktopPackage = await files.readDesktopPackage(desktopRoot)
@@ -547,20 +621,36 @@ export class DesktopBuilder {
         options.target,
         ...tauriBundleArguments(options.bundle),
         '--config',
-        JSON.stringify({ identifier: identifierForChannel(options.channel) }),
+        JSON.stringify({
+          identifier: identifierForChannel(options.channel),
+          version: desktopPackage.version,
+          bundle: { createUpdaterArtifacts: options.bundle === 'all' },
+          plugins: {
+            updater: {
+              pubkey: updaterPublicKey,
+              endpoints: [updateChannel.endpoint],
+            },
+          },
+        }),
         '--ci',
       ],
       cwd: desktopRoot,
+      env: {
+        [updateChannel.keyEnvironment]: updaterPublicKey,
+      },
     })
     const releaseInputs = { ...baseInputs }
     if (options.bundle !== 'none') releaseInputs.app = app
     if (options.bundle === 'dmg' || options.bundle === 'all') releaseInputs.dmg = dmg
+    if (options.bundle === 'all') releaseInputs.updater = updater
     generateArtifactManifest(releaseInputs)
     await files.verify({
       root: this.root,
       ...baseInputs,
       app: options.bundle === 'none' ? undefined : app,
       dmg: options.bundle === 'dmg' || options.bundle === 'all' ? dmg : undefined,
+      updater: options.bundle === 'all' ? updater : undefined,
+      updaterSignature: options.bundle === 'all' ? updaterSignature : undefined,
       artifacts,
       options,
       release,
@@ -595,6 +685,9 @@ export function createDesktopBuilder({
   return new DesktopBuilder({
     root: repositoryRoot,
     options,
+    updaterPublicKey: options?.channel === 'stable'
+      ? process.env.OPENLOOP_STABLE_UPDATER_PUBLIC_KEY
+      : process.env.OPENLOOP_UPDATER_PUBLIC_KEY,
     runner,
     files: nodeFileSystem,
     createRuntimeBuilder: runtimeBuilderFor,

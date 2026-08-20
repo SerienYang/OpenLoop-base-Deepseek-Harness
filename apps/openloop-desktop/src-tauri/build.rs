@@ -304,6 +304,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "cargo:rustc-env=OPENLOOP_BUNDLE_GRAPH_SHA256={}",
         hashes.bundle_graph
     );
+    for variable in [
+        "OPENLOOP_UPDATER_PUBLIC_KEY",
+        "OPENLOOP_STABLE_UPDATER_PUBLIC_KEY",
+    ] {
+        println!("cargo:rerun-if-env-changed={variable}");
+        let value = env::var(variable).unwrap_or_default();
+        if value.contains('\r') || value.contains('\n') {
+            return Err(
+                invalid_data(format!("{variable} must be a single-line base64 value")).into(),
+            );
+        }
+        println!("cargo:rustc-env={variable}={value}");
+    }
 
     tauri_build::try_build(
         Attributes::new().app_manifest(AppManifest::new().commands(&["build_manifest"])),
