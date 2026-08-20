@@ -379,7 +379,7 @@ describe('Openloop desktop foundation configuration', () => {
       'icons/icon.icns',
     ])
     expect(record(bundle.macOS, 'tauri macOS bundle config')).toEqual({
-      minimumSystemVersion: '11.0',
+      minimumSystemVersion: '14.0',
       signingIdentity: '-',
       entitlements: 'Entitlements.plist',
     })

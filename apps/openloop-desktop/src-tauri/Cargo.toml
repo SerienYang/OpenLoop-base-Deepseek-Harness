@@ -6,6 +6,9 @@ edition = "2021"
 rust-version = "1.88"
 build = "build.rs"
 
+[features]
+openloop-e2e = []
+
 [lib]
 name = "openloop_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -26,7 +29,8 @@ libc = "=0.2.189"
 sha2 = "=0.10.9"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
-tauri = { version = "=2.11.5", features = [] }
+tauri = { version = "=2.11.5", features = ["unstable", "macos-proxy"] }
+url = "=2.5.8"
 uuid = { version = "=1.24.1", features = ["v4"] }
 zeroize = "=1.9.0"
 

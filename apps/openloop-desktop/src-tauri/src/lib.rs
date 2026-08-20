@@ -10,7 +10,21 @@ use crate::launcher::{
     InstanceAction, LaunchReadinessExpectation, LaunchSecrets, SingleInstance, SupervisedChild,
 };
 
+pub mod browser;
 pub mod launcher;
+
+#[cfg(target_os = "macos")]
+pub fn build_browser_webview(
+    label: impl Into<String>,
+    target: Url,
+    proxy: &browser::network_policy_proxy::RunningNetworkPolicyProxy,
+) -> tauri::WebviewBuilder<tauri::Wry> {
+    let navigation_policy = proxy.navigation_policy();
+    tauri::WebviewBuilder::new(label, tauri::WebviewUrl::External(target))
+        .incognito(true)
+        .proxy_url(proxy.proxy_url())
+        .on_navigation(move |url| navigation_policy.validate_navigation(url.as_str()).is_ok())
+}
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -177,9 +191,10 @@ fn start_runtime(app: &AppHandle) -> Result<Option<RuntimeProcessState>, String>
     );
     let window = window.ok_or_else(|| "Openloop main webview is missing".to_owned())?;
     window
-        .navigate(Url::parse(&bootstrap_url).map_err(|error| {
-            format!("Openloop runtime bootstrap URL is invalid: {error}")
-        })?)
+        .navigate(
+            Url::parse(&bootstrap_url)
+                .map_err(|error| format!("Openloop runtime bootstrap URL is invalid: {error}"))?,
+        )
         .map_err(|error| format!("Openloop main webview navigation failed: {error}"))?;
     Ok(Some(RuntimeProcessState {
         _instance: instance,
