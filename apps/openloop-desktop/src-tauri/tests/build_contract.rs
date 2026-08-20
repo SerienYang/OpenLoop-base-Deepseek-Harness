@@ -6,7 +6,7 @@ mod updater_key_tests {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
 
-    const VALID_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU4OTU2OENBMkZCQUZBODUKUldTRityb3Z5bWlWNkowTThHZC9YZEpBN1kvWDMyaEljcEVZOEw4K2RtR1poQlY1MzJsWjh0aXYK";
+    const VALID_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg2QzhGMThDMUVFRkUzRUYKUldUdjQrOGVqUEhJaHNKdlgrNVE4REtTYTRENXpzL0VEVi9pb2pmTVJiR2MrRHl3Wnowdy9Lay8K";
 
     #[test]
     fn test_channel_uses_repository_key_as_the_no_environment_fallback() {

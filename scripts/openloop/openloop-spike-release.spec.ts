@@ -65,11 +65,16 @@ describe('Openloop spike release workflow', () => {
     expect(publishJob().if).toContain('github.ref_protected == true')
     expect(publishJob().environment).toBe('openloop-test-release')
     expect(source).toContain('test "$(uname -m)" = arm64')
+    for (const step of publishJob().steps ?? []) {
+      if (step.uses !== undefined) {
+        expect(step.uses).toMatch(/^[^@]+@[a-f0-9]{40}$/u)
+      }
+    }
   })
 
   it('checks out and preflights the exact protected main trigger SHA', () => {
     const source = workflowSource()
-    const checkout = publishJob().steps?.find(step => step.uses === 'actions/checkout@v6')
+    const checkout = publishJob().steps?.find(step => step.uses === 'actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803')
     const preflight = namedStep('Validate isolated test release inputs').run ?? ''
 
     expect(checkout?.with).toMatchObject({

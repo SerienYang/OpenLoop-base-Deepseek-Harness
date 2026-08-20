@@ -274,7 +274,7 @@ fn embed_manifests(
     })
 }
 
-const TEST_UPDATER_PUBLIC_KEY_FALLBACK: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU4OTU2OENBMkZCQUZBODUKUldTRityb3Z5bWlWNkowTThHZC9YZEpBN1kvWDMyaEljcEVZOEw4K2RtR1poQlY1MzJsWjh0aXYK";
+const TEST_UPDATER_PUBLIC_KEY_FALLBACK: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg2QzhGMThDMUVFRkUzRUYKUldUdjQrOGVqUEhJaHNKdlgrNVE4REtTYTRENXpzL0VEVi9pb2pmTVJiR2MrRHl3Wnowdy9Lay8K";
 
 #[derive(Debug, PartialEq, Eq)]
 struct SelectedUpdaterPublicKey {
