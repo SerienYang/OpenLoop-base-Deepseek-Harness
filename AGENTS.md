@@ -17,6 +17,10 @@ updates, and product plugins.
 - Put product brand assets in `assets/brand/`.
 - Do not add a second plugin runtime. Cordis owns plugin loading, dependency
   injection, events, services, and lifecycle.
+- Packages under `packages/openloop/<name>` are the only private namespace
+  exception: they use `@openloop/<name>`, set `"private": true`, and declare
+  exactly one Host, Client, or pure face. Existing DSH package naming and
+  publication rules remain unchanged.
 
 ## Security ownership
 
@@ -67,6 +71,9 @@ repository-layout or release change is declared complete.
 - Keep Host and Client compiler faces explicit.
 - Use exact file paths in tests; zero executed tests is a failure.
 - Do not use `.only` or unapproved skips.
+- Run focused OpenLoop tests through `pnpm openloop:gate-test`; temporary skip
+  entries belong in `scripts/openloop/test-skip-allowlist.json` with an owner,
+  reason, and future expiry.
 - Keep generated binaries and installers out of Git.
 
 ## GitHub publishing

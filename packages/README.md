@@ -4,6 +4,11 @@ English | [中文](README.zh.md)
 
 npm scope: `@deepseek-ai/dsh-*`; Cordis `Service` subclasses and function plugins contribute through `ctx.effect()`, `ctx.on()`, or `ctx.waterfall()`. Repository rules live in [the root engineering guide](../AGENTS.md).
 
+OpenLoop product packages are the narrow exception: they live only under
+[`openloop/`](openloop/README.md), use the matching private
+`@openloop/<name>` namespace, and never alter the existing DSH naming or
+publication rules.
+
 ## Hierarchy
 
 Groups hold `packages/<group>/<pkg>/`; names stay `@deepseek-ai/dsh-<pkg>`. **Group READMEs own package/ctx-key maps.**
@@ -57,6 +62,7 @@ Groups hold `packages/<group>/<pkg>/`; names stay `@deepseek-ai/dsh-<pkg>`. **Gr
 | [`examples/`](examples/README.md) | Demo bundles (agent-spine + CLI/ACP/JSON-RPC bins) leaves load | Support — example infra |
 | [`test-support/`](test-support/README.md) | Support infrastructure (testkits, invariants, replay, Loader smokes) | Support — lower compatibility expectations |
 | [`util/`](util/README.md) | Low-level zero-dependency utilities shared across groups (`Branded<B>`, Harness home/path helpers, timeout, retention) | Support — small, stable, harness-dep-free |
+| [`openloop/`](openloop/README.md) | Private OpenLoop desktop product packages, each assigned one Host, Client, or pure face | Product — private, not a DSH release member |
 
 New packages join existing groups; new groups update their README and this table.
 

@@ -50,6 +50,14 @@ import './base.css'
 /** Module transport hook the shell passes through (jsdom tests replace the <script> path). */
 export type BootSeams = Pick<ClientModuleSystemOptions, 'loadBundle'>
 
+interface DshPrebootWindow {
+  __DSH_PREBOOT__?: Promise<void>
+}
+
+export async function awaitDshPreboot(): Promise<void> {
+  await (globalThis as DshPrebootWindow).__DSH_PREBOOT__
+}
+
 /**
  * The modules package's own graph row id. The kernel adopts that entry
  * itself (its wrapper is statically registered — shell-bundled code, never
@@ -130,9 +138,10 @@ export class AppWebEntry {
     // runPluginBoot awaits it before creating entries (see module comment:
     // cross-package synchronous require edges need every immediately-tier
     // factory registered before any materialization).
-    const prefetching = this.prefetchImmediateTier()
     this.ctx = new Context()
     try {
+      await awaitDshPreboot()
+      const prefetching = this.prefetchImmediateTier()
       await this.runPluginBoot(prefetching)
       this.settled.set(true)
     } catch (reason) {

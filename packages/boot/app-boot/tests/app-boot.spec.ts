@@ -625,6 +625,37 @@ describe('boot', () => {
     }
   })
 
+  it('uses the packaged-runtime base for bare entries created dynamically after boot starts', async () => {
+    const dir = tmp()
+    const harness = tmp()
+    const dynamicPackage = join(harness, 'node_modules', 'dynamic-package')
+    mkdirSync(dynamicPackage, { recursive: true })
+    writeFileSync(join(dynamicPackage, 'package.json'), JSON.stringify({
+      name: 'dynamic-package',
+      type: 'module',
+      exports: './index.mjs',
+    }))
+    writeFileSync(
+      join(dynamicPackage, 'index.mjs'),
+      'export function apply(ctx) { ctx.provide("dynamicPackageLoaded", true) }\n',
+    )
+    writeFileSync(join(dir, 'outer.mjs'), [
+      'export async function apply(ctx) {',
+      '  await ctx.loader.create({ name: "dynamic-package" })',
+      '}',
+      '',
+    ].join('\n'))
+    writeFileSync(join(dir, 'cordis.yml'), '- id: outer\n  name: ./outer.mjs\n')
+
+    const harnessBaseUrl = pathToFileURL(join(harness, 'entry.mjs')).href
+    const ctx = await boot(NAME, join(dir, 'cordis.yml'), undefined, undefined, harnessBaseUrl)
+    try {
+      expect(ctx.get('dynamicPackageLoaded')).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('runs host preparation before the Loader tree mounts', async () => {
     const dir = tmp()
     writeFileSync(join(dir, 'noop.mjs'), 'export const name = "noop"\nexport function apply() {}\n')

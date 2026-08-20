@@ -9,6 +9,10 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 import { hasTypertRemoteNavigation, isForbiddenPublicationFile } from './publication-payload.ts'
 import { collectProjectReferenceFaceViolations } from './project-reference-faces.ts'
+import {
+  collectDshWorkspaceNamingViolations,
+  collectOpenLoopWorkspaceViolations,
+} from './openloop/workspace-conventions.ts'
 
 const root = resolve(import.meta.dirname, '..')
 // vendor/* is single-level; packages/<group>/<pkg> nests one level deeper
@@ -223,6 +227,8 @@ function checkWorkspace({ dir, manifest }: WorkspaceManifest): string[] {
   const errors: string[] = []
   const label = manifest.name ?? dir
   const isLandlockPackageDir = dir.startsWith('native/landlock-run/packages/')
+  const isOpenLoopPackageDir = dir.startsWith('packages/openloop/')
+  const isOpenLoopAppDir = /^apps\/openloop-[^/]+$/u.test(dir)
   const isPublicLandlockPackage = isLandlockPackageDir
     && manifest.name !== undefined
     && publicLandlockPackages.has(manifest.name)
@@ -239,6 +245,18 @@ function checkWorkspace({ dir, manifest }: WorkspaceManifest): string[] {
       || manifest.repository.url !== repositoryUrl
       || manifest.repository.directory !== expectedDirectory) {
       errors.push(`${label}: published Landlock package repository must use ${repositoryUrl} with directory ${expectedDirectory} for trusted publishing`)
+    }
+  } else if (isOpenLoopPackageDir) {
+    // Product-owned @openloop packages are a narrow private namespace
+    // exception. Their naming, privacy, face, and Cordis rules are checked by
+    // collectOpenLoopWorkspaceViolations below.
+  } else if (isOpenLoopAppDir) {
+    const expectedName = `@openloop/${dir.slice('apps/openloop-'.length)}`
+    if (manifest.name !== expectedName) {
+      errors.push(`${label}: OpenLoop app package name must be ${expectedName}`)
+    }
+    if (manifest.private !== true) {
+      errors.push(`${label}: OpenLoop app packages must set "private": true`)
     }
   } else if (releaseMemberDirectory.test(dir)) {
     // Release members state that they are publishable: npm refuses a private
@@ -412,6 +430,8 @@ const errors = [
   ...checkWorkspaceProtocol(manifests),
   ...checkHierarchyShape(),
   ...collectProjectReferenceFaceViolations(root),
+  ...collectDshWorkspaceNamingViolations(root),
+  ...collectOpenLoopWorkspaceViolations(root),
 ]
 if (errors.length > 0) {
   console.error(errors.join('\n'))

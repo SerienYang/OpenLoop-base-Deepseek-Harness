@@ -58,6 +58,7 @@ const allowedRootEntries = new Set([
 const allowedWorkflowFiles = new Set([
   '.github/workflows/openloop-ci.yml',
   '.github/workflows/openloop-release.yml',
+  '.github/workflows/openloop-spike-release.yml',
   '.github/workflows/upstream-radar.yml',
 ])
 

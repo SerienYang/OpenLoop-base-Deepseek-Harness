@@ -354,7 +354,7 @@ export const CORDIS_INSPECT_POLICY: CordisCatalogPolicy = {
   linkedTypePages: {},
   foundationTypeNames: FOUNDATION_TYPE_NAMES,
   typeLinkExemptions: RUNTIME_TYPE_EXEMPTIONS,
-  runtimeServiceExclusions: new Set(['cordisInspect', 'dynamicCordisRunner']),
+  runtimeServiceExclusions: new Set(['cordisInspect', 'dynamicCordisRunner', 'runtimeBootstrap']),
   runtimeServices: [{
     key: 'timer',
     type: 'TimerService',

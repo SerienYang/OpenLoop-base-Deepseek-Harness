@@ -2,6 +2,10 @@ import { spawnSync } from 'node:child_process'
 import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import {
+  SERVICE_API as HOST_SERVICE_API,
+  queryServiceApi as queryHostServiceApi,
+} from '../packages/extensions/tool-cordis/src/api-catalog.ts'
 
 const repositoryRoot = fileURLToPath(new URL('..', import.meta.url))
 const tsxCli = fileURLToPath(new URL('../node_modules/tsx/dist/cli.mjs', import.meta.url))
@@ -36,6 +40,17 @@ describe('Cordis inspect catalog generator', () => {
       expect(after).not.toContain('docs/cordis-catalog')
     }
   }, 90_000)
+
+  it('keeps the Host-only runtime bootstrap out of model-visible catalogs', () => {
+    const hostSource = readFileSync(new URL(`../${catalogs[0]}`, import.meta.url), 'utf8')
+    const clientSource = readFileSync(new URL(`../${catalogs[1]}`, import.meta.url), 'utf8')
+
+    expect(hostSource).not.toContain("key: 'runtimeBootstrap'")
+    expect(HOST_SERVICE_API.some(service => service.key === 'runtimeBootstrap')).toBe(false)
+    expect(() => queryHostServiceApi('runtimeBootstrap')).toThrow('no catalogued Service named "runtimeBootstrap"')
+
+    expect(clientSource).not.toContain("key: 'runtimeBootstrap'")
+  })
 
   it('rejects a Context declaration that the Typert projection cannot see', () => {
     const probe = new URL('../packages/util/brand/src/cordis-inspect-probe.ts', import.meta.url)
