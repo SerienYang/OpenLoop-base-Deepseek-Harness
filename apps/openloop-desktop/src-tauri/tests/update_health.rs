@@ -3,6 +3,7 @@ use std::{
     fs,
     os::unix::fs::{symlink, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
+    process::Command,
     sync::{Mutex, MutexGuard},
     time::{Duration, Instant},
 };
@@ -62,6 +63,16 @@ fn app_bundle(main_script: &str, sidecar_script: &str) -> (tempfile::TempDir, Pa
     .expect("Info.plist");
     executable(&macos.join("openloop-desktop"), main_script);
     executable(&macos.join("openloop-runtime"), sidecar_script);
+    let signed = Command::new("/usr/bin/codesign")
+        .args(["--force", "--deep", "--sign", "-"])
+        .arg(&app)
+        .output()
+        .expect("sign fixture app");
+    assert!(
+        signed.status.success(),
+        "fixture codesign failed: {}",
+        String::from_utf8_lossy(&signed.stderr)
+    );
     (root, app)
 }
 
@@ -144,9 +155,7 @@ fn self_probe_validates_info_plist_and_bundled_sidecar_core_identity() {
     )
     .expect("replace Info.plist");
     assert!(
-        probe
-            .inspect(&app, PROBE_TIMEOUT, &dsh_home)
-            .is_err(),
+        probe.inspect(&app, PROBE_TIMEOUT, &dsh_home).is_err(),
         "mismatched build version passed health"
     );
 
@@ -158,9 +167,7 @@ fn self_probe_validates_info_plist_and_bundled_sidecar_core_identity() {
     let wrong_core = sidecar.replace(CORE_SHA256, &"b".repeat(64));
     executable(&app.join("Contents/MacOS/openloop-runtime"), &wrong_core);
     assert!(
-        probe
-            .inspect(&app, PROBE_TIMEOUT, &dsh_home)
-            .is_err(),
+        probe.inspect(&app, PROBE_TIMEOUT, &dsh_home).is_err(),
         "mismatched sidecar core identity passed health"
     );
 }
@@ -181,6 +188,18 @@ fn candidate_process_health_reports_success_failure_and_timeout() {
     assert_eq!(
         health.await_health(&success_app, PROBE_TIMEOUT),
         HealthStatus::Healthy
+    );
+
+    fs::write(
+        success_app.join("Contents/MacOS/openloop-desktop"),
+        "#!/bin/sh\nexit 0\n# tampered after signing\n",
+    )
+    .expect("tamper signed candidate Host");
+    let mut tampered_health = CandidateProcessHealth::new(VERSION, &dsh_home);
+    let tampered = tampered_health.await_health(&success_app, PROBE_TIMEOUT);
+    assert!(
+        matches!(tampered, HealthStatus::Failed(ref message) if message.contains("code signature")),
+        "tampered candidate Host was not rejected: {tampered:?}"
     );
 
     let failure = format!(
@@ -222,7 +241,7 @@ fn candidate_process_health_times_out_when_a_detached_descendant_holds_the_pipes
     let marker_root = tempdir().expect("detached helper marker root");
     let marker = marker_root.path().join("ready");
     let script = format!(
-        "#!/bin/sh\n[ \"$1\" = \"{HEALTH_PROBE_ARGUMENT}\" ] || exit 91\n/usr/bin/python3 -c 'import os, sys, time; pid = os.fork(); os._exit(0) if pid else None; os.setsid(); open(sys.argv[1], \"w\").close(); os.write(1, b\"x\"); time.sleep(2)' '{}' &\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nexit 0\n",
+        "#!/bin/sh\n[ \"$1\" = \"{HEALTH_PROBE_ARGUMENT}\" ] || exit 91\n/usr/bin/python3 -c 'import os, sys, time; pid = os.fork(); os._exit(0) if pid else None; os.setsid(); open(sys.argv[1], \"w\").close(); os.write(1, b\"x\"); time.sleep(5)' '{}' &\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nexit 0\n",
         marker.display(),
         marker.display()
     );
@@ -230,12 +249,12 @@ fn candidate_process_health_times_out_when_a_detached_descendant_holds_the_pipes
     let mut health = CandidateProcessHealth::new(VERSION, &dsh_home);
     let started = Instant::now();
 
-    let status = health.await_health(&app, Duration::from_secs(1));
+    let status = health.await_health(&app, Duration::from_secs(2));
 
     assert_eq!(status, HealthStatus::TimedOut);
     assert!(marker.exists(), "setsid pipe holder did not start");
     assert!(
-        started.elapsed() < Duration::from_millis(1_500),
+        started.elapsed() < Duration::from_millis(2_500),
         "health timeout exceeded its hard bound: {:?}",
         started.elapsed()
     );

@@ -81,6 +81,7 @@ impl BundleHealthProbe {
                 "candidate bundle must use the .app extension",
             ));
         }
+        verify_bundle_code_signature(app)?;
         let contents = app.join("Contents");
         let macos = contents.join("MacOS");
         require_real_directory(&contents, "candidate Contents")?;
@@ -173,6 +174,7 @@ impl CandidateProcessHealth {
     fn run(&self, candidate: &Path, timeout: Duration) -> Result<(), HealthProbeError> {
         validate_dsh_home(&self.dsh_home, None)?;
         require_real_directory(candidate, "published candidate app")?;
+        verify_bundle_code_signature(candidate)?;
         let contents = candidate.join("Contents");
         let macos = contents.join("MacOS");
         require_real_directory(&contents, "published candidate Contents")?;
@@ -482,6 +484,25 @@ fn plist_value(path: &Path, key: &str) -> Result<String, HealthProbeError> {
         )));
     }
     Ok(value.to_owned())
+}
+
+fn verify_bundle_code_signature(app: &Path) -> Result<(), HealthProbeError> {
+    let output = Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(app)
+        .output()
+        .map_err(|source| HealthProbeError::io("run candidate codesign verification", source))?;
+    if !output.status.success() {
+        return Err(HealthProbeError::invalid(format!(
+            "candidate app code signature verification failed{}",
+            if output.stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", bounded_diagnostic(&output.stderr))
+            }
+        )));
+    }
+    Ok(())
 }
 
 fn bounded_output(mut command: Command, timeout: Duration) -> Result<Output, HealthProbeError> {

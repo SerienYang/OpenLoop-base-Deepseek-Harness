@@ -127,10 +127,10 @@ pub fn stage_verified_archive(
         .map_err(|source| ArchiveStageError::io("inspect staged candidate", source))
         .map_err(|error| error.with_preserved_path(candidate.path.clone()))?;
     if observed_identity != candidate_identity {
-        return Err(ArchiveStageError::invalid(
-            "candidate app identity changed during extraction",
-        )
-        .with_preserved_path(candidate.path.clone()));
+        return Err(
+            ArchiveStageError::invalid("candidate app identity changed during extraction")
+                .with_preserved_path(candidate.path.clone()),
+        );
     }
     Ok(candidate)
 }
