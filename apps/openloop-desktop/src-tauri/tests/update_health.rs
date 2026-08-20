@@ -3,7 +3,8 @@ use std::{
     fs,
     os::unix::fs::{symlink, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
-    time::Duration,
+    sync::{Mutex, MutexGuard},
+    time::{Duration, Instant},
 };
 
 use openloop_desktop_lib::update::{
@@ -20,6 +21,13 @@ const VERSION: &str = "1.2.3-test.4";
 const IDENTIFIER: &str = "ai.openloop.desktop.test";
 const CORE_SHA256: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+static PROCESS_HEALTH_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_process_health_tests() -> MutexGuard<'static, ()> {
+    PROCESS_HEALTH_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn executable(path: &Path, script: &str) {
     fs::write(path, script).expect("write executable fixture");
@@ -159,6 +167,7 @@ fn self_probe_validates_info_plist_and_bundled_sidecar_core_identity() {
 
 #[test]
 fn candidate_process_health_reports_success_failure_and_timeout() {
+    let _guard = lock_process_health_tests();
     let dsh_home_root = tempdir().expect("DSH_HOME root");
     let dsh_home = dsh_home_root.path().join("Openloop-Test/dsh");
     fs::create_dir_all(&dsh_home).expect("DSH_HOME");
@@ -205,7 +214,36 @@ fn candidate_process_health_reports_success_failure_and_timeout() {
 }
 
 #[test]
+fn candidate_process_health_times_out_when_a_detached_descendant_holds_the_pipes() {
+    let _guard = lock_process_health_tests();
+    let dsh_home_root = tempdir().expect("DSH_HOME root");
+    let dsh_home = dsh_home_root.path().join("Openloop-Test/dsh");
+    fs::create_dir_all(&dsh_home).expect("DSH_HOME");
+    let marker_root = tempdir().expect("detached helper marker root");
+    let marker = marker_root.path().join("ready");
+    let script = format!(
+        "#!/bin/sh\n[ \"$1\" = \"{HEALTH_PROBE_ARGUMENT}\" ] || exit 91\n/usr/bin/python3 -c 'import os, sys, time; pid = os.fork(); os._exit(0) if pid else None; os.setsid(); open(sys.argv[1], \"w\").close(); os.write(1, b\"x\"); time.sleep(2)' '{}' &\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nexit 0\n",
+        marker.display(),
+        marker.display()
+    );
+    let (_root, app) = app_bundle(&script, "#!/bin/sh\nexit 0\n");
+    let mut health = CandidateProcessHealth::new(VERSION, &dsh_home);
+    let started = Instant::now();
+
+    let status = health.await_health(&app, Duration::from_secs(1));
+
+    assert_eq!(status, HealthStatus::TimedOut);
+    assert!(marker.exists(), "setsid pipe holder did not start");
+    assert!(
+        started.elapsed() < Duration::from_millis(1_500),
+        "health timeout exceeded its hard bound: {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
 fn candidate_process_health_drains_oversized_stdout_without_timing_out() {
+    let _guard = lock_process_health_tests();
     let dsh_home_root = tempdir().expect("DSH_HOME root");
     let dsh_home = dsh_home_root.path().join("Openloop-Test/dsh");
     fs::create_dir_all(&dsh_home).expect("DSH_HOME");
@@ -225,6 +263,7 @@ fn candidate_process_health_drains_oversized_stdout_without_timing_out() {
 
 #[test]
 fn candidate_process_health_drains_oversized_stderr_without_timing_out() {
+    let _guard = lock_process_health_tests();
     let dsh_home_root = tempdir().expect("DSH_HOME root");
     let dsh_home = dsh_home_root.path().join("Openloop-Test/dsh");
     fs::create_dir_all(&dsh_home).expect("DSH_HOME");

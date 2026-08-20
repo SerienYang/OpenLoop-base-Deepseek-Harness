@@ -9,7 +9,8 @@ use std::{
         unix::process::CommandExt,
     },
     path::{Component, Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
+    sync::mpsc::{self, Receiver, RecvTimeoutError},
     thread,
     time::{Duration, Instant},
 };
@@ -21,6 +22,7 @@ use super::recovery::{CandidateHealth, HealthStatus};
 pub const HEALTH_PROBE_ARGUMENT: &str = "--openloop-update-health-probe";
 pub const TEST_PROBE_FAILURE_ENVIRONMENT: &str = "OPENLOOP_UPDATE_SPIKE_PROBE_FAILURE";
 const MAX_PROBE_OUTPUT: usize = 16 * 1024;
+const PROCESS_REAP_GRACE: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -510,39 +512,54 @@ fn bounded_output(mut command: Command, timeout: Duration) -> Result<Output, Hea
             io::Error::new(io::ErrorKind::BrokenPipe, "stderr pipe is unavailable"),
         )
     })?;
-    let stdout_reader = thread::spawn(move || drain_bounded(stdout));
-    let stderr_reader = thread::spawn(move || drain_bounded(stderr));
+    let stdout_reader = spawn_probe_reader(stdout);
+    let stderr_reader = spawn_probe_reader(stderr);
     let deadline = Instant::now() + timeout;
-    let mut status = None;
-    loop {
-        if status.is_none() {
-            status = child
-                .try_wait()
-                .map_err(|source| HealthProbeError::io("wait for health probe process", source))?;
-        }
-        if status.is_some() && stdout_reader.is_finished() && stderr_reader.is_finished() {
-            break;
-        }
-        if Instant::now() >= deadline {
-            terminate_process_group(child.id())?;
-            if status.is_none() {
-                child
-                    .wait()
-                    .map_err(|source| HealthProbeError::io("reap health probe process", source))?;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(
+                    Duration::from_millis(5)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
             }
-            join_probe_reader(stdout_reader, "join health probe stdout reader")?;
-            join_probe_reader(stderr_reader, "join health probe stderr reader")?;
-            return Err(HealthProbeError::TimedOut);
+            Ok(None) => {
+                let _ = terminate_process_group_with_grace(&mut child);
+                return Err(HealthProbeError::TimedOut);
+            }
+            Err(source) => {
+                let error = HealthProbeError::io("wait for health probe process", source);
+                let _ = terminate_process_group_with_grace(&mut child);
+                return Err(error);
+            }
         }
-        thread::sleep(Duration::from_millis(5));
-    }
-    let stdout = join_probe_reader(stdout_reader, "join health probe stdout reader")?;
-    let stderr = join_probe_reader(stderr_reader, "join health probe stderr reader")?;
+    };
+    let stdout = receive_probe_reader(
+        &stdout_reader,
+        deadline,
+        "receive health probe stdout reader",
+        &mut child,
+    )?;
+    let stderr = receive_probe_reader(
+        &stderr_reader,
+        deadline,
+        "receive health probe stderr reader",
+        &mut child,
+    )?;
     Ok(Output {
-        status: status.expect("health probe exited before readers completed"),
+        status,
         stdout,
         stderr,
     })
+}
+
+fn spawn_probe_reader(reader: impl Read + Send + 'static) -> Receiver<io::Result<Vec<u8>>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = sender.send(drain_bounded(reader));
+    });
+    receiver
 }
 
 fn drain_bounded(mut reader: impl Read) -> io::Result<Vec<u8>> {
@@ -558,14 +575,44 @@ fn drain_bounded(mut reader: impl Read) -> io::Result<Vec<u8>> {
     }
 }
 
-fn join_probe_reader(
-    reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+fn receive_probe_reader(
+    reader: &Receiver<io::Result<Vec<u8>>>,
+    deadline: Instant,
     operation: &'static str,
+    child: &mut Child,
 ) -> Result<Vec<u8>, HealthProbeError> {
-    reader
-        .join()
-        .map_err(|_| HealthProbeError::io(operation, io::Error::other("reader thread panicked")))?
-        .map_err(|source| HealthProbeError::io(operation, source))
+    let result = match reader.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout) => {
+            let _ = terminate_process_group_with_grace(child);
+            return Err(HealthProbeError::TimedOut);
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            return Err(HealthProbeError::io(
+                operation,
+                io::Error::other("reader thread disconnected"),
+            ));
+        }
+    };
+    result.map_err(|source| HealthProbeError::io(operation, source))
+}
+
+fn terminate_process_group_with_grace(child: &mut Child) -> Result<(), HealthProbeError> {
+    let termination = terminate_process_group(child.id());
+    let deadline = Instant::now() + PROCESS_REAP_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => break,
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(
+                    Duration::from_millis(5)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Ok(None) => break,
+        }
+    }
+    termination
 }
 
 fn terminate_process_group(pid: u32) -> Result<(), HealthProbeError> {
