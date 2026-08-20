@@ -1,7 +1,12 @@
 use std::{
+    ffi::CString,
     fs,
-    os::unix::fs::symlink,
+    os::unix::{ffi::OsStrExt, fs::symlink},
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -21,10 +26,12 @@ fn channel_contracts_are_explicit_isolated_and_use_the_actual_repository() {
         .expect("valid test updater configuration");
     let stable = UpdateChannelConfig::new(ReleaseChannel::Stable, Some(VALID_TAURI_PUBLIC_KEY))
         .expect("valid stable updater configuration");
+    let app_data = Path::new("/Users/example/Library/Application Support/ai.openloop.desktop");
 
     assert_eq!(test.bundle_identifier(), "ai.openloop.desktop.test");
     assert_eq!(test.manifest_filename(), "latest-test-k1.json");
     assert_eq!(test.data_root_name(), "Openloop-Test");
+    assert_eq!(test.data_root(app_data), app_data.join("Openloop-Test"),);
     assert_eq!(
         test.endpoint().as_str(),
         "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-rolling/latest-test-k1.json"
@@ -35,6 +42,7 @@ fn channel_contracts_are_explicit_isolated_and_use_the_actual_repository() {
     assert_eq!(stable.bundle_identifier(), "ai.openloop.desktop");
     assert_eq!(stable.manifest_filename(), "latest-stable-k1.json");
     assert_eq!(stable.data_root_name(), "Openloop");
+    assert_eq!(stable.data_root(app_data), app_data.join("Openloop"));
     assert_eq!(
         stable.endpoint().as_str(),
         "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-stable-rolling/latest-stable-k1.json"
@@ -120,6 +128,18 @@ fn transaction_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
     app_bundle(&installed, "old");
     app_bundle(&candidate, "new");
     (fixture, installed, candidate)
+}
+
+fn fifo(path: &Path) {
+    let path = CString::new(path.as_os_str().as_bytes()).expect("FIFO path");
+    // SAFETY: `path` is a live NUL-terminated filesystem path.
+    let result = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+    assert_eq!(
+        result,
+        0,
+        "create FIFO: {}",
+        std::io::Error::last_os_error()
+    );
 }
 
 #[test]
@@ -215,6 +235,54 @@ fn recovery_transaction_surfaces_restore_failure_without_hiding_the_candidate() 
 }
 
 #[test]
+fn recovery_transaction_does_not_delete_a_replaced_backup_on_commit() {
+    let (fixture, installed, candidate) = transaction_fixture();
+    let backup = fixture.path().join(".Openloop.app.openloop-backup");
+    let transaction =
+        RecoveryTransaction::open(fixture.path(), &installed, &candidate).expect("transaction");
+    let replaced_backup = backup.clone();
+    let mut health = HealthProbe(move |_: &Path, _: Duration| {
+        fs::remove_dir_all(&replaced_backup).expect("remove owned backup");
+        app_bundle(&replaced_backup, "replacement");
+        HealthStatus::Healthy
+    });
+
+    let error = transaction
+        .publish(&mut health)
+        .expect_err("replacement backup must not be deleted");
+
+    assert!(error.to_string().contains("backup") || error.to_string().contains("identity"));
+    assert_eq!(marker(&installed), "new");
+    assert_eq!(marker(&backup), "replacement");
+}
+
+#[test]
+fn recovery_transaction_does_not_restore_a_replaced_backup() {
+    let (fixture, installed, candidate) = transaction_fixture();
+    let backup = fixture.path().join(".Openloop.app.openloop-backup");
+    let transaction =
+        RecoveryTransaction::open(fixture.path(), &installed, &candidate).expect("transaction");
+    let replaced_backup = backup.clone();
+    let mut health = HealthProbe(move |_: &Path, _: Duration| {
+        fs::remove_dir_all(&replaced_backup).expect("remove owned backup");
+        app_bundle(&replaced_backup, "replacement");
+        HealthStatus::Failed("candidate failed".into())
+    });
+
+    let error = transaction
+        .publish(&mut health)
+        .expect_err("replacement backup must not be restored");
+
+    assert!(matches!(error, RecoveryError::RestoreFailed { .. }));
+    assert_eq!(marker(&installed), "new");
+    assert_eq!(marker(&backup), "replacement");
+    assert!(!fixture
+        .path()
+        .join(".Openloop.app.openloop-staging")
+        .exists());
+}
+
+#[test]
 fn recovery_transaction_rejects_stale_partial_state() {
     for stale_name in [
         ".Openloop.app.openloop-backup",
@@ -283,4 +351,73 @@ fn recovery_transaction_rejects_unsafe_or_ambiguous_bundle_paths() {
         .is_err(),
         "symlinked transaction root was accepted"
     );
+}
+
+#[test]
+fn recovery_transaction_rejects_candidate_replacements_after_open() {
+    for replacement in ["symlink", "fifo", "different-inode"] {
+        let (fixture, installed, candidate) = transaction_fixture();
+        let external = fixture.path().join("External.app");
+        app_bundle(&external, "external");
+        let transaction =
+            RecoveryTransaction::open(fixture.path(), &installed, &candidate).expect("transaction");
+        fs::remove_dir_all(&candidate).expect("remove original candidate");
+        match replacement {
+            "symlink" => symlink(&external, &candidate).expect("replacement symlink"),
+            "fifo" => fifo(&candidate),
+            "different-inode" => app_bundle(&candidate, "replacement"),
+            _ => unreachable!(),
+        }
+        let health_called = Arc::new(AtomicBool::new(false));
+        let observed = health_called.clone();
+        let mut health = HealthProbe(move |_: &Path, _: Duration| {
+            observed.store(true, Ordering::SeqCst);
+            HealthStatus::Healthy
+        });
+
+        let error = transaction
+            .publish(&mut health)
+            .expect_err("replaced candidate identity must abort publication");
+
+        assert!(
+            error.to_string().contains("candidate")
+                || error.to_string().contains("identity")
+                || error.to_string().contains("bundle"),
+            "unexpected replacement error: {error}"
+        );
+        assert!(
+            !health_called.load(Ordering::SeqCst),
+            "health probe ran for {replacement} replacement"
+        );
+        assert_eq!(marker(&installed), "old");
+    }
+}
+
+#[test]
+fn recovery_transaction_rejects_installed_replacement_after_open() {
+    let (fixture, installed, candidate) = transaction_fixture();
+    let displaced = fixture.path().join("Displaced.app");
+    let transaction =
+        RecoveryTransaction::open(fixture.path(), &installed, &candidate).expect("transaction");
+    fs::rename(&installed, &displaced).expect("displace original installed bundle");
+    app_bundle(&installed, "replacement");
+    let health_called = Arc::new(AtomicBool::new(false));
+    let observed = health_called.clone();
+    let mut health = HealthProbe(move |_: &Path, _: Duration| {
+        observed.store(true, Ordering::SeqCst);
+        HealthStatus::Healthy
+    });
+
+    let error = transaction
+        .publish(&mut health)
+        .expect_err("replaced installed identity must abort publication");
+
+    assert!(
+        error.to_string().contains("installed") || error.to_string().contains("identity"),
+        "unexpected replacement error: {error}"
+    );
+    assert!(!health_called.load(Ordering::SeqCst));
+    assert_eq!(marker(&installed), "replacement");
+    assert_eq!(marker(&candidate), "new");
+    assert_eq!(marker(&displaced), "old");
 }

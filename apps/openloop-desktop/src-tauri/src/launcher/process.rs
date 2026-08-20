@@ -165,6 +165,45 @@ impl SupervisedChild {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        Self::spawn_command(executable, args, secrets, None)
+    }
+
+    pub fn spawn_with_dsh_home(
+        executable: &Path,
+        secrets: &LaunchSecrets,
+        dsh_home: &Path,
+    ) -> Result<Self, StartupError> {
+        Self::spawn_with_args_and_dsh_home(
+            executable,
+            std::iter::empty::<&OsStr>(),
+            secrets,
+            dsh_home,
+        )
+    }
+
+    pub fn spawn_with_args_and_dsh_home<I, S>(
+        executable: &Path,
+        args: I,
+        secrets: &LaunchSecrets,
+        dsh_home: &Path,
+    ) -> Result<Self, StartupError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        Self::spawn_command(executable, args, secrets, Some(dsh_home))
+    }
+
+    fn spawn_command<I, S>(
+        executable: &Path,
+        args: I,
+        secrets: &LaunchSecrets,
+        dsh_home: Option<&Path>,
+    ) -> Result<Self, StartupError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         let (read_fd, write_fd) = anonymous_pipe().map_err(StartupError::Io)?;
         let inherited_fd = read_fd.as_raw_fd();
         let mut command = Command::new(executable);
@@ -173,6 +212,9 @@ impl SupervisedChild {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(dsh_home) = dsh_home {
+            command.env("DSH_HOME", dsh_home);
+        }
         unsafe {
             command.pre_exec(move || {
                 if libc::dup2(inherited_fd, CHILD_SECRET_FD) < 0 {

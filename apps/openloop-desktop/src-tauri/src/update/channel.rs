@@ -1,4 +1,9 @@
-use std::{error::Error, fmt, str::FromStr};
+use std::{
+    error::Error,
+    fmt,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use minisign_verify::PublicKey;
@@ -108,6 +113,10 @@ impl UpdateChannelConfig {
 
     pub fn data_root_name(&self) -> &'static str {
         self.channel.data_root_name()
+    }
+
+    pub fn data_root(&self, app_data: &Path) -> PathBuf {
+        app_data.join(self.data_root_name())
     }
 
     pub fn public_key_environment(&self) -> &'static str {

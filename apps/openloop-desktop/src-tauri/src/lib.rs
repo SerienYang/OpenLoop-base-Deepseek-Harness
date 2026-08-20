@@ -1,4 +1,5 @@
 use std::{
+    fs,
     path::{Path, PathBuf},
     sync::Mutex,
     time::Duration,
@@ -159,8 +160,19 @@ fn runtime_executable(app: &AppHandle) -> Result<PathBuf, String> {
         .ok_or_else(|| "bundled Openloop runtime sidecar is missing".to_owned())
 }
 
-fn start_runtime(app: &AppHandle) -> Result<Option<RuntimeProcessState>, String> {
-    let launch_id_path = std::env::temp_dir().join("openloop-runtime.sock");
+fn start_runtime(
+    app: &AppHandle,
+    updater_config: &update::channel::UpdateChannelConfig,
+) -> Result<Option<RuntimeProcessState>, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Openloop app data directory is unavailable: {error}"))?;
+    let channel_root = app_data.join(updater_config.data_root_name());
+    let dsh_home = channel_root.join("dsh");
+    fs::create_dir_all(&dsh_home)
+        .map_err(|error| format!("Openloop channel data root is unavailable: {error}"))?;
+    let launch_id_path = channel_root.join("openloop-runtime.sock");
     let secrets = LaunchSecrets::generate(launch_id_path.clone())
         .map_err(|error| format!("runtime launch secret generation failed: {error}"))?;
     let instance = SingleInstance::acquire(&secrets.socket_path)
@@ -184,8 +196,8 @@ fn start_runtime(app: &AppHandle) -> Result<Option<RuntimeProcessState>, String>
         launch_id: secrets.launch_id,
         core_manifest_sha256: CORE_MANIFEST_SHA256.to_owned(),
     };
-    let mut child =
-        SupervisedChild::spawn(&executable, &secrets).map_err(|error| error.to_string())?;
+    let mut child = SupervisedChild::spawn_with_dsh_home(&executable, &secrets, &dsh_home)
+        .map_err(|error| error.to_string())?;
     let readiness = child
         .wait_readiness(&expectation, Duration::from_secs(10))
         .map_err(|error| error.to_string())?;
@@ -227,7 +239,8 @@ pub fn run() {
         .manage(updater_config)
         .invoke_handler(tauri::generate_handler![build_manifest])
         .setup(|app| {
-            if let Some(state) = start_runtime(&app.handle())? {
+            let updater_config = app.state::<update::channel::UpdateChannelConfig>();
+            if let Some(state) = start_runtime(&app.handle(), &updater_config)? {
                 app.manage(state);
             }
             Ok(())

@@ -3,7 +3,7 @@ use std::{
     ffi::{CStr, CString, OsStr},
     fmt, fs, io,
     os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
+        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::{ffi::OsStrExt, fs::MetadataExt},
     },
     path::{Path, PathBuf},
@@ -29,6 +29,35 @@ pub enum PublicationOutcome {
     RolledBack(HealthStatus),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+    file_type: u32,
+}
+
+impl FileIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            file_type: metadata.mode() & libc::S_IFMT as u32,
+        }
+    }
+
+    fn from_stat(metadata: &libc::stat) -> Self {
+        Self {
+            device: metadata.st_dev as u64,
+            inode: metadata.st_ino as u64,
+            file_type: metadata.st_mode as u32 & libc::S_IFMT as u32,
+        }
+    }
+
+    fn is_directory(self) -> bool {
+        self.file_type == libc::S_IFDIR as u32
+    }
+}
+
 #[derive(Debug)]
 pub struct RecoveryTransaction {
     root_path: PathBuf,
@@ -37,6 +66,8 @@ pub struct RecoveryTransaction {
     candidate_name: CString,
     backup_name: CString,
     staging_name: CString,
+    installed_identity: FileIdentity,
+    candidate_identity: FileIdentity,
 }
 
 impl RecoveryTransaction {
@@ -57,41 +88,14 @@ impl RecoveryTransaction {
                 "installed and candidate app bundle paths must not overlap",
             ));
         }
-        let installed_metadata = real_bundle_metadata(installed, "installed")?;
-        let candidate_metadata = real_bundle_metadata(candidate, "candidate")?;
-        if installed_metadata.dev() != candidate_metadata.dev()
-            || installed_metadata.dev() != root_metadata.dev()
-        {
-            return Err(RecoveryError::invalid(
-                "installed, candidate, and update root must share one filesystem",
-            ));
-        }
 
         let installed_text = installed_name.to_string_lossy();
         let backup_name = CString::new(format!(".{installed_text}.openloop-backup"))
             .expect("validated app names contain no NUL");
         let staging_name = CString::new(format!(".{installed_text}.openloop-staging"))
             .expect("validated app names contain no NUL");
-        for marker in [&backup_name, &staging_name] {
-            let marker_path = canonical_root.join(OsStr::from_bytes(marker.to_bytes()));
-            match fs::symlink_metadata(&marker_path) {
-                Ok(_) => {
-                    return Err(RecoveryError::invalid(format!(
-                        "stale update transaction marker exists at {}",
-                        marker_path.display()
-                    )));
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(RecoveryError::io(
-                        "inspect update transaction marker",
-                        source,
-                    ));
-                }
-            }
-        }
 
-        let root_c = CString::new(root.as_os_str().as_bytes())
+        let root_c = CString::new(canonical_root.as_os_str().as_bytes())
             .map_err(|_| RecoveryError::invalid("update root contains a NUL byte"))?;
         // SAFETY: `root_c` is a live NUL-terminated path. A successful call
         // returns a new descriptor owned by this transaction.
@@ -107,15 +111,54 @@ impl RecoveryTransaction {
                 io::Error::last_os_error(),
             ));
         }
+        // SAFETY: `descriptor` was just returned as a new owned fd.
+        let root = unsafe { OwnedFd::from_raw_fd(descriptor) };
+        let root_identity = descriptor_identity(root.as_raw_fd())
+            .map_err(|source| RecoveryError::io("inspect opened update root", source))?;
+        if root_identity != FileIdentity::from_metadata(&root_metadata) {
+            return Err(RecoveryError::invalid(
+                "update root identity changed while opening transaction",
+            ));
+        }
+        for marker in [&backup_name, &staging_name] {
+            match identity_at(root.as_raw_fd(), marker) {
+                Ok(_) => {
+                    let marker_path = canonical_root.join(OsStr::from_bytes(marker.to_bytes()));
+                    return Err(RecoveryError::invalid(format!(
+                        "stale update transaction marker exists at {}",
+                        marker_path.display()
+                    )));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(RecoveryError::io(
+                        "inspect update transaction marker",
+                        source,
+                    ));
+                }
+            }
+        }
+        let installed_identity =
+            bundle_identity_at(root.as_raw_fd(), &installed_name, "installed")?;
+        let candidate_identity =
+            bundle_identity_at(root.as_raw_fd(), &candidate_name, "candidate")?;
+        if installed_identity.device != candidate_identity.device
+            || installed_identity.device != root_identity.device
+        {
+            return Err(RecoveryError::invalid(
+                "installed, candidate, and update root must share one filesystem",
+            ));
+        }
 
         Ok(Self {
             root_path: canonical_root,
-            // SAFETY: `descriptor` was just returned as a new owned fd.
-            root: unsafe { OwnedFd::from_raw_fd(descriptor) },
+            root,
             installed_name,
             candidate_name,
             backup_name,
             staging_name,
+            installed_identity,
+            candidate_identity,
         })
     }
 
@@ -123,10 +166,25 @@ impl RecoveryTransaction {
         self,
         health: &mut impl CandidateHealth,
     ) -> Result<PublicationOutcome, RecoveryError> {
-        self.rename(&self.installed_name, &self.backup_name)
-            .map_err(|source| RecoveryError::io("preserve installed app bundle", source))?;
-        if let Err(publication_error) = self.rename(&self.candidate_name, &self.installed_name) {
-            let restore = self.rename(&self.backup_name, &self.installed_name);
+        self.rename_owned(
+            &self.installed_name,
+            &self.backup_name,
+            self.installed_identity,
+            "installed app bundle",
+        )
+        .map_err(|source| RecoveryError::io("preserve installed app bundle", source))?;
+        if let Err(publication_error) = self.rename_owned(
+            &self.candidate_name,
+            &self.installed_name,
+            self.candidate_identity,
+            "candidate app bundle",
+        ) {
+            let restore = self.rename_owned(
+                &self.backup_name,
+                &self.installed_name,
+                self.installed_identity,
+                "installed backup",
+            );
             return match restore {
                 Ok(()) => Err(RecoveryError::io(
                     "publish candidate app bundle",
@@ -142,26 +200,100 @@ impl RecoveryTransaction {
         let installed_path = self.path(&self.installed_name);
         let status = health.await_health(&installed_path, HEALTH_TIMEOUT);
         if status == HealthStatus::Healthy {
-            self.remove_bundle(&self.backup_name)
-                .map_err(|source| RecoveryError::io("remove committed backup", source))?;
+            self.remove_owned(
+                &self.backup_name,
+                self.installed_identity,
+                "installed backup",
+            )
+            .map_err(|source| RecoveryError::io("remove committed backup", source))?;
             return Ok(PublicationOutcome::Committed);
         }
 
-        self.rename(&self.installed_name, &self.staging_name)
-            .map_err(|source| RecoveryError::io("stage failed candidate", source))?;
-        if let Err(restore) = self.rename(&self.backup_name, &self.installed_name) {
-            let candidate_republish = self.rename(&self.staging_name, &self.installed_name).err();
+        self.rename_owned(
+            &self.installed_name,
+            &self.staging_name,
+            self.candidate_identity,
+            "published candidate",
+        )
+        .map_err(|source| RecoveryError::io("stage failed candidate", source))?;
+        if let Err(restore) = self.rename_owned(
+            &self.backup_name,
+            &self.installed_name,
+            self.installed_identity,
+            "installed backup",
+        ) {
+            let candidate_republish = self
+                .rename_owned(
+                    &self.staging_name,
+                    &self.installed_name,
+                    self.candidate_identity,
+                    "staged candidate",
+                )
+                .err();
             return Err(RecoveryError::RestoreFailed {
                 restore,
                 candidate_republish,
             });
         }
-        self.remove_bundle(&self.staging_name)
-            .map_err(|source| RecoveryError::io("remove rolled-back candidate", source))?;
+        self.remove_owned(
+            &self.staging_name,
+            self.candidate_identity,
+            "staged candidate",
+        )
+        .map_err(|source| RecoveryError::io("remove rolled-back candidate", source))?;
         Ok(PublicationOutcome::RolledBack(status))
     }
 
-    fn rename(&self, from: &CStr, to: &CStr) -> io::Result<()> {
+    fn rename_owned(
+        &self,
+        from: &CStr,
+        to: &CStr,
+        expected: FileIdentity,
+        label: &str,
+    ) -> io::Result<()> {
+        self.verify_identity(from, expected, label)?;
+        self.rename_unchecked(from, to)?;
+        let actual = match identity_at(self.root.as_raw_fd(), to) {
+            Ok(actual) if actual == expected => return Ok(()),
+            Ok(actual) => actual,
+            Err(error) => {
+                return Err(identity_error(
+                    label,
+                    format!("destination inspection failed after rename: {error}"),
+                ));
+            }
+        };
+        let recovery = self
+            .return_unexpected_entry(to, from, actual)
+            .map(|()| "unexpected entry returned to its source path".to_owned())
+            .unwrap_or_else(|error| format!("returning unexpected entry failed: {error}"));
+        Err(identity_error(
+            label,
+            format!("destination changed during rename; {recovery}"),
+        ))
+    }
+
+    fn return_unexpected_entry(
+        &self,
+        from: &CStr,
+        to: &CStr,
+        observed: FileIdentity,
+    ) -> io::Result<()> {
+        self.verify_identity(from, observed, "unexpected renamed entry")?;
+        self.rename_unchecked(from, to)?;
+        self.verify_identity(to, observed, "returned unexpected entry")
+    }
+
+    fn verify_identity(&self, name: &CStr, expected: FileIdentity, label: &str) -> io::Result<()> {
+        let actual = identity_at(self.root.as_raw_fd(), name)
+            .map_err(|error| identity_error(label, error.to_string()))?;
+        if actual != expected {
+            return Err(identity_error(label, "filesystem object was replaced"));
+        }
+        Ok(())
+    }
+
+    fn rename_unchecked(&self, from: &CStr, to: &CStr) -> io::Result<()> {
         // SAFETY: both names are validated single path components and the
         // transaction keeps the root descriptor alive for the entire call.
         // RENAME_EXCL prevents a raced, unowned marker from being replaced.
@@ -184,29 +316,8 @@ impl RecoveryTransaction {
         self.root_path.join(OsStr::from_bytes(name.to_bytes()))
     }
 
-    fn remove_bundle(&self, name: &CStr) -> io::Result<()> {
-        let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
-        // SAFETY: `metadata` points to writable storage, `name` is a live
-        // single component, and the root descriptor remains open.
-        let result = unsafe {
-            libc::fstatat(
-                self.root.as_raw_fd(),
-                name.as_ptr(),
-                metadata.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if result < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: successful fstatat initialized the complete stat value.
-        let metadata = unsafe { metadata.assume_init() };
-        if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "transaction cleanup target is not a real app bundle directory",
-            ));
-        }
+    fn remove_owned(&self, name: &CStr, expected: FileIdentity, label: &str) -> io::Result<()> {
+        self.verify_identity(name, expected, label)?;
         // SAFETY: removefileat resolves the validated name under the retained
         // root descriptor. A null state requests ordinary recursive removal.
         let result = unsafe {
@@ -261,15 +372,55 @@ fn bundle_name(root: &Path, bundle: &Path, label: &str) -> Result<CString, Recov
         .map_err(|_| RecoveryError::invalid(format!("{label} app bundle name contains NUL")))
 }
 
-fn real_bundle_metadata(path: &Path, label: &str) -> Result<fs::Metadata, RecoveryError> {
-    let metadata = fs::symlink_metadata(path)
+fn descriptor_identity(descriptor: RawFd) -> io::Result<FileIdentity> {
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `metadata` points to writable storage and `descriptor` is open.
+    if unsafe { libc::fstat(descriptor, metadata.as_mut_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful fstat initialized the complete stat value.
+    Ok(FileIdentity::from_stat(unsafe { &metadata.assume_init() }))
+}
+
+fn identity_at(root: RawFd, name: &CStr) -> io::Result<FileIdentity> {
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `metadata` points to writable storage, `name` is a live
+    // NUL-terminated path component, and `root` is an open directory fd.
+    if unsafe {
+        libc::fstatat(
+            root,
+            name.as_ptr(),
+            metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful fstatat initialized the complete stat value.
+    Ok(FileIdentity::from_stat(unsafe { &metadata.assume_init() }))
+}
+
+fn bundle_identity_at(
+    root: RawFd,
+    name: &CStr,
+    label: &str,
+) -> Result<FileIdentity, RecoveryError> {
+    let identity = identity_at(root, name)
         .map_err(|source| RecoveryError::io("inspect app bundle", source))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if !identity.is_directory() {
         return Err(RecoveryError::invalid(format!(
             "{label} app bundle must be a real directory, not a symlink"
         )));
     }
-    Ok(metadata)
+    Ok(identity)
+}
+
+fn identity_error(label: &str, detail: impl fmt::Display) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{label} identity changed: {detail}"),
+    )
 }
 
 #[derive(Debug)]

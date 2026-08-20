@@ -1,6 +1,8 @@
 use std::{
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
+    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -103,6 +105,47 @@ fn startup_timeout_terminates_only_the_verified_child() {
         child.wait_readiness(&expected, Duration::from_millis(20)),
         Err(StartupError::Timeout),
     ));
+}
+
+#[test]
+fn supervised_child_passes_only_the_exact_dsh_home_override() {
+    let fixture = tempfile::tempdir().expect("temporary child output");
+    let dsh_home = fixture.path().join("Openloop-Test").join("dsh");
+    let dsh_home_output = fixture.path().join("dsh-home");
+    let environment_output = fixture.path().join("environment");
+    let args = vec![
+        OsString::from("-c"),
+        OsString::from("printf '%s' \"$DSH_HOME\" > \"$1\"; /usr/bin/env > \"$2\""),
+        OsString::from("openloop-environment-probe"),
+        dsh_home_output.as_os_str().to_owned(),
+        environment_output.as_os_str().to_owned(),
+    ];
+
+    let mut child = SupervisedChild::spawn_with_args_and_dsh_home(
+        Path::new("/bin/sh"),
+        args,
+        &secrets(),
+        &dsh_home,
+    )
+    .expect("shell child with DSH_HOME");
+    let status = (0..100)
+        .find_map(|_| match child.try_wait().expect("poll shell child") {
+            Some(status) => Some(status),
+            None => {
+                thread::sleep(Duration::from_millis(10));
+                None
+            }
+        })
+        .expect("shell child must exit");
+
+    assert!(status.success());
+    assert_eq!(
+        fs::read_to_string(dsh_home_output).expect("DSH_HOME output"),
+        dsh_home.to_str().expect("UTF-8 temporary path"),
+    );
+    let environment = fs::read_to_string(environment_output).expect("child environment");
+    assert!(!environment.contains("bootstrap-secret"));
+    assert!(!environment.contains("bridge-secret"));
 }
 
 #[test]
