@@ -187,7 +187,7 @@ jobs:
             else
               validate_required_assets "$release_json" "published immutable prerelease"
               immutable_state=published
-              published_assets_dir="$(mktemp -d)"
+              published_assets_dir="$(mktemp -d "${GITHUB_WORKSPACE}/.openloop-published-assets.XXXXXX")"
               gh release download "$RELEASE_TAG" \
                 --pattern "Openloop.app.tar.gz" \
                 --pattern "Openloop.app.tar.gz.sig" \

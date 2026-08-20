@@ -187,6 +187,10 @@ describe('Openloop spike release workflow', () => {
     expect(publish).toMatch(
       /gh release download "\$RELEASE_TAG"[^]*Openloop\.app\.tar\.gz[^]*Openloop\.app\.tar\.gz\.sig/u,
     )
+    expect(publish).toContain(
+      'published_assets_dir="$(mktemp -d "${GITHUB_WORKSPACE}/.openloop-published-assets.XXXXXX")"',
+    )
+    expect(publish).not.toContain('published_assets_dir="$(mktemp -d)"')
     expect(publish).toMatch(
       /render-update-manifest\.mjs[^]*--artifact "\$published_updater"[^]*--signature "\$published_signature"/u,
     )
