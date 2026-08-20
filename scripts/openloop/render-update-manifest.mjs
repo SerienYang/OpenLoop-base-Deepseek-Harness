@@ -147,7 +147,8 @@ function validateArtifactUrl(value, version) {
     throw new Error('artifact URL must not contain credentials or a fragment')
   }
   const expectedPrefix = 'https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/'
-  if (!value.startsWith(expectedPrefix)
+  if (value !== artifactUrl.href
+    || !value.startsWith(expectedPrefix)
     || artifactUrl.hostname !== 'github.com'
     || artifactUrl.host !== 'github.com'
     || artifactUrl.search !== ''
