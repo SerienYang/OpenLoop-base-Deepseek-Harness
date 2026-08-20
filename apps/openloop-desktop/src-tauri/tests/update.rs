@@ -175,15 +175,22 @@ fn fifo(path: &Path) {
 #[test]
 fn recovery_transaction_commits_a_healthy_candidate_and_preserves_recovery_entries() {
     let (fixture, installed, candidate) = transaction_fixture();
+    let installed_during_health = installed.clone();
+    let candidate_during_health = candidate.clone();
     let transaction =
         RecoveryTransaction::open(fixture.path(), &installed, &candidate).expect("transaction");
-    let mut health = HealthProbe(|published: &Path, timeout| {
+    let mut health = HealthProbe(move |published: &Path, timeout| {
         assert_eq!(
             fs::canonicalize(published).expect("published canonical path"),
-            fs::canonicalize(&installed).expect("installed canonical path"),
+            fs::canonicalize(&installed_during_health).expect("installed canonical path"),
         );
         assert_eq!(timeout, Duration::from_secs(60));
         assert_eq!(marker(published), "new");
+        assert_eq!(
+            marker(&candidate_during_health),
+            "old",
+            "the first swap must leave a complete old app at the candidate path"
+        );
         HealthStatus::Healthy
     });
 
@@ -195,19 +202,16 @@ fn recovery_transaction_commits_a_healthy_candidate_and_preserves_recovery_entri
         panic!("healthy candidate must commit");
     };
     assert_eq!(marker(&installed), "new");
-    assert_eq!(marker(&preserved_backup), "old");
-    assert!(
-        candidate.exists(),
-        "candidate placeholder must be preserved"
+    assert_eq!(
+        fs::canonicalize(&preserved_backup).expect("canonical preserved backup"),
+        fs::canonicalize(&candidate).expect("canonical candidate")
     );
-    assert!(!fixture
-        .path()
-        .join(".Openloop.app.openloop-backup")
-        .exists());
-    assert!(!fixture
-        .path()
-        .join(".Openloop.app.openloop-staging")
-        .exists());
+    assert_eq!(marker(&preserved_backup), "old");
+    assert_eq!(
+        fs::read_dir(fixture.path()).expect("update root").count(),
+        2,
+        "single-swap commit must leave only installed and candidate apps"
+    );
 }
 
 #[test]
@@ -238,17 +242,84 @@ fn recovery_transaction_rolls_back_timeout_and_reported_failure() {
         };
         assert_eq!(actual, status);
         assert_eq!(marker(&installed), "old");
+        assert_eq!(
+            fs::canonicalize(&failed_candidate).expect("canonical failed candidate"),
+            fs::canonicalize(&candidate).expect("canonical candidate")
+        );
         assert_eq!(marker(&failed_candidate), "new");
-        assert!(candidate.exists(), "rollback placeholder must be preserved");
-        assert!(!fixture
-            .path()
-            .join(".Openloop.app.openloop-backup")
-            .exists());
-        assert!(!fixture
-            .path()
-            .join(".Openloop.app.openloop-staging")
-            .exists());
+        assert_eq!(
+            fs::read_dir(fixture.path()).expect("update root").count(),
+            2,
+            "single-swap rollback must leave only installed and candidate apps"
+        );
     }
+}
+
+#[test]
+fn recovery_first_swap_crash_boundary_keeps_both_complete_apps() {
+    let (fixture, installed, candidate) = transaction_fixture();
+    let transaction =
+        RecoveryTransaction::open(fixture.path(), &installed, &candidate).expect("transaction");
+    let observed = Arc::new(AtomicBool::new(false));
+    let hook_observed = observed.clone();
+    let mut hook = TransactionHook(move |boundary, left: &Path, right: &Path| {
+        if boundary == RecoveryBoundary::AfterCandidatePublishSwap {
+            assert_eq!(
+                fs::canonicalize(left).expect("canonical published path"),
+                fs::canonicalize(&installed).expect("canonical installed path")
+            );
+            assert_eq!(
+                fs::canonicalize(right).expect("canonical backup path"),
+                fs::canonicalize(&candidate).expect("canonical candidate path")
+            );
+            assert_eq!(marker(left), "new");
+            assert_eq!(marker(right), "old");
+            hook_observed.store(true, Ordering::SeqCst);
+        }
+    });
+    let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
+
+    transaction
+        .publish_with_hook(&mut health, &mut hook)
+        .expect("single-swap publication");
+
+    assert!(
+        observed.load(Ordering::SeqCst),
+        "post-swap crash boundary was not observed"
+    );
+    assert_eq!(
+        fs::read_dir(fixture.path()).expect("update root").count(),
+        2
+    );
+}
+
+#[test]
+fn recovery_publish_postverify_race_safely_restores_the_old_app() {
+    let (fixture, installed, candidate) = transaction_fixture();
+    let displaced = fixture.path().join("Displaced-published.app");
+    let transaction =
+        RecoveryTransaction::open(fixture.path(), &installed, &candidate).expect("transaction");
+    let mut hook = TransactionHook(|boundary, published: &Path, _: &Path| {
+        if boundary == RecoveryBoundary::AfterCandidatePublishSwap {
+            fs::rename(published, &displaced).expect("displace published candidate");
+            app_bundle(published, "replacement");
+        }
+    });
+    let health_called = Arc::new(AtomicBool::new(false));
+    let observed = health_called.clone();
+    let mut health = HealthProbe(move |_: &Path, _: Duration| {
+        observed.store(true, Ordering::SeqCst);
+        HealthStatus::Healthy
+    });
+
+    transaction
+        .publish_with_hook(&mut health, &mut hook)
+        .expect_err("post-swap replacement must fail postverification");
+
+    assert!(!health_called.load(Ordering::SeqCst));
+    assert_eq!(marker(&installed), "old");
+    assert_eq!(marker(&candidate), "replacement");
+    assert_eq!(marker(&displaced), "new");
 }
 
 #[test]
@@ -423,7 +494,7 @@ fn recovery_swap_rejects_installed_replacement_between_precheck_and_syscall() {
         RecoveryTransaction::open(fixture.path(), &installed, &candidate).expect("transaction");
     let mut injected = false;
     let mut hook = TransactionHook(|boundary, left: &Path, _: &Path| {
-        if boundary == RecoveryBoundary::BeforeInstalledBackupSwap {
+        if boundary == RecoveryBoundary::BeforeCandidatePublishSwap {
             fs::rename(left, &displaced).expect("displace old installed app");
             app_bundle(left, "replacement");
             injected = true;
@@ -453,10 +524,10 @@ fn recovery_swap_rejects_candidate_replacement_between_precheck_and_syscall() {
     let displaced = fixture.path().join("Displaced-new.app");
     let transaction =
         RecoveryTransaction::open(fixture.path(), &installed, &candidate).expect("transaction");
-    let mut hook = TransactionHook(|boundary, left: &Path, _: &Path| {
+    let mut hook = TransactionHook(|boundary, _: &Path, right: &Path| {
         if boundary == RecoveryBoundary::BeforeCandidatePublishSwap {
-            fs::rename(left, &displaced).expect("displace candidate app");
-            app_bundle(left, "replacement");
+            fs::rename(right, &displaced).expect("displace candidate app");
+            app_bundle(right, "replacement");
         }
     });
     let health_called = Arc::new(AtomicBool::new(false));
@@ -501,15 +572,15 @@ fn recovery_swap_does_not_install_replaced_backup_during_health_rollback() {
 }
 
 #[test]
-fn recovery_health_rollback_restores_old_app_when_published_candidate_is_replaced() {
+fn recovery_health_rollback_keeps_old_app_when_failed_candidate_is_replaced_after_swap() {
     let (fixture, installed, candidate) = transaction_fixture();
-    let displaced = fixture.path().join("Displaced-published-candidate.app");
+    let displaced = fixture.path().join("Displaced-failed-candidate.app");
     let transaction =
         RecoveryTransaction::open(fixture.path(), &installed, &candidate).expect("transaction");
-    let mut hook = TransactionHook(|boundary, published: &Path, _: &Path| {
-        if boundary == RecoveryBoundary::BeforeHealthRollbackSwap {
-            fs::rename(published, &displaced).expect("displace published candidate");
-            app_bundle(published, "replacement");
+    let mut hook = TransactionHook(|boundary, _: &Path, failed: &Path| {
+        if boundary == RecoveryBoundary::AfterHealthRollbackSwap {
+            fs::rename(failed, &displaced).expect("displace failed candidate");
+            app_bundle(failed, "replacement");
         }
     });
     let mut health =
@@ -551,7 +622,7 @@ fn recovery_commit_preserves_old_app_and_never_deletes_a_placeholder_replacement
         RecoveryTransaction::open(fixture.path(), &installed, &candidate).expect("transaction");
     let candidate_for_health = candidate.clone();
     let mut health = HealthProbe(move |_: &Path, _: Duration| {
-        fs::remove_dir(&candidate_for_health).expect("replace empty candidate placeholder");
+        fs::remove_dir_all(&candidate_for_health).expect("replace old candidate backup");
         app_bundle(&candidate_for_health, "replacement");
         HealthStatus::Healthy
     });
@@ -565,7 +636,11 @@ fn recovery_commit_preserves_old_app_and_never_deletes_a_placeholder_replacement
     let PublicationOutcome::Committed { preserved_backup } = outcome else {
         panic!("healthy candidate must commit");
     };
-    assert_eq!(marker(&preserved_backup), "old");
+    assert_eq!(
+        fs::canonicalize(&preserved_backup).expect("canonical preserved backup"),
+        fs::canonicalize(&candidate).expect("canonical candidate")
+    );
+    assert_eq!(marker(&preserved_backup), "replacement");
 }
 
 #[test]

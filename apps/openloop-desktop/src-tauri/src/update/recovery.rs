@@ -10,10 +10,7 @@ use std::{
     time::Duration,
 };
 
-use uuid::Uuid;
-
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
-const MARKER_ATTEMPTS: usize = 16;
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "status", content = "detail")]
@@ -41,19 +38,19 @@ pub enum PublicationOutcome {
 #[cfg(debug_assertions)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryBoundary {
-    BeforeInstalledBackupSwap,
     BeforeCandidatePublishSwap,
-    BeforePublishFailureRestoreSwap,
+    AfterCandidatePublishSwap,
     BeforeHealthRollbackSwap,
+    AfterHealthRollbackSwap,
 }
 
 #[cfg(not(debug_assertions))]
 #[derive(Debug, Clone, Copy)]
 enum RecoveryBoundary {
-    BeforeInstalledBackupSwap,
     BeforeCandidatePublishSwap,
-    BeforePublishFailureRestoreSwap,
+    AfterCandidatePublishSwap,
     BeforeHealthRollbackSwap,
+    AfterHealthRollbackSwap,
 }
 
 #[cfg(debug_assertions)]
@@ -108,12 +105,6 @@ impl FileIdentity {
     fn is_directory(self) -> bool {
         self.file_type == libc::S_IFDIR as u32
     }
-}
-
-#[derive(Debug)]
-struct OwnedMarker {
-    name: CString,
-    identity: FileIdentity,
 }
 
 #[derive(Debug)]
@@ -213,61 +204,28 @@ impl RecoveryTransaction {
         health: &mut impl CandidateHealth,
         hook: &mut impl TransactionHook,
     ) -> Result<PublicationOutcome, RecoveryError> {
-        let marker = self
-            .create_marker("backup-placeholder")
-            .map_err(|source| RecoveryError::io("create recovery placeholder", source))?;
-
         if let Err(source) = self.swap_checked(
             &self.installed_name,
             self.installed_identity,
-            &marker.name,
-            marker.identity,
-            "installed app and backup placeholder",
-            RecoveryBoundary::BeforeInstalledBackupSwap,
-            hook,
-        ) {
-            return Err(RecoveryError::io("preserve installed app bundle", source));
-        }
-
-        if let Err(publication_error) = self.swap_checked(
             &self.candidate_name,
             self.candidate_identity,
-            &self.installed_name,
-            marker.identity,
-            "candidate app and installed placeholder",
+            "installed app and candidate app",
             RecoveryBoundary::BeforeCandidatePublishSwap,
+            RecoveryBoundary::AfterCandidatePublishSwap,
             hook,
         ) {
-            let restore = self.swap_checked(
-                &self.installed_name,
-                marker.identity,
-                &marker.name,
-                self.installed_identity,
-                "installed placeholder and old app backup",
-                RecoveryBoundary::BeforePublishFailureRestoreSwap,
-                hook,
-            );
-            return match restore {
-                Ok(()) => Err(RecoveryError::io(
-                    "publish candidate app bundle",
-                    publication_error,
-                )),
-                Err(restore) => Err(RecoveryError::RestoreFailed {
-                    restore,
-                    candidate_republish: None,
-                }),
-            };
+            return Err(RecoveryError::io("publish candidate app bundle", source));
         }
 
         let installed_path = self.path(&self.installed_name);
         let status = health.await_health(&installed_path, HEALTH_TIMEOUT);
         if status == HealthStatus::Healthy {
             return Ok(PublicationOutcome::Committed {
-                preserved_backup: self.path(&marker.name),
+                preserved_backup: self.path(&self.candidate_name),
             });
         }
 
-        if let Err(restore) = self.health_rollback_swap(&marker, hook) {
+        if let Err(restore) = self.health_rollback_swap(hook) {
             return Err(RecoveryError::RestoreFailed {
                 restore,
                 candidate_republish: None,
@@ -275,27 +233,32 @@ impl RecoveryTransaction {
         }
         Ok(PublicationOutcome::RolledBack {
             status,
-            failed_candidate: self.path(&marker.name),
+            failed_candidate: self.path(&self.candidate_name),
         })
     }
 
-    fn health_rollback_swap(
-        &self,
-        marker: &OwnedMarker,
-        hook: &mut impl TransactionHook,
-    ) -> io::Result<()> {
+    fn health_rollback_swap(&self, hook: &mut impl TransactionHook) -> io::Result<()> {
         self.verify_identity(
             &self.installed_name,
             self.candidate_identity,
             "published candidate",
         )?;
-        self.verify_identity(&marker.name, self.installed_identity, "old app backup")?;
+        self.verify_identity(
+            &self.candidate_name,
+            self.installed_identity,
+            "old app backup",
+        )?;
         hook.before(
             RecoveryBoundary::BeforeHealthRollbackSwap,
             &self.path(&self.installed_name),
-            &self.path(&marker.name),
+            &self.path(&self.candidate_name),
         );
-        self.atomic_swap(&self.installed_name, &marker.name)?;
+        self.atomic_swap(&self.installed_name, &self.candidate_name)?;
+        hook.before(
+            RecoveryBoundary::AfterHealthRollbackSwap,
+            &self.path(&self.installed_name),
+            &self.path(&self.candidate_name),
+        );
         let installed_observed =
             identity_at(self.root.as_raw_fd(), &self.installed_name).map_err(|error| {
                 identity_error(
@@ -303,18 +266,18 @@ impl RecoveryTransaction {
                     format!(
                         "inspection failed: {error}; preserved entries remain visible at {} and {}",
                         self.path(&self.installed_name).display(),
-                        self.path(&marker.name).display()
+                        self.path(&self.candidate_name).display()
                     ),
                 )
             })?;
         let backup_observed =
-            identity_at(self.root.as_raw_fd(), &marker.name).map_err(|error| {
+            identity_at(self.root.as_raw_fd(), &self.candidate_name).map_err(|error| {
                 identity_error(
                     "health rollback backup path",
                     format!(
                         "inspection failed: {error}; preserved entries remain visible at {} and {}",
                         self.path(&self.installed_name).display(),
-                        self.path(&marker.name).display()
+                        self.path(&self.candidate_name).display()
                     ),
                 )
             })?;
@@ -329,14 +292,14 @@ impl RecoveryTransaction {
                 format!(
                     "old app was restored but the candidate identity changed; preserved entries remain visible at {} and {}",
                     self.path(&self.installed_name).display(),
-                    self.path(&marker.name).display()
+                    self.path(&self.candidate_name).display()
                 ),
             ));
         }
         let rollback = self.rollback_observed(
             &self.installed_name,
             installed_observed,
-            &marker.name,
+            &self.candidate_name,
             backup_observed,
             "failed health rollback",
         );
@@ -346,12 +309,12 @@ impl RecoveryTransaction {
                 Ok(()) => format!(
                     "filesystem objects changed during swap and were returned; preserved at {} and {}",
                     self.path(&self.installed_name).display(),
-                    self.path(&marker.name).display()
+                    self.path(&self.candidate_name).display()
                 ),
                 Err(error) => format!(
                     "filesystem objects changed during swap; returning observed objects failed: {error}; preserved entries remain visible at {} and {}",
                     self.path(&self.installed_name).display(),
-                    self.path(&marker.name).display()
+                    self.path(&self.candidate_name).display()
                 ),
             },
         ))
@@ -365,13 +328,15 @@ impl RecoveryTransaction {
         right: &CStr,
         right_expected: FileIdentity,
         label: &str,
-        boundary: RecoveryBoundary,
+        before_boundary: RecoveryBoundary,
+        after_boundary: RecoveryBoundary,
         hook: &mut impl TransactionHook,
     ) -> io::Result<()> {
         self.verify_identity(left, left_expected, label)?;
         self.verify_identity(right, right_expected, label)?;
-        hook.before(boundary, &self.path(left), &self.path(right));
+        hook.before(before_boundary, &self.path(left), &self.path(right));
         self.atomic_swap(left, right)?;
+        hook.before(after_boundary, &self.path(left), &self.path(right));
 
         let left_observed = identity_at(self.root.as_raw_fd(), left).map_err(|error| {
             identity_error(
@@ -452,31 +417,6 @@ impl RecoveryTransaction {
         Ok(())
     }
 
-    fn create_marker(&self, label: &str) -> io::Result<OwnedMarker> {
-        for _ in 0..MARKER_ATTEMPTS {
-            let name = random_name(label);
-            // SAFETY: `name` is a live NUL-terminated single path component
-            // and the retained root descriptor names the update directory.
-            let result =
-                unsafe { libc::mkdirat(self.root.as_raw_fd(), name.as_ptr(), libc::S_IRWXU) };
-            if result == 0 {
-                let identity = identity_at(self.root.as_raw_fd(), &name)?;
-                if !identity.is_directory() {
-                    return Err(identity_error(label, "created marker is not a directory"));
-                }
-                return Ok(OwnedMarker { name, identity });
-            }
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::AlreadyExists {
-                return Err(error);
-            }
-        }
-        Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "could not allocate an unpredictable recovery marker",
-        ))
-    }
-
     fn verify_identity(&self, name: &CStr, expected: FileIdentity, label: &str) -> io::Result<()> {
         let actual = identity_at(self.root.as_raw_fd(), name)
             .map_err(|error| identity_error(label, error))?;
@@ -489,11 +429,6 @@ impl RecoveryTransaction {
     fn path(&self, name: &CStr) -> PathBuf {
         self.root_path.join(OsStr::from_bytes(name.to_bytes()))
     }
-}
-
-fn random_name(label: &str) -> CString {
-    CString::new(format!(".openloop-{label}-{}", Uuid::new_v4()))
-        .expect("UUID recovery names contain no NUL")
 }
 
 fn bundle_name(root: &Path, bundle: &Path, label: &str) -> Result<CString, RecoveryError> {

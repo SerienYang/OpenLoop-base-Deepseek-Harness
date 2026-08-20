@@ -6,7 +6,10 @@ use std::{
     io::Cursor,
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
-        unix::{ffi::OsStrExt, fs::MetadataExt},
+        unix::{
+            ffi::OsStrExt,
+            fs::{MetadataExt, PermissionsExt},
+        },
     },
     path::{Path, PathBuf},
 };
@@ -53,10 +56,10 @@ impl FileIdentity {
     fn is_directory(self) -> bool {
         self.file_type == libc::S_IFDIR as u32
     }
-}
 
-struct DirectoryGuard {
-    path: PathBuf,
+    fn is_file(self) -> bool {
+        self.file_type == libc::S_IFREG as u32
+    }
 }
 
 pub fn stage_verified_archive(
@@ -111,65 +114,61 @@ pub fn stage_verified_archive(
         ));
     }
 
-    let (temporary_name, _temporary_identity) =
-        create_unique_directory(parent.as_raw_fd(), ".openloop-update-", ".tmp")
-            .map_err(|source| ArchiveStageError::io("create archive staging directory", source))?;
-    let temporary_path = parent_path.join(OsStr::from_bytes(temporary_name.as_bytes()));
-    let temporary = DirectoryGuard {
-        path: temporary_path,
-    };
-
-    let app_root = unpack_strict_archive(archive_bytes, &temporary.path)?;
-    let source_relative = temporary_name
-        .as_bytes()
-        .iter()
-        .copied()
-        .chain(std::iter::once(b'/'))
-        .chain(app_root.as_os_str().as_bytes().iter().copied())
-        .collect::<Vec<_>>();
-    let source_name = CString::new(source_relative)
-        .map_err(|_| ArchiveStageError::invalid("archive app root contains NUL"))?;
-    let source_identity = identity_at(parent.as_raw_fd(), &source_name)
-        .map_err(|source| ArchiveStageError::io("inspect unpacked app root", source))?;
-    if !source_identity.is_directory() {
-        return Err(ArchiveStageError::invalid(
-            "archive app root is not a real directory",
-        ));
-    }
-
-    let candidate_name = unique_missing_name(parent.as_raw_fd(), ".openloop-candidate-", ".app")
-        .map_err(|source| ArchiveStageError::io("reserve candidate app name", source))?;
-    rename_exclusive(parent.as_raw_fd(), &source_name, &candidate_name)
-        .map_err(|source| ArchiveStageError::io("publish staged candidate", source))?;
+    reject_preserved_artifacts(&parent_path)?;
+    let (candidate_name, candidate_identity) =
+        create_unique_directory(parent.as_raw_fd(), ".openloop-candidate-", ".app")
+            .map_err(|source| ArchiveStageError::io("create candidate app directory", source))?;
     let candidate = StagedCandidate {
         path: parent_path.join(OsStr::from_bytes(candidate_name.as_bytes())),
     };
-    let candidate_identity = identity_at(parent.as_raw_fd(), &candidate_name)
+    unpack_strict_archive(archive_bytes, &candidate.path)?;
+    let observed_identity = identity_at(parent.as_raw_fd(), &candidate_name)
         .map_err(|source| ArchiveStageError::io("inspect staged candidate", source))?;
-    if candidate_identity != source_identity {
+    if observed_identity != candidate_identity {
         return Err(ArchiveStageError::invalid(
-            "candidate app identity changed during publication",
+            "candidate app identity changed during extraction",
         ));
     }
-    // macOS has no public inode-conditional recursive deletion syscall. Keep
-    // staging and candidate directories for later controlled cleanup instead
-    // of risking deletion of a same-user replacement after an identity check.
     Ok(candidate)
 }
 
-fn unpack_strict_archive(bytes: &[u8], destination: &Path) -> Result<PathBuf, ArchiveStageError> {
+fn reject_preserved_artifacts(parent: &Path) -> Result<(), ArchiveStageError> {
+    let mut count = 0_usize;
+    let entries = fs::read_dir(parent).map_err(|source| {
+        ArchiveStageError::io("scan app parent for recovery artifacts", source)
+    })?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|source| ArchiveStageError::io("read app parent recovery artifact", source))?;
+        let name = entry.file_name();
+        let name = name.as_bytes();
+        if (name.starts_with(b".openloop-candidate-") && name.ends_with(b".app"))
+            || (name.starts_with(b".openloop-update-") && name.ends_with(b".tmp"))
+        {
+            count += 1;
+        }
+    }
+    if count != 0 {
+        return Err(ArchiveStageError::invalid(format!(
+            "found {count} preserved update artifact(s); requires recovery cleanup"
+        )));
+    }
+    Ok(())
+}
+
+fn unpack_strict_archive(bytes: &[u8], destination: &Path) -> Result<(), ArchiveStageError> {
     let decoder = GzDecoder::new(Cursor::new(bytes));
     let mut archive = Archive::new(decoder);
-    archive.set_preserve_permissions(true);
-    archive.set_preserve_ownerships(false);
-    archive.set_preserve_mtime(true);
     let entries = archive
         .entries()
         .map_err(|source| ArchiveStageError::io("read signed archive", source))?;
+    let destination = open_directory(destination)
+        .map_err(|source| ArchiveStageError::io("open candidate app directory", source))?;
     let mut root: Option<Vec<u8>> = None;
     let mut root_directory_seen = false;
     let mut paths = HashSet::new();
     let mut extracted = Vec::new();
+    let mut directories = Vec::new();
 
     for entry in entries {
         let mut entry =
@@ -216,38 +215,70 @@ fn unpack_strict_archive(bytes: &[u8], destination: &Path) -> Result<PathBuf, Ar
                 ));
             }
             root_directory_seen = true;
+            let mode = entry
+                .header()
+                .mode()
+                .map_err(|source| ArchiveStageError::io("read archive directory mode", source))?;
+            directories.push((Vec::new(), mode));
+            continue;
         }
-        let relative = components_to_path(&components);
-        let unpacked = entry
-            .unpack_in(destination)
-            .map_err(|source| ArchiveStageError::io("unpack signed archive", source))?;
-        if !unpacked {
-            return Err(ArchiveStageError::invalid(
-                "archive entry escaped the staging directory",
-            ));
+        let stripped = &components[1..];
+        let mode = entry
+            .header()
+            .mode()
+            .map_err(|source| ArchiveStageError::io("read archive entry mode", source))?;
+        if kind.is_dir() {
+            create_directory_path(destination.as_raw_fd(), stripped)
+                .map_err(|source| ArchiveStageError::io("create archive directory", source))?;
+            directories.push((stripped.to_vec(), mode));
+        } else {
+            unpack_file_at(destination.as_raw_fd(), stripped, mode, &mut entry)
+                .map_err(|source| ArchiveStageError::io("unpack archive file", source))?;
         }
-        extracted.push((relative, kind.is_dir()));
+        extracted.push((components_to_path(stripped), kind.is_dir()));
     }
 
-    let root = root.ok_or_else(|| ArchiveStageError::invalid("archive contains no app root"))?;
+    root.ok_or_else(|| ArchiveStageError::invalid("archive contains no app root"))?;
     if !root_directory_seen {
         return Err(ArchiveStageError::invalid(
             "archive does not contain an explicit app root directory",
         ));
     }
+    for (components, mode) in directories.into_iter().rev() {
+        let directory = open_directory_path(destination.as_raw_fd(), &components, false)
+            .map_err(|source| ArchiveStageError::io("open unpacked archive directory", source))?;
+        set_descriptor_mode(directory.as_raw_fd(), mode)
+            .map_err(|source| ArchiveStageError::io("set archive directory mode", source))?;
+    }
     for (relative, expected_directory) in extracted {
-        let metadata = fs::symlink_metadata(destination.join(&relative))
-            .map_err(|source| ArchiveStageError::io("inspect unpacked archive entry", source))?;
-        if metadata.file_type().is_symlink()
-            || metadata.is_dir() != expected_directory
-            || (!expected_directory && !metadata.is_file())
+        if !has_expected_type(destination.as_raw_fd(), &relative, expected_directory)
+            .map_err(|source| ArchiveStageError::io("inspect unpacked archive entry", source))?
         {
             return Err(ArchiveStageError::invalid(
                 "unpacked archive entry has an unexpected file type",
             ));
         }
     }
-    Ok(PathBuf::from(OsStr::from_bytes(&root)))
+    Ok(())
+}
+
+fn has_expected_type(root: RawFd, path: &Path, expected_directory: bool) -> io::Result<bool> {
+    let components = path
+        .components()
+        .map(|component| component.as_os_str().as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    let (name, parents) = components
+        .split_last()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "archive path is empty"))?;
+    let parent = open_directory_path(root, parents, false)?;
+    let name = CString::new(name.as_slice())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    let identity = identity_at(parent.as_raw_fd(), &name)?;
+    Ok(if expected_directory {
+        identity.is_directory()
+    } else {
+        identity.is_file()
+    })
 }
 
 fn strict_components(path: &[u8]) -> Result<Vec<Vec<u8>>, ArchiveStageError> {
@@ -261,9 +292,12 @@ fn strict_components(path: &[u8]) -> Result<Vec<Vec<u8>>, ArchiveStageError> {
         raw.pop();
     }
     if raw.is_empty()
-        || raw
-            .iter()
-            .any(|component| component.is_empty() || *component == b"." || *component == b"..")
+        || raw.iter().any(|component| {
+            component.is_empty()
+                || *component == b"."
+                || *component == b".."
+                || component.contains(&0)
+        })
     {
         return Err(ArchiveStageError::invalid(
             "archive path contains a forbidden component",
@@ -278,6 +312,87 @@ fn components_to_path(components: &[Vec<u8>]) -> PathBuf {
         path.push(OsStr::from_bytes(component));
     }
     path
+}
+
+fn create_directory_path(root: RawFd, components: &[Vec<u8>]) -> io::Result<()> {
+    open_directory_path(root, components, true).map(drop)
+}
+
+fn open_directory_path(root: RawFd, components: &[Vec<u8>], create: bool) -> io::Result<OwnedFd> {
+    // SAFETY: dup returns a new descriptor referring to the same directory.
+    let duplicated = unsafe { libc::dup(root) };
+    if duplicated < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `duplicated` is a fresh owned descriptor.
+    let mut current = unsafe { OwnedFd::from_raw_fd(duplicated) };
+    for component in components {
+        let component = CString::new(component.as_slice())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
+        if create {
+            // SAFETY: the path is one validated component beneath `current`.
+            if unsafe { libc::mkdirat(current.as_raw_fd(), component.as_ptr(), 0o700) } < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::AlreadyExists {
+                    return Err(error);
+                }
+            }
+        }
+        // SAFETY: the path is one validated component and O_NOFOLLOW rejects
+        // symlink substitution at every level.
+        let descriptor = unsafe {
+            libc::openat(
+                current.as_raw_fd(),
+                component.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if descriptor < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `descriptor` is a fresh owned descriptor.
+        current = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    }
+    Ok(current)
+}
+
+fn unpack_file_at(
+    root: RawFd,
+    components: &[Vec<u8>],
+    mode: u32,
+    entry: &mut impl io::Read,
+) -> io::Result<()> {
+    let (name, parents) = components
+        .split_last()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "archive file has no name"))?;
+    let parent = open_directory_path(root, parents, true)?;
+    let name = CString::new(name.as_slice())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    // SAFETY: `name` is one validated component beneath a retained directory
+    // descriptor. O_EXCL and O_NOFOLLOW reject collisions and symlinks.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `descriptor` is a fresh owned file descriptor.
+    let mut file = unsafe { fs::File::from_raw_fd(descriptor) };
+    io::copy(entry, &mut file)?;
+    file.set_permissions(fs::Permissions::from_mode(mode & 0o777))
+}
+
+fn set_descriptor_mode(descriptor: RawFd, mode: u32) -> io::Result<()> {
+    // SAFETY: `descriptor` is open and fchmod only changes its permission bits.
+    if unsafe { libc::fchmod(descriptor, (mode & 0o777) as libc::mode_t) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn open_directory(path: &Path) -> io::Result<OwnedFd> {
@@ -323,22 +438,6 @@ fn create_unique_directory(
     ))
 }
 
-fn unique_missing_name(parent: RawFd, prefix: &str, suffix: &str) -> io::Result<CString> {
-    for _ in 0..16 {
-        let name = CString::new(format!("{prefix}{}{suffix}", Uuid::new_v4()))
-            .expect("UUID candidate names contain no NUL");
-        match identity_at(parent, &name) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(name),
-            Ok(_) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "could not allocate a unique candidate name",
-    ))
-}
-
 fn descriptor_identity(descriptor: RawFd) -> io::Result<FileIdentity> {
     let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: `metadata` points to writable storage and `descriptor` is open.
@@ -366,23 +465,6 @@ fn identity_at(parent: RawFd, name: &CStr) -> io::Result<FileIdentity> {
     }
     // SAFETY: successful fstatat initialized the complete value.
     Ok(FileIdentity::from_stat(unsafe { &metadata.assume_init() }))
-}
-
-fn rename_exclusive(parent: RawFd, from: &CStr, to: &CStr) -> io::Result<()> {
-    // SAFETY: both paths are relative to the retained parent descriptor.
-    if unsafe {
-        libc::renameatx_np(
-            parent,
-            from.as_ptr(),
-            parent,
-            to.as_ptr(),
-            libc::RENAME_EXCL,
-        )
-    } < 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
 }
 
 #[derive(Debug)]

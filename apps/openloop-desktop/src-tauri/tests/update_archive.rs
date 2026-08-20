@@ -56,44 +56,40 @@ fn update_entries() -> Vec<(&'static [u8], u8, &'static [u8])> {
 }
 
 #[test]
-fn stages_one_valid_app_root_beside_the_installed_app_without_overwriting() {
+fn stages_one_valid_app_root_directly_as_the_only_candidate_artifact() {
     let root = tempdir().expect("update root");
     let installed = installed_app(root.path());
-    let first = stage_verified_archive(&archive(&update_entries()), &installed)
+    let staged = stage_verified_archive(&archive(&update_entries()), &installed)
         .expect("valid archive must stage");
-    let second = stage_verified_archive(&archive(&update_entries()), &installed)
-        .expect("candidate names must be unique");
 
     let canonical_root = fs::canonicalize(root.path()).expect("canonical update root");
-    assert_eq!(first.path().parent(), Some(canonical_root.as_path()));
-    assert_eq!(second.path().parent(), Some(canonical_root.as_path()));
-    assert_ne!(first.path(), second.path());
+    assert_eq!(staged.path().parent(), Some(canonical_root.as_path()));
+    let candidate_name = staged
+        .path()
+        .file_name()
+        .expect("candidate name")
+        .to_string_lossy();
+    assert!(candidate_name.starts_with(".openloop-candidate-"));
+    assert!(candidate_name.ends_with(".app"));
     assert_eq!(
-        first.path().extension().and_then(|value| value.to_str()),
-        Some("app")
-    );
-    assert_eq!(
-        fs::read_to_string(first.path().join("Contents/marker")).expect("candidate marker"),
+        fs::read_to_string(staged.path().join("Contents/marker")).expect("candidate marker"),
         "new"
     );
     assert_eq!(
         fs::read_to_string(installed.join("marker")).expect("installed marker"),
         "old"
     );
-    assert!(
+    assert_eq!(
         fs::read_dir(root.path())
             .expect("update root entries")
-            .any(|entry| entry
-                .expect("update root entry")
-                .file_name()
-                .to_string_lossy()
-                .ends_with(".tmp")),
-        "successful staging must preserve its temporary extraction directory"
+            .count(),
+        2,
+        "direct candidate staging must not create an extra temporary root"
     );
 }
 
 #[test]
-fn dropping_a_staged_candidate_preserves_it_for_controlled_cleanup() {
+fn preserved_candidate_blocks_the_next_stage_until_recovery_cleanup() {
     let root = tempdir().expect("update root");
     let installed = installed_app(root.path());
     let staged = stage_verified_archive(&archive(&update_entries()), &installed)
@@ -102,10 +98,48 @@ fn dropping_a_staged_candidate_preserves_it_for_controlled_cleanup() {
 
     drop(staged);
 
+    let error = stage_verified_archive(&archive(&update_entries()), &installed)
+        .expect_err("preserved candidate must block a second stage");
+    assert!(
+        error.to_string().contains("requires recovery cleanup"),
+        "unexpected bounded-retention error: {error}"
+    );
     assert_eq!(
         fs::read_to_string(candidate.join("Contents/marker")).expect("preserved candidate"),
         "new"
     );
+    assert_eq!(fs::read_dir(root.path()).expect("update root").count(), 2);
+}
+
+#[test]
+fn any_legacy_candidate_or_temporary_artifact_blocks_staging() {
+    for names in [
+        vec![".openloop-candidate-existing.app"],
+        vec![".openloop-update-existing.tmp"],
+        vec![
+            ".openloop-candidate-existing.app",
+            ".openloop-update-existing.tmp",
+        ],
+    ] {
+        let root = tempdir().expect("update root");
+        let installed = installed_app(root.path());
+        for name in &names {
+            fs::create_dir(root.path().join(name)).expect("preserved artifact");
+        }
+
+        let error = stage_verified_archive(&archive(&update_entries()), &installed)
+            .expect_err("preserved artifact must block staging");
+
+        assert!(
+            error.to_string().contains("requires recovery cleanup"),
+            "unexpected bounded-retention error: {error}"
+        );
+        assert_eq!(
+            fs::read_dir(root.path()).expect("update root").count(),
+            names.len() + 1,
+            "failed-closed staging created another artifact"
+        );
+    }
 }
 
 #[test]
@@ -139,12 +173,21 @@ fn rejects_tampered_or_ambiguous_archive_structure_without_recursive_cleanup() {
             error.to_string().contains("archive") || error.to_string().contains("root"),
             "{label}: unexpected error: {error}"
         );
+        let artifacts = fs::read_dir(root.path())
+            .expect("update root")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            artifacts.len(),
+            2,
+            "{label}: failed staging left more than one preserved artifact"
+        );
         assert!(
-            fs::read_dir(root.path())
-                .expect("update root")
-                .filter_map(Result::ok)
-                .any(|entry| entry.file_name().to_string_lossy().ends_with(".tmp")),
-            "{label}: failed staging directory was recursively deleted"
+            artifacts
+                .iter()
+                .any(|name| name.starts_with(".openloop-candidate-") && name.ends_with(".app")),
+            "{label}: failed candidate was not preserved directly"
         );
     }
 }

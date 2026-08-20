@@ -474,38 +474,113 @@ fn verified_download_commits_healthy_candidate_and_rolls_back_failed_health() {
         );
         match report.publication {
             InstallPublication::Committed => {
+                let backup = report.preserved_backup.as_ref().expect("committed backup");
                 assert_eq!(
-                    fs::read_to_string(
-                        report
-                            .preserved_backup
-                            .as_ref()
-                            .expect("committed backup")
-                            .join("marker")
-                    )
-                    .expect("backup marker"),
+                    fs::read_to_string(backup.join("marker")).expect("backup marker"),
                     "old"
                 );
+                assert!(backup
+                    .file_name()
+                    .expect("backup name")
+                    .to_string_lossy()
+                    .starts_with(".openloop-candidate-"));
                 assert!(report.failed_candidate.is_none());
             }
             InstallPublication::RolledBack(_) => {
+                let failed = report.failed_candidate.as_ref().expect("failed candidate");
                 assert_eq!(
-                    fs::read_to_string(
-                        report
-                            .failed_candidate
-                            .as_ref()
-                            .expect("failed candidate")
-                            .join("marker")
-                    )
-                    .expect("failed candidate marker"),
+                    fs::read_to_string(failed.join("marker")).expect("failed candidate marker"),
                     "new"
                 );
+                assert!(failed
+                    .file_name()
+                    .expect("failed candidate name")
+                    .to_string_lossy()
+                    .starts_with(".openloop-candidate-"));
                 assert!(report.preserved_backup.is_none());
             }
             InstallPublication::NoUpdate => unreachable!("fixture always provides an update"),
         }
-        assert!(
-            fs::read_dir(root.path()).expect("update root").count() >= 3,
-            "transaction must preserve staging and recovery entries"
+        assert_eq!(
+            fs::read_dir(root.path()).expect("update root").count(),
+            2,
+            "one update must leave only installed and one preserved candidate"
         );
     }
+}
+
+#[test]
+fn a_second_update_is_rejected_while_the_first_preserved_artifact_requires_cleanup() {
+    let root = tempdir().expect("update root");
+    let installed = installed_app(root.path());
+
+    let first_server = TestServer::new(2, |base_url| {
+        HashMap::from([
+            (
+                "/manifest",
+                manifest(base_url, "0.2.0", VALID_ARCHIVE_SIGNATURE),
+            ),
+            (
+                "/archive",
+                archive(
+                    STANDARD
+                        .decode(VALID_ARCHIVE)
+                        .expect("valid archive base64"),
+                ),
+            ),
+        ])
+    });
+    let (_first_app, first_update) = checked_update(&first_server, VALID_ARCHIVE_PUBLIC_KEY);
+    let first_policy = DownloadUrlPolicy::local_test_fixture(&first_server.url("/archive"))
+        .expect("first fixture policy");
+    let mut first_health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
+    let first_report = tauri::async_runtime::block_on(install_checked_update(
+        first_update,
+        &installed,
+        &mut first_health,
+        &first_policy,
+    ))
+    .expect("first update");
+    assert_eq!(first_report.publication, InstallPublication::Committed);
+    drop(first_server);
+
+    let second_server = TestServer::new(2, |base_url| {
+        HashMap::from([
+            (
+                "/manifest",
+                manifest(base_url, "0.3.0", VALID_ARCHIVE_SIGNATURE),
+            ),
+            (
+                "/archive",
+                archive(
+                    STANDARD
+                        .decode(VALID_ARCHIVE)
+                        .expect("valid archive base64"),
+                ),
+            ),
+        ])
+    });
+    let (_second_app, second_update) = checked_update(&second_server, VALID_ARCHIVE_PUBLIC_KEY);
+    let second_policy = DownloadUrlPolicy::local_test_fixture(&second_server.url("/archive"))
+        .expect("second fixture policy");
+    let mut second_health =
+        HealthProbe(|_: &Path, _: Duration| panic!("blocked update must not run health"));
+
+    let error = tauri::async_runtime::block_on(install_checked_update(
+        second_update,
+        &installed,
+        &mut second_health,
+        &second_policy,
+    ))
+    .expect_err("preserved backup must block a second update");
+
+    assert!(
+        error.to_string().contains("requires recovery cleanup"),
+        "unexpected second-update error: {error}"
+    );
+    assert_eq!(
+        fs::read_dir(root.path()).expect("update root").count(),
+        2,
+        "blocked update created another preserved artifact"
+    );
 }
