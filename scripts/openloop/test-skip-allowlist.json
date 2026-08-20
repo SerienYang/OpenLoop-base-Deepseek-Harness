@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "skips": [
+    {
+      "file": "packages/typert/generator/tests/cordis-catalog-contract.spec.ts",
+      "line": 127,
+      "fingerprint": "a7d73665b0e6529eec02c3aec8640a0389b99edac6b0bf459bbe512c733b454f",
+      "owner": "dsh-typert",
+      "reason": "The upstream collectEvents contract suite is intentionally disabled to keep the Typert CI cost bounded until the generator contract is split.",
+      "expires": "2026-12-31"
+    },
+    {
+      "file": "packages/typert/generator/tests/cordis-catalog-contract.spec.ts",
+      "line": 242,
+      "fingerprint": "08787c7b743c60f356c0d78ad15fc3e1fc57b0968d83d1f3f9eb16ccb2c52717",
+      "owner": "dsh-typert",
+      "reason": "The upstream collectServices contract suite is intentionally disabled to keep the Typert CI cost bounded until the generator contract is split.",
+      "expires": "2026-12-31"
+    },
+    {
+      "file": "packages/web/web-search-deepseek/tests/deepseek.e2e.ts",
+      "line": 26,
+      "fingerprint": "129d1cbb8643c8fcbe634c32ec537de73d83cd432069d1104c371eef405394cb",
+      "owner": "dsh-web-search",
+      "reason": "The live DeepSeek search endpoint can succeed without structured source blocks, so this probe is not a reliable merge signal.",
+      "expires": "2026-12-31"
+    }
+  ]
+}
