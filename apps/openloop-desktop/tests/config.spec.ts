@@ -613,10 +613,23 @@ describe('Openloop desktop foundation configuration', () => {
       'runtime/openloop',
     ])
     expect(ignoredWorkspaces).not.toContain('runtime/*')
-    expect(ignoredDependencies).toContain('@yao-pkg/pkg')
-    expect(ignoredDependencies.filter(dependency =>
-      dependency.startsWith('@deepseek-ai/'))).toEqual([])
-    expect(ignoredBinaries).toEqual(expect.arrayContaining(['mkfifo', 'plutil']))
+    expect(ignoredDependencies).toEqual([
+      '@yao-pkg/pkg',
+      '@yarnpkg/cli-dist',
+      'lightningcss',
+    ])
+    expect(ignoredBinaries).toEqual([
+      'bwrap',
+      'icacls',
+      'mkfifo',
+      'musl-gcc',
+      'plutil',
+      'python3',
+      'sandbox-exec',
+      'tar',
+      'taskkill',
+      'where.exe',
+    ])
     expect(stringArray(runtime.ignoreDependencies, 'Openloop runtime ignoreDependencies'))
       .toEqual(['@deepseek-ai/dsh'])
     expect(stringArray(bundle.ignoreDependencies, 'Openloop bundle ignoreDependencies')).toEqual([
