@@ -4,7 +4,7 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard},
     thread,
     time::{Duration, Instant},
 };
@@ -29,6 +29,20 @@ const VALID_ARCHIVE_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1
 const VALID_ARCHIVE: &str = "H4sIACbGhmoAA+3RQQ7CIBAFUI7CCXSAGXqMngF1ulEpwRrj7SW2MWq0qzaNcd7mbyYw8OvE8dC2aRVSWqt5AEBFpO/p+wSLfQ60IYuG0AF6DQbJkdI00z4vzqcu5LLK5trxLsQtf5krY00zcs7wjkf+iPq5/2PIe86T31H+wyOO9e/e+qfKWaVh8k0++PP+I1+WXkEIIcQCbu254eEACgAA";
 const VALID_ARCHIVE_SIGNATURE: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTcUJ1d0t0TC9Pc0JVOUQzL1owNTc4bUNPMC9KWmNWYng0VklnK3c4TUZka0o2SnVHTGFqclc0M1FRRytCclc0UVYzekpKUGRRNFBZODJic1U0WTFzWHdnbCtDaCt5bWdzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3MjE3NDQ2CWZpbGU6dXBkYXRlLnRhci5negp1OENHNjJDQ3NvZ0lQRU9xdUFCK2RUMjhCU1BySEoxVmhHM0JiQzR2cUtQUFdhUHFadDRBVzlSdlR4dVRTVHZqMkxuaGdMNVVPK0Z1MWhFYzFKQ1hCQT09Cg==";
 
+// Mock updater apps share process-level HTTP/runtime state on macOS CI.
+static UPDATE_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
+
+struct UpdateFixtureGuard {
+    _guard: MutexGuard<'static, ()>,
+}
+
+fn update_fixture_guard() -> UpdateFixtureGuard {
+    let guard = UPDATE_FIXTURE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    UpdateFixtureGuard { _guard: guard }
+}
+
 #[derive(Clone)]
 struct Response {
     status: &'static str,
@@ -36,13 +50,15 @@ struct Response {
     body: Vec<u8>,
 }
 
-struct TestServer {
+struct TestServer<'fixture> {
     base_url: String,
     thread: Option<thread::JoinHandle<Result<(), String>>>,
+    _guard: &'fixture UpdateFixtureGuard,
 }
 
-impl TestServer {
+impl<'fixture> TestServer<'fixture> {
     fn new(
+        guard: &'fixture UpdateFixtureGuard,
         expected_requests: usize,
         routes: impl FnOnce(&str) -> HashMap<&'static str, Response>,
     ) -> Self {
@@ -78,6 +94,7 @@ impl TestServer {
         Self {
             base_url,
             thread: Some(thread),
+            _guard: guard,
         }
     }
 
@@ -88,7 +105,7 @@ impl TestServer {
     }
 }
 
-impl Drop for TestServer {
+impl Drop for TestServer<'_> {
     fn drop(&mut self) {
         let result = self
             .thread
@@ -228,7 +245,7 @@ fn installed_app(root: &Path) -> PathBuf {
     installed
 }
 
-fn checked_update(server: &TestServer, public_key: &str) -> (tauri::App<MockRuntime>, Update) {
+fn checked_update(server: &TestServer<'_>, public_key: &str) -> (tauri::App<MockRuntime>, Update) {
     let (app, updater) = fixture_updater(public_key, server.url("/manifest"));
     let policy =
         DownloadUrlPolicy::local_test_fixture(&server.url("/archive")).expect("fixture policy");
@@ -240,7 +257,10 @@ fn checked_update(server: &TestServer, public_key: &str) -> (tauri::App<MockRunt
 
 #[test]
 fn coordinator_check_reports_no_update_and_detected_update() {
-    let no_update_server = TestServer::new(1, |_| HashMap::from([("/manifest", no_content())]));
+    let fixture = update_fixture_guard();
+    let no_update_server = TestServer::new(&fixture, 1, |_| {
+        HashMap::from([("/manifest", no_content())])
+    });
     let (_app, updater) =
         fixture_updater(SIGNED_TEST_PUBLIC_KEY, no_update_server.url("/manifest"));
     let policy = DownloadUrlPolicy::local_test_fixture(&no_update_server.url("/archive"))
@@ -254,7 +274,7 @@ fn coordinator_check_reports_no_update_and_detected_update() {
     assert!(update.is_none());
     drop(no_update_server);
 
-    let update_server = TestServer::new(1, |base_url| {
+    let update_server = TestServer::new(&fixture, 1, |base_url| {
         HashMap::from([("/manifest", manifest(base_url, "0.2.0", TEST_SIGNATURE))])
     });
     let (_app, updater) = fixture_updater(SIGNED_TEST_PUBLIC_KEY, update_server.url("/manifest"));
@@ -320,6 +340,7 @@ fn production_download_policy_accepts_only_immutable_repository_release_assets()
 
 #[test]
 fn production_policy_validates_the_raw_platform_url_before_download() {
+    let fixture = update_fixture_guard();
     let cases = [
         "https://github.com:443/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v0.2.0/Openloop.app.tar.gz",
         "https://GITHUB.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v0.2.0/Openloop.app.tar.gz",
@@ -327,7 +348,7 @@ fn production_policy_validates_the_raw_platform_url_before_download() {
         "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v0.2.0/Openloop.app.tar%2Egz",
     ];
     for raw_url in cases {
-        let server = TestServer::new(1, |_| {
+        let server = TestServer::new(&fixture, 1, |_| {
             HashMap::from([(
                 "/manifest",
                 manifest_with_url("0.2.0", TEST_SIGNATURE, raw_url),
@@ -375,7 +396,8 @@ fn spike_reports_are_one_line_and_install_no_update_is_unambiguous() {
 
 #[test]
 fn signature_failure_never_stages_or_publishes_a_candidate() {
-    let server = TestServer::new(2, |base_url| {
+    let fixture = update_fixture_guard();
+    let server = TestServer::new(&fixture, 2, |base_url| {
         HashMap::from([
             ("/manifest", manifest(base_url, "0.2.0", TEST_SIGNATURE)),
             ("/archive", archive(b"Test".to_vec())),
@@ -414,11 +436,12 @@ fn signature_failure_never_stages_or_publishes_a_candidate() {
 
 #[test]
 fn verified_download_commits_healthy_candidate_and_rolls_back_failed_health() {
+    let fixture = update_fixture_guard();
     for expected_publication in [
         InstallPublication::Committed,
         InstallPublication::RolledBack(HealthStatus::Failed("injected failure".into())),
     ] {
-        let server = TestServer::new(2, |base_url| {
+        let server = TestServer::new(&fixture, 2, |base_url| {
             HashMap::from([
                 (
                     "/manifest",
@@ -511,10 +534,11 @@ fn verified_download_commits_healthy_candidate_and_rolls_back_failed_health() {
 
 #[test]
 fn a_second_update_is_rejected_while_the_first_preserved_artifact_requires_cleanup() {
+    let fixture = update_fixture_guard();
     let root = tempdir().expect("update root");
     let installed = installed_app(root.path());
 
-    let first_server = TestServer::new(2, |base_url| {
+    let first_server = TestServer::new(&fixture, 2, |base_url| {
         HashMap::from([
             (
                 "/manifest",
@@ -544,7 +568,7 @@ fn a_second_update_is_rejected_while_the_first_preserved_artifact_requires_clean
     assert_eq!(first_report.publication, InstallPublication::Committed);
     drop(first_server);
 
-    let second_server = TestServer::new(2, |base_url| {
+    let second_server = TestServer::new(&fixture, 2, |base_url| {
         HashMap::from([
             (
                 "/manifest",
