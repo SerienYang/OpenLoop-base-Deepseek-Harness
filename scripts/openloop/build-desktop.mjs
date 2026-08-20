@@ -22,6 +22,10 @@ import {
   generateBuildManifest,
 } from './generate-build-manifest.mjs'
 import {
+  assertTauriUpdaterPublicKey,
+  verifyTauriUpdaterSignature,
+} from './verify-tauri-updater-signature.mjs'
+import {
   parseOpenloopArtifactManifest,
   parseOpenloopBuildManifest,
 } from '../../packages/openloop/build-contract/src/index.ts'
@@ -85,28 +89,6 @@ function updateChannelFor(channel) {
     keyEnvironment: 'OPENLOOP_UPDATER_PUBLIC_KEY',
     endpoint: 'https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-rolling/latest-test-k1.json',
   }
-}
-
-function validUpdaterPublicKey(value) {
-  if (typeof value !== 'string'
-    || value === ''
-    || value.trim() !== value
-    || value.length % 4 !== 0
-    || !/^[A-Za-z0-9+/]+={0,2}$/u.test(value)) {
-    return false
-  }
-  const decoded = Buffer.from(value, 'base64')
-  if (decoded.toString('base64') !== value) return false
-  const lines = decoded.toString('utf8').trimEnd().split(/\r?\n/u)
-  if (lines.length !== 2
-    || !lines[0].startsWith('untrusted comment: ')
-    || !/^[A-Za-z0-9+/]+={0,2}$/u.test(lines[1])) {
-    return false
-  }
-  const key = Buffer.from(lines[1], 'base64')
-  return key.length === 42
-    && key[0] === 0x45
-    && (key[1] === 0x64 || key[1] === 0x44)
 }
 
 function tauriBundleArguments(bundle) {
@@ -389,6 +371,19 @@ export async function verifyDesktopBuild(context, runner) {
   if (core.manifest.channel !== context.options.channel) {
     throw new Error('build-desktop: core manifest channel does not match requested channel')
   }
+  if (typeof context.desktopVersion !== 'string'
+    || context.desktopVersion !== core.manifest.appVersion) {
+    throw new Error('build-desktop: desktop package version does not match core appVersion')
+  }
+  if (context.dmg !== undefined) {
+    const expectedDmg = join(
+      fixed.release,
+      `bundle/dmg/Openloop_${context.desktopVersion}_aarch64.dmg`,
+    )
+    if (resolve(context.dmg) !== expectedDmg) {
+      throw new Error(`build-desktop: DMG filename must match desktop version at ${expectedDmg}`)
+    }
+  }
   const final = await readCanonicalManifest(
     context.artifacts,
     parseOpenloopArtifactManifest,
@@ -429,9 +424,15 @@ export async function verifyDesktopBuild(context, runner) {
     if (signatureMetadata.isSymbolicLink() || !signatureMetadata.isFile()) {
       throw new Error('build-desktop: updater signature must be a regular file')
     }
-    if ((await readFile(context.updaterSignature, 'utf8')).trim() === '') {
+    const signature = await readFile(context.updaterSignature, 'utf8')
+    if (signature.trim() === '') {
       throw new Error('build-desktop: updater signature must not be empty')
     }
+    verifyTauriUpdaterSignature({
+      artifactBytes: await readFile(context.updater),
+      signature,
+      publicKey: context.updaterPublicKey,
+    })
   }
 
   if (context.app === undefined) {
@@ -463,20 +464,23 @@ export async function verifyDesktopBuild(context, runner) {
     args: ['--verify', '--deep', '--strict', context.app],
     capture: true,
   })
-  const plist = await runner.run({
-    command: 'plutil',
-    args: [
-      '-extract',
-      'CFBundleIdentifier',
-      'raw',
-      '-o',
-      '-',
-      join(context.app, 'Contents/Info.plist'),
-    ],
-    capture: true,
-  })
-  if (plist.stdout.trim() !== identifierForChannel(context.options.channel)) {
+  const infoPlist = join(context.app, 'Contents/Info.plist')
+  const readPlistValue = async key => {
+    const result = await runner.run({
+      command: 'plutil',
+      args: ['-extract', key, 'raw', '-o', '-', infoPlist],
+      capture: true,
+    })
+    return result.stdout.trim()
+  }
+  if (await readPlistValue('CFBundleIdentifier')
+    !== identifierForChannel(context.options.channel)) {
     throw new Error('build-desktop: App bundle identifier does not match requested channel')
+  }
+  for (const key of ['CFBundleShortVersionString', 'CFBundleVersion']) {
+    if (await readPlistValue(key) !== context.desktopVersion) {
+      throw new Error(`build-desktop: Info.plist ${key} does not match desktop version`)
+    }
   }
   const health = await runner.run({
     command: sidecar,
@@ -555,9 +559,13 @@ export class DesktopBuilder {
     } = this.dependencies
     const updateChannel = updateChannelFor(options.channel)
     const updaterPublicKey = this.dependencies.updaterPublicKey ?? ''
-    if (options.bundle === 'all' && !validUpdaterPublicKey(updaterPublicKey)) {
+    try {
+      assertTauriUpdaterPublicKey(updaterPublicKey)
+    } catch (error) {
       throw new Error(
-        `build-desktop: ${updateChannel.keyEnvironment} must contain a valid Tauri updater public key for --bundle all`,
+        `build-desktop: ${updateChannel.keyEnvironment} must contain a valid Tauri updater public key: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
       )
     }
     const dist = join(this.root, 'dist-openloop')
@@ -651,6 +659,8 @@ export class DesktopBuilder {
       dmg: options.bundle === 'dmg' || options.bundle === 'all' ? dmg : undefined,
       updater: options.bundle === 'all' ? updater : undefined,
       updaterSignature: options.bundle === 'all' ? updaterSignature : undefined,
+      updaterPublicKey,
+      desktopVersion: desktopPackage.version,
       artifacts,
       options,
       release,

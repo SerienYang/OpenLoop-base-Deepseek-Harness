@@ -22,6 +22,12 @@ RWQf6LRCGA9i59SLOFxz6NxvASXDJeRtuZykwQepbDEGt87ig1BNpWaVWuNrm73YiIiJbq71Wi+dP9eK
 trusted comment: timestamp:1555779966\tfile:test
 QtKMXWyYcwdpZAlPF7tE2ENJkRd1ujvKjlj1m9RtHTBnZPa5WKU5uWRs5GoP5M/VqE81QFuMKI5k/SfNQUaOAA==`
 const tauriSignature = Buffer.from(minisignSignature).toString('base64')
+const prehashedMinisignSignature = `untrusted comment: signature from minisign secret key
+RUQf6LRCGA9i559r3g7V1qNyJDApGip8MfqcadIgT9CuhV3EMhHoN1mGTkUidF/z7SrlQgXdy8ofjb7bNJJylDOocrCo8KLzZwo=
+trusted comment: timestamp:1556193335\tfile:test
+y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+bHwhEBg==`
+const prehashedTauriSignature = Buffer.from(prehashedMinisignSignature).toString('base64')
+const updaterPublicKey = 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkgRTc2MjBGMTg0MkI0RTgxRgpSV1FmNkxSQ0dBOWk1M21sWWVjTzRJelQ1MVRHUHB2V3VjTlNDaDFDQk0wUVRhTG43M1k3R0ZPMwo='
 
 interface RendererModule {
   readonly parseUpdateManifestArguments: (args: string[]) => Record<string, string>
@@ -29,7 +35,9 @@ interface RendererModule {
     options: {
       readonly version: string
       readonly artifactUrl: string
+      readonly artifact: string
       readonly signature: string
+      readonly publicKey: string
       readonly notes: string
       readonly pubDate: string
       readonly out: string
@@ -45,27 +53,35 @@ function temporaryRoot(): string {
 }
 
 function fixture(root: string): {
+  readonly artifact: string
   readonly signature: string
   readonly out: string
   readonly options: {
     readonly version: string
     readonly artifactUrl: string
+    readonly artifact: string
     readonly signature: string
+    readonly publicKey: string
     readonly notes: string
     readonly pubDate: string
     readonly out: string
   }
 } {
+  const artifact = join(root, 'Openloop.app.tar.gz')
   const signature = join(root, 'Openloop.app.tar.gz.sig')
   const out = join(root, 'dist/latest-test-k1.json')
+  writeFileSync(artifact, 'test')
   writeFileSync(signature, `${tauriSignature}\n`)
   return {
+    artifact,
     signature,
     out,
     options: {
       version: '1.2.3-test.2',
       artifactUrl: 'https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-b-v1.2.3-test.2/Openloop.app.tar.gz',
+      artifact,
       signature,
+      publicKey: updaterPublicKey,
       notes: 'Task 14A B candidate',
       pubDate: '2026-08-20T12:34:56Z',
       out,
@@ -112,7 +128,9 @@ describe('signed Tauri update manifest renderer', () => {
     const args = [
       '--version', '1.2.3',
       '--artifact-url', 'https://example.com/Openloop.app.tar.gz',
+      '--artifact', 'Openloop.app.tar.gz',
       '--signature', 'bundle.sig',
+      '--public-key', updaterPublicKey,
       '--notes', 'notes',
       '--pub-date', '2026-08-20T00:00:00Z',
       '--out', 'latest-test-k1.json',
@@ -121,7 +139,9 @@ describe('signed Tauri update manifest renderer', () => {
     expect(parseUpdateManifestArguments(args)).toEqual({
       version: '1.2.3',
       artifactUrl: 'https://example.com/Openloop.app.tar.gz',
+      artifact: 'Openloop.app.tar.gz',
       signature: 'bundle.sig',
+      publicKey: updaterPublicKey,
       notes: 'notes',
       pubDate: '2026-08-20T00:00:00Z',
       out: 'latest-test-k1.json',
@@ -180,6 +200,42 @@ describe('signed Tauri update manifest renderer', () => {
     execFileSync('mkfifo', [fifo.signature])
     expect(() => renderUpdateManifest(fifo.options, { trustedRoot: fifoRoot }))
       .toThrow(/regular file/iu)
+  })
+
+  it('verifies the signature against the exact local archive and current public key', async () => {
+    const { renderUpdateManifest } = await import(modulePath) as RendererModule
+    const root = temporaryRoot()
+    const { options, artifact } = fixture(root)
+
+    writeFileSync(artifact, 'Test')
+    expect(() => renderUpdateManifest(options, { trustedRoot: root }))
+      .toThrow(/signature|Minisign|verify/iu)
+    writeFileSync(artifact, 'test')
+
+    const decodedWrongKey = Buffer.from(updaterPublicKey, 'base64').toString('utf8')
+    const [wrongComment, encodedWrongKey] = decodedWrongKey.trimEnd().split('\n')
+    const wrongKeyBytes = Buffer.from(encodedWrongKey ?? '', 'base64')
+    wrongKeyBytes[10] = (wrongKeyBytes[10] ?? 0) ^ 0xff
+    const wrongPublicKey = Buffer.from(
+      `${wrongComment ?? 'untrusted comment: wrong key'}\n${wrongKeyBytes.toString('base64')}\n`,
+    ).toString('base64')
+    expect(() => renderUpdateManifest(
+      { ...options, publicKey: wrongPublicKey },
+      { trustedRoot: root },
+    )).toThrow(/signature|Minisign|key|verify/iu)
+  })
+
+  it('uses Tauri Minisign prehashed semantics for ED signatures', async () => {
+    const { renderUpdateManifest } = await import(modulePath) as RendererModule
+    const root = temporaryRoot()
+    const { options, artifact, signature } = fixture(root)
+    writeFileSync(signature, `${prehashedTauriSignature}\n`)
+
+    writeFileSync(artifact, 'Test')
+    expect(() => renderUpdateManifest(options, { trustedRoot: root }))
+      .toThrow(/signature|Minisign|verify/iu)
+    writeFileSync(artifact, 'test')
+    expect(() => renderUpdateManifest(options, { trustedRoot: root })).not.toThrow()
   })
 
   it('rejects unsafe, overlapping, symlinked, and special output paths', async () => {

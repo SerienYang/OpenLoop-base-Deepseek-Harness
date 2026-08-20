@@ -74,6 +74,23 @@ describe('Openloop spike release workflow', () => {
     expect(source).not.toContain('deepseek-openloop')
   })
 
+  it('rejects both an existing release and an exact remote tag before creating a release', () => {
+    const source = workflowSource()
+    const preflight = source.slice(
+      source.indexOf('- name: Validate isolated test release inputs'),
+      source.indexOf('- name: Install immutable dependencies'),
+    )
+
+    expect(preflight).toMatch(/gh release view "\$RELEASE_TAG"/u)
+    expect(preflight).toMatch(
+      /REMOTE_TAG=.*git ls-remote[^]*refs\/tags\/\$\{RELEASE_TAG\}/u,
+    )
+    expect(preflight).toMatch(/test -z "\$REMOTE_TAG"/u)
+    expect(preflight).not.toMatch(/if git ls-remote/u)
+    expect(preflight).toMatch(/remote tag[^]*already exists|already exists[^]*remote tag/iu)
+    expect(source.indexOf('git ls-remote')).toBeLessThan(source.indexOf('gh release create'))
+  })
+
   it('renders and publishes signed immutable assets plus the deterministic rolling manifest', () => {
     const source = workflowSource()
 

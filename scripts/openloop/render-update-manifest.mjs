@@ -13,12 +13,15 @@ import {
 } from 'node:fs'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { verifyTauriUpdaterSignature } from './verify-tauri-updater-signature.mjs'
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url))
 const options = new Map([
   ['--version', 'version'],
   ['--artifact-url', 'artifactUrl'],
+  ['--artifact', 'artifact'],
   ['--signature', 'signature'],
+  ['--public-key', 'publicKey'],
   ['--notes', 'notes'],
   ['--pub-date', 'pubDate'],
   ['--out', 'out'],
@@ -39,7 +42,7 @@ export function parseUpdateManifestArguments(args) {
   const normalized = args[0] === '--' ? args.slice(1) : args
   if (normalized.includes('--test')) {
     throw new Error(
-      '--test is not supported; run the focused Vitest suite or provide --version, --artifact-url, --signature, --notes, --pub-date, and --out',
+      '--test is not supported; run the focused Vitest suite or provide --version, --artifact-url, --artifact, --signature, --public-key, --notes, --pub-date, and --out',
     )
   }
   const parsed = {}
@@ -101,30 +104,16 @@ function regularSignature(path, trustedRoot) {
   return real
 }
 
-function validBase64(value) {
-  if (value === '' || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/u.test(value)) {
-    return false
+function regularArtifact(path, trustedRoot) {
+  const absolute = resolve(path)
+  assertNoSymlinkComponents(absolute, trustedRoot, 'artifact input')
+  const metadata = lstatSync(absolute)
+  if (!metadata.isFile()) throw new Error('artifact input must be a regular file')
+  const real = realpathSync(absolute)
+  if (!isWithin(realpathSync(trustedRoot), real)) {
+    throw new Error('artifact input must resolve inside its trusted root')
   }
-  return Buffer.from(value, 'base64').toString('base64') === value
-}
-
-function signatureContents(path) {
-  const signature = readFileSync(path, 'utf8').trim()
-  if (!validBase64(signature)) {
-    throw new Error('signature file must contain one non-empty canonical base64 signature')
-  }
-  const decoded = Buffer.from(signature, 'base64').toString('utf8')
-  const lines = decoded.split(/\r?\n/u)
-  if (lines.length !== 4
-    || !lines[0].startsWith('untrusted comment: ')
-    || !lines[2].startsWith('trusted comment: ')
-    || !validBase64(lines[1])
-    || !validBase64(lines[3])
-    || Buffer.from(lines[1], 'base64').length !== 74
-    || Buffer.from(lines[3], 'base64').length !== 64) {
-    throw new Error('signature file does not contain a valid Tauri Minisign signature')
-  }
-  return signature
+  return real
 }
 
 function validRfc3339(value) {
@@ -176,7 +165,7 @@ function sameFile(left, right) {
   return leftMetadata.dev === rightMetadata.dev && leftMetadata.ino === rightMetadata.ino
 }
 
-function outputTarget(path, signature, trustedRoot) {
+function outputTarget(path, inputs, trustedRoot) {
   const absolute = resolve(path)
   assertNoSymlinkComponents(dirname(absolute), trustedRoot, 'output', true)
   mkdirSync(dirname(absolute), { recursive: true })
@@ -186,8 +175,8 @@ function outputTarget(path, signature, trustedRoot) {
     throw new Error('output parent must stay inside its trusted root')
   }
   const target = join(parent, basename(absolute))
-  if (sameFile(target, signature)) {
-    throw new Error('output must not overlap the signature input')
+  if (inputs.some(input => sameFile(target, input))) {
+    throw new Error('output must not overlap an input')
   }
   if (existsSync(target)) {
     const metadata = lstatSync(target)
@@ -215,8 +204,13 @@ function atomicWrite(target, bytes) {
 export function renderUpdateManifest(renderOptions, dependencies = {}) {
   validateValues(renderOptions)
   const trustedRoot = dependencies.trustedRoot ?? repositoryRoot
+  const artifactPath = regularArtifact(renderOptions.artifact, trustedRoot)
   const signaturePath = regularSignature(renderOptions.signature, trustedRoot)
-  const signature = signatureContents(signaturePath)
+  const signature = verifyTauriUpdaterSignature({
+    artifactBytes: readFileSync(artifactPath),
+    signature: readFileSync(signaturePath, 'utf8'),
+    publicKey: renderOptions.publicKey,
+  })
   const manifest = {
     version: renderOptions.version,
     notes: renderOptions.notes,
@@ -229,7 +223,10 @@ export function renderUpdateManifest(renderOptions, dependencies = {}) {
     },
   }
   const bytes = `${JSON.stringify(manifest, null, 2)}\n`
-  atomicWrite(outputTarget(renderOptions.out, signaturePath, trustedRoot), bytes)
+  atomicWrite(
+    outputTarget(renderOptions.out, [artifactPath, signaturePath], trustedRoot),
+    bytes,
+  )
   return { manifest, bytes }
 }
 

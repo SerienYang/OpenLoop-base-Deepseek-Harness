@@ -82,6 +82,9 @@ jobs:
             echo "immutable prerelease $RELEASE_TAG already exists" >&2
             exit 1
           fi
+          REMOTE_TAG="$(git ls-remote --tags origin "refs/tags/${RELEASE_TAG}")"
+          test -z "$REMOTE_TAG" \
+            || { echo "immutable prerelease remote tag $RELEASE_TAG already exists" >&2; exit 1; }
 
       - name: Install immutable dependencies
         run: pnpm install --frozen-lockfile
@@ -107,7 +110,9 @@ jobs:
           node scripts/openloop/render-update-manifest.mjs \
             --version "$APP_VERSION" \
             --artifact-url "$artifact_url" \
+            --artifact "$updater" \
             --signature "$signature" \
+            --public-key "$OPENLOOP_UPDATER_PUBLIC_KEY" \
             --notes "$RELEASE_NOTES" \
             --pub-date "$pub_date" \
             --out dist-openloop/latest-test-k1.json

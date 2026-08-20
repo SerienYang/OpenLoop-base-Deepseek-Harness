@@ -19,6 +19,11 @@ const modulePath = './build-desktop.mjs'
 const artifactGeneratorPath: string = './generate-artifact-manifest.mjs'
 const temporaryRoots: string[] = []
 const updaterPublicKey = 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkgRTc2MjBGMTg0MkI0RTgxRgpSV1FmNkxSQ0dBOWk1M21sWWVjTzRJelQ1MVRHUHB2V3VjTlNDaDFDQk0wUVRhTG43M1k3R0ZPMwo='
+const minisignSignature = `untrusted comment: signature from minisign secret key
+RWQf6LRCGA9i59SLOFxz6NxvASXDJeRtuZykwQepbDEGt87ig1BNpWaVWuNrm73YiIiJbq71Wi+dP9eKL8OC351vwIasSSbXxwA=
+trusted comment: timestamp:1555779966\tfile:test
+QtKMXWyYcwdpZAlPF7tE2ENJkRd1ujvKjlj1m9RtHTBnZPa5WKU5uWRs5GoP5M/VqE81QFuMKI5k/SfNQUaOAA==`
+const tauriSignature = Buffer.from(minisignSignature).toString('base64')
 
 interface ArtifactGeneratorModule {
   readonly generateArtifactManifest: (
@@ -269,33 +274,36 @@ describe('Openloop desktop build orchestrator', () => {
     }
   })
 
-  it('fails closed before an all-bundle build when the updater public key is absent', async () => {
-    const { DesktopBuilder } = await import(modulePath) as DesktopModule
-    const events: string[] = []
-    const builder = new DesktopBuilder({
-      root: '/repo',
-      updaterPublicKey: ' \n',
-      options: {
-        channel: 'test',
-        target: 'aarch64-apple-darwin',
-        bundle: 'all',
-      },
-      runner: { run: async () => {
-        events.push('run')
-        return { stdout: '', stderr: '' }
-      } },
-      files: {
-        cleanDist: async () => events.push('clean'),
-        readDesktopPackage: async () => ({ version: '1.2.3' }),
-      },
-      createRuntimeBuilder: () => ({ build: async () => undefined }),
-      generateBuildManifest: () => undefined,
-      generateArtifactManifest: () => undefined,
-    })
+  it.each(['none', 'app', 'dmg', 'all'] as const)(
+    'fails closed before a %s build when the updater public key is absent',
+    async (bundle) => {
+      const { DesktopBuilder } = await import(modulePath) as DesktopModule
+      const events: string[] = []
+      const builder = new DesktopBuilder({
+        root: '/repo',
+        updaterPublicKey: ' \n',
+        options: {
+          channel: 'test',
+          target: 'aarch64-apple-darwin',
+          bundle,
+        },
+        runner: { run: async () => {
+          events.push('run')
+          return { stdout: '', stderr: '' }
+        } },
+        files: {
+          cleanDist: async () => events.push('clean'),
+          readDesktopPackage: async () => ({ version: '1.2.3' }),
+        },
+        createRuntimeBuilder: () => ({ build: async () => undefined }),
+        generateBuildManifest: () => undefined,
+        generateArtifactManifest: () => undefined,
+      })
 
-    await expect(builder.build()).rejects.toThrow(/OPENLOOP_UPDATER_PUBLIC_KEY/iu)
-    expect(events).toEqual([])
-  })
+      await expect(builder.build()).rejects.toThrow(/OPENLOOP_UPDATER_PUBLIC_KEY/iu)
+      expect(events).toEqual([])
+    },
+  )
 
   it('deletes only a git-ignored real dist-openloop directory', async () => {
     const { nodeFileSystem } = await import(modulePath) as DesktopModule
@@ -501,8 +509,8 @@ describe('Openloop desktop build orchestrator', () => {
     writeFileSync(join(web, 'index.html'), '<main>Openloop</main>\n')
     writeFileSync(bundleGraph, '{"version":1}\n')
     mkdirSync(join(release, 'bundle/dmg'), { recursive: true })
-    writeFileSync(updater, 'signed updater archive')
-    writeFileSync(updaterSignature, 'non-empty updater signature\n')
+    writeFileSync(updater, 'test')
+    writeFileSync(updaterSignature, `${tauriSignature}\n`)
     writeFileSync(dmg, 'disk image')
     const baseInputs = {
       core,
@@ -537,13 +545,18 @@ describe('Openloop desktop build orchestrator', () => {
     }
     let readinessPayload: Record<string, unknown> = validReadiness
     let healthSmokeStderr = ''
+    const plistValues: Record<string, string> = {
+      CFBundleIdentifier: 'ai.openloop.desktop.test',
+      CFBundleShortVersionString: '1.2.3',
+      CFBundleVersion: '1.2.3',
+    }
     const commands: Array<{ command: string; args: string[] }> = []
     const runner = {
       run: async (command: { command: string; args: string[] }) => {
         commands.push(command)
         if (command.command === 'lipo') return { stdout: 'arm64\n', stderr: '' }
         if (command.command === 'plutil') {
-          return { stdout: 'ai.openloop.desktop.test\n', stderr: '' }
+          return { stdout: `${plistValues[command.args[1] ?? ''] ?? ''}\n`, stderr: '' }
         }
         if (command.command === 'codesign' && command.args[0] === '-d') {
           return {
@@ -568,6 +581,8 @@ describe('Openloop desktop build orchestrator', () => {
       dmg,
       updater,
       updaterSignature,
+      updaterPublicKey,
+      desktopVersion: '1.2.3',
       release,
       options: {
         channel: 'test',
@@ -601,7 +616,57 @@ describe('Openloop desktop build orchestrator', () => {
     writeFileSync(updaterSignature, '')
     await expect(verifyDesktopBuild(context, runner))
       .rejects.toThrow(/signature.*empty|empty.*signature/iu)
-    writeFileSync(updaterSignature, 'non-empty updater signature\n')
+    writeFileSync(updaterSignature, `${tauriSignature}\n`)
+
+    writeFileSync(updater, 'Test')
+    generateArtifactManifest(
+      { ...baseInputs, app, dmg, updater },
+      { trustedRoot: root },
+    )
+    await expect(verifyDesktopBuild(context, runner))
+      .rejects.toThrow(/signature|Minisign|verify/iu)
+    writeFileSync(updater, 'test')
+    generateArtifactManifest(
+      { ...baseInputs, app, dmg, updater },
+      { trustedRoot: root },
+    )
+
+    const decodedWrongKey = Buffer.from(updaterPublicKey, 'base64').toString('utf8')
+    const [wrongComment, encodedWrongKey] = decodedWrongKey.trimEnd().split('\n')
+    const wrongKeyBytes = Buffer.from(encodedWrongKey ?? '', 'base64')
+    wrongKeyBytes[10] = (wrongKeyBytes[10] ?? 0) ^ 0xff
+    const wrongPublicKey = Buffer.from(
+      `${wrongComment ?? 'untrusted comment: wrong key'}\n${wrongKeyBytes.toString('base64')}\n`,
+    ).toString('base64')
+    await expect(verifyDesktopBuild(
+      { ...context, updaterPublicKey: wrongPublicKey },
+      runner,
+    )).rejects.toThrow(/signature|Minisign|key|verify/iu)
+
+    for (const key of ['CFBundleShortVersionString', 'CFBundleVersion']) {
+      plistValues[key] = '9.9.9'
+      await expect(verifyDesktopBuild(context, runner))
+        .rejects.toThrow(new RegExp(`${key}|version`, 'iu'))
+      plistValues[key] = '1.2.3'
+    }
+
+    await expect(verifyDesktopBuild(
+      { ...context, desktopVersion: '9.9.9' },
+      runner,
+    )).rejects.toThrow(/core|desktop|version/iu)
+
+    const wrongDmg = join(release, 'bundle/dmg/Openloop_9.9.9_aarch64.dmg')
+    writeFileSync(wrongDmg, 'disk image')
+    generateArtifactManifest(
+      { ...baseInputs, app, dmg: wrongDmg, updater },
+      { trustedRoot: root },
+    )
+    await expect(verifyDesktopBuild({ ...context, dmg: wrongDmg }, runner))
+      .rejects.toThrow(/filename|file name|version|DMG/iu)
+    generateArtifactManifest(
+      { ...baseInputs, app, dmg, updater },
+      { trustedRoot: root },
+    )
 
     const invalidReadinessCases: Array<[string, Record<string, unknown>]> = [
       ['missing type', Object.fromEntries(
