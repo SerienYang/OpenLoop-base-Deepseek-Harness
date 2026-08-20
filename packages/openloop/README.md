@@ -1,5 +1,7 @@
 # OpenLoop packages
 
+English | [中文](README.zh.md)
+
 OpenLoop product packages live at `packages/openloop/<name>` and use the
 matching private package name `@openloop/<name>`. This is a narrow exception
 to the public `@deepseek-ai/dsh-*` release layout; it does not change DSH

@@ -1,5 +1,7 @@
 # @openloop/build-contract
 
+English | [中文](README.zh.md)
+
 Private OpenLoop package on the `host` compiler face.
 
 This package defines the strict Schemastery contracts for OpenLoop core build

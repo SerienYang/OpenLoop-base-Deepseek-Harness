@@ -1,5 +1,7 @@
 # @openloop/bundle
 
+English | [中文](README.zh.md)
+
 Private OpenLoop package on the `host` compiler face.
 
 This package is the only OpenLoop composition layer on top of the official DSH

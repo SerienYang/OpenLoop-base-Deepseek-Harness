@@ -1,6 +1,6 @@
 # Bilingual-pair consistency record: the git blob hash of each side as of the
 # last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
-#   pnpm run verify-translation-pairing --write packages/README.md
-README.md: a386b5546586161167c90890619f4a6a42db7faf
-README.zh.md: 29e18d7123e0a9d65502ee3dd8288540c09ca72e
+#   pnpm run verify-translation-pairing --write packages/openloop/README.md
+README.md: d62eda7d7649671e7a190fce06a5784185c70b52
+README.zh.md: ad9eeb37e30f4279da7dc28860c4e1a9187db31a

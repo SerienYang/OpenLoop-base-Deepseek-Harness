@@ -4,6 +4,10 @@
 
 npm scope 为 `@deepseek-ai/dsh-*`；Cordis `Service` 子类和函数插件通过 `ctx.effect()`、`ctx.on()` 或 `ctx.waterfall()` 注册。仓库规则见[根工程指南](../AGENTS.md)。
 
+OpenLoop 产品包是一个严格限定的例外：它们仅位于
+[`openloop/`](openloop/README.md) 下，使用对应的私有
+`@openloop/<name>` 命名空间，并且不会改变现有 DSH 的命名或发布规则。
+
 ## 层级结构
 
 包按组置于 `packages/<group>/<pkg>/`；包名仍为 `@deepseek-ai/dsh-<pkg>`。**组 README 负责包／ctx 键映射。**
@@ -57,6 +61,7 @@ npm scope 为 `@deepseek-ai/dsh-*`；Cordis `Service` 子类和函数插件通�
 | [`examples/`](examples/README.md) | 演示组合包（agent-spine + CLI（命令行界面）/ACP/JSON-RPC bin），由叶节点加载 | 支持：示例基础设施 |
 | [`test-support/`](test-support/README.md) | 支持基础设施（testkit、不变式、回放、Loader 冒烟测试） | 支持：兼容性预期较低 |
 | [`util/`](util/README.md) | 组间共享的低层零依赖工具（`Branded<B>`、Harness home／路径辅助函数、超时、留存） | 支持：小型、稳定、无 harness 依赖 |
+| [`openloop/`](openloop/README.md) | 私有 OpenLoop 桌面产品包；每个包只归属 Host、Client 或 pure 三种编译面之一 | 产品：私有，不属于 DSH 发布成员 |
 
 新包加入现有组；新组更新其 README 和此表。
 
