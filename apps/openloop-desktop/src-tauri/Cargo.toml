@@ -37,3 +37,4 @@ zeroize = "=1.9.0"
 [dev-dependencies]
 sha2 = "=0.10.9"
 tauri-build = { version = "=2.6.3", features = [] }
+tempfile = "=3.27.0"

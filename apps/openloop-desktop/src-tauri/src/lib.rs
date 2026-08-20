@@ -12,6 +12,7 @@ use crate::launcher::{
 
 pub mod browser;
 pub mod launcher;
+pub mod spikes;
 
 #[cfg(target_os = "macos")]
 pub fn build_browser_webview(
