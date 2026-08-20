@@ -83,17 +83,33 @@ fn stages_one_valid_app_root_beside_the_installed_app_without_overwriting() {
     assert!(
         fs::read_dir(root.path())
             .expect("update root entries")
-            .all(|entry| !entry
+            .any(|entry| entry
                 .expect("update root entry")
                 .file_name()
                 .to_string_lossy()
                 .ends_with(".tmp")),
-        "successful staging left a temporary extraction directory"
+        "successful staging must preserve its temporary extraction directory"
     );
 }
 
 #[test]
-fn rejects_tampered_or_ambiguous_archive_structure_and_cleans_temporary_state() {
+fn dropping_a_staged_candidate_preserves_it_for_controlled_cleanup() {
+    let root = tempdir().expect("update root");
+    let installed = installed_app(root.path());
+    let staged = stage_verified_archive(&archive(&update_entries()), &installed)
+        .expect("valid archive must stage");
+    let candidate = staged.path().to_owned();
+
+    drop(staged);
+
+    assert_eq!(
+        fs::read_to_string(candidate.join("Contents/marker")).expect("preserved candidate"),
+        "new"
+    );
+}
+
+#[test]
+fn rejects_tampered_or_ambiguous_archive_structure_without_recursive_cleanup() {
     let cases = [
         ("not-gzip", b"not a gzip archive".to_vec()),
         (
@@ -123,10 +139,12 @@ fn rejects_tampered_or_ambiguous_archive_structure_and_cleans_temporary_state() 
             error.to_string().contains("archive") || error.to_string().contains("root"),
             "{label}: unexpected error: {error}"
         );
-        assert_eq!(
-            fs::read_dir(root.path()).expect("update root").count(),
-            1,
-            "{label}: failed staging left filesystem state"
+        assert!(
+            fs::read_dir(root.path())
+                .expect("update root")
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().ends_with(".tmp")),
+            "{label}: failed staging directory was recursively deleted"
         );
     }
 }

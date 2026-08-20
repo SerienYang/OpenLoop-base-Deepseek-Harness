@@ -152,6 +152,10 @@ fn no_content() -> Response {
 }
 
 fn manifest(base_url: &str, version: &str, signature: &str) -> Response {
+    manifest_with_url(version, signature, &format!("{base_url}/archive"))
+}
+
+fn manifest_with_url(version: &str, signature: &str, url: &str) -> Response {
     Response {
         status: "200 OK",
         content_type: "application/json",
@@ -161,7 +165,7 @@ fn manifest(base_url: &str, version: &str, signature: &str) -> Response {
             "pub_date": "2026-08-20T12:00:00Z",
             "platforms": {
                 "darwin-aarch64": {
-                    "url": format!("{base_url}/archive"),
+                    "url": url,
                     "signature": signature,
                 }
             }
@@ -283,7 +287,7 @@ fn production_download_policy_accepts_only_immutable_repository_release_assets()
     ];
     for (channel, value) in accepted {
         let url = value.parse().expect("accepted URL");
-        validate_download_url(&url, "1.2.3", channel).expect(value);
+        validate_download_url(value, &url, "1.2.3", channel).expect(value);
     }
 
     let rejected = [
@@ -291,6 +295,7 @@ fn production_download_policy_accepts_only_immutable_repository_release_assets()
         "https://example.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v1.2.3/Openloop.app.tar.gz",
         "https://localhost/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v1.2.3/Openloop.app.tar.gz",
         "https://user:pass@github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v1.2.3/Openloop.app.tar.gz",
+        "https://github.com:443/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v1.2.3/Openloop.app.tar.gz",
         "https://github.com:444/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v1.2.3/Openloop.app.tar.gz",
         "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v1.2.3/Openloop.app.tar.gz?redirect=https://example.com",
         "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v1.2.3/Openloop.app.tar.gz#fragment",
@@ -302,15 +307,45 @@ fn production_download_policy_accepts_only_immutable_repository_release_assets()
     for value in rejected {
         let url = value.parse().expect("syntactically valid rejected URL");
         assert!(
-            validate_download_url(&url, "1.2.3", ReleaseChannel::Test).is_err(),
+            validate_download_url(value, &url, "1.2.3", ReleaseChannel::Test).is_err(),
             "accepted unsafe download URL {value}"
         );
     }
     let test_asset = accepted[0].1.parse().expect("test asset URL");
     assert!(
-        validate_download_url(&test_asset, "1.2.3", ReleaseChannel::Stable).is_err(),
+        validate_download_url(accepted[0].1, &test_asset, "1.2.3", ReleaseChannel::Stable).is_err(),
         "stable channel accepted a test release tag"
     );
+}
+
+#[test]
+fn production_policy_validates_the_raw_platform_url_before_download() {
+    let cases = [
+        "https://github.com:443/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v0.2.0/Openloop.app.tar.gz",
+        "https://GITHUB.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v0.2.0/Openloop.app.tar.gz",
+        "https://github.com/%53erienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v0.2.0/Openloop.app.tar.gz",
+        "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v0.2.0/Openloop.app.tar%2Egz",
+    ];
+    for raw_url in cases {
+        let server = TestServer::new(1, |_| {
+            HashMap::from([(
+                "/manifest",
+                manifest_with_url("0.2.0", TEST_SIGNATURE, raw_url),
+            )])
+        });
+        let (_app, updater) = fixture_updater(SIGNED_TEST_PUBLIC_KEY, server.url("/manifest"));
+        let policy = DownloadUrlPolicy::production(ReleaseChannel::Test);
+
+        let error = match tauri::async_runtime::block_on(check_update(&updater, "0.1.0", &policy)) {
+            Ok(_) => panic!("raw URL normalization bypass must fail before download"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("unsafe update download URL"),
+            "unexpected raw URL error for {raw_url}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -329,10 +364,12 @@ fn spike_reports_are_one_line_and_install_no_update_is_unambiguous() {
         available: None,
         download: DownloadStatus::NotStarted,
         publication: InstallPublication::NoUpdate,
+        preserved_backup: None,
+        failed_candidate: None,
     };
     assert_eq!(
         install.json_line().expect("install JSON"),
-        "{\"current\":\"0.1.0\",\"available\":null,\"download\":\"notStarted\",\"publication\":{\"result\":\"noUpdate\"}}\n"
+        "{\"current\":\"0.1.0\",\"available\":null,\"download\":\"notStarted\",\"publication\":{\"result\":\"noUpdate\"},\"preservedBackup\":null,\"failedCandidate\":null}\n"
     );
 }
 
@@ -435,10 +472,40 @@ fn verified_download_commits_healthy_candidate_and_rolls_back_failed_health() {
             fs::read_to_string(installed.join("marker")).expect("final installed marker"),
             expected_marker
         );
-        assert_eq!(
-            fs::read_dir(root.path()).expect("update root").count(),
-            1,
-            "completed transaction left candidate or recovery markers"
+        match report.publication {
+            InstallPublication::Committed => {
+                assert_eq!(
+                    fs::read_to_string(
+                        report
+                            .preserved_backup
+                            .as_ref()
+                            .expect("committed backup")
+                            .join("marker")
+                    )
+                    .expect("backup marker"),
+                    "old"
+                );
+                assert!(report.failed_candidate.is_none());
+            }
+            InstallPublication::RolledBack(_) => {
+                assert_eq!(
+                    fs::read_to_string(
+                        report
+                            .failed_candidate
+                            .as_ref()
+                            .expect("failed candidate")
+                            .join("marker")
+                    )
+                    .expect("failed candidate marker"),
+                    "new"
+                );
+                assert!(report.preserved_backup.is_none());
+            }
+            InstallPublication::NoUpdate => unreachable!("fixture always provides an update"),
+        }
+        assert!(
+            fs::read_dir(root.path()).expect("update root").count() >= 3,
+            "transaction must preserve staging and recovery entries"
         );
     }
 }

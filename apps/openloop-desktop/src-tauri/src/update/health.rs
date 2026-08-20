@@ -1,8 +1,11 @@
 use std::{
     error::Error,
-    ffi::OsStr,
+    ffi::{CString, OsStr, OsString},
     fmt, fs, io,
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+        unix::ffi::OsStrExt,
+    },
     path::{Component, Path, PathBuf},
     process::{Command, Output, Stdio},
     thread,
@@ -219,7 +222,22 @@ pub fn required_dsh_home(
     Ok(path)
 }
 
+pub fn ensure_channel_dsh_home(
+    app_data: &Path,
+    data_root_name: &str,
+) -> Result<PathBuf, HealthProbeError> {
+    validate_data_root_name(data_root_name)?;
+    let dsh_home = app_data.join(data_root_name).join("dsh");
+    open_directory_chain(&dsh_home, true)
+        .map_err(|source| HealthProbeError::io("create channel data root", source))?;
+    validate_dsh_home(&dsh_home, Some(data_root_name))?;
+    Ok(dsh_home)
+}
+
 fn validate_dsh_home(path: &Path, data_root_name: Option<&str>) -> Result<(), HealthProbeError> {
+    if let Some(name) = data_root_name {
+        validate_data_root_name(name)?;
+    }
     if !path.is_absolute()
         || path
             .components()
@@ -272,14 +290,13 @@ fn validate_file_name(value: &str, label: &str) -> Result<(), HealthProbeError> 
 }
 
 fn require_real_directory(path: &Path, label: &str) -> Result<(), HealthProbeError> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|source| HealthProbeError::io("inspect candidate directory", source))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(HealthProbeError::invalid(format!(
-            "{label} must be a real directory"
-        )));
-    }
-    Ok(())
+    open_directory_chain(path, false)
+        .map(|_| ())
+        .map_err(|source| {
+            HealthProbeError::invalid(format!(
+                "{label} and every ancestor must be real directories: {source}"
+            ))
+        })
 }
 
 fn require_regular_file(
@@ -287,12 +304,40 @@ fn require_regular_file(
     label: &str,
     executable: bool,
 ) -> Result<(), HealthProbeError> {
-    let metadata = fs::symlink_metadata(path)
+    let parent = path
+        .parent()
+        .ok_or_else(|| HealthProbeError::invalid(format!("{label} has no parent")))?;
+    let parent = open_directory_chain(parent, false).map_err(|source| {
+        HealthProbeError::invalid(format!(
+            "{label} ancestors must be real directories: {source}"
+        ))
+    })?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| HealthProbeError::invalid(format!("{label} has no file name")))?;
+    let name = c_component(name)?;
+    // SAFETY: `name` is one NUL-terminated component and `parent` is a retained
+    // real directory descriptor. O_NOFOLLOW rejects a symlink leaf.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if descriptor < 0 {
+        return Err(HealthProbeError::io(
+            "open candidate file without following symlinks",
+            io::Error::last_os_error(),
+        ));
+    }
+    // SAFETY: `descriptor` was returned as a new owned descriptor.
+    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    let metadata = descriptor_stat(descriptor.as_raw_fd())
         .map_err(|source| HealthProbeError::io("inspect candidate file", source))?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.nlink() != 1
-        || (executable && metadata.permissions().mode() & 0o111 == 0)
+    if metadata.st_mode as u32 & libc::S_IFMT as u32 != libc::S_IFREG as u32
+        || metadata.st_nlink != 1
+        || (executable && metadata.st_mode as u32 & 0o111 == 0)
     {
         return Err(HealthProbeError::invalid(format!(
             "{label} must be a single-link regular{} file",
@@ -300,6 +345,116 @@ fn require_regular_file(
         )));
     }
     Ok(())
+}
+
+fn validate_data_root_name(value: &str) -> Result<(), HealthProbeError> {
+    let mut components = Path::new(value).components();
+    if value.is_empty()
+        || !matches!(components.next(), Some(Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(HealthProbeError::invalid(
+            "channel data root name must be one relative component",
+        ));
+    }
+    Ok(())
+}
+
+fn open_directory_chain(path: &Path, create: bool) -> io::Result<OwnedFd> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "directory path must be absolute without dot components",
+        ));
+    }
+    let mut anchor = path.to_path_buf();
+    let mut suffix = Vec::<OsString>::new();
+    for _ in 0..3 {
+        let Some(component) = anchor.file_name() else {
+            break;
+        };
+        suffix.push(component.to_owned());
+        anchor.pop();
+    }
+    suffix.reverse();
+    let anchor = fs::canonicalize(&anchor)?;
+    let anchor = CString::new(anchor.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "directory path contains NUL"))?;
+    // SAFETY: anchor is a live NUL-terminated canonical absolute path. The
+    // security boundary begins at its three trailing descendants: app_data,
+    // channel root, and dsh (or the equivalent candidate bundle chain).
+    let descriptor = unsafe {
+        libc::open(
+            anchor.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `descriptor` was returned as a new owned descriptor.
+    let mut parent = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    for component in suffix {
+        let component = c_component(&component)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+        match open_directory_at(parent.as_raw_fd(), &component) {
+            Ok(child) => parent = child,
+            Err(error) if create && error.kind() == io::ErrorKind::NotFound => {
+                // SAFETY: the component is relative to the retained real parent
+                // directory. mkdirat is exclusive and never follows a leaf.
+                if unsafe { libc::mkdirat(parent.as_raw_fd(), component.as_ptr(), 0o700) } < 0 {
+                    let create_error = io::Error::last_os_error();
+                    if create_error.kind() != io::ErrorKind::AlreadyExists {
+                        return Err(create_error);
+                    }
+                }
+                parent = open_directory_at(parent.as_raw_fd(), &component)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(parent)
+}
+
+fn open_directory_at(parent: RawFd, name: &CString) -> io::Result<OwnedFd> {
+    // SAFETY: `name` is one NUL-terminated component and `parent` is an open
+    // real directory descriptor. O_NOFOLLOW rejects a symlink at this step.
+    let descriptor = unsafe {
+        libc::openat(
+            parent,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `descriptor` was returned as a new owned descriptor.
+    Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
+}
+
+fn c_component(value: &OsStr) -> Result<CString, HealthProbeError> {
+    if value.as_bytes().contains(&b'/') {
+        return Err(HealthProbeError::invalid(
+            "filesystem component contains a separator",
+        ));
+    }
+    CString::new(value.as_bytes())
+        .map_err(|_| HealthProbeError::invalid("filesystem component contains NUL"))
+}
+
+fn descriptor_stat(descriptor: RawFd) -> io::Result<libc::stat> {
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `metadata` points to writable storage and `descriptor` is open.
+    if unsafe { libc::fstat(descriptor, metadata.as_mut_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful fstat initialized the complete stat value.
+    Ok(unsafe { metadata.assume_init() })
 }
 
 fn plist_value(path: &Path, key: &str) -> Result<String, HealthProbeError> {

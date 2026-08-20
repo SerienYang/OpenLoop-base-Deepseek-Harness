@@ -1,6 +1,5 @@
 use std::{
     ffi::{OsStr, OsString},
-    fs,
     io::{self, Write},
     path::{Path, PathBuf},
     sync::Mutex,
@@ -20,7 +19,7 @@ use crate::update::{
         InstallPublication, InstallReport,
     },
     health::{
-        required_dsh_home, BundleHealthProbe, CandidateProcessHealth,
+        ensure_channel_dsh_home, required_dsh_home, BundleHealthProbe, CandidateProcessHealth,
         TEST_PROBE_FAILURE_ENVIRONMENT,
     },
     recovery::{PublicationOutcome, RecoveryTransaction},
@@ -239,10 +238,8 @@ fn channel_dsh_home(
         .path()
         .app_data_dir()
         .map_err(|error| format!("Openloop app data directory is unavailable: {error}"))?;
-    let dsh_home = updater_config.dsh_home(&app_data);
-    fs::create_dir_all(&dsh_home)
-        .map_err(|error| format!("Openloop channel data root is unavailable: {error}"))?;
-    Ok(dsh_home)
+    ensure_channel_dsh_home(&app_data, updater_config.data_root_name())
+        .map_err(|error| format!("Openloop channel data root is unavailable: {error}"))
 }
 
 fn embedded_channel() -> Result<update::channel::ReleaseChannel, String> {
@@ -337,7 +334,7 @@ async fn run_update_spike(
     let download_policy = DownloadUrlPolicy::production(updater_config.channel());
     if let Some(update) = update.as_ref() {
         download_policy
-            .validate(&update.download_url, &update.version)
+            .validate_update(update)
             .map_err(|error| error.to_string())?;
     }
     let check = CheckReport {
@@ -353,6 +350,8 @@ async fn run_update_spike(
             available: None,
             download: DownloadStatus::NotStarted,
             publication: InstallPublication::NoUpdate,
+            preserved_backup: None,
+            failed_candidate: None,
         }
         .json_line()
         .map_err(|error| error.to_string());
@@ -360,6 +359,9 @@ async fn run_update_spike(
     let installed = current_app_bundle()?;
     let current = update.current_version.clone();
     let available = update.version.clone();
+    download_policy
+        .validate_update(&update)
+        .map_err(|error| error.to_string())?;
     let archive = update
         .download(|_, _| {}, || {})
         .await
@@ -373,18 +375,30 @@ async fn run_update_spike(
         .map_err(|error| format!("open candidate recovery transaction failed: {error}"))?;
     let dsh_home = channel_dsh_home(app, &updater_config)?;
     let mut health = CandidateProcessHealth::new(&update.version, dsh_home);
-    let publication = match transaction
+    let (publication, preserved_backup, failed_candidate) = match transaction
         .publish(&mut health)
-        .map_err(|error| format!("publish candidate recovery transaction failed: {error}"))?
-    {
-        PublicationOutcome::Committed => InstallPublication::Committed,
-        PublicationOutcome::RolledBack(status) => InstallPublication::RolledBack(status),
+        .map_err(|error| {
+        format!("publish candidate recovery transaction failed: {error}")
+    })? {
+        PublicationOutcome::Committed { preserved_backup } => {
+            (InstallPublication::Committed, Some(preserved_backup), None)
+        }
+        PublicationOutcome::RolledBack {
+            status,
+            failed_candidate,
+        } => (
+            InstallPublication::RolledBack(status),
+            None,
+            Some(failed_candidate),
+        ),
     };
     InstallReport {
         current,
         available: Some(available),
         download: DownloadStatus::Verified,
         publication,
+        preserved_backup,
+        failed_candidate,
     }
     .json_line()
     .map_err(|error| error.to_string())

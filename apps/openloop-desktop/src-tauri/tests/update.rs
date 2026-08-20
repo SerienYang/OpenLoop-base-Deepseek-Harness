@@ -173,7 +173,7 @@ fn fifo(path: &Path) {
 }
 
 #[test]
-fn recovery_transaction_commits_a_healthy_candidate_and_cleans_markers() {
+fn recovery_transaction_commits_a_healthy_candidate_and_preserves_recovery_entries() {
     let (fixture, installed, candidate) = transaction_fixture();
     let transaction =
         RecoveryTransaction::open(fixture.path(), &installed, &candidate).expect("transaction");
@@ -191,9 +191,15 @@ fn recovery_transaction_commits_a_healthy_candidate_and_cleans_markers() {
         .publish(&mut health)
         .expect("healthy publication");
 
-    assert_eq!(outcome, PublicationOutcome::Committed);
+    let PublicationOutcome::Committed { preserved_backup } = outcome else {
+        panic!("healthy candidate must commit");
+    };
     assert_eq!(marker(&installed), "new");
-    assert!(!candidate.exists());
+    assert_eq!(marker(&preserved_backup), "old");
+    assert!(
+        candidate.exists(),
+        "candidate placeholder must be preserved"
+    );
     assert!(!fixture
         .path()
         .join(".Openloop.app.openloop-backup")
@@ -223,9 +229,17 @@ fn recovery_transaction_rolls_back_timeout_and_reported_failure() {
             .publish(&mut health)
             .expect("failed candidate must restore old bundle");
 
-        assert_eq!(outcome, PublicationOutcome::RolledBack(status));
+        let PublicationOutcome::RolledBack {
+            status: actual,
+            failed_candidate,
+        } = outcome
+        else {
+            panic!("failed candidate must roll back");
+        };
+        assert_eq!(actual, status);
         assert_eq!(marker(&installed), "old");
-        assert!(!candidate.exists());
+        assert_eq!(marker(&failed_candidate), "new");
+        assert!(candidate.exists(), "rollback placeholder must be preserved");
         assert!(!fixture
             .path()
             .join(".Openloop.app.openloop-backup")
@@ -506,6 +520,14 @@ fn recovery_health_rollback_restores_old_app_when_published_candidate_is_replace
         .expect_err("candidate replacement must be reported");
 
     assert!(matches!(error, RecoveryError::RestoreFailed { .. }));
+    assert!(
+        error.to_string().contains(&installed.display().to_string()),
+        "post-verify failure did not report the visible installed path: {error}"
+    );
+    assert!(
+        error.to_string().contains("preserved"),
+        "post-verify failure did not describe preservation: {error}"
+    );
     assert_eq!(marker(&installed), "old");
     assert_eq!(marker(&displaced), "new");
     let replacement = fs::read_dir(fixture.path())
@@ -523,38 +545,37 @@ fn recovery_health_rollback_restores_old_app_when_published_candidate_is_replace
 }
 
 #[test]
-fn recovery_cleanup_quarantines_but_never_deletes_a_raced_replacement() {
+fn recovery_commit_preserves_old_app_and_never_deletes_a_placeholder_replacement() {
     let (fixture, installed, candidate) = transaction_fixture();
-    let displaced = fixture.path().join("Displaced-cleanup.app");
     let transaction =
         RecoveryTransaction::open(fixture.path(), &installed, &candidate).expect("transaction");
-    let mut injected = false;
-    let mut hook = TransactionHook(|boundary, source: &Path, _: &Path| {
-        if boundary == RecoveryBoundary::BeforeQuarantineMove && !injected {
-            fs::rename(source, &displaced).expect("displace cleanup source");
-            app_bundle(source, "replacement");
-            injected = true;
-        }
+    let candidate_for_health = candidate.clone();
+    let mut health = HealthProbe(move |_: &Path, _: Duration| {
+        fs::remove_dir(&candidate_for_health).expect("replace empty candidate placeholder");
+        app_bundle(&candidate_for_health, "replacement");
+        HealthStatus::Healthy
     });
-    let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
 
-    transaction
-        .publish_with_hook(&mut health, &mut hook)
-        .expect_err("raced cleanup source must not be deleted");
+    let outcome = transaction
+        .publish(&mut health)
+        .expect("healthy publication is committed before deferred cleanup");
 
-    assert!(injected);
     assert_eq!(marker(&installed), "new");
-    assert_eq!(marker(&displaced), "old");
-    let replacement = fs::read_dir(fixture.path())
-        .expect("fixture entries")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            matches!(
-                fs::read_to_string(path.join("marker")).as_deref(),
-                Ok("replacement")
-            )
-        })
-        .expect("replacement preserved");
-    assert!(replacement.exists());
+    assert_eq!(marker(&candidate), "replacement");
+    let PublicationOutcome::Committed { preserved_backup } = outcome else {
+        panic!("healthy candidate must commit");
+    };
+    assert_eq!(marker(&preserved_backup), "old");
+}
+
+#[test]
+fn update_transaction_sources_never_use_recursive_deletion() {
+    let recovery = include_str!("../src/update/recovery.rs");
+    let archive = include_str!("../src/update/archive.rs");
+
+    for source in [recovery, archive] {
+        assert!(!source.contains("removefileat"));
+        assert!(!source.contains("REMOVEFILE_RECURSIVE"));
+        assert!(!source.contains("remove_dir_all"));
+    }
 }

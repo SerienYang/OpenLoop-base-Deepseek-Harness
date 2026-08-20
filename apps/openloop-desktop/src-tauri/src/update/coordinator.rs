@@ -1,4 +1,10 @@
-use std::{error::Error, ffi::OsString, fmt, os::unix::ffi::OsStrExt, path::Path};
+use std::{
+    error::Error,
+    ffi::OsString,
+    fmt,
+    os::unix::ffi::OsStrExt,
+    path::{Path, PathBuf},
+};
 
 use serde::Serialize;
 use tauri::Url;
@@ -91,6 +97,8 @@ pub struct InstallReport {
     pub available: Option<String>,
     pub download: DownloadStatus,
     pub publication: InstallPublication,
+    pub preserved_backup: Option<PathBuf>,
+    pub failed_candidate: Option<PathBuf>,
 }
 
 impl InstallReport {
@@ -136,21 +144,41 @@ impl DownloadUrlPolicy {
         })
     }
 
-    pub fn validate(&self, url: &Url, version: &str) -> Result<(), CoordinatorError> {
-        #[cfg(debug_assertions)]
-        if self.local_fixture.as_ref() == Some(url) {
-            return Ok(());
+    pub fn validate_update(&self, update: &Update) -> Result<(), CoordinatorError> {
+        let raw_url = raw_platform_download_url(update)?;
+        let parsed_url = Url::parse(raw_url).map_err(|error| {
+            CoordinatorError::UnsafeDownloadUrl(format!(
+                "raw platform download URL is invalid: {error}"
+            ))
+        })?;
+        if parsed_url != update.download_url {
+            return Err(CoordinatorError::UnsafeDownloadUrl(
+                "raw platform download URL does not match the updater download URL".to_owned(),
+            ));
         }
-        validate_download_url(url, version, self.channel)
+        #[cfg(debug_assertions)]
+        if let Some(expected) = self.local_fixture.as_ref() {
+            if raw_url == expected.as_str() && &parsed_url == expected {
+                return Ok(());
+            }
+            return Err(CoordinatorError::UnsafeDownloadUrl(
+                "local test update must use the exact configured fixture URL".to_owned(),
+            ));
+        }
+        validate_download_url(raw_url, &parsed_url, &update.version, self.channel)
     }
 }
 
 pub fn validate_download_url(
+    raw_url: &str,
     url: &Url,
     version: &str,
     channel: ReleaseChannel,
 ) -> Result<(), CoordinatorError> {
-    if url.scheme() != "https"
+    let canonical_prefix = "https://github.com/";
+    if raw_url != url.as_str()
+        || !raw_url.starts_with(canonical_prefix)
+        || url.scheme() != "https"
         || url.host_str() != Some(RELEASE_HOST)
         || url.port().is_some()
         || url.username() != ""
@@ -208,6 +236,22 @@ pub fn validate_download_url(
     Ok(())
 }
 
+fn raw_platform_download_url(update: &Update) -> Result<&str, CoordinatorError> {
+    update
+        .raw_json
+        .get("platforms")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|platforms| platforms.get(&update.target))
+        .and_then(|platform| platform.get("url"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            CoordinatorError::UnsafeDownloadUrl(format!(
+                "update manifest must contain one string platforms.{}.url",
+                update.target
+            ))
+        })
+}
+
 pub async fn check_update(
     updater: &Updater,
     current: &str,
@@ -215,7 +259,7 @@ pub async fn check_update(
 ) -> Result<(CheckReport, Option<Update>), CoordinatorError> {
     let update = updater.check().await.map_err(CoordinatorError::Check)?;
     if let Some(update) = update.as_ref() {
-        policy.validate(&update.download_url, &update.version)?;
+        policy.validate_update(update)?;
     }
     let report = CheckReport {
         current: current.to_owned(),
@@ -230,7 +274,7 @@ pub async fn install_checked_update(
     health: &mut impl CandidateHealth,
     policy: &DownloadUrlPolicy,
 ) -> Result<InstallReport, CoordinatorError> {
-    policy.validate(&update.download_url, &update.version)?;
+    policy.validate_update(&update)?;
     let current = update.current_version.clone();
     let available = update.version.clone();
     let archive = update
@@ -244,18 +288,29 @@ pub async fn install_checked_update(
         .ok_or(CoordinatorError::MissingInstallationRoot)?;
     let transaction = RecoveryTransaction::open(root, installed_app, candidate.path())
         .map_err(CoordinatorError::Recovery)?;
-    let publication = match transaction
+    let (publication, preserved_backup, failed_candidate) = match transaction
         .publish(health)
         .map_err(CoordinatorError::Recovery)?
     {
-        PublicationOutcome::Committed => InstallPublication::Committed,
-        PublicationOutcome::RolledBack(status) => InstallPublication::RolledBack(status),
+        PublicationOutcome::Committed { preserved_backup } => {
+            (InstallPublication::Committed, Some(preserved_backup), None)
+        }
+        PublicationOutcome::RolledBack {
+            status,
+            failed_candidate,
+        } => (
+            InstallPublication::RolledBack(status),
+            None,
+            Some(failed_candidate),
+        ),
     };
     Ok(InstallReport {
         current,
         available: Some(available),
         download: DownloadStatus::Verified,
         publication,
+        preserved_backup,
+        failed_candidate,
     })
 }
 

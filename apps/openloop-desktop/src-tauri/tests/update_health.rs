@@ -1,7 +1,7 @@
 use std::{
     ffi::OsString,
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{symlink, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -9,8 +9,8 @@ use std::{
 use openloop_desktop_lib::update::{
     coordinator::{parse_host_action, HostAction},
     health::{
-        required_dsh_home, BundleHealthProbe, CandidateProcessHealth, HEALTH_PROBE_ARGUMENT,
-        TEST_PROBE_FAILURE_ENVIRONMENT,
+        ensure_channel_dsh_home, required_dsh_home, BundleHealthProbe, CandidateProcessHealth,
+        HEALTH_PROBE_ARGUMENT, TEST_PROBE_FAILURE_ENVIRONMENT,
     },
     recovery::{CandidateHealth, HealthStatus},
 };
@@ -227,6 +227,79 @@ fn candidate_host_requires_a_channel_specific_dsh_home() {
         "Openloop-Test"
     )
     .is_err());
+}
+
+#[test]
+fn channel_data_root_creation_rejects_shared_symlinks_and_keeps_roots_distinct() {
+    let root = tempdir().expect("fixture root");
+    let app_data = root.path().join("app-data");
+    fs::create_dir(&app_data).expect("app data");
+
+    let test = ensure_channel_dsh_home(&app_data, "Openloop-Test").expect("test data root");
+    let stable = ensure_channel_dsh_home(&app_data, "Openloop").expect("stable data root");
+    let test_metadata = fs::metadata(&test).expect("test root metadata");
+    let stable_metadata = fs::metadata(&stable).expect("stable root metadata");
+
+    assert_ne!(
+        fs::canonicalize(&test).expect("canonical test root"),
+        fs::canonicalize(&stable).expect("canonical stable root")
+    );
+    assert_ne!(
+        (test_metadata.dev(), test_metadata.ino()),
+        (stable_metadata.dev(), stable_metadata.ino())
+    );
+
+    let linked_app_data = root.path().join("linked-app-data");
+    let shared = root.path().join("shared");
+    fs::create_dir(&linked_app_data).expect("linked app data");
+    fs::create_dir_all(shared.join("dsh")).expect("shared dsh");
+    symlink(&shared, linked_app_data.join("Openloop-Test")).expect("test shared symlink");
+    symlink(&shared, linked_app_data.join("Openloop")).expect("stable shared symlink");
+
+    assert!(ensure_channel_dsh_home(&linked_app_data, "Openloop-Test").is_err());
+    assert!(ensure_channel_dsh_home(&linked_app_data, "Openloop").is_err());
+    assert!(required_dsh_home(
+        Some(linked_app_data.join("Openloop-Test/dsh").as_os_str()),
+        "Openloop-Test"
+    )
+    .is_err());
+    assert!(required_dsh_home(
+        Some(linked_app_data.join("Openloop/dsh").as_os_str()),
+        "Openloop"
+    )
+    .is_err());
+}
+
+#[test]
+fn candidate_health_rejects_an_app_reached_through_a_symlink_ancestor() {
+    let dsh_home_root = tempdir().expect("DSH_HOME root");
+    let dsh_home = dsh_home_root.path().join("Openloop-Test/dsh");
+    fs::create_dir_all(&dsh_home).expect("DSH_HOME");
+    let sidecar = format!(
+        "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+        healthy_runtime_readiness()
+    );
+    let (app_root, app) = app_bundle("#!/bin/sh\nexit 0\n", &sidecar);
+    let alias = dsh_home_root.path().join("candidate-alias");
+    symlink(app_root.path(), &alias).expect("candidate ancestor symlink");
+    let aliased_app = alias.join(app.file_name().expect("app name"));
+    let probe = BundleHealthProbe::new(VERSION, IDENTIFIER, CORE_SHA256);
+
+    assert!(
+        probe
+            .inspect(&aliased_app, Duration::from_secs(2), &dsh_home)
+            .is_err(),
+        "candidate path with a symlink ancestor passed bundle health"
+    );
+
+    let mut process_health = CandidateProcessHealth::new(VERSION, &dsh_home);
+    assert!(
+        matches!(
+            process_health.await_health(&aliased_app, Duration::from_secs(2)),
+            HealthStatus::Failed(_)
+        ),
+        "candidate path with a symlink ancestor passed process health"
+    );
 }
 
 #[test]

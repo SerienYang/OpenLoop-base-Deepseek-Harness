@@ -163,6 +163,7 @@ describe('signed Tauri update manifest renderer', () => {
     ['artifactUrl', 'https://example.com/Openloop.app.tar.gz#fragment', /URL/iu],
     ['artifactUrl', 'https://example.com/releases/download/openloop-test-b-v1.2.3-test.2/Openloop.app.tar.gz', /GitHub|release/iu],
     ['artifactUrl', 'https://localhost/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-b-v1.2.3-test.2/Openloop.app.tar.gz', /GitHub|release/iu],
+    ['artifactUrl', 'https://github.com:443/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-b-v1.2.3-test.2/Openloop.app.tar.gz', /port|GitHub|release/iu],
     ['artifactUrl', 'https://github.com:444/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-b-v1.2.3-test.2/Openloop.app.tar.gz', /port|GitHub|release/iu],
     ['artifactUrl', 'https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-b-v1.2.3-test.2/Openloop.app.tar.gz?redirect=https://example.com', /query|GitHub|release/iu],
     ['artifactUrl', 'https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-b-v1.2.3-test.2/Openloop.app.tar.gz/redirect', /path|GitHub|release/iu],

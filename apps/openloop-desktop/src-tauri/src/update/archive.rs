@@ -18,23 +18,11 @@ use uuid::Uuid;
 #[derive(Debug)]
 pub struct StagedCandidate {
     path: PathBuf,
-    parent: OwnedFd,
-    name: CString,
-    identity: FileIdentity,
-    armed: bool,
 }
 
 impl StagedCandidate {
     pub fn path(&self) -> &Path {
         &self.path
-    }
-}
-
-impl Drop for StagedCandidate {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = remove_owned_directory(self.parent.as_raw_fd(), &self.name, self.identity);
-        }
     }
 }
 
@@ -69,26 +57,6 @@ impl FileIdentity {
 
 struct DirectoryGuard {
     path: PathBuf,
-    parent: OwnedFd,
-    name: CString,
-    identity: FileIdentity,
-    armed: bool,
-}
-
-impl DirectoryGuard {
-    fn cleanup(&mut self) -> io::Result<()> {
-        remove_owned_directory(self.parent.as_raw_fd(), &self.name, self.identity)?;
-        self.armed = false;
-        Ok(())
-    }
-}
-
-impl Drop for DirectoryGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = remove_owned_directory(self.parent.as_raw_fd(), &self.name, self.identity);
-        }
-    }
 }
 
 pub fn stage_verified_archive(
@@ -143,23 +111,16 @@ pub fn stage_verified_archive(
         ));
     }
 
-    let (temporary_name, temporary_identity) =
+    let (temporary_name, _temporary_identity) =
         create_unique_directory(parent.as_raw_fd(), ".openloop-update-", ".tmp")
             .map_err(|source| ArchiveStageError::io("create archive staging directory", source))?;
     let temporary_path = parent_path.join(OsStr::from_bytes(temporary_name.as_bytes()));
-    let mut temporary = DirectoryGuard {
+    let temporary = DirectoryGuard {
         path: temporary_path,
-        parent: parent
-            .try_clone()
-            .map_err(|source| ArchiveStageError::io("retain app parent", source))?,
-        name: temporary_name,
-        identity: temporary_identity,
-        armed: true,
     };
 
     let app_root = unpack_strict_archive(archive_bytes, &temporary.path)?;
-    let source_relative = temporary
-        .name
+    let source_relative = temporary_name
         .as_bytes()
         .iter()
         .copied()
@@ -180,34 +141,19 @@ pub fn stage_verified_archive(
         .map_err(|source| ArchiveStageError::io("reserve candidate app name", source))?;
     rename_exclusive(parent.as_raw_fd(), &source_name, &candidate_name)
         .map_err(|source| ArchiveStageError::io("publish staged candidate", source))?;
-    let mut candidate = StagedCandidate {
+    let candidate = StagedCandidate {
         path: parent_path.join(OsStr::from_bytes(candidate_name.as_bytes())),
-        parent,
-        name: candidate_name,
-        identity: source_identity,
-        armed: true,
     };
-    let candidate_identity = identity_at(candidate.parent.as_raw_fd(), &candidate.name)
+    let candidate_identity = identity_at(parent.as_raw_fd(), &candidate_name)
         .map_err(|source| ArchiveStageError::io("inspect staged candidate", source))?;
     if candidate_identity != source_identity {
         return Err(ArchiveStageError::invalid(
             "candidate app identity changed during publication",
         ));
     }
-    if let Err(source) = temporary.cleanup() {
-        let cleanup_error = remove_owned_directory(
-            candidate.parent.as_raw_fd(),
-            &candidate.name,
-            candidate.identity,
-        );
-        if cleanup_error.is_ok() {
-            candidate.armed = false;
-        }
-        return Err(ArchiveStageError::io(
-            "remove archive staging directory",
-            source,
-        ));
-    }
+    // macOS has no public inode-conditional recursive deletion syscall. Keep
+    // staging and candidate directories for later controlled cleanup instead
+    // of risking deletion of a same-user replacement after an identity check.
     Ok(candidate)
 }
 
@@ -437,42 +383,6 @@ fn rename_exclusive(parent: RawFd, from: &CStr, to: &CStr) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
-}
-
-fn remove_owned_directory(parent: RawFd, name: &CStr, expected: FileIdentity) -> io::Result<()> {
-    let actual = identity_at(parent, name)?;
-    if actual != expected || !actual.is_directory() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "staging cleanup target identity changed",
-        ));
-    }
-    // SAFETY: `name` resolves beneath the retained parent descriptor and its
-    // identity was checked immediately before recursive removal.
-    if unsafe {
-        removefileat(
-            parent,
-            name.as_ptr(),
-            std::ptr::null_mut(),
-            REMOVEFILE_RECURSIVE,
-        )
-    } < 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-type RemoveFileState = *mut libc::c_void;
-const REMOVEFILE_RECURSIVE: u32 = 1;
-
-unsafe extern "C" {
-    fn removefileat(
-        descriptor: libc::c_int,
-        path: *const libc::c_char,
-        state: RemoveFileState,
-        flags: u32,
-    ) -> libc::c_int;
 }
 
 #[derive(Debug)]
