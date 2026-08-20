@@ -77,6 +77,24 @@ jobs:
       - name: Test native workspace
         run: pnpm --dir native/landlock-run test
 
+      - name: Prepare OpenLoop desktop Rust manifests
+        run: |
+          set -euo pipefail
+          pnpm --filter @openloop/desktop manifest:test
+          mkdir -p apps/openloop-desktop/src-tauri/binaries dist-openloop/ci-artifact-fixtures
+          printf '%s\n' 'openloop-ci-sidecar-fixture-v1' > apps/openloop-desktop/src-tauri/binaries/openloop-runtime-aarch64-apple-darwin
+          printf '%s\n' 'openloop-ci-spawn-helper-fixture-v1' > apps/openloop-desktop/src-tauri/binaries/openloop-runtime-spawn-helper-aarch64-apple-darwin
+          printf '%s\n' '{"fixture":"openloop-ci-runtime-sbom-v1"}' > dist-openloop/ci-artifact-fixtures/runtime-sbom.json
+          printf '%s\n' '<!doctype html><title>OpenLoop CI fixture</title>' > dist-openloop/ci-artifact-fixtures/web.html
+          printf '%s\n' '{"fixture":"openloop-ci-bundle-graph-v1"}' > dist-openloop/ci-artifact-fixtures/bundle-graph.json
+          node scripts/openloop/generate-artifact-manifest.mjs \
+            --core dist-openloop/openloop-core.json \
+            --sidecar apps/openloop-desktop/src-tauri/binaries/openloop-runtime-aarch64-apple-darwin \
+            --runtime-sbom dist-openloop/ci-artifact-fixtures/runtime-sbom.json \
+            --web dist-openloop/ci-artifact-fixtures/web.html \
+            --bundle-graph dist-openloop/ci-artifact-fixtures/bundle-graph.json \
+            --out dist-openloop/openloop-artifacts.json
+
       - name: Test OpenLoop desktop Rust crate
         run: cargo test --manifest-path apps/openloop-desktop/src-tauri/Cargo.toml --locked
 
