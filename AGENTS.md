@@ -37,6 +37,8 @@ Use the pnpm version pinned in `package.json`.
 
 ```sh
 pnpm install --frozen-lockfile
+pnpm run verify:repository-layout
+pnpm run verify:brand-tokens
 pnpm run knip
 pnpm run typecheck
 pnpm run lint
@@ -47,7 +49,6 @@ pnpm run verify-third-party-notices
 pnpm run verify-translation-pairing
 pnpm run build
 pnpm run test
-pnpm exec vitest run scripts/openloop/repository-layout.spec.ts
 uv run --python 3.10 --group test --project python/sdk pytest
 pnpm --dir native/landlock-run test
 pnpm run verify-runtime-closure

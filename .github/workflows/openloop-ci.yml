@@ -35,6 +35,9 @@ jobs:
       - name: Verify public repository layout
         run: pnpm run verify:repository-layout
 
+      - name: Verify OpenLoop brand tokens
+        run: pnpm run verify:brand-tokens
+
       - name: Verify dependency and source usage
         run: pnpm run knip
 

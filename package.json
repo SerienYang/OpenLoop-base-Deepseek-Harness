@@ -71,6 +71,7 @@
     "gen-scoped-events": "tsx scripts/gen-scoped-events.ts",
     "verify-scoped-events": "tsx scripts/gen-scoped-events.ts --check",
     "constraints": "tsx scripts/check-workspace-constraints.ts",
+    "verify:brand-tokens": "vitest run scripts/openloop/brand-tokens.spec.ts",
     "verify:repository-layout": "vitest run scripts/openloop/repository-layout.spec.ts",
     "dsh": "node --import tsx/esm apps/cli/src/bin.ts",
     "demo:code-mode": "node scripts/demo-code-mode.mjs",

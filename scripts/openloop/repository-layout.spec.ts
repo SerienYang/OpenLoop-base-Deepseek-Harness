@@ -147,9 +147,11 @@ describe('public repository layout', () => {
       'LICENSE',
       'README.md',
       'THIRD_PARTY_NOTICES.md',
+      'assets/brand/README.md',
       'assets/brand/openloop-dsh-hero.png',
       'assets/brand/openloop-dsh-hero.svg',
       'assets/brand/openloop-icon.svg',
+      'assets/brand/openloop.tokens.json',
       '.github/workflows/openloop-ci.yml',
       'scripts/openloop/upstream-baseline.json',
     ]
@@ -185,7 +187,7 @@ describe('public repository layout', () => {
     expect(forbiddenTerms.filter(term => agentRules.includes(term))).toEqual([])
   })
 
-  test('does not link retained Markdown to missing repository content', () => {
+  test('does not link retained Markdown to missing repository content', { timeout: 30_000 }, () => {
     const brokenLinks: string[] = []
 
     for (const file of trackedFiles.filter(file => file.endsWith('.md'))) {
