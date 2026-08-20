@@ -1,0 +1,555 @@
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import { createHash } from 'node:crypto'
+import { EventEmitter } from 'node:events'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach } from 'vitest'
+import { describe, expect, it } from 'vitest'
+
+const modulePath = './build-desktop.mjs'
+const artifactGeneratorPath: string = './generate-artifact-manifest.mjs'
+const temporaryRoots: string[] = []
+
+interface ArtifactGeneratorModule {
+  readonly generateArtifactManifest: (
+    options: {
+      readonly core: string
+      readonly sidecar: string
+      readonly runtimeSbom: string
+      readonly web: string
+      readonly bundleGraph: string
+      readonly out: string
+      readonly app?: string
+    },
+    dependencies: { readonly trustedRoot: string },
+  ) => { readonly bytes: string }
+}
+
+function temporaryRoot(): string {
+  const root = mkdtempSync(join(tmpdir(), 'openloop-desktop-builder-'))
+  temporaryRoots.push(root)
+  return root
+}
+
+afterEach(() => {
+  for (const root of temporaryRoots.splice(0)) {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+describe('Openloop desktop build orchestrator', () => {
+  it.each(['none', 'app', 'dmg', 'all'] as const)(
+    'parses the single supported target with %s bundles',
+    async (bundle) => {
+      const { parseDesktopBuildArguments } = await import(modulePath)
+
+      expect(parseDesktopBuildArguments([
+        '--channel',
+        'test',
+        '--target',
+        'aarch64-apple-darwin',
+        '--bundle',
+        bundle,
+      ])).toEqual({
+        channel: 'test',
+        target: 'aarch64-apple-darwin',
+        bundle,
+      })
+    },
+  )
+
+  it.each([
+    [['--channel', 'test', '--channel', 'stable', '--target', 'aarch64-apple-darwin', '--bundle', 'app'], /--channel.*once/u],
+    [['--channel', 'test', '--target', 'aarch64-apple-darwin', '--bundle', 'app', '--out', '/tmp/app'], /unknown option --out/u],
+    [['--channel', 'test', '--target', 'aarch64-apple-darwin'], /--bundle is required/u],
+    [['--channel', 'preview', '--target', 'aarch64-apple-darwin', '--bundle', 'app'], /channel.*test or stable/u],
+    [['--channel', 'test', '--target', 'x86_64-apple-darwin', '--bundle', 'app'], /target.*aarch64/u],
+    [['--channel', 'test', '--target', 'aarch64-apple-darwin', '--bundle', 'pkg'], /bundle.*none.*app.*dmg.*all/u],
+  ] as const)('rejects ambiguous or unsupported arguments %#', async (args, error) => {
+    const { parseDesktopBuildArguments } = await import(modulePath)
+
+    expect(() => parseDesktopBuildArguments([...args])).toThrow(error)
+  })
+
+  it('runs the eight desktop build stages in strict order', async () => {
+    const { DesktopBuilder } = await import(modulePath)
+    const events: string[] = []
+    const runner = {
+      run: async ({ command, args }: { command: string; args: string[] }) => {
+        events.push(`run:${command} ${args.join(' ')}`)
+        return { stdout: '', stderr: '' }
+      },
+    }
+    let verifyContext: Record<string, unknown> | undefined
+    const files = {
+      cleanDist: async () => events.push('1:clean'),
+      readDesktopPackage: async () => ({ version: '1.2.3' }),
+      generateBundleGraph: async () => undefined,
+      verify: async (context: Record<string, unknown>) => {
+        verifyContext = context
+        events.push('8:verify')
+      },
+    }
+    let runtimeOptions: Record<string, unknown> | undefined
+    const createRuntimeBuilder = (options: Record<string, unknown>) => {
+      runtimeOptions = options
+      return {
+        build: async () => events.push('4:runtime'),
+      }
+    }
+    const generateBuildManifest = () => {
+      events.push('2:core')
+      return { manifest: { appVersion: '1.2.3' } }
+    }
+    let artifactGeneration = 0
+    const generateArtifactManifest = () => {
+      artifactGeneration += 1
+      events.push(artifactGeneration === 1 ? '5:base' : '7:final')
+      return { manifest: { artifacts: {} } }
+    }
+    const builder = new DesktopBuilder({
+      root: '/repo',
+      options: {
+        channel: 'test',
+        target: 'aarch64-apple-darwin',
+        bundle: 'app',
+      },
+      runner,
+      files,
+      createRuntimeBuilder,
+      generateBuildManifest,
+      generateArtifactManifest,
+    })
+
+    await builder.build()
+
+    expect(runtimeOptions).toMatchObject({
+      root: '/repo',
+      target: 'aarch64-apple-darwin',
+      skipBuild: true,
+      runner,
+    })
+    expect(verifyContext).toMatchObject({ root: '/repo' })
+    expect(events).toEqual([
+      '1:clean',
+      '2:core',
+      'run:pnpm run build',
+      '4:runtime',
+      '5:base',
+      'run:pnpm exec tauri build --target aarch64-apple-darwin --bundles app --config {"identifier":"ai.openloop.desktop.test"} --ci',
+      '7:final',
+      '8:verify',
+    ])
+  })
+
+  it.each([
+    ['none', ['--no-bundle'], []],
+    ['app', ['--bundles', 'app'], ['app']],
+    ['dmg', ['--bundles', 'dmg'], ['app', 'dmg']],
+    ['all', ['--bundles', 'app,dmg'], ['app', 'dmg']],
+  ] as const)('maps %s to Tauri and final artifact inputs', async (
+    bundle,
+    expectedBundleArgs,
+    expectedReleaseArtifacts,
+  ) => {
+    const { DesktopBuilder } = await import(modulePath)
+    const commands: Array<{ command: string; args: string[]; cwd: string }> = []
+    const manifests: Array<Record<string, string>> = []
+    const runner = {
+      run: async (command: { command: string; args: string[]; cwd: string }) => {
+        commands.push(command)
+        return { stdout: '', stderr: '' }
+      },
+    }
+    const builder = new DesktopBuilder({
+      root: '/repo',
+      options: {
+        channel: 'stable',
+        target: 'aarch64-apple-darwin',
+        bundle,
+      },
+      runner,
+      files: {
+        cleanDist: async () => undefined,
+        readDesktopPackage: async () => ({ version: '1.2.3' }),
+        generateBundleGraph: async () => undefined,
+        verify: async () => undefined,
+      },
+      createRuntimeBuilder: () => ({ build: async () => undefined }),
+      generateBuildManifest: (options: Record<string, string>) => {
+        expect(options.appVersion).toBe('1.2.3')
+        expect(options.channel).toBe('stable')
+      },
+      generateArtifactManifest: (options: Record<string, string>) => {
+        manifests.push(options)
+      },
+    })
+
+    await builder.build()
+
+    const tauri = commands[1]
+    expect(tauri?.args).toEqual([
+      'exec',
+      'tauri',
+      'build',
+      '--target',
+      'aarch64-apple-darwin',
+      ...expectedBundleArgs,
+      '--config',
+      '{"identifier":"ai.openloop.desktop"}',
+      '--ci',
+    ])
+    expect(tauri?.cwd).toBe('/repo/apps/openloop-desktop')
+    expect(manifests).toHaveLength(2)
+    expect(Object.keys(manifests[0] ?? {}).sort()).toEqual([
+      'bundleGraph',
+      'core',
+      'out',
+      'runtimeSbom',
+      'sidecar',
+      'web',
+    ])
+    const releaseArtifacts = Object.keys(manifests[1] ?? {})
+      .filter(key => key === 'app' || key === 'dmg')
+    expect(releaseArtifacts).toEqual(expectedReleaseArtifacts)
+    const releaseArtifactNames: readonly string[] = expectedReleaseArtifacts
+    if (releaseArtifactNames.includes('app')) {
+      expect(manifests[1]?.app).toBe(
+        '/repo/apps/openloop-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Openloop.app',
+      )
+    }
+    if (releaseArtifactNames.includes('dmg')) {
+      expect(manifests[1]?.dmg).toBe(
+        '/repo/apps/openloop-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Openloop_1.2.3_aarch64.dmg',
+      )
+    }
+  })
+
+  it('deletes only a git-ignored real dist-openloop directory', async () => {
+    const { nodeFileSystem } = await import(modulePath)
+    const root = temporaryRoot()
+    const dist = join(root, 'dist-openloop')
+    const keep = join(root, 'keep')
+    mkdirSync(dist)
+    mkdirSync(keep)
+    writeFileSync(join(dist, 'old'), 'old')
+    writeFileSync(join(keep, 'data'), 'keep')
+    const commands: unknown[] = []
+    const runner = {
+      run: async (command: unknown) => {
+        commands.push(command)
+        return { stdout: '', stderr: '' }
+      },
+    }
+
+    await nodeFileSystem.cleanDist(root, dist, runner)
+
+    expect(commands).toEqual([{
+      command: 'git',
+      args: ['check-ignore', '-q', '--', 'dist-openloop'],
+      cwd: root,
+    }])
+    expect(existsSync(dist)).toBe(false)
+    expect(readFileSync(join(keep, 'data'), 'utf8')).toBe('keep')
+
+    mkdirSync(dist)
+    writeFileSync(join(dist, 'old'), 'old')
+    await expect(nodeFileSystem.cleanDist(root, join(root, 'other'), runner))
+      .rejects.toThrow(/exactly.*dist-openloop|fixed.*dist-openloop/iu)
+    expect(existsSync(dist)).toBe(true)
+
+    const outside = temporaryRoot()
+    writeFileSync(join(outside, 'outside'), 'outside')
+    rmSync(dist, { recursive: true })
+    symlinkSync(outside, dist, 'dir')
+    await expect(nodeFileSystem.cleanDist(root, dist, runner))
+      .rejects.toThrow(/symlink/iu)
+    expect(readFileSync(join(outside, 'outside'), 'utf8')).toBe('outside')
+
+    rmSync(dist)
+    mkdirSync(dist)
+    symlinkSync(outside, join(dist, 'nested'), 'dir')
+    await expect(nodeFileSystem.cleanDist(root, dist, runner))
+      .rejects.toThrow(/symlink/iu)
+    expect(readFileSync(join(outside, 'outside'), 'utf8')).toBe('outside')
+
+    rmSync(dist, { recursive: true })
+    mkdirSync(dist)
+    writeFileSync(join(dist, 'old'), 'old')
+    const rejectingRunner = {
+      run: async () => {
+        throw new Error('not ignored')
+      },
+    }
+    await expect(nodeFileSystem.cleanDist(root, dist, rejectingRunner))
+      .rejects.toThrow(/not ignored/u)
+    expect(readFileSync(join(dist, 'old'), 'utf8')).toBe('old')
+
+    const rootAlias = join(temporaryRoot(), 'root-alias')
+    symlinkSync(root, rootAlias, 'dir')
+    await expect(nodeFileSystem.cleanDist(
+      rootAlias,
+      join(rootAlias, 'dist-openloop'),
+      runner,
+    )).rejects.toThrow(/repository root.*symlink/iu)
+  })
+
+  it('writes a canonical fixed-path Web bundle graph and rejects symlinks', async () => {
+    const { nodeFileSystem } = await import(modulePath)
+    const root = temporaryRoot()
+    const web = join(root, 'apps/web/dist')
+    const graph = join(root, 'dist-openloop/openloop-web-bundle-graph.json')
+    mkdirSync(join(web, 'assets'), { recursive: true })
+    writeFileSync(join(web, 'index.html'), '<main>Openloop</main>\n')
+    writeFileSync(join(web, 'assets/z.js'), 'z\n')
+    writeFileSync(join(web, 'assets/a.js'), 'a\n')
+
+    await nodeFileSystem.generateBundleGraph(root, web, graph)
+    const first = readFileSync(graph, 'utf8')
+    await nodeFileSystem.generateBundleGraph(root, web, graph)
+
+    expect(readFileSync(graph, 'utf8')).toBe(first)
+    expect(first.endsWith('\n')).toBe(true)
+    expect(JSON.parse(first)).toEqual({
+      version: 1,
+      root: 'apps/web/dist',
+      files: [
+        {
+          path: 'assets/a.js',
+          size: 2,
+          sha256: createHash('sha256').update('a\n').digest('hex'),
+        },
+        {
+          path: 'assets/z.js',
+          size: 2,
+          sha256: createHash('sha256').update('z\n').digest('hex'),
+        },
+        {
+          path: 'index.html',
+          size: 22,
+          sha256: createHash('sha256').update('<main>Openloop</main>\n').digest('hex'),
+        },
+      ],
+    })
+
+    await expect(nodeFileSystem.generateBundleGraph(
+      root,
+      web,
+      join(root, 'other.json'),
+    )).rejects.toThrow(/fixed.*bundle graph|exactly.*bundle graph/iu)
+
+    const outside = temporaryRoot()
+    writeFileSync(join(outside, 'linked.js'), 'outside')
+    symlinkSync(join(outside, 'linked.js'), join(web, 'linked.js'))
+    await expect(nodeFileSystem.generateBundleGraph(root, web, graph))
+      .rejects.toThrow(/symlink/iu)
+  })
+
+  it('spawns subprocesses with argv and shell disabled', async () => {
+    const { createProcessRunner } = await import(modulePath)
+    const calls: unknown[][] = []
+    const spawn = (...args: unknown[]) => {
+      calls.push(args)
+      const child = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter
+        stderr: EventEmitter
+      }
+      child.stdout = new EventEmitter()
+      child.stderr = new EventEmitter()
+      queueMicrotask(() => {
+        child.stdout.emit('data', Buffer.from('stdout\n'))
+        child.stderr.emit('data', Buffer.from('stderr\n'))
+        child.emit('exit', 0, null)
+      })
+      return child
+    }
+    const runner = createProcessRunner(spawn)
+
+    const result = await runner.run({
+      command: 'tool',
+      args: ['--value', 'with spaces;$(no-shell)'],
+      cwd: '/repo',
+      capture: true,
+    })
+
+    expect(result).toEqual({ stdout: 'stdout\n', stderr: 'stderr\n' })
+    expect(calls).toEqual([[
+      'tool',
+      ['--value', 'with spaces;$(no-shell)'],
+      expect.objectContaining({
+        cwd: '/repo',
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }),
+    ]])
+  })
+
+  it('verifies final hashes, embedded base identity, App binaries, signatures, and health', async () => {
+    const { verifyDesktopBuild } = await import(modulePath)
+    const { generateArtifactManifest } = await import(
+      artifactGeneratorPath,
+    ) as ArtifactGeneratorModule
+    const root = temporaryRoot()
+    const dist = join(root, 'dist-openloop')
+    const core = join(dist, 'openloop-core.json')
+    const artifacts = join(dist, 'openloop-artifacts.json')
+    const sidecar = join(dist, 'openloop-runtime-aarch64-apple-darwin')
+    const runtimeSbom = join(dist, 'openloop-runtime-sbom-inputs.json')
+    const web = join(root, 'apps/web/dist')
+    const bundleGraph = join(dist, 'openloop-web-bundle-graph.json')
+    const release = join(
+      root,
+      'apps/openloop-desktop/src-tauri/target/aarch64-apple-darwin/release',
+    )
+    const app = join(release, 'bundle/macos/Openloop.app')
+    const macOS = join(app, 'Contents/MacOS')
+    const main = join(macOS, 'openloop-desktop')
+    const bundledSidecar = join(macOS, 'openloop-runtime')
+    const helper = join(macOS, 'openloop-runtime-spawn-helper')
+    mkdirSync(dist, { recursive: true })
+    mkdirSync(web, { recursive: true })
+    mkdirSync(macOS, { recursive: true })
+    writeFileSync(core, `${JSON.stringify({
+      appVersion: '1.2.3',
+      channel: 'test',
+      dshTag: 'dsh-v0.1.0-rc.7',
+      dshCommit: '99f6f02fecdb7dff40c3fbc9470f5907c29f74ca',
+      runtimeVersion: 1,
+      bridgeProtocolVersion: 1,
+      uiSdkVersion: '0.1.0',
+      pluginPackageSpecVersion: '0.1.0',
+      openloopDataVersion: 0,
+      dshDataVersion: 0,
+    }, null, 2)}\n`)
+    writeFileSync(sidecar, 'sidecar')
+    writeFileSync(runtimeSbom, '{"version":1}\n')
+    writeFileSync(join(web, 'index.html'), '<main>Openloop</main>\n')
+    writeFileSync(bundleGraph, '{"version":1}\n')
+    const baseInputs = {
+      core,
+      sidecar,
+      runtimeSbom,
+      web,
+      bundleGraph,
+      out: artifacts,
+    }
+    const base = generateArtifactManifest(baseInputs, { trustedRoot: root })
+    writeFileSync(main, Buffer.concat([Buffer.from('main\0'), Buffer.from(base.bytes)]))
+    writeFileSync(bundledSidecar, 'sidecar')
+    writeFileSync(helper, 'helper')
+    writeFileSync(join(app, 'Contents/Info.plist'), 'plist')
+    for (const executable of [sidecar, main, bundledSidecar, helper]) {
+      chmodSync(executable, 0o755)
+    }
+    generateArtifactManifest({ ...baseInputs, app }, { trustedRoot: root })
+    const coreSha256 = createHash('sha256').update(readFileSync(core)).digest('hex')
+    const commands: Array<{ command: string; args: string[] }> = []
+    const runner = {
+      run: async (command: { command: string; args: string[] }) => {
+        commands.push(command)
+        if (command.command === 'lipo') return { stdout: 'arm64\n', stderr: '' }
+        if (command.command === 'plutil') {
+          return { stdout: 'ai.openloop.desktop.test\n', stderr: '' }
+        }
+        if (command.command === 'codesign' && command.args[0] === '-d') {
+          return {
+            stdout: '',
+            stderr: 'Signature=adhoc\nflags=0x10002(adhoc,runtime)\n',
+          }
+        }
+        if (command.command === bundledSidecar) {
+          return {
+            stdout: `${JSON.stringify({
+              type: 'openloop.runtime.ready',
+              version: 1,
+              profile: 'openloop',
+              host: '127.0.0.1',
+              port: 49152,
+              origin: 'http://127.0.0.1:49152',
+              coreManifestSha256: coreSha256,
+              healthSmoke: { method: 'GET', path: '/', status: 200 },
+            })}\n`,
+            stderr: '',
+          }
+        }
+        return { stdout: '', stderr: '' }
+      },
+    }
+    const context = {
+      root,
+      ...baseInputs,
+      artifacts,
+      app,
+      dmg: undefined,
+      release,
+      options: {
+        channel: 'test',
+        target: 'aarch64-apple-darwin',
+        bundle: 'app',
+      },
+    }
+
+    await expect(verifyDesktopBuild(context, runner)).resolves.toBeUndefined()
+    expect(commands.filter(command => command.command === 'lipo')).toHaveLength(3)
+    expect(commands).toContainEqual({
+      command: 'codesign',
+      args: ['--verify', '--deep', '--strict', app],
+      capture: true,
+    })
+    expect(commands).toContainEqual({
+      command: bundledSidecar,
+      args: ['--health-smoke'],
+      capture: true,
+    })
+
+    writeFileSync(runtimeSbom, '{"version":2}\n')
+    await expect(verifyDesktopBuild(context, runner))
+      .rejects.toThrow(/runtimeSbom.*hash|hash.*runtimeSbom/iu)
+
+    writeFileSync(runtimeSbom, '{"version":1}\n')
+    generateArtifactManifest(baseInputs, { trustedRoot: root })
+    const rawMain = join(release, 'openloop-desktop')
+    writeFileSync(rawMain, 'raw main')
+    chmodSync(rawMain, 0o755)
+    const rawRunner = {
+      run: async (command: { command: string; args: string[] }) => {
+        if (command.command === 'lipo') return { stdout: 'arm64\n', stderr: '' }
+        if (command.command === 'codesign' && command.args[0] === '-d') {
+          return {
+            stdout: '',
+            stderr: 'Signature=adhoc\nflags=0x2(adhoc)\n',
+          }
+        }
+        return { stdout: '', stderr: '' }
+      },
+    }
+    await expect(verifyDesktopBuild({
+      ...context,
+      app: undefined,
+      options: { ...context.options, bundle: 'none' },
+    }, rawRunner)).resolves.toBeUndefined()
+  })
+
+  it('wires the production verifier and default desktop builder without import side effects', async () => {
+    const {
+      createDesktopBuilder,
+      DesktopBuilder,
+      nodeFileSystem,
+      verifyDesktopBuild,
+    } = await import(modulePath)
+    const runner = { run: async () => ({ stdout: '', stderr: '' }) }
+    const builder = createDesktopBuilder({ root: '/repo', runner })
+
+    expect(builder).toBeInstanceOf(DesktopBuilder)
+    expect(nodeFileSystem.verify).toBe(verifyDesktopBuild)
+  })
+})

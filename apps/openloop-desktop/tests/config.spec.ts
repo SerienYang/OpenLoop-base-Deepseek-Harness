@@ -100,9 +100,10 @@ function commandNamesFromBuildScript(source: string): readonly string[] {
 }
 
 function embeddedManifestPath(source: string): string | undefined {
-  const match = /PathBuf::from\("([^"]*dist-openloop\/)"\)\.join\("openloop-core\.json"\)/u
+  const direct = /PathBuf::from\("([^"]*dist-openloop\/)"\)\.join\("openloop-core\.json"\)/u
     .exec(source)
-  return match?.[1]
+  if (direct?.[1] !== undefined) return direct[1]
+  return /let\s+dist\s*=\s*PathBuf::from\("([^"]*dist-openloop\/)"\)/u.exec(source)?.[1]
 }
 
 function tauriCommandNames(source: string): readonly string[] {
@@ -237,13 +238,15 @@ describe('Openloop desktop foundation configuration', () => {
     expect(scriptArguments(scripts.dev)).toEqual(['pnpm', 'manifest:test', '&&', 'tauri', 'dev'])
     expect(scriptArguments(scripts.build)).toEqual([
       'pnpm',
-      'manifest:test',
-      '&&',
-      'tauri',
-      'build',
+      '--dir',
+      '../..',
+      'openloop:build-desktop',
+      '--',
+      '--channel',
+      'test',
       '--target',
       'aarch64-apple-darwin',
-      '--bundles',
+      '--bundle',
       'app',
     ])
     expect(scriptArguments(scripts.icon)).toEqual([
@@ -365,6 +368,10 @@ describe('Openloop desktop foundation configuration', () => {
     ]))
     expect(bundle.targets).toEqual(['app'])
     expect(bundle.active).toBe(true)
+    expect(bundle.externalBin).toEqual([
+      'binaries/openloop-runtime',
+      'binaries/openloop-runtime-spawn-helper',
+    ])
     expect(bundle.icon).toEqual([
       'icons/32x32.png',
       'icons/128x128.png',
@@ -374,6 +381,23 @@ describe('Openloop desktop foundation configuration', () => {
     expect(record(bundle.macOS, 'tauri macOS bundle config')).toEqual({
       minimumSystemVersion: '11.0',
       signingIdentity: '-',
+      entitlements: 'Entitlements.plist',
+    })
+  })
+
+  test('grants only the native runtime entitlements required by the hardened Node sidecar', () => {
+    const entitlementsPath = requiredFile(
+      'apps/openloop-desktop/src-tauri/Entitlements.plist',
+    )
+    const entitlements = JSON.parse(execFileSync(
+      'plutil',
+      ['-convert', 'json', '-o', '-', entitlementsPath],
+      { encoding: 'utf8' },
+    )) as Record<string, unknown>
+
+    expect(entitlements).toEqual({
+      'com.apple.security.cs.allow-jit': true,
+      'com.apple.security.cs.disable-library-validation': true,
     })
   })
 
@@ -457,7 +481,9 @@ describe('Openloop desktop foundation configuration', () => {
       embeddedManifestPath(buildScript) ?? '',
       'openloop-core.json',
     )).toBe(path.join(repositoryRoot, 'dist-openloop/openloop-core.json'))
-    expect(buildScript).toMatch(/dist-openloop[\\/]"?\)?\.join\("openloop-core\.json"\)/u)
+    expect(buildScript).toMatch(/PathBuf::from\("[^"]*dist-openloop\/"\)/u)
+    expect(buildScript).toMatch(/dist\.join\("openloop-core\.json"\)/u)
+    expect(buildScript).toMatch(/dist\.join\("openloop-artifacts\.json"\)/u)
     expect(buildScript).toMatch(/std::str::from_utf8/u)
     expect(buildScript).toMatch(/serde_json::from_str/u)
     expect(buildScript).toMatch(/serde_json::to_string_pretty/u)
@@ -562,6 +588,23 @@ describe('Openloop desktop foundation configuration', () => {
     expect(gitignore).toContain('dist-openloop/')
     expect(gitignore).toContain('*.app')
     expect(path.relative(appRoot, tauriRoot)).toBe('src-tauri')
+  })
+
+  test('exposes the root desktop builder as the only build orchestrator', () => {
+    const rootPackage = readJson('package.json')
+    const rootScripts = stringRecord(rootPackage.scripts, 'root package scripts')
+    const desktopPackage = readJson('apps/openloop-desktop/package.json')
+    const desktopScripts = stringRecord(desktopPackage.scripts, 'desktop package scripts')
+
+    expect(rootScripts['openloop:build-desktop']).toBe(
+      'node scripts/openloop/build-desktop.mjs',
+    )
+    expect(desktopScripts.build).toContain('openloop:build-desktop')
+    expect(desktopScripts.build).not.toContain('tauri build')
+    expect(Object.values(rootScripts).filter(script =>
+      script.includes('build-desktop.mjs'))).toEqual([
+      'node scripts/openloop/build-desktop.mjs',
+    ])
   })
 
   test('is accepted as a private Openloop workspace application', () => {

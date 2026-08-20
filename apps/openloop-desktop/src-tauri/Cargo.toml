@@ -10,6 +10,10 @@ build = "build.rs"
 name = "openloop_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[test]]
+name = "build_contract"
+path = "tests/build_contract.rs"
+
 [build-dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
@@ -20,3 +24,7 @@ tauri-build = { version = "=2.6.3", features = [] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 tauri = { version = "=2.11.5", features = [] }
+
+[dev-dependencies]
+sha2 = "=0.10.9"
+tauri-build = { version = "=2.6.3", features = [] }
