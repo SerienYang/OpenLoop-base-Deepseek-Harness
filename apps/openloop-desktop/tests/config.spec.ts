@@ -44,6 +44,13 @@ function stringRecord(value: unknown, label: string): Record<string, string> {
   return object as Record<string, string>
 }
 
+function stringArray(value: unknown, label: string): readonly string[] {
+  if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) {
+    throw new TypeError(`${label} must be an array of strings`)
+  }
+  return value
+}
+
 type RustVersion = readonly [major: number, minor: number, patch: number]
 
 function rustVersion(value: unknown, label: string): RustVersion {
@@ -588,6 +595,34 @@ describe('Openloop desktop foundation configuration', () => {
     expect(gitignore).toContain('dist-openloop/')
     expect(gitignore).toContain('*.app')
     expect(path.relative(appRoot, tauriRoot)).toBe('src-tauri')
+  })
+
+  test('keeps Openloop static-analysis exceptions narrow and explicit', () => {
+    const knip = readJson('knip.json')
+    const ignoredWorkspaces = stringArray(knip.ignoreWorkspaces, 'knip ignoreWorkspaces')
+    const ignoredDependencies = stringArray(
+      knip.ignoreDependencies,
+      'knip ignoreDependencies',
+    )
+    const ignoredBinaries = stringArray(knip.ignoreBinaries, 'knip ignoreBinaries')
+    const workspaces = record(knip.workspaces, 'knip workspaces')
+    const runtime = record(workspaces['apps/openloop-runtime'], 'Openloop runtime knip config')
+    const bundle = record(workspaces['packages/openloop/bundle'], 'Openloop bundle knip config')
+
+    expect(ignoredWorkspaces.filter(workspace => workspace.startsWith('runtime/'))).toEqual([
+      'runtime/openloop',
+    ])
+    expect(ignoredWorkspaces).not.toContain('runtime/*')
+    expect(ignoredDependencies).toContain('@yao-pkg/pkg')
+    expect(ignoredDependencies.filter(dependency =>
+      dependency.startsWith('@deepseek-ai/'))).toEqual([])
+    expect(ignoredBinaries).toEqual(expect.arrayContaining(['mkfifo', 'plutil']))
+    expect(stringArray(runtime.ignoreDependencies, 'Openloop runtime ignoreDependencies'))
+      .toEqual(['@deepseek-ai/dsh'])
+    expect(stringArray(bundle.ignoreDependencies, 'Openloop bundle ignoreDependencies')).toEqual([
+      '@deepseek-ai/dsh-base',
+      '@deepseek-ai/dsh-web-app',
+    ])
   })
 
   test('exposes the root desktop builder as the only build orchestrator', () => {

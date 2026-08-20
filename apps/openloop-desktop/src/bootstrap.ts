@@ -9,13 +9,13 @@ export interface BootstrapResponse {
   readonly coreManifestSha256: string
 }
 
-export interface BootstrapLocation {
+interface BootstrapLocation {
   readonly hash: string
   readonly pathname: string
   readonly search: string
 }
 
-export interface BootstrapHistory {
+interface BootstrapHistory {
   replaceState(data: unknown, unused: string, url?: string | URL | null): void
 }
 

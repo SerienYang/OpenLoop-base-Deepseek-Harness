@@ -2,9 +2,9 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ts from 'typescript'
 
-export const openLoopFaces = ['host', 'client', 'pure'] as const
+const openLoopFaces = ['host', 'client', 'pure'] as const
 
-export type OpenLoopFace = typeof openLoopFaces[number]
+type OpenLoopFace = typeof openLoopFaces[number]
 
 interface OpenLoopManifest {
   name?: string

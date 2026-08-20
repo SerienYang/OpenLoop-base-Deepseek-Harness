@@ -256,7 +256,7 @@ export function ensureEmptyRootConfig(path: string, trustedParent = dirname(path
 }
 
 /** Accept no application arguments other than the launcher's smoke switch. */
-export function parseRuntimeArgs(argv: readonly string[]): RuntimeOptions {
+function parseRuntimeArgs(argv: readonly string[]): RuntimeOptions {
   if (argv.length === 0) return { healthSmoke: false }
   if (argv.length === 1 && argv[0] === '--health-smoke') return { healthSmoke: true }
   throw new Error(`${BIN_NAME}: usage: ${BIN_NAME} [--health-smoke]`)

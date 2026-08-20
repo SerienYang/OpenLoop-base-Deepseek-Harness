@@ -6,7 +6,9 @@
   "ignoreBinaries": [
     "bwrap",
     "icacls",
+    "mkfifo",
     "musl-gcc",
+    "plutil",
     "python3",
     "sandbox-exec",
     "tar",
@@ -15,9 +17,11 @@
   ],
   "ignoreWorkspaces": [
     "vendor/*",
-    "python/sdk-runtime"
+    "python/sdk-runtime",
+    "runtime/openloop"
   ],
   "ignoreDependencies": [
+    "@yao-pkg/pkg",
     "@yarnpkg/cli-dist",
     "lightningcss"
   ],
@@ -769,6 +773,17 @@
     "packages/bundle/web-app": {
       "ignoreDependencies": [
         "@deepseek-ai/.+"
+      ]
+    },
+    "apps/openloop-runtime": {
+      "ignoreDependencies": [
+        "@deepseek-ai/dsh"
+      ]
+    },
+    "packages/openloop/bundle": {
+      "ignoreDependencies": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app"
       ]
     }
   }
