@@ -292,7 +292,7 @@ fn validate_updater_public_key(environment: &str, value: &str) -> Result<(), io:
         || value.trim() != value
         || value.contains('\r')
         || value.contains('\n')
-        || value.len() % 4 != 0
+        || !value.len().is_multiple_of(4)
     {
         return Err(invalid());
     }

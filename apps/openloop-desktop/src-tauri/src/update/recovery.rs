@@ -97,7 +97,7 @@ impl FileIdentity {
     fn from_stat(metadata: &libc::stat) -> Self {
         Self {
             device: metadata.st_dev as u64,
-            inode: metadata.st_ino as u64,
+            inode: metadata.st_ino,
             file_type: metadata.st_mode as u32 & libc::S_IFMT as u32,
         }
     }

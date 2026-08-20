@@ -219,7 +219,7 @@ fn rejects_absolute_dot_parent_and_nested_traversal_paths() {
 
 #[test]
 fn rejects_symbolic_and_hard_links_before_unpacking() {
-    for kind in [b'1', b'2'] {
+    for kind in *b"12" {
         let root = tempdir().expect("update root");
         let installed = installed_app(root.path());
         let bytes = archive(&[
@@ -236,7 +236,7 @@ fn rejects_symbolic_and_hard_links_before_unpacking() {
 
 #[test]
 fn rejects_special_files_before_unpacking() {
-    for kind in [b'3', b'4', b'6', b'7'] {
+    for kind in *b"3467" {
         let root = tempdir().expect("update root");
         let installed = installed_app(root.path());
         let bytes = archive(&[

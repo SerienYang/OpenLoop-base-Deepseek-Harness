@@ -58,9 +58,8 @@ impl LaunchSecrets {
         let mut bootstrap_token = vec![0u8; 32];
         let mut bridge_secret = vec![0u8; 32];
         getrandom::fill(&mut bootstrap_token)
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
-        getrandom::fill(&mut bridge_secret)
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        getrandom::fill(&mut bridge_secret).map_err(|error| io::Error::other(error.to_string()))?;
         Ok(Self::new(
             Uuid::new_v4(),
             bootstrap_token,

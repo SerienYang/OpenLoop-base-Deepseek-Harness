@@ -1,10 +1,12 @@
 use std::{
     error::Error,
     ffi::{CString, OsStr, OsString},
-    fmt, fs, io,
+    fmt, fs,
+    io::{self, Read},
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::ffi::OsStrExt,
+        unix::process::CommandExt,
     },
     path::{Component, Path, PathBuf},
     process::{Command, Output, Stdio},
@@ -485,31 +487,113 @@ fn bounded_output(mut command: Command, timeout: Duration) -> Result<Output, Hea
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     let mut child = command
         .spawn()
         .map_err(|source| HealthProbeError::io("start health probe process", source))?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        HealthProbeError::io(
+            "capture health probe stdout",
+            io::Error::new(io::ErrorKind::BrokenPipe, "stdout pipe is unavailable"),
+        )
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        HealthProbeError::io(
+            "capture health probe stderr",
+            io::Error::new(io::ErrorKind::BrokenPipe, "stderr pipe is unavailable"),
+        )
+    })?;
+    let stdout_reader = thread::spawn(move || drain_bounded(stdout));
+    let stderr_reader = thread::spawn(move || drain_bounded(stderr));
     let deadline = Instant::now() + timeout;
+    let mut status = None;
     loop {
-        match child
-            .try_wait()
-            .map_err(|source| HealthProbeError::io("wait for health probe process", source))?
-        {
-            Some(_) => {
-                return child
-                    .wait_with_output()
-                    .map_err(|source| HealthProbeError::io("collect health probe output", source));
-            }
-            None if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(HealthProbeError::TimedOut);
-            }
-            None => thread::sleep(Duration::from_millis(5)),
+        if status.is_none() {
+            status = child
+                .try_wait()
+                .map_err(|source| HealthProbeError::io("wait for health probe process", source))?;
         }
+        if status.is_some() && stdout_reader.is_finished() && stderr_reader.is_finished() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            terminate_process_group(child.id())?;
+            if status.is_none() {
+                child
+                    .wait()
+                    .map_err(|source| HealthProbeError::io("reap health probe process", source))?;
+            }
+            join_probe_reader(stdout_reader, "join health probe stdout reader")?;
+            join_probe_reader(stderr_reader, "join health probe stderr reader")?;
+            return Err(HealthProbeError::TimedOut);
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let stdout = join_probe_reader(stdout_reader, "join health probe stdout reader")?;
+    let stderr = join_probe_reader(stderr_reader, "join health probe stderr reader")?;
+    Ok(Output {
+        status: status.expect("health probe exited before readers completed"),
+        stdout,
+        stderr,
+    })
+}
+
+fn drain_bounded(mut reader: impl Read) -> io::Result<Vec<u8>> {
+    let mut retained = Vec::with_capacity(MAX_PROBE_OUTPUT + 1);
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(retained);
+        }
+        let keep = read.min((MAX_PROBE_OUTPUT + 1).saturating_sub(retained.len()));
+        retained.extend_from_slice(&buffer[..keep]);
+    }
+}
+
+fn join_probe_reader(
+    reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+    operation: &'static str,
+) -> Result<Vec<u8>, HealthProbeError> {
+    reader
+        .join()
+        .map_err(|_| HealthProbeError::io(operation, io::Error::other("reader thread panicked")))?
+        .map_err(|source| HealthProbeError::io(operation, source))
+}
+
+fn terminate_process_group(pid: u32) -> Result<(), HealthProbeError> {
+    if unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) } == 0 {
+        return Ok(());
+    }
+    let source = io::Error::last_os_error();
+    if source.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(HealthProbeError::io(
+            "terminate health probe process group",
+            source,
+        ))
     }
 }
 
 fn validate_success_output(output: &Output, label: &str) -> Result<(), HealthProbeError> {
+    if output.stdout.len() > MAX_PROBE_OUTPUT {
+        return Err(HealthProbeError::invalid(format!(
+            "{label} output is oversized"
+        )));
+    }
+    if output.stderr.len() > MAX_PROBE_OUTPUT {
+        return Err(HealthProbeError::invalid(format!(
+            "{label} stderr is oversized"
+        )));
+    }
     if !output.status.success() {
         let stderr = bounded_diagnostic(&output.stderr);
         return Err(HealthProbeError::invalid(format!(
@@ -525,11 +609,6 @@ fn validate_success_output(output: &Output, label: &str) -> Result<(), HealthPro
     if !output.stderr.is_empty() {
         return Err(HealthProbeError::invalid(format!(
             "{label} wrote unexpected stderr"
-        )));
-    }
-    if output.stdout.len() > MAX_PROBE_OUTPUT {
-        return Err(HealthProbeError::invalid(format!(
-            "{label} output is oversized"
         )));
     }
     Ok(())

@@ -122,8 +122,7 @@ fn ensure_singly_linked_regular(file: &File) -> io::Result<()> {
 fn create_temporary(parent: RawFd) -> io::Result<(File, CString)> {
     for _ in 0..16 {
         let mut random = [0_u8; 16];
-        getrandom::fill(&mut random)
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+        getrandom::fill(&mut random).map_err(|error| io::Error::other(error.to_string()))?;
         let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
         let name = CString::new(format!(".openloop-write-{suffix}.tmp"))
             .expect("generated temporary names contain no NUL bytes");

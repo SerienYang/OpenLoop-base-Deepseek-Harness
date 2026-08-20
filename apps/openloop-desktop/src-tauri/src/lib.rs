@@ -22,6 +22,7 @@ use crate::update::{
         ensure_channel_dsh_home, required_dsh_home, BundleHealthProbe, CandidateProcessHealth,
         TEST_PROBE_FAILURE_ENVIRONMENT,
     },
+    lease::UpdateLease,
     recovery::{PublicationOutcome, RecoveryTransaction},
 };
 
@@ -152,6 +153,7 @@ fn embedded_build_manifest() -> Result<OpenloopBuildManifest, String> {
 
 struct RuntimeProcessState {
     _instance: SingleInstance,
+    _update_lease: UpdateLease,
     child: Mutex<SupervisedChild>,
 }
 
@@ -182,6 +184,8 @@ fn start_runtime(
     let channel_root = dsh_home
         .parent()
         .ok_or_else(|| "Openloop channel data root is unavailable".to_owned())?;
+    let update_lease = UpdateLease::shared(channel_root)
+        .map_err(|error| format!("runtime update lease acquisition failed: {error}"))?;
     let launch_id_path = channel_root.join("openloop-runtime.sock");
     let secrets = LaunchSecrets::generate(launch_id_path.clone())
         .map_err(|error| format!("runtime launch secret generation failed: {error}"))?;
@@ -226,6 +230,7 @@ fn start_runtime(
         .map_err(|error| format!("Openloop main webview navigation failed: {error}"))?;
     Ok(Some(RuntimeProcessState {
         _instance: instance,
+        _update_lease: update_lease,
         child: Mutex::new(child),
     }))
 }
@@ -325,6 +330,12 @@ async fn run_update_spike(
     current: &str,
 ) -> Result<String, String> {
     let updater_config = app.state::<update::channel::UpdateChannelConfig>();
+    let dsh_home = channel_dsh_home(app, &updater_config)?;
+    let channel_root = dsh_home
+        .parent()
+        .ok_or_else(|| "Openloop channel data root is unavailable".to_owned())?;
+    let _update_lease = UpdateLease::exclusive(channel_root)
+        .map_err(|error| format!("exclusive update lease acquisition failed: {error}"))?;
     let update = app
         .updater()
         .map_err(|error| format!("create signed updater failed: {error}"))?
@@ -373,7 +384,6 @@ async fn run_update_spike(
         .ok_or_else(|| "installed app has no recovery root".to_owned())?;
     let transaction = RecoveryTransaction::open(root, &installed, candidate.path())
         .map_err(|error| format!("open candidate recovery transaction failed: {error}"))?;
-    let dsh_home = channel_dsh_home(app, &updater_config)?;
     let mut health = CandidateProcessHealth::new(&update.version, dsh_home);
     let (publication, preserved_backup, failed_candidate) = match transaction
         .publish(&mut health)
@@ -455,7 +465,7 @@ pub fn run() -> i32 {
                 return Ok(());
             }
             let updater_config = app.state::<update::channel::UpdateChannelConfig>();
-            if let Some(state) = start_runtime(&app.handle(), &updater_config)? {
+            if let Some(state) = start_runtime(app.handle(), &updater_config)? {
                 app.manage(state);
             }
             Ok(())
@@ -464,7 +474,7 @@ pub fn run() -> i32 {
         .expect("failed to build Openloop desktop application");
     if matches!(action, HostAction::Check | HostAction::Install) {
         return match tauri::async_runtime::block_on(run_update_spike(
-            &app.handle(),
+            app.handle(),
             action,
             &manifest.app_version,
         )) {

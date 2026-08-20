@@ -1,9 +1,10 @@
 use std::{
     ffi::OsString,
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use openloop_desktop_lib::launcher::{
@@ -105,6 +106,43 @@ fn startup_timeout_terminates_only_the_verified_child() {
         child.wait_readiness(&expected, Duration::from_millis(20)),
         Err(StartupError::Timeout),
     ));
+}
+
+#[test]
+fn dropping_a_stale_supervised_child_is_bounded_without_killing_by_pid() {
+    let fixture = tempfile::tempdir().expect("temporary executable root");
+    let executable = fixture.path().join("runtime");
+    fs::write(&executable, "#!/bin/sh\nsleep 5\n").expect("runtime script");
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+        .expect("runtime permissions");
+    let child = SupervisedChild::spawn(&executable, &secrets()).expect("supervised child");
+    let pid = child.identity().pid;
+    let replacement = fixture.path().join("replacement");
+    fs::write(&replacement, "#!/bin/sh\nexit 0\n").expect("replacement script");
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755))
+        .expect("replacement permissions");
+    fs::rename(&replacement, &executable).expect("replace executable path");
+
+    let started = Instant::now();
+    drop(child);
+    let elapsed = started.elapsed();
+
+    let kill_result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    if kill_result == 0 {
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) };
+        assert_eq!(waited, pid as libc::pid_t, "reap stale test child");
+    } else {
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH),
+            "unexpected stale test child cleanup failure"
+        );
+    }
+    assert!(
+        elapsed < Duration::from_millis(750),
+        "stale child Drop blocked for {elapsed:?}"
+    );
 }
 
 #[test]

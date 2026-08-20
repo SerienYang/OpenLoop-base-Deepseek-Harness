@@ -40,7 +40,7 @@ impl FileIdentity {
     fn from_stat(value: &libc::stat) -> Self {
         Self {
             device: value.st_dev as u64,
-            inode: value.st_ino as u64,
+            inode: value.st_ino,
             file_type: value.st_mode as u32 & libc::S_IFMT as u32,
         }
     }

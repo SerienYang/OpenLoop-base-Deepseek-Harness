@@ -8,7 +8,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::mpsc,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use sha2::{Digest, Sha256};
@@ -20,6 +20,8 @@ use super::{
 
 const CHILD_SECRET_FD: RawFd = 3;
 const FD_CLOEXEC: libc::c_int = 1;
+const DROP_REAP_TIMEOUT: Duration = Duration::from_millis(100);
+const REAP_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessIdentity {
@@ -338,11 +340,22 @@ fn read_bounded_line<R: BufRead>(reader: &mut R) -> io::Result<Vec<u8>> {
     }
 }
 
+fn reap_child_bounded(child: &mut Child, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) if Instant::now() >= deadline => return,
+            Ok(None) => thread::sleep(REAP_POLL_INTERVAL),
+        }
+    }
+}
+
 impl Drop for SupervisedChild {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
             let _ = self.terminate_if_verified();
-            let _ = self.child.wait();
+            reap_child_bounded(&mut self.child, DROP_REAP_TIMEOUT);
         }
     }
 }

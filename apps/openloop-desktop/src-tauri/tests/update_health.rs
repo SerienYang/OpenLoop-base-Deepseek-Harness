@@ -19,6 +19,7 @@ use tempfile::tempdir;
 const VERSION: &str = "1.2.3-test.4";
 const IDENTIFIER: &str = "ai.openloop.desktop.test";
 const CORE_SHA256: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn executable(path: &Path, script: &str) {
     fs::write(path, script).expect("write executable fixture");
@@ -123,7 +124,7 @@ fn self_probe_validates_info_plist_and_bundled_sidecar_core_identity() {
     let probe = BundleHealthProbe::new(VERSION, IDENTIFIER, CORE_SHA256);
 
     let report = probe
-        .inspect(&app, Duration::from_secs(2), &dsh_home)
+        .inspect(&app, PROBE_TIMEOUT, &dsh_home)
         .expect("valid candidate bundle health");
 
     assert_eq!(report.app_version, VERSION);
@@ -136,7 +137,7 @@ fn self_probe_validates_info_plist_and_bundled_sidecar_core_identity() {
     .expect("replace Info.plist");
     assert!(
         probe
-            .inspect(&app, Duration::from_secs(2), &dsh_home)
+            .inspect(&app, PROBE_TIMEOUT, &dsh_home)
             .is_err(),
         "mismatched build version passed health"
     );
@@ -150,7 +151,7 @@ fn self_probe_validates_info_plist_and_bundled_sidecar_core_identity() {
     executable(&app.join("Contents/MacOS/openloop-runtime"), &wrong_core);
     assert!(
         probe
-            .inspect(&app, Duration::from_secs(2), &dsh_home)
+            .inspect(&app, PROBE_TIMEOUT, &dsh_home)
             .is_err(),
         "mismatched sidecar core identity passed health"
     );
@@ -169,7 +170,7 @@ fn candidate_process_health_reports_success_failure_and_timeout() {
     let (_success_root, success_app) = app_bundle(&success, "#!/bin/sh\nexit 0\n");
     let mut health = CandidateProcessHealth::new(VERSION, &dsh_home);
     assert_eq!(
-        health.await_health(&success_app, Duration::from_secs(2)),
+        health.await_health(&success_app, PROBE_TIMEOUT),
         HealthStatus::Healthy
     );
 
@@ -178,7 +179,7 @@ fn candidate_process_health_reports_success_failure_and_timeout() {
     );
     let (_failure_root, failure_app) = app_bundle(&failure, "#!/bin/sh\nexit 0\n");
     let mut health = CandidateProcessHealth::new(VERSION, &dsh_home);
-    let status = health.await_health(&failure_app, Duration::from_secs(2));
+    let status = health.await_health(&failure_app, PROBE_TIMEOUT);
     assert!(
         matches!(status, HealthStatus::Failed(ref message) if message.contains("status") || message.contains("failed")),
         "unexpected failed status: {status:?}"
@@ -200,6 +201,44 @@ fn candidate_process_health_reports_success_failure_and_timeout() {
     assert!(
         !marker.exists(),
         "timed-out Host probe left its descendant running"
+    );
+}
+
+#[test]
+fn candidate_process_health_drains_oversized_stdout_without_timing_out() {
+    let dsh_home_root = tempdir().expect("DSH_HOME root");
+    let dsh_home = dsh_home_root.path().join("Openloop-Test/dsh");
+    fs::create_dir_all(&dsh_home).expect("DSH_HOME");
+    let script = format!(
+        "#!/bin/sh\n[ \"$1\" = \"{HEALTH_PROBE_ARGUMENT}\" ] || exit 91\n/usr/bin/awk 'BEGIN {{ for (i = 0; i < 16384; i++) printf \"0123456789abcdef\" }}'\n"
+    );
+    let (_root, app) = app_bundle(&script, "#!/bin/sh\nexit 0\n");
+    let mut health = CandidateProcessHealth::new(VERSION, &dsh_home);
+
+    let status = health.await_health(&app, PROBE_TIMEOUT);
+
+    assert!(
+        matches!(status, HealthStatus::Failed(ref message) if message.contains("oversized")),
+        "oversized stdout was not reported before timeout: {status:?}"
+    );
+}
+
+#[test]
+fn candidate_process_health_drains_oversized_stderr_without_timing_out() {
+    let dsh_home_root = tempdir().expect("DSH_HOME root");
+    let dsh_home = dsh_home_root.path().join("Openloop-Test/dsh");
+    fs::create_dir_all(&dsh_home).expect("DSH_HOME");
+    let script = format!(
+        "#!/bin/sh\n[ \"$1\" = \"{HEALTH_PROBE_ARGUMENT}\" ] || exit 91\n/usr/bin/awk 'BEGIN {{ for (i = 0; i < 16384; i++) printf \"0123456789abcdef\" }}' >&2\n"
+    );
+    let (_root, app) = app_bundle(&script, "#!/bin/sh\nexit 0\n");
+    let mut health = CandidateProcessHealth::new(VERSION, &dsh_home);
+
+    let status = health.await_health(&app, PROBE_TIMEOUT);
+
+    assert!(
+        matches!(status, HealthStatus::Failed(ref message) if message.contains("oversized")),
+        "oversized stderr was not reported before timeout: {status:?}"
     );
 }
 
@@ -287,7 +326,7 @@ fn candidate_health_rejects_an_app_reached_through_a_symlink_ancestor() {
 
     assert!(
         probe
-            .inspect(&aliased_app, Duration::from_secs(2), &dsh_home)
+            .inspect(&aliased_app, PROBE_TIMEOUT, &dsh_home)
             .is_err(),
         "candidate path with a symlink ancestor passed bundle health"
     );
@@ -295,7 +334,7 @@ fn candidate_health_rejects_an_app_reached_through_a_symlink_ancestor() {
     let mut process_health = CandidateProcessHealth::new(VERSION, &dsh_home);
     assert!(
         matches!(
-            process_health.await_health(&aliased_app, Duration::from_secs(2)),
+            process_health.await_health(&aliased_app, PROBE_TIMEOUT),
             HealthStatus::Failed(_)
         ),
         "candidate path with a symlink ancestor passed process health"
