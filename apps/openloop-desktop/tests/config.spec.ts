@@ -326,6 +326,40 @@ describe('Openloop desktop foundation configuration', () => {
     expect(buildDependencies.sha2).toBe('=0.10.9')
   })
 
+  test('serializes the external Cargo metadata probe in the process-bound lane', () => {
+    const vitestConfig = readText('vitest.config.ts')
+    const processBoundBlock = /const processBoundTests = \[([\s\S]*?)\n\]/u.exec(vitestConfig)?.[1]
+
+    expect(processBoundBlock).toContain(
+      "'apps/openloop-desktop/tests/config.spec.ts'",
+    )
+  })
+
+  test('caps ordinary macOS workers without reducing other platforms', () => {
+    expect(readText('vitest.config.ts')).toContain(
+      "maxWorkers: process.platform === 'darwin' ? 2 : 4",
+    )
+  })
+
+  test('extends aggregate test and hook timeouts only on macOS', () => {
+    const vitestConfig = readText('vitest.config.ts')
+
+    expect(vitestConfig).toContain(
+      "const aggregateTestTimeout = process.platform === 'darwin' ? 30_000 : 5_000",
+    )
+    expect(vitestConfig).toContain(
+      "const aggregateHookTimeout = process.platform === 'darwin' ? 30_000 : 10_000",
+    )
+    expect(vitestConfig.match(/testTimeout: aggregateTestTimeout/gu)).toHaveLength(2)
+    expect(vitestConfig.match(/hookTimeout: aggregateHookTimeout/gu)).toHaveLength(2)
+  })
+
+  test('inherits the platform aggregate timeout for the Cargo metadata probe', () => {
+    expect(readText('apps/openloop-desktop/tests/config.spec.ts')).not.toMatch(
+      /test\(\s*'declares a Rust baseline at least as high as the locked dependency closure'\s*,\s*\{\s*timeout:/u,
+    )
+  })
+
   test('declares a Rust baseline at least as high as the locked dependency closure', () => {
     const cargo = record(
       parseToml(readText('apps/openloop-desktop/src-tauri/Cargo.toml')),

@@ -104,6 +104,7 @@ const coverageExemptExcludes = coverageExemptRaw === '1'
 // that worker threads cannot isolate reliably under aggregate gate contention.
 // Keep the narrow exception in one serial fork lane while the ordinary inventory stays parallel.
 const processBoundTests = [
+  'apps/openloop-desktop/tests/config.spec.ts',
   'packages/boot/app-boot/tests/user-patches.spec.ts',
   'packages/hooks/hooks-claude-code/tests/coverage-*.spec.ts',
   'packages/hooks/hooks-codex/tests/coverage-*.spec.ts',
@@ -125,6 +126,12 @@ const processBoundTests = [
   'scripts/oxlint-contract.spec.ts',
 ]
 
+// The 13k-test macOS aggregate can pause a fork for several seconds under
+// scheduler and GC pressure even when the same test finishes in milliseconds
+// alone. Keep the strict default elsewhere and a bounded aggregate margin here.
+const aggregateTestTimeout = process.platform === 'darwin' ? 30_000 : 5_000
+const aggregateHookTimeout = process.platform === 'darwin' ? 30_000 : 10_000
+
 export default defineConfig({
   plugins: [pathsPlugin(), standardDecoratorPlugin()],
   test: {
@@ -144,7 +151,9 @@ export default defineConfig({
           // MaybeLocal in cjs_lexer::Parse) from worker threads on macOS,
           // Linux, and Windows. Forked workers avoid that shared thread path.
           pool: 'forks',
-          maxWorkers: 4,
+          maxWorkers: process.platform === 'darwin' ? 2 : 4,
+          testTimeout: aggregateTestTimeout,
+          hookTimeout: aggregateHookTimeout,
           setupFiles: ['./scripts/test-invariants.ts'],
           include: testIncludes,
           exclude: [
@@ -162,6 +171,8 @@ export default defineConfig({
           pool: 'forks',
           fileParallelism: false,
           maxWorkers: 1,
+          testTimeout: aggregateTestTimeout,
+          hookTimeout: aggregateHookTimeout,
           setupFiles: ['./scripts/test-invariants.ts'],
           include: processBoundTests,
           exclude: [
