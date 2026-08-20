@@ -17,6 +17,11 @@ export interface RuntimeBuildIdentity {
 
 export type BootstrapTokenResult = 'consumed' | 'invalid' | 'expired'
 
+/**
+ * Host-only service for one-time launch-secret handoff, bootstrap-session validation, and runtime build identity.
+ * Its Cordis inspect entry documents an internal Host contract, not a public Plugin API;
+ * Plugins must never receive raw bootstrap tokens or bridge secrets.
+ */
 export interface RuntimeBootstrap {
   readonly launchId: () => string
   readonly getLaunchId: () => string
