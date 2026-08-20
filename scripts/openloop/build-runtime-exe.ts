@@ -276,7 +276,7 @@ async function copyWithoutNestedModules(source: string, destination: string): Pr
   const nested = join(source, 'node_modules')
   await cp(source, destination, {
     recursive: true,
-    dereference: true,
+    dereference: false,
     filter: path => path !== nested && !path.startsWith(nested + sep),
   })
 }

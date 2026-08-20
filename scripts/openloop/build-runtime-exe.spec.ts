@@ -440,9 +440,12 @@ describe('Openloop macOS arm64 single-exe builder', () => {
   test('materializes every symlink and leaves a zero-symlink staging tree', async () => {
     const root = temporaryDirectory('links')
     const external = join(root, 'external')
+    const nestedTarget = join(root, 'nested-target.js')
     const staging = join(root, 'staging')
     write(join(external, 'package.json'), '{"name":"linked"}\n')
     write(join(external, 'lib/index.js'), 'export {}\n')
+    write(nestedTarget, 'export const nested = true\n')
+    symlinkSync(nestedTarget, join(external, 'lib/nested.js'))
     mkdirSync(join(staging, 'node_modules/@scope'), { recursive: true })
     symlinkSync(external, join(staging, 'node_modules/@scope/linked'))
 
@@ -451,6 +454,25 @@ describe('Openloop macOS arm64 single-exe builder', () => {
     const linked = join(staging, 'node_modules/@scope/linked')
     expect(lstatSync(linked).isSymbolicLink()).toBe(false)
     expect(readFileSync(join(linked, 'lib/index.js'), 'utf8')).toBe('export {}\n')
+    expect(lstatSync(join(linked, 'lib/nested.js')).isSymbolicLink()).toBe(false)
+    expect(readFileSync(join(linked, 'lib/nested.js'), 'utf8')).toBe('export const nested = true\n')
+  })
+
+  test('rejects a repository directory containing a nested symlink outside the repository', async () => {
+    const root = temporaryDirectory('nested-external-link-root')
+    const outside = temporaryDirectory('nested-external-link-target')
+    const source = join(root, 'linked-package')
+    const staging = join(root, 'dist-openloop/runtime-staging')
+    write(join(source, 'package.json'), '{"name":"linked-package"}\n')
+    write(join(outside, 'payload'), 'OUTSIDE_BYTES\n')
+    symlinkSync(join(outside, 'payload'), join(source, 'payload'), 'file')
+    mkdirSync(staging, { recursive: true })
+    symlinkSync(source, join(staging, 'linked-package'), 'dir')
+
+    await expect(materializeSymlinks(staging, root)).rejects.toThrow(
+      /outside|trusted root|boundary/iu,
+    )
+    expect(lstatSync(join(staging, 'linked-package/payload')).isSymbolicLink()).toBe(true)
   })
 
   test('rejects a staged symlink whose canonical target is outside the repository', async () => {
