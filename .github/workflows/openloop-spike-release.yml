@@ -30,16 +30,18 @@ permissions:
 
 jobs:
   publish-test:
-    if: github.repository == 'SerienYang/OpenLoop-base-Deepseek-Harness'
+    if: >-
+      github.repository == 'SerienYang/OpenLoop-base-Deepseek-Harness' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true
     runs-on: macos-15
+    environment: openloop-test-release
     permissions:
       contents: write
     env:
       APP_VERSION: ${{ inputs.app_version }}
       RELEASE_TAG: ${{ inputs.release_tag }}
       RELEASE_NOTES: ${{ inputs.release_notes }}
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.OPENLOOP_TEST_UPDATER_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.OPENLOOP_TEST_UPDATER_PRIVATE_KEY_PASSWORD }}
       OPENLOOP_UPDATER_PUBLIC_KEY: ${{ vars.OPENLOOP_TEST_UPDATER_PUBLIC_KEY }}
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -47,6 +49,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ github.sha }}
 
       - uses: pnpm/action-setup@v4
 
@@ -61,6 +64,9 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = arm64
           test "$GITHUB_REPOSITORY" = SerienYang/OpenLoop-base-Deepseek-Harness
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_REF_PROTECTED" = true
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(git remote get-url origin)" = https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness
           [[ "$APP_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] \
             || { echo "app_version must be valid semver" >&2; exit 1; }
@@ -72,16 +78,8 @@ jobs:
             || { echo "stable release tags are forbidden in this workflow" >&2; exit 1; }
           test -n "${RELEASE_NOTES//[[:space:]]/}" \
             || { echo "release_notes must be non-empty" >&2; exit 1; }
-          test -n "$TAURI_SIGNING_PRIVATE_KEY" \
-            || { echo "TAURI_SIGNING_PRIVATE_KEY must be configured" >&2; exit 1; }
-          test -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" \
-            || { echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD must be configured" >&2; exit 1; }
           test -n "$OPENLOOP_UPDATER_PUBLIC_KEY" \
             || { echo "OPENLOOP_UPDATER_PUBLIC_KEY must be configured" >&2; exit 1; }
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "immutable prerelease $RELEASE_TAG already exists" >&2
-            exit 1
-          fi
           REMOTE_TAG="$(git ls-remote --tags origin "refs/tags/${RELEASE_TAG}")"
           test -z "$REMOTE_TAG" \
             || { echo "immutable prerelease remote tag $RELEASE_TAG already exists" >&2; exit 1; }
@@ -93,7 +91,17 @@ jobs:
         run: pnpm --dir apps/openloop-desktop pkg set version="$APP_VERSION"
 
       - name: Build and verify the signed test desktop
-        run: pnpm openloop:build-desktop -- --channel test --target aarch64-apple-darwin --bundle all
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.OPENLOOP_TEST_UPDATER_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.OPENLOOP_TEST_UPDATER_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$TAURI_SIGNING_PRIVATE_KEY" \
+            || { echo "TAURI_SIGNING_PRIVATE_KEY must be configured" >&2; exit 1; }
+          test -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" \
+            || { echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD must be configured" >&2; exit 1; }
+          pnpm openloop:build-desktop -- --channel test --target aarch64-apple-darwin --bundle all
 
       - name: Render the signed static test manifest
         shell: bash
@@ -124,17 +132,59 @@ jobs:
           updater="apps/openloop-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Openloop.app.tar.gz"
           signature="apps/openloop-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Openloop.app.tar.gz.sig"
           dmg="apps/openloop-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Openloop_${APP_VERSION}_aarch64.dmg"
-          gh release create "$RELEASE_TAG" \
-            --target "$GITHUB_SHA" \
-            --title "OpenLoop test ${APP_VERSION}" \
-            --notes "$RELEASE_NOTES" \
-            --prerelease \
+          validate_draft() {
+            local release_json="$1"
+            test "$(jq -r '.isDraft' <<<"$release_json")" = true \
+              || { echo "published immutable prerelease $RELEASE_TAG cannot be overwritten" >&2; exit 1; }
+            test "$(jq -r '.targetCommitish' <<<"$release_json")" = "$GITHUB_SHA" \
+              || { echo "draft prerelease $RELEASE_TAG targets a different commit" >&2; exit 1; }
+          }
+
+          release_error="$(mktemp)"
+          trap 'rm -f "$release_error"' EXIT
+          set +e
+          release_json="$(gh release view "$RELEASE_TAG" --json isDraft,targetCommitish 2>"$release_error")"
+          release_status=$?
+          set -e
+          if test "$release_status" -eq 0; then
+            validate_draft "$release_json"
+          elif grep -Fqi "release not found" "$release_error"; then
+            gh release create "$RELEASE_TAG" \
+              --draft \
+              --target "$GITHUB_SHA" \
+              --title "OpenLoop test ${APP_VERSION}" \
+              --notes "$RELEASE_NOTES" \
+              --prerelease
+          else
+            cat "$release_error" >&2
+            exit "$release_status"
+          fi
+
+          gh release upload "$RELEASE_TAG" \
             "$updater" \
             "$signature" \
             "$dmg" \
             dist-openloop/openloop-core.json \
             dist-openloop/openloop-artifacts.json \
-            dist-openloop/openloop-runtime-sbom-inputs.json
+            dist-openloop/openloop-runtime-sbom-inputs.json \
+            --clobber
+
+          release_json="$(gh release view "$RELEASE_TAG" --json isDraft,targetCommitish,assets)"
+          validate_draft "$release_json"
+          required_assets=(
+            "$(basename "$updater")"
+            "$(basename "$signature")"
+            "$(basename "$dmg")"
+            openloop-core.json
+            openloop-artifacts.json
+            openloop-runtime-sbom-inputs.json
+          )
+          for asset in "${required_assets[@]}"; do
+            jq -e --arg asset "$asset" \
+              'any(.assets[]; .name == $asset)' <<<"$release_json" >/dev/null \
+              || { echo "draft prerelease $RELEASE_TAG is missing asset $asset" >&2; exit 1; }
+          done
+          gh release edit "$RELEASE_TAG" --draft=false
 
       - name: Publish deterministic rolling test manifest
         if: inputs.update_rolling_manifest
