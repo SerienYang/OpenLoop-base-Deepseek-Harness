@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest'
 import {
   BROWSER_SPIKE_SCENARIOS,
   browserSpikeFixtureUrl,
-} from '../src/browser-spike.ts'
+} from './fixtures/browser-spike.ts'
 
 describe('Openloop browser spike fixtures', () => {
   test('keeps the security regression scenario set stable', () => {
