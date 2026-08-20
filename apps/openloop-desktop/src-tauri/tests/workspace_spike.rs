@@ -1,4 +1,13 @@
-use std::{ffi::OsStr, fs, os::unix::fs::symlink, path::Path, process::Output};
+use std::{
+    ffi::{CString, OsStr},
+    fs::{self, OpenOptions},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{symlink, MetadataExt, OpenOptionsExt, PermissionsExt},
+    },
+    path::Path,
+    process::{Command, Output},
+};
 
 use openloop_desktop_lib::spikes::{seatbelt::SeatbeltProfile, workspace::WorkspaceRoot};
 use tempfile::tempdir;
@@ -31,6 +40,120 @@ fn workspace_root_allows_descriptor_relative_reads_and_writes() {
     assert_eq!(
         fs::read(workspace_path.join("nested/output.txt")).expect("written file"),
         b"written"
+    );
+}
+
+#[test]
+fn workspace_root_rejects_reads_from_hardlinked_files() {
+    let fixture = tempdir().expect("temp root");
+    let workspace_path = fixture.path().join("workspace");
+    let private_path = fixture.path().join("sibling-private");
+    fs::create_dir(&workspace_path).expect("workspace fixture");
+    fs::create_dir(&private_path).expect("private fixture");
+    let secret_path = private_path.join("secret.txt");
+    fs::write(&secret_path, b"private").expect("private secret");
+    fs::hard_link(&secret_path, workspace_path.join("secret-link.txt")).expect("hardlink fixture");
+    let workspace = WorkspaceRoot::open(&workspace_path).expect("workspace descriptor");
+
+    assert!(
+        workspace.read("secret-link.txt").is_err(),
+        "read accepted a multiply-linked inode"
+    );
+    assert_eq!(
+        fs::read(secret_path).expect("private secret remains"),
+        b"private"
+    );
+}
+
+#[test]
+fn workspace_root_rejects_writes_to_hardlinked_files_without_truncating_the_inode() {
+    let fixture = tempdir().expect("temp root");
+    let workspace_path = fixture.path().join("workspace");
+    let private_path = fixture.path().join("sibling-private");
+    fs::create_dir(&workspace_path).expect("workspace fixture");
+    fs::create_dir(&private_path).expect("private fixture");
+    let secret_path = private_path.join("secret.txt");
+    fs::write(&secret_path, b"private").expect("private secret");
+    fs::hard_link(&secret_path, workspace_path.join("secret-link.txt")).expect("hardlink fixture");
+    let workspace = WorkspaceRoot::open(&workspace_path).expect("workspace descriptor");
+
+    assert!(
+        workspace.write("secret-link.txt", b"overwritten").is_err(),
+        "write accepted a multiply-linked inode"
+    );
+    assert_eq!(
+        fs::read(secret_path).expect("private secret remains"),
+        b"private"
+    );
+}
+
+#[test]
+fn workspace_root_atomically_replaces_an_existing_regular_file() {
+    let fixture = tempdir().expect("temp root");
+    let workspace_path = fixture.path().join("workspace");
+    fs::create_dir(&workspace_path).expect("workspace fixture");
+    let output_path = workspace_path.join("output.txt");
+    fs::write(&output_path, b"before").expect("existing file");
+    let original_inode = fs::metadata(&output_path).expect("original metadata").ino();
+    let workspace = WorkspaceRoot::open(&workspace_path).expect("workspace descriptor");
+
+    workspace
+        .write("output.txt", b"after")
+        .expect("replace existing regular file");
+
+    assert_eq!(fs::read(&output_path).expect("updated file"), b"after");
+    assert_ne!(
+        fs::metadata(output_path).expect("updated metadata").ino(),
+        original_inode,
+        "update must replace the directory entry instead of truncating the existing inode"
+    );
+}
+
+#[test]
+fn workspace_root_rejects_fifo_reads_and_writes_without_blocking() {
+    let fixture = tempdir().expect("temp root");
+    let workspace_path = fixture.path().join("workspace");
+    fs::create_dir(&workspace_path).expect("workspace fixture");
+    let fifo_path = workspace_path.join("pipe");
+    let fifo_c_path = CString::new(fifo_path.as_os_str().as_bytes()).expect("FIFO path");
+    // SAFETY: `fifo_c_path` is a live, NUL-terminated C string, and `mkfifo`
+    // retains no pointer after returning.
+    let result = unsafe { libc::mkfifo(fifo_c_path.as_ptr(), 0o600) };
+    assert_eq!(
+        result,
+        0,
+        "mkfifo failed: {}",
+        std::io::Error::last_os_error()
+    );
+    let _keeper = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&fifo_path)
+        .expect("open FIFO keeper");
+    let workspace = WorkspaceRoot::open(&workspace_path).expect("workspace descriptor");
+
+    assert!(workspace.read("pipe").is_err(), "read accepted a FIFO");
+    assert!(
+        workspace.write("pipe", b"blocked").is_err(),
+        "write accepted a FIFO"
+    );
+}
+
+#[test]
+fn workspace_root_rejects_directory_reads_and_writes() {
+    let fixture = tempdir().expect("temp root");
+    let workspace_path = fixture.path().join("workspace");
+    fs::create_dir_all(workspace_path.join("directory")).expect("workspace fixture");
+    let workspace = WorkspaceRoot::open(&workspace_path).expect("workspace descriptor");
+
+    assert!(
+        workspace.read("directory").is_err(),
+        "read accepted a directory"
+    );
+    assert!(
+        workspace.write("directory", b"invalid").is_err(),
+        "write accepted a directory"
     );
 }
 
@@ -220,6 +343,8 @@ IFS= read -r task_temp_value < "$2/written.txt"
     let denied_home_path =
         Path::new(&home).join(format!(".openloop-seatbelt-denied-{}", std::process::id()));
     let _ = fs::remove_file(&denied_home_path);
+    fs::write(&denied_home_path, b"baseline").expect("HOME path must be writable without Seatbelt");
+    fs::remove_file(&denied_home_path).expect("remove HOME baseline fixture");
     let home_write = profile
         .run(
             Path::new("/bin/sh"),
@@ -241,7 +366,7 @@ IFS= read -r task_temp_value < "$2/written.txt"
 }
 
 #[test]
-fn seatbelt_denies_unlisted_nested_subprocess() {
+fn seatbelt_profile_does_not_allow_unfiltered_metadata_reads() {
     let fixture = tempdir().expect("temp root");
     let workspace_path = fixture.path().join("workspace");
     let task_temp_path = fixture.path().join("task-temp");
@@ -249,19 +374,56 @@ fn seatbelt_denies_unlisted_nested_subprocess() {
     fs::create_dir(&task_temp_path).expect("task temp fixture");
     let profile = SeatbeltProfile::new(&workspace_path, &task_temp_path).expect("Seatbelt profile");
 
+    assert!(
+        !profile
+            .as_str()
+            .lines()
+            .any(|line| line == "(allow file-read-metadata)"),
+        "metadata reads must be restricted to explicit literals or subpaths"
+    );
+}
+
+#[test]
+fn seatbelt_denies_executable_copied_into_the_workspace() {
+    let fixture = tempdir().expect("temp root");
+    let workspace_path = fixture.path().join("workspace");
+    let task_temp_path = fixture.path().join("task-temp");
+    fs::create_dir(&workspace_path).expect("workspace fixture");
+    fs::create_dir(&task_temp_path).expect("task temp fixture");
+    let copied_executable = workspace_path.join("copied-true");
+    fs::copy("/usr/bin/true", &copied_executable).expect("copy executable into Workspace");
+    fs::set_permissions(&copied_executable, fs::Permissions::from_mode(0o700))
+        .expect("make copied executable runnable");
+    let baseline = Command::new(&copied_executable)
+        .output()
+        .expect("run copied executable outside Seatbelt");
+    assert_success(&baseline, "copied executable baseline");
+    let profile = SeatbeltProfile::new(&workspace_path, &task_temp_path).expect("Seatbelt profile");
+
     let nested = profile
         .run(
             Path::new("/bin/sh"),
-            [OsStr::new("-c"), OsStr::new("/usr/bin/true")],
+            [
+                OsStr::new("-c"),
+                OsStr::new(r#""$1/copied-true""#),
+                OsStr::new("openloop-seatbelt"),
+                workspace_path.as_os_str(),
+            ],
         )
         .expect("run nested subprocess attempt");
+    let stderr = String::from_utf8_lossy(&nested.stderr);
     println!(
         "Denied nested subprocess: status={:?}, stderr={}",
         nested.status.code(),
-        String::from_utf8_lossy(&nested.stderr)
+        stderr
+    );
+    assert_eq!(
+        nested.status.code(),
+        Some(126),
+        "copied executable denial returned an unexpected status; stderr: {stderr}"
     );
     assert!(
-        !nested.status.success(),
-        "unlisted nested subprocess unexpectedly executed"
+        stderr.contains("Operation not permitted"),
+        "copied executable denial did not report process-exec failure: {stderr}"
     );
 }

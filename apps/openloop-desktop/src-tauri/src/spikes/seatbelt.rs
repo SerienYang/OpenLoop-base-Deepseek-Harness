@@ -32,7 +32,10 @@ impl SeatbeltProfile {
     (literal "/bin/sh" "/bin/bash"))
 (allow sysctl-read
     (sysctl-name "security.mac.lockdown_mode_state" "kern.bootargs"))
-(allow file-read-metadata)
+(allow file-read-metadata
+    (literal "/var" "/bin/bash" "/private/var/select/sh")
+    (subpath "{workspace}")
+    (subpath "{task_temp}"))
 (allow file-read-data
     (literal "/" "/bin/sh" "/bin/bash")
     (subpath "{workspace}")
