@@ -55,6 +55,22 @@ fn update_entries() -> Vec<(&'static [u8], u8, &'static [u8])> {
     ]
 }
 
+fn preserved_artifact_paths(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut paths = fs::read_dir(root)
+        .expect("update root")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            (name.starts_with(".openloop-candidate-") && name.ends_with(".app"))
+                || (name.starts_with(".openloop-update-") && name.ends_with(".tmp"))
+        })
+        .map(|entry| fs::canonicalize(entry.path()).expect("canonical preserved artifact"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+}
+
 #[test]
 fn stages_one_valid_app_root_directly_as_the_only_candidate_artifact() {
     let root = tempdir().expect("update root");
@@ -100,9 +116,15 @@ fn preserved_candidate_blocks_the_next_stage_until_recovery_cleanup() {
 
     let error = stage_verified_archive(&archive(&update_entries()), &installed)
         .expect_err("preserved candidate must block a second stage");
+    let expected = vec![fs::canonicalize(&candidate).expect("canonical preserved candidate")];
     assert!(
         error.to_string().contains("requires recovery cleanup"),
         "unexpected bounded-retention error: {error}"
+    );
+    assert_eq!(error.preserved_paths(), expected);
+    assert!(
+        error.to_string().contains(&candidate.display().to_string()),
+        "preserved candidate path is absent from error: {error}"
     );
     assert_eq!(
         fs::read_to_string(candidate.join("Contents/marker")).expect("preserved candidate"),
@@ -129,11 +151,23 @@ fn any_legacy_candidate_or_temporary_artifact_blocks_staging() {
 
         let error = stage_verified_archive(&archive(&update_entries()), &installed)
             .expect_err("preserved artifact must block staging");
+        let mut expected = names
+            .iter()
+            .map(|name| fs::canonicalize(root.path().join(name)).expect("canonical artifact"))
+            .collect::<Vec<_>>();
+        expected.sort();
 
         assert!(
             error.to_string().contains("requires recovery cleanup"),
             "unexpected bounded-retention error: {error}"
         );
+        assert_eq!(error.preserved_paths(), expected);
+        for path in &expected {
+            assert!(
+                error.to_string().contains(&path.display().to_string()),
+                "preserved artifact path is absent from error: {error}"
+            );
+        }
         assert_eq!(
             fs::read_dir(root.path()).expect("update root").count(),
             names.len() + 1,
@@ -169,24 +203,33 @@ fn rejects_tampered_or_ambiguous_archive_structure_without_recursive_cleanup() {
         let installed = installed_app(root.path());
         let error =
             stage_verified_archive(&bytes, &installed).expect_err("tampered structure must fail");
+        let preserved = preserved_artifact_paths(root.path());
+        assert_eq!(
+            error.preserved_paths(),
+            preserved,
+            "{label}: error did not expose the preserved candidate path"
+        );
+        assert_eq!(
+            preserved.len(),
+            1,
+            "{label}: failed staging left more than one preserved artifact"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains(&preserved[0].display().to_string()),
+            "{label}: error did not include the full preserved candidate path: {error}"
+        );
         assert!(
             error.to_string().contains("archive") || error.to_string().contains("root"),
             "{label}: unexpected error: {error}"
         );
-        let artifacts = fs::read_dir(root.path())
-            .expect("update root")
-            .filter_map(Result::ok)
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            artifacts.len(),
-            2,
-            "{label}: failed staging left more than one preserved artifact"
-        );
         assert!(
-            artifacts
-                .iter()
-                .any(|name| name.starts_with(".openloop-candidate-") && name.ends_with(".app")),
+            preserved[0]
+                .file_name()
+                .expect("preserved candidate name")
+                .to_string_lossy()
+                .starts_with(".openloop-candidate-"),
             "{label}: failed candidate was not preserved directly"
         );
     }

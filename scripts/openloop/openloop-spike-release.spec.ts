@@ -129,32 +129,45 @@ describe('Openloop spike release workflow', () => {
     expect(source).not.toContain('deepseek-openloop')
   })
 
-  it('rejects an exact remote tag while allowing only a matching draft release to resume', () => {
+  it('allows a remote immutable tag only when it resolves to the trigger SHA', () => {
     const source = workflowSource()
     const preflight = source.slice(
       source.indexOf('- name: Validate isolated test release inputs'),
       source.indexOf('- name: Install immutable dependencies'),
     )
-    const publish = namedStep('Publish immutable A/B prerelease').run ?? ''
 
     expect(preflight).toMatch(
       /REMOTE_TAG=.*git ls-remote[^]*refs\/tags\/\$\{RELEASE_TAG\}/u,
     )
-    expect(preflight).toMatch(/test -z "\$REMOTE_TAG"/u)
-    expect(preflight).not.toMatch(/if git ls-remote/u)
-    expect(preflight).toMatch(/remote tag[^]*already exists|already exists[^]*remote tag/iu)
-    expect(publish).toMatch(
-      /gh release view "\$RELEASE_TAG" --json isDraft,targetCommitish/u,
+    expect(preflight).toMatch(/REMOTE_TAG_SHA=/u)
+    expect(preflight).toMatch(
+      /test -z "\$REMOTE_TAG_SHA"[^]*"\$REMOTE_TAG_SHA" = "\$GITHUB_SHA"/u,
     )
-    expect(publish).toMatch(/isDraft[^]*true/iu)
-    expect(publish).toMatch(/targetCommitish[^]*GITHUB_SHA/u)
-    expect(publish).toMatch(/published[^]*(?:refus|forbid|reject|immutable)/iu)
+    expect(preflight).toMatch(/remote tag[^]*different commit/iu)
+    expect(preflight).not.toMatch(/test -z "\$REMOTE_TAG"/u)
+  })
+
+  it('resumes matching drafts but rejects mismatched immutable release metadata', () => {
+    const publish = namedStep('Publish immutable A/B prerelease').run ?? ''
+
+    expect(publish).toMatch(
+      /gh release view "\$RELEASE_TAG" --json isDraft,isPrerelease,tagName,targetCommitish,name,body,assets/u,
+    )
+    expect(publish).toMatch(/\.tagName[^]*RELEASE_TAG/u)
+    expect(publish).toMatch(/\.targetCommitish[^]*GITHUB_SHA/u)
+    expect(publish).toMatch(/\.isPrerelease[^]*true/u)
+    expect(publish).toMatch(/\.name[^]*APP_VERSION/u)
+    expect(publish).toMatch(/\.body[^]*RELEASE_NOTES/u)
+    expect(publish).toMatch(/release tag[^]*does not match/iu)
+    expect(publish).toMatch(/different commit/iu)
+    expect(publish).toMatch(/metadata[^]*does not match/iu)
+    expect(publish).toMatch(/isDraft[^]*immutable_state=draft/u)
     expect(publish).toMatch(
       /gh release create "\$RELEASE_TAG"[^]*--draft[^]*--target "\$GITHUB_SHA"/u,
     )
   })
 
-  it('uploads and verifies every immutable asset before publishing the draft', () => {
+  it('resumes a same-SHA published prerelease only when every immutable asset exists', () => {
     const source = workflowSource()
     const publish = namedStep('Publish immutable A/B prerelease').run ?? ''
 
@@ -164,9 +177,11 @@ describe('Openloop spike release workflow', () => {
     expect(source).toContain('/releases/download/openloop-test-rolling/latest-test-k1.json')
     expect(source).not.toContain('/releases/latest')
     expect(publish).toMatch(/gh release create[^]*--prerelease/u)
+    expect(publish).toMatch(/immutable_state=published/u)
+    expect(publish).toMatch(/published immutable prerelease[^]*resume rolling/iu)
+    expect(publish).toMatch(/if test "\$immutable_state" = draft; then/u)
     expect(publish).toMatch(/gh release upload "\$RELEASE_TAG"[^]*--clobber/u)
-    expect(publish).toMatch(/gh release view "\$RELEASE_TAG" --json [^\n]*assets/u)
-    expect(publish).toMatch(/gh release edit "\$RELEASE_TAG" --draft=false/u)
+    expect(publish).toMatch(/gh release edit "\$RELEASE_TAG" --draft=false[^]*fi/u)
     for (const asset of [
       'Openloop.app.tar.gz',
       'Openloop.app.tar.gz.sig',
@@ -177,21 +192,33 @@ describe('Openloop spike release workflow', () => {
     ]) {
       expect(publish).toContain(asset)
     }
+    expect(publish).toContain(
+      'validate_required_assets "$release_json" "published immutable prerelease"',
+    )
+    expect(publish).toMatch(/is missing asset[^]*exit 1/iu)
     expect(source).not.toMatch(/(?:docs\/|screenshots?)/iu)
   })
 
-  it('creates the draft only after builds and publishes it only after asset verification', () => {
+  it('orders immutable inspection and conditional mutation before rolling upload', () => {
     const source = workflowSource()
     const publish = namedStep('Publish immutable A/B prerelease').run ?? ''
     const releaseStep = source.indexOf('- name: Publish immutable A/B prerelease')
     const rollingStep = source.indexOf('- name: Publish deterministic rolling test manifest')
+    const inspect = publish.indexOf(
+      'gh release view "$RELEASE_TAG" --json isDraft,isPrerelease,tagName,targetCommitish,name,body,assets',
+    )
+    const publishedResume = publish.indexOf('immutable_state=published')
+    const mutationGate = publish.indexOf('if test "$immutable_state" = draft; then')
     const create = publish.indexOf('gh release create "$RELEASE_TAG"')
     const upload = publish.indexOf('gh release upload "$RELEASE_TAG"')
-    const verify = publish.lastIndexOf('gh release view "$RELEASE_TAG"')
+    const verify = publish.lastIndexOf('validate_required_assets "$release_json"')
     const finalize = publish.indexOf('gh release edit "$RELEASE_TAG" --draft=false')
 
     expect(source.indexOf('pnpm openloop:build-desktop')).toBeLessThan(releaseStep)
     expect(source.indexOf('render-update-manifest.mjs')).toBeLessThan(releaseStep)
+    expect(inspect).toBeGreaterThanOrEqual(0)
+    expect(inspect).toBeLessThan(publishedResume)
+    expect(publishedResume).toBeLessThan(mutationGate)
     expect(create).toBeGreaterThanOrEqual(0)
     expect(create).toBeLessThan(upload)
     expect(upload).toBeLessThan(verify)

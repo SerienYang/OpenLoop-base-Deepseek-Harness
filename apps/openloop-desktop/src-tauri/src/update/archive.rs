@@ -121,19 +121,22 @@ pub fn stage_verified_archive(
     let candidate = StagedCandidate {
         path: parent_path.join(OsStr::from_bytes(candidate_name.as_bytes())),
     };
-    unpack_strict_archive(archive_bytes, &candidate.path)?;
+    unpack_strict_archive(archive_bytes, &candidate.path)
+        .map_err(|error| error.with_preserved_path(candidate.path.clone()))?;
     let observed_identity = identity_at(parent.as_raw_fd(), &candidate_name)
-        .map_err(|source| ArchiveStageError::io("inspect staged candidate", source))?;
+        .map_err(|source| ArchiveStageError::io("inspect staged candidate", source))
+        .map_err(|error| error.with_preserved_path(candidate.path.clone()))?;
     if observed_identity != candidate_identity {
         return Err(ArchiveStageError::invalid(
             "candidate app identity changed during extraction",
-        ));
+        )
+        .with_preserved_path(candidate.path.clone()));
     }
     Ok(candidate)
 }
 
 fn reject_preserved_artifacts(parent: &Path) -> Result<(), ArchiveStageError> {
-    let mut count = 0_usize;
+    let mut paths = Vec::new();
     let entries = fs::read_dir(parent).map_err(|source| {
         ArchiveStageError::io("scan app parent for recovery artifacts", source)
     })?;
@@ -145,13 +148,16 @@ fn reject_preserved_artifacts(parent: &Path) -> Result<(), ArchiveStageError> {
         if (name.starts_with(b".openloop-candidate-") && name.ends_with(b".app"))
             || (name.starts_with(b".openloop-update-") && name.ends_with(b".tmp"))
         {
-            count += 1;
+            paths.push(entry.path());
         }
     }
-    if count != 0 {
+    if !paths.is_empty() {
+        paths.sort();
         return Err(ArchiveStageError::invalid(format!(
-            "found {count} preserved update artifact(s); requires recovery cleanup"
-        )));
+            "found {} preserved update artifact(s)",
+            paths.len()
+        ))
+        .with_preserved_paths(paths));
     }
     Ok(())
 }
@@ -468,7 +474,7 @@ fn identity_at(parent: RawFd, name: &CStr) -> io::Result<FileIdentity> {
 }
 
 #[derive(Debug)]
-pub enum ArchiveStageError {
+enum ArchiveStageErrorKind {
     InvalidArchive(String),
     Io {
         operation: &'static str,
@@ -476,30 +482,70 @@ pub enum ArchiveStageError {
     },
 }
 
+#[derive(Debug)]
+pub struct ArchiveStageError {
+    kind: ArchiveStageErrorKind,
+    preserved_paths: Vec<PathBuf>,
+}
+
 impl ArchiveStageError {
     fn invalid(message: impl Into<String>) -> Self {
-        Self::InvalidArchive(message.into())
+        Self {
+            kind: ArchiveStageErrorKind::InvalidArchive(message.into()),
+            preserved_paths: Vec::new(),
+        }
     }
 
     fn io(operation: &'static str, source: io::Error) -> Self {
-        Self::Io { operation, source }
+        Self {
+            kind: ArchiveStageErrorKind::Io { operation, source },
+            preserved_paths: Vec::new(),
+        }
+    }
+
+    fn with_preserved_path(self, path: PathBuf) -> Self {
+        self.with_preserved_paths(vec![path])
+    }
+
+    fn with_preserved_paths(mut self, mut paths: Vec<PathBuf>) -> Self {
+        paths.sort();
+        paths.dedup();
+        self.preserved_paths = paths;
+        self
+    }
+
+    pub fn preserved_paths(&self) -> &[PathBuf] {
+        &self.preserved_paths
     }
 }
 
 impl fmt::Display for ArchiveStageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidArchive(message) => formatter.write_str(message),
-            Self::Io { operation, source } => write!(formatter, "{operation} failed: {source}"),
+        match &self.kind {
+            ArchiveStageErrorKind::InvalidArchive(message) => formatter.write_str(message)?,
+            ArchiveStageErrorKind::Io { operation, source } => {
+                write!(formatter, "{operation} failed: {source}")?;
+            }
         }
+        if !self.preserved_paths.is_empty() {
+            formatter.write_str("; preserved update artifact(s) at ")?;
+            for (index, path) in self.preserved_paths.iter().enumerate() {
+                if index != 0 {
+                    formatter.write_str(", ")?;
+                }
+                write!(formatter, "{}", path.display())?;
+            }
+            formatter.write_str("; requires recovery cleanup")?;
+        }
+        Ok(())
     }
 }
 
 impl Error for ArchiveStageError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::InvalidArchive(_) => None,
-            Self::Io { source, .. } => Some(source),
+        match &self.kind {
+            ArchiveStageErrorKind::InvalidArchive(_) => None,
+            ArchiveStageErrorKind::Io { source, .. } => Some(source),
         }
     }
 }

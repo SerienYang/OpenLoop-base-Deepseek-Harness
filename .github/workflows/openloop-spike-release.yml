@@ -80,9 +80,15 @@ jobs:
             || { echo "release_notes must be non-empty" >&2; exit 1; }
           test -n "$OPENLOOP_UPDATER_PUBLIC_KEY" \
             || { echo "OPENLOOP_UPDATER_PUBLIC_KEY must be configured" >&2; exit 1; }
-          REMOTE_TAG="$(git ls-remote --tags origin "refs/tags/${RELEASE_TAG}")"
-          test -z "$REMOTE_TAG" \
-            || { echo "immutable prerelease remote tag $RELEASE_TAG already exists" >&2; exit 1; }
+          REMOTE_TAG="$(git ls-remote --tags origin \
+            "refs/tags/${RELEASE_TAG}" "refs/tags/${RELEASE_TAG}^{}")"
+          REMOTE_TAG_SHA="$(awk '
+            $2 ~ /\^\{\}$/ { peeled = $1 }
+            $2 !~ /\^\{\}$/ { direct = $1 }
+            END { print peeled != "" ? peeled : direct }
+          ' <<<"$REMOTE_TAG")"
+          test -z "$REMOTE_TAG_SHA" || test "$REMOTE_TAG_SHA" = "$GITHUB_SHA" \
+            || { echo "immutable prerelease remote tag $RELEASE_TAG targets a different commit" >&2; exit 1; }
 
       - name: Install immutable dependencies
         run: pnpm install --frozen-lockfile
@@ -132,45 +138,6 @@ jobs:
           updater="apps/openloop-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Openloop.app.tar.gz"
           signature="apps/openloop-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Openloop.app.tar.gz.sig"
           dmg="apps/openloop-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Openloop_${APP_VERSION}_aarch64.dmg"
-          validate_draft() {
-            local release_json="$1"
-            test "$(jq -r '.isDraft' <<<"$release_json")" = true \
-              || { echo "published immutable prerelease $RELEASE_TAG cannot be overwritten" >&2; exit 1; }
-            test "$(jq -r '.targetCommitish' <<<"$release_json")" = "$GITHUB_SHA" \
-              || { echo "draft prerelease $RELEASE_TAG targets a different commit" >&2; exit 1; }
-          }
-
-          release_error="$(mktemp)"
-          trap 'rm -f "$release_error"' EXIT
-          set +e
-          release_json="$(gh release view "$RELEASE_TAG" --json isDraft,targetCommitish 2>"$release_error")"
-          release_status=$?
-          set -e
-          if test "$release_status" -eq 0; then
-            validate_draft "$release_json"
-          elif grep -Fqi "release not found" "$release_error"; then
-            gh release create "$RELEASE_TAG" \
-              --draft \
-              --target "$GITHUB_SHA" \
-              --title "OpenLoop test ${APP_VERSION}" \
-              --notes "$RELEASE_NOTES" \
-              --prerelease
-          else
-            cat "$release_error" >&2
-            exit "$release_status"
-          fi
-
-          gh release upload "$RELEASE_TAG" \
-            "$updater" \
-            "$signature" \
-            "$dmg" \
-            dist-openloop/openloop-core.json \
-            dist-openloop/openloop-artifacts.json \
-            dist-openloop/openloop-runtime-sbom-inputs.json \
-            --clobber
-
-          release_json="$(gh release view "$RELEASE_TAG" --json isDraft,targetCommitish,assets)"
-          validate_draft "$release_json"
           required_assets=(
             "$(basename "$updater")"
             "$(basename "$signature")"
@@ -179,12 +146,81 @@ jobs:
             openloop-artifacts.json
             openloop-runtime-sbom-inputs.json
           )
-          for asset in "${required_assets[@]}"; do
-            jq -e --arg asset "$asset" \
-              'any(.assets[]; .name == $asset)' <<<"$release_json" >/dev/null \
-              || { echo "draft prerelease $RELEASE_TAG is missing asset $asset" >&2; exit 1; }
-          done
-          gh release edit "$RELEASE_TAG" --draft=false
+          validate_release_metadata() {
+            local release_json="$1"
+            test "$(jq -r '.tagName' <<<"$release_json")" = "$RELEASE_TAG" \
+              || { echo "immutable release tag does not match $RELEASE_TAG" >&2; exit 1; }
+            test "$(jq -r '.targetCommitish' <<<"$release_json")" = "$GITHUB_SHA" \
+              || { echo "immutable prerelease $RELEASE_TAG targets a different commit" >&2; exit 1; }
+            test "$(jq -r '.isPrerelease' <<<"$release_json")" = true \
+              || { echo "immutable prerelease metadata does not match: release is not a prerelease" >&2; exit 1; }
+            test "$(jq -r '.name' <<<"$release_json")" = "OpenLoop test ${APP_VERSION}" \
+              || { echo "immutable prerelease metadata does not match requested version" >&2; exit 1; }
+            test "$(jq -r '.body' <<<"$release_json")" = "$RELEASE_NOTES" \
+              || { echo "immutable prerelease metadata does not match requested notes" >&2; exit 1; }
+          }
+          validate_required_assets() {
+            local release_json="$1"
+            local release_label="$2"
+            for asset in "${required_assets[@]}"; do
+              jq -e --arg asset "$asset" \
+                'any(.assets[]; .name == $asset)' <<<"$release_json" >/dev/null \
+                || { echo "$release_label $RELEASE_TAG is missing asset $asset" >&2; exit 1; }
+            done
+          }
+
+          release_error="$(mktemp)"
+          trap 'rm -f "$release_error"' EXIT
+          set +e
+          release_json="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease,tagName,targetCommitish,name,body,assets 2>"$release_error")"
+          release_status=$?
+          set -e
+          if test "$release_status" -eq 0; then
+            validate_release_metadata "$release_json"
+            if test "$(jq -r '.isDraft' <<<"$release_json")" = true; then
+              immutable_state=draft
+            else
+              validate_required_assets "$release_json" "published immutable prerelease"
+              immutable_state=published
+              echo "published immutable prerelease $RELEASE_TAG matches this run; resume rolling manifest publication"
+            fi
+          elif grep -Fqi "release not found" "$release_error"; then
+            test -z "$(git ls-remote --tags origin \
+              "refs/tags/${RELEASE_TAG}" "refs/tags/${RELEASE_TAG}^{}")" \
+              || { echo "immutable prerelease remote tag $RELEASE_TAG exists without a matching release" >&2; exit 1; }
+            gh release create "$RELEASE_TAG" \
+              --draft \
+              --target "$GITHUB_SHA" \
+              --title "OpenLoop test ${APP_VERSION}" \
+              --notes "$RELEASE_NOTES" \
+              --prerelease
+            release_json="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease,tagName,targetCommitish,name,body,assets)"
+            validate_release_metadata "$release_json"
+            test "$(jq -r '.isDraft' <<<"$release_json")" = true \
+              || { echo "new immutable prerelease $RELEASE_TAG is not a draft" >&2; exit 1; }
+            immutable_state=draft
+          else
+            cat "$release_error" >&2
+            exit "$release_status"
+          fi
+
+          if test "$immutable_state" = draft; then
+            gh release upload "$RELEASE_TAG" \
+              "$updater" \
+              "$signature" \
+              "$dmg" \
+              dist-openloop/openloop-core.json \
+              dist-openloop/openloop-artifacts.json \
+              dist-openloop/openloop-runtime-sbom-inputs.json \
+              --clobber
+
+            release_json="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease,tagName,targetCommitish,name,body,assets)"
+            validate_release_metadata "$release_json"
+            test "$(jq -r '.isDraft' <<<"$release_json")" = true \
+              || { echo "immutable prerelease $RELEASE_TAG was published before asset verification" >&2; exit 1; }
+            validate_required_assets "$release_json" "draft prerelease"
+            gh release edit "$RELEASE_TAG" --draft=false
+          fi
 
       - name: Publish deterministic rolling test manifest
         if: inputs.update_rolling_manifest
