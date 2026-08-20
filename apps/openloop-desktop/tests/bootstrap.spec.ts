@@ -14,6 +14,16 @@ const response: BootstrapResponse = {
   coreManifestSha256: 'a'.repeat(64),
 }
 
+function requestUrl(input: string | URL | Request): string {
+  if (typeof input === 'string') return input
+  return input instanceof URL ? input.href : input.url
+}
+
+function requestBody(body: BodyInit | null | undefined): string {
+  if (typeof body !== 'string') throw new TypeError('bootstrap request body must be a string')
+  return body
+}
+
 describe('Openloop Web bootstrap', () => {
   test('parses only the launch-bound fragment fields', () => {
     expect(parseBootstrapFragment('#bootstrap=secret-token&launch=launch-id')).toEqual({
@@ -27,11 +37,12 @@ describe('Openloop Web bootstrap', () => {
 
   test('exchanges the fragment through a POST body and clears the visible history', async () => {
     const fetcher = vi.fn<typeof fetch>(async (input, init) => {
-      expect(String(input)).toBe('/api/openloop/bootstrap')
-      expect(String(input)).not.toContain('secret-token')
+      const url = requestUrl(input)
+      expect(url).toBe('/api/openloop/bootstrap')
+      expect(url).not.toContain('secret-token')
       expect(init?.method).toBe('POST')
       expect(init?.headers).toEqual({ 'content-type': 'application/json' })
-      expect(String(init?.body)).toContain('secret-token')
+      expect(requestBody(init?.body)).toContain('secret-token')
       return new Response(JSON.stringify(response), {
         status: 200,
         headers: { 'content-type': 'application/json' },
@@ -66,7 +77,7 @@ describe('Openloop Web bootstrap', () => {
 
   test('refreshes without a fragment through the authenticated session cookie', async () => {
     const fetcher = vi.fn<typeof fetch>(async (input, init) => {
-      expect(String(input)).toBe('/api/openloop/bootstrap')
+      expect(requestUrl(input)).toBe('/api/openloop/bootstrap')
       expect(init?.method).toBe('GET')
       expect(init?.credentials).toBe('same-origin')
       return new Response(JSON.stringify(response), {

@@ -6,6 +6,43 @@ import { afterEach, describe, expect, it } from 'vitest'
 const roots: string[] = []
 const gateModulePath: string = './run-gate-tests.mjs'
 
+interface GateCommandResult {
+  readonly status: number | null
+  readonly stdout: string
+  readonly stderr: string
+}
+
+interface GateDependencies {
+  readonly root?: string
+  readonly now?: Date
+  readonly runCommand?: (
+    command: string,
+    args: string[],
+    options?: {
+      readonly cwd?: string
+      readonly env?: NodeJS.ProcessEnv
+    },
+  ) => GateCommandResult | Promise<GateCommandResult>
+}
+
+interface GateModule {
+  readonly parseGateArguments: (args: string[]) => Record<string, unknown>
+  readonly markerFingerprint: (marker: {
+    readonly kind: string
+    readonly callee: string
+    readonly source: string
+    readonly title: string
+  }) => string
+  readonly runGateTests: (
+    args: string[],
+    dependencies?: GateDependencies,
+  ) => Promise<void>
+}
+
+async function loadGateModule(): Promise<GateModule> {
+  return await import(gateModulePath) as GateModule
+}
+
 function fixtureRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'openloop-gate-'))
   roots.push(root)
@@ -35,7 +72,7 @@ afterEach(() => {
 
 describe('OpenLoop focused test gate', () => {
   it('parses every exact-target mode', async () => {
-    const { parseGateArguments } = await import(gateModulePath)
+    const { parseGateArguments } = await loadGateModule()
 
     expect(parseGateArguments(['vitest', '--files', 'a.spec.ts', 'b.spec.ts'])).toEqual({
       mode: 'vitest',
@@ -67,13 +104,13 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('accepts the separator forwarded by the root pnpm command', async () => {
-    const { parseGateArguments } = await import(gateModulePath)
+    const { parseGateArguments } = await loadGateModule()
 
     expect(parseGateArguments(['--', 'scan-repo'])).toEqual({ mode: 'scan-repo' })
   })
 
   it('runs exact Vitest files and requires a nonzero executed count', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     write(root, 'scripts/openloop/a.spec.ts', "it('a', () => {})\n")
     write(root, 'scripts/openloop/b.spec.ts', "it('b', () => {})\n")
@@ -110,7 +147,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('lists a Cargo target before running it', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     write(root, 'native/app/Cargo.toml', '[package]\nname = "openloop"\nversion = "0.1.0"\n')
     const commands: string[][] = []
@@ -146,7 +183,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('rejects a nonexistent exact Cargo test target', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     write(root, 'native/app/Cargo.toml', '[package]\nname = "openloop"\nversion = "0.1.0"\n')
 
@@ -164,7 +201,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('rejects a Cargo target that discovers zero tests', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     write(root, 'native/app/Cargo.toml', '[package]\nname = "openloop"\nversion = "0.1.0"\n')
 
@@ -182,7 +219,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('rejects an all-skipped Cargo result', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     write(root, 'native/app/Cargo.toml', '[package]\nname = "openloop"\nversion = "0.1.0"\n')
     let invocation = 0
@@ -208,7 +245,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('passes the exact binary to WDIO and rejects a missing binary', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     write(root, 'wdio.conf.ts', 'export const config = {}\n')
     write(root, 'tests/window.e2e.ts', "describe('window', () => {})\n")
@@ -251,7 +288,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('rejects a nonexistent exact Vitest file before invoking the runner', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
 
     await expect(runGateTests(
@@ -266,7 +303,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('rejects a test target that resolves outside the repository through a symlink', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     const outside = outsideFixtureRoot()
     write(outside, 'suite.spec.ts', "it('outside', () => {})\n")
@@ -286,7 +323,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('rejects a Cargo manifest that resolves outside the repository through a symlink', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     const outside = outsideFixtureRoot()
     write(outside, 'Cargo.toml', '[package]\nname = "outside"\nversion = "0.1.0"\n')
@@ -306,7 +343,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('rejects a WDIO config that resolves outside the repository through a symlink', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     const outside = outsideFixtureRoot()
     write(outside, 'wdio.conf.ts', 'export const config = {}\n')
@@ -330,7 +367,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('rejects a WDIO binary that resolves outside the repository through a symlink', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     const outside = outsideFixtureRoot()
     write(outside, 'openloop', 'binary')
@@ -354,7 +391,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('rejects zero discovered Vitest tests', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     write(root, 'scripts/openloop/empty.spec.ts', 'export {}\n')
 
@@ -372,7 +409,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('rejects an all-skipped Vitest result', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     write(root, 'scripts/openloop/platform.spec.ts', "it('platform', () => {})\n")
 
@@ -390,9 +427,9 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('performs a repository-wide focused-marker scan in every mode', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
-    write(root, 'packages/core/example/tests/example.spec.ts', `it${'.only'}('focused', () => {})\n`)
+    write(root, 'packages/core/example/tests/example.spec.ts', "it.only('focused', () => {})\n")
 
     await expect(runGateTests(['scan-repo'], {
       root,
@@ -403,7 +440,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('ignores focused and skip marker text in strings, templates, and comments', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     const testPath = 'packages/core/example/tests/example.spec.ts'
     write(root, testPath, [
@@ -428,7 +465,7 @@ describe('OpenLoop focused test gate', () => {
     ["const spec = test\nspec.only('focused', () => {})", 2],
     ["import { test as check } from 'vitest'\ncheck['only']('focused', () => {})", 2],
   ])('rejects focused call expression %s', async (source, line) => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     const testPath = 'packages/core/example/tests/example.spec.ts'
     write(root, testPath, `${source}\n`)
@@ -465,7 +502,7 @@ describe('OpenLoop focused test gate', () => {
     line,
     message,
   ) => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     const testPath = 'packages/core/example/tests/aliased.spec.ts'
     write(root, testPath, `${source}\n`)
@@ -475,7 +512,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('ignores marker-like calls not rooted in a recognized test API', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     const testPath = 'packages/core/example/tests/helpers.spec.ts'
     write(root, testPath, [
@@ -499,7 +536,7 @@ describe('OpenLoop focused test gate', () => {
     'test.skip(platformTitle, () => {})',
     'test.todo(`platform ${target}`)',
   ])('rejects unlisted skip call expression %s', async (source) => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     const testPath = 'packages/core/example/tests/platform.spec.ts'
     write(root, testPath, `${source}\n`)
@@ -509,7 +546,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('ignores conditional skips, runtime skips, and skip text in fixtures', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     write(root, 'packages/core/example/tests/platform.spec.ts', [
       "describe.skipIf(process.platform === 'win32')('platform', () => {})",
@@ -522,7 +559,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('requires a matching marker fingerprint and rejects same-line replacements', async () => {
-    const { markerFingerprint, runGateTests } = await import(gateModulePath)
+    const { markerFingerprint, runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     const testPath = 'scripts/openloop/platform.spec.ts'
     const source = "it.skip('platform', () => {})"
@@ -601,7 +638,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('matches distinct same-line skips by file, line, and fingerprint', async () => {
-    const { markerFingerprint, runGateTests } = await import(gateModulePath)
+    const { markerFingerprint, runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     const testPath = 'scripts/openloop/same-line.spec.ts'
     const first = "it.skip('first', () => {})"
@@ -643,10 +680,10 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('rejects unlisted or expired skips and accepts complete future entries', async () => {
-    const { markerFingerprint, runGateTests } = await import(gateModulePath)
+    const { markerFingerprint, runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     const testPath = 'scripts/openloop/platform.spec.ts'
-    const source = `it${'.skip'}('platform', () => {})`
+    const source = "it.skip('platform', () => {})"
     const fingerprint = markerFingerprint({
       kind: 'skip',
       callee: 'it.skip',
@@ -705,7 +742,7 @@ describe('OpenLoop focused test gate', () => {
     "it['skip'].each([1])('platform', () => {})",
     "test.todo('platform')",
   ])('accepts allowlisted skip call expression %s', async (source) => {
-    const { markerFingerprint, runGateTests } = await import(gateModulePath)
+    const { markerFingerprint, runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     const testPath = 'scripts/openloop/platform.spec.ts'
     write(root, testPath, `${source}\n`)
@@ -735,10 +772,10 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('rejects an impossible ISO calendar expiry', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     const testPath = 'scripts/openloop/platform.spec.ts'
-    write(root, testPath, `it${'.skip'}('platform', () => {})\n`)
+    write(root, testPath, "it.skip('platform', () => {})\n")
     write(root, 'scripts/openloop/test-skip-allowlist.json', JSON.stringify({
       version: 1,
       skips: [{
@@ -760,7 +797,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('rejects a nonexistent exact Playwright file before invoking the runner', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
 
     await expect(runGateTests(['playwright', '--file', 'tests/missing.spec.ts'], {
@@ -772,7 +809,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('rejects a nonexistent exact WDIO file before invoking the runner', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     write(root, 'wdio.conf.ts', 'export const config = {}\n')
     write(root, 'target/openloop', 'binary')
@@ -791,7 +828,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('rejects an all-skipped Playwright result', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     write(root, 'tests/app.spec.ts', "test('app', () => {})\n")
 
@@ -808,7 +845,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('rejects an all-skipped WDIO result', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     write(root, 'wdio.conf.ts', 'export const config = {}\n')
     write(root, 'target/openloop', 'binary')
@@ -830,7 +867,7 @@ describe('OpenLoop focused test gate', () => {
   })
 
   it('validates both Playwright and WDIO zero-execution summaries', async () => {
-    const { runGateTests } = await import(gateModulePath)
+    const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     write(root, 'tests/app.spec.ts', "test('app', () => {})\n")
     write(root, 'wdio.conf.ts', 'export const config = {}\n')

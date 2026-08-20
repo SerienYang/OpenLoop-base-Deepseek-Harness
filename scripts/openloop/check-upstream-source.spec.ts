@@ -125,6 +125,11 @@ function markerFor(
   return `<!-- openloop-upstream-radar:issue-key=upstream-radar:v1:${sourceType}:${encodeURIComponent(sourceRef)}:${commit} -->`
 }
 
+function requestUrl(input: string | URL | Request): string {
+  if (typeof input === 'string') return input
+  return input instanceof URL ? input.href : input.url
+}
+
 async function radar(): Promise<RadarModule> {
   return await import(radarModulePath) as RadarModule
 }
@@ -528,7 +533,7 @@ describe('read-only GitHub API handling', () => {
     const marker = markerFor()
     const urls: string[] = []
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
-      const url = String(input)
+      const url = requestUrl(input)
       urls.push(url)
       if (url.includes('/releases?')) {
         return Response.json([release()])
@@ -575,7 +580,7 @@ describe('read-only GitHub API handling', () => {
       body: null,
     }))
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
-      const url = String(input)
+      const url = requestUrl(input)
       if (url.includes('/releases?')) return Response.json([release()])
       if (url.includes('/tags?')) return Response.json([tag()])
       if (url.endsWith('/commits/master')) {
@@ -606,7 +611,7 @@ describe('read-only GitHub API handling', () => {
       body: null,
     }))
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
-      const url = String(input)
+      const url = requestUrl(input)
       if (url.includes('/releases?')) return Response.json([release()])
       if (url.includes('/tags?')) return Response.json([tag()])
       if (url.endsWith('/commits/master')) {
@@ -627,7 +632,7 @@ describe('read-only GitHub API handling', () => {
     const { loadLiveRadarInput } = await radar()
     const marker = markerFor()
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
-      const url = String(input)
+      const url = requestUrl(input)
       if (url.includes('/releases?')) return Response.json([release()])
       if (url.includes('/tags?')) return Response.json([tag()])
       if (url.endsWith('/commits/master')) {
@@ -693,7 +698,7 @@ describe('read-only GitHub API handling', () => {
 describe('live dry-run CLI', () => {
   function liveFetch(issues: Record<string, unknown>[]): typeof fetch {
     return vi.fn(async (input: string | URL | Request) => {
-      const url = String(input)
+      const url = requestUrl(input)
       if (url.includes('/releases?')) return Response.json([release()])
       if (url.includes('/tags?')) return Response.json([tag()])
       if (url.endsWith('/commits/master')) {
@@ -703,7 +708,7 @@ describe('live dry-run CLI', () => {
         return Response.json(issues)
       }
       throw new Error(`unexpected URL ${url}`)
-    }) as typeof fetch
+    })
   }
 
   it('reports update-existing and matching Markdown when one marker exists', async () => {

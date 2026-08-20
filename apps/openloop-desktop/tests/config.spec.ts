@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
-import fs from 'node:fs'
-import path from 'node:path'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
 import ts from 'typescript'
 import { parse as parseToml } from 'smol-toml'
 import { describe, expect, test } from 'vitest'
@@ -45,9 +45,20 @@ function stringRecord(value: unknown, label: string): Record<string, string> {
 }
 
 function stringArray(value: unknown, label: string): readonly string[] {
-  if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) {
-    throw new TypeError(`${label} must be an array of strings`)
+  if (!Array.isArray(value)) throw new TypeError(`${label} must be an array of strings`)
+  const items: unknown[] = value
+  const strings: string[] = []
+  for (const item of items) {
+    if (typeof item !== 'string') {
+      throw new TypeError(`${label} must be an array of strings`)
+    }
+    strings.push(item)
   }
+  return strings
+}
+
+function requiredValue<T>(value: T | undefined, label: string): T {
+  if (value === undefined) throw new TypeError(`${label} is required`)
   return value
 }
 
@@ -58,14 +69,14 @@ function rustVersion(value: unknown, label: string): RustVersion {
   const match = /^(\d+)\.(\d+)(?:\.(\d+))?$/u.exec(value)
   if (match === null) throw new TypeError(`${label} must be a Rust version`)
   return [
-    Number.parseInt(match[1], 10),
-    Number.parseInt(match[2], 10),
+    Number.parseInt(requiredValue(match[1], `${label} major version`), 10),
+    Number.parseInt(requiredValue(match[2], `${label} minor version`), 10),
     Number.parseInt(match[3] ?? '0', 10),
   ]
 }
 
 function compareRustVersions(left: RustVersion, right: RustVersion): number {
-  for (let index = 0; index < left.length; index += 1) {
+  for (const index of [0, 1, 2] as const) {
     const difference = left[index] - right[index]
     if (difference !== 0) return difference
   }
@@ -103,7 +114,7 @@ function commandNamesFromBuildScript(source: string): readonly string[] {
   const calls = [...source.matchAll(/\.commands\s*\(\s*&\s*\[([\s\S]*?)\]\s*\)/gu)]
   if (calls.length !== 1) return []
   return [...(calls[0]?.[1] ?? '').matchAll(/"([a-z][a-z0-9_]*)"/gu)]
-    .map(match => match[1] as string)
+    .map((match, index) => requiredValue(match[1], `build command ${index}`))
 }
 
 function embeddedManifestPath(source: string): string | undefined {
@@ -116,7 +127,7 @@ function embeddedManifestPath(source: string): string | undefined {
 function tauriCommandNames(source: string): readonly string[] {
   return [...source.matchAll(
     /#\s*\[\s*tauri::command\s*\]\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+([a-z][a-z0-9_]*)\s*\(/gu,
-  )].map(match => match[1] as string)
+  )].map((match, index) => requiredValue(match[1], `Tauri command ${index}`))
 }
 
 function invokeHandlerCommands(source: string): readonly string[] {
@@ -131,11 +142,18 @@ function invokeHandlerCommands(source: string): readonly string[] {
 function rustStructFields(source: string, name: string): Record<string, string> {
   const match = new RegExp(`struct\\s+${name}\\s*\\{([\\s\\S]*?)\\}`, 'u').exec(source)
   if (match?.[1] === undefined) return {}
-  return Object.fromEntries(
-    [...match[1].matchAll(
-      /(?:pub(?:\([^)]*\))?\s+)?([a-z][a-z0-9_]*)\s*:\s*([A-Za-z][A-Za-z0-9_:<>]*)\s*,/gu,
-    )].map(field => [field[1], field[2]]),
-  )
+  const fields: Record<string, string> = {}
+  for (const field of match[1].matchAll(
+    /(?:pub(?:\([^)]*\))?\s+)?([a-z][a-z0-9_]*)\s*:\s*([A-Za-z][A-Za-z0-9_:<>]*)\s*,/gu,
+  )) {
+    const fieldName = field[1]
+    const fieldType = field[2]
+    if (fieldName === undefined || fieldType === undefined) {
+      throw new TypeError(`${name} contains an invalid Rust field`)
+    }
+    fields[fieldName] = fieldType
+  }
+  return fields
 }
 
 function interfaceFields(relativePath: string, interfaceName: string): Record<string, string> {
@@ -172,12 +190,14 @@ function findBaselineUrl(relativePath: string): string | undefined {
   )
   let baselineUrl: string | undefined
   const visit = (node: ts.Node): void => {
+    const firstArgument = ts.isNewExpression(node) ? node.arguments?.[0] : undefined
     if (ts.isNewExpression(node)
       && ts.isIdentifier(node.expression)
       && node.expression.text === 'URL'
       && node.arguments?.length === 2
-      && ts.isStringLiteral(node.arguments[0])) {
-      const candidate = node.arguments[0].text
+      && firstArgument !== undefined
+      && ts.isStringLiteral(firstArgument)) {
+      const candidate = firstArgument.text
       if (candidate.endsWith('upstream-baseline.json')) baselineUrl = candidate
     }
     ts.forEachChild(node, visit)
@@ -196,9 +216,18 @@ describe('Openloop desktop foundation configuration', () => {
       'package.json devDependencies',
     )
     const manifestArgs = scriptArguments(scripts['manifest:test'] ?? '')
-    const channel = manifestArgs[manifestArgs.indexOf('--channel') + 1]
-    const output = manifestArgs[manifestArgs.indexOf('--out') + 1]
-    const appVersion = manifestArgs[manifestArgs.indexOf('--app-version') + 1]
+    const channel = requiredValue(
+      manifestArgs[manifestArgs.indexOf('--channel') + 1],
+      'manifest channel',
+    )
+    const output = requiredValue(
+      manifestArgs[manifestArgs.indexOf('--out') + 1],
+      'manifest output',
+    )
+    const appVersion = requiredValue(
+      manifestArgs[manifestArgs.indexOf('--app-version') + 1],
+      'manifest app version',
+    )
 
     expect(packageJson).toMatchObject({
       name: '@openloop/desktop',
@@ -227,7 +256,7 @@ describe('Openloop desktop foundation configuration', () => {
     ])
     expect(channel).toBe('test')
     expect(output).toBe('../../dist-openloop/openloop-core.json')
-    expect(path.resolve(appRoot, output as string)).toBe(
+    expect(path.resolve(appRoot, output)).toBe(
       path.join(repositoryRoot, 'dist-openloop/openloop-core.json'),
     )
     expect(appVersion).toBe(packageJson.version)
@@ -239,11 +268,14 @@ describe('Openloop desktop foundation configuration', () => {
       typescript: '6.0.3',
       vite: '8.0.16',
     })
-    expect(scriptArguments(scripts.tauri)).toEqual(['tauri'])
-    expect(scriptArguments(scripts['frontend:dev'])).toEqual(['vite'])
-    expect(scriptArguments(scripts['frontend:build'])).toEqual(['tsc', '&&', 'vite', 'build'])
-    expect(scriptArguments(scripts.dev)).toEqual(['pnpm', 'manifest:test', '&&', 'tauri', 'dev'])
-    expect(scriptArguments(scripts.build)).toEqual([
+    expect(scriptArguments(requiredValue(scripts.tauri, 'tauri script'))).toEqual(['tauri'])
+    expect(scriptArguments(requiredValue(scripts['frontend:dev'], 'frontend:dev script')))
+      .toEqual(['vite'])
+    expect(scriptArguments(requiredValue(scripts['frontend:build'], 'frontend:build script')))
+      .toEqual(['tsc', '&&', 'vite', 'build'])
+    expect(scriptArguments(requiredValue(scripts.dev, 'dev script')))
+      .toEqual(['pnpm', 'manifest:test', '&&', 'tauri', 'dev'])
+    expect(scriptArguments(requiredValue(scripts.build, 'build script'))).toEqual([
       'pnpm',
       '--dir',
       '../..',
@@ -256,7 +288,7 @@ describe('Openloop desktop foundation configuration', () => {
       '--bundle',
       'app',
     ])
-    expect(scriptArguments(scripts.icon)).toEqual([
+    expect(scriptArguments(requiredValue(scripts.icon, 'icon script'))).toEqual([
       'tauri',
       'icon',
       '../../assets/brand/openloop-icon.svg',
@@ -300,11 +332,12 @@ describe('Openloop desktop foundation configuration', () => {
       'Cargo.toml',
     )
     const cargoPackage = record(cargo.package, 'Cargo.toml package')
-    const metadata = record(JSON.parse(execFileSync(
+    const metadataValue: unknown = JSON.parse(execFileSync(
       'cargo',
       ['metadata', '--locked', '--format-version', '1'],
       { cwd: tauriRoot, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
-    )), 'cargo metadata')
+    ))
+    const metadata = record(metadataValue, 'cargo metadata')
     if (!Array.isArray(metadata.packages)) {
       throw new TypeError('cargo metadata packages must be an array')
     }
@@ -331,7 +364,10 @@ describe('Openloop desktop foundation configuration', () => {
     const packageJson = readJson('apps/openloop-desktop/package.json')
     const scripts = stringRecord(packageJson.scripts, 'package.json scripts')
     const manifestArgs = scriptArguments(scripts['manifest:test'] ?? '')
-    const channel = manifestArgs[manifestArgs.indexOf('--channel') + 1] as string
+    const channel = requiredValue(
+      manifestArgs[manifestArgs.indexOf('--channel') + 1],
+      'manifest channel',
+    )
     const config = readJson('apps/openloop-desktop/src-tauri/tauri.conf.json')
     const build = record(config.build, 'tauri build config')
     const app = record(config.app, 'tauri app config')
@@ -396,11 +432,12 @@ describe('Openloop desktop foundation configuration', () => {
     const entitlementsPath = requiredFile(
       'apps/openloop-desktop/src-tauri/Entitlements.plist',
     )
-    const entitlements = JSON.parse(execFileSync(
+    const entitlementsValue: unknown = JSON.parse(execFileSync(
       'plutil',
       ['-convert', 'json', '-o', '-', entitlementsPath],
       { encoding: 'utf8' },
-    )) as Record<string, unknown>
+    ))
+    const entitlements = record(entitlementsValue, 'macOS entitlements')
 
     expect(entitlements).toEqual({
       'com.apple.security.cs.allow-jit': true,

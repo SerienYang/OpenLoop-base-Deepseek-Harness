@@ -68,7 +68,11 @@ async function readBody(request: IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = []
   let total = 0
   for await (const chunk of request) {
-    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    const value: unknown = chunk
+    if (typeof value !== 'string' && !(value instanceof Uint8Array)) {
+      throw new TypeError('bootstrap request body contains an invalid chunk')
+    }
+    const bytes = Buffer.from(value)
     total += bytes.length
     if (total > MAX_REQUEST_BYTES) throw new Error('bootstrap request is oversized')
     chunks.push(bytes)

@@ -17,6 +17,23 @@ import { afterEach, describe, expect, it } from 'vitest'
 const roots: string[] = []
 const scaffoldModulePath: string = './scaffold-package.mjs'
 
+interface ScaffoldModule {
+  readonly parseScaffoldArguments: (args: string[]) => Record<string, unknown>
+  readonly scaffoldPackage: (
+    options: {
+      readonly root: string
+      readonly name: string
+      readonly face: 'host' | 'client' | 'pure'
+      readonly clientBundle?: boolean
+      readonly bundleRow?: string
+      readonly service?: string
+    },
+    dependencies?: {
+      readonly rename?: (source: string, destination: string) => void
+    },
+  ) => string
+}
+
 interface JsonFixture {
   readonly [key: string]: unknown
   readonly references?: ReadonlyArray<{ readonly path?: string }>
@@ -64,6 +81,10 @@ function readJson(path: string): JsonFixture {
   return JSON.parse(readFileSync(path, 'utf8')) as JsonFixture
 }
 
+async function loadScaffoldModule(): Promise<ScaffoldModule> {
+  return await import(scaffoldModulePath) as ScaffoldModule
+}
+
 function snapshotTree(root: string): Record<string, string> {
   const snapshot: Record<string, string> = {}
 
@@ -102,7 +123,7 @@ afterEach(() => {
 
 describe('OpenLoop package scaffolder', () => {
   it('parses the complete CLI interface', async () => {
-    const { parseScaffoldArguments } = await import(scaffoldModulePath)
+    const { parseScaffoldArguments } = await loadScaffoldModule()
 
     expect(parseScaffoldArguments([
       '--name', 'workbench',
@@ -120,7 +141,7 @@ describe('OpenLoop package scaffolder', () => {
   })
 
   it('accepts the leading separator forwarded by the root pnpm command', async () => {
-    const { parseScaffoldArguments } = await import(scaffoldModulePath)
+    const { parseScaffoldArguments } = await loadScaffoldModule()
 
     expect(parseScaffoldArguments([
       '--',
@@ -134,7 +155,7 @@ describe('OpenLoop package scaffolder', () => {
   })
 
   it('creates a package in an absent directory with one host aggregate reference', async () => {
-    const { scaffoldPackage } = await import(scaffoldModulePath)
+    const { scaffoldPackage } = await loadScaffoldModule()
     const root = fixtureRoot()
 
     scaffoldPackage({ root, name: 'window-state', face: 'host' })
@@ -160,7 +181,7 @@ describe('OpenLoop package scaffolder', () => {
   })
 
   it('accepts a relative repository root', async () => {
-    const { scaffoldPackage } = await import(scaffoldModulePath)
+    const { scaffoldPackage } = await loadScaffoldModule()
     const absoluteRoot = fixtureRoot()
     const root = relative(process.cwd(), absoluteRoot)
 
@@ -172,7 +193,7 @@ describe('OpenLoop package scaffolder', () => {
   })
 
   it('updates JSONC compiler aggregates used by the repository', async () => {
-    const { scaffoldPackage } = await import(scaffoldModulePath)
+    const { scaffoldPackage } = await loadScaffoldModule()
     const root = fixtureRoot()
     writeFileSync(join(root, 'tsconfig.host.json'), `{
   // Host aggregate.
@@ -189,7 +210,7 @@ describe('OpenLoop package scaffolder', () => {
   })
 
   it('treats a client bundle as a Cordis plugin without requiring a service', async () => {
-    const { scaffoldPackage } = await import(scaffoldModulePath)
+    const { scaffoldPackage } = await loadScaffoldModule()
     const root = fixtureRoot()
 
     scaffoldPackage({
@@ -228,15 +249,12 @@ describe('OpenLoop package scaffolder', () => {
     expect(readFileSync(join(directory, 'tsdown.config.ts'), 'utf8')).toContain(
       "clientBundle('@openloop/window-client', ['lib/types/index.js'])",
     )
-    await expect(loadCordisPlugin(join(directory, 'src/client/index.ts'))).resolves.toMatchObject({
-      plugin: {
-        apply: expect.any(Function),
-      },
-    })
+    const loaded = await loadCordisPlugin(join(directory, 'src/client/index.ts'))
+    expect(typeof loaded.plugin.apply).toBe('function')
   })
 
   it('preserves a tests-only directory and generates optional client and bundle wiring', async () => {
-    const { scaffoldPackage } = await import(scaffoldModulePath)
+    const { scaffoldPackage } = await loadScaffoldModule()
     const root = fixtureRoot()
     const directory = join(root, 'packages/openloop/workbench')
     mkdirSync(join(directory, 'tests'), { recursive: true })
@@ -287,7 +305,7 @@ describe('OpenLoop package scaffolder', () => {
   })
 
   it('generates a loadable namespace plugin for a bundle row without a service', async () => {
-    const { scaffoldPackage } = await import(scaffoldModulePath)
+    const { scaffoldPackage } = await loadScaffoldModule()
     const root = fixtureRoot()
     const bundleDirectory = join(root, 'packages/openloop/desktop')
     writeJson(join(bundleDirectory, 'package.json'), {
@@ -307,17 +325,15 @@ describe('OpenLoop package scaffolder', () => {
     const loaded = await loadCordisPlugin(
       join(root, 'packages/openloop/window-state/src/index.ts'),
     )
-    expect(loaded.plugin).toMatchObject({
-      name: 'window-state',
-      apply: expect.any(Function),
-    })
+    expect(loaded.plugin.name).toBe('window-state')
+    expect(typeof loaded.plugin.apply).toBe('function')
     expect(load(readFileSync(join(bundleDirectory, 'cordis.patch.yml'), 'utf8'))).toEqual([
       { insert: [{ id: 'window-state', name: '@openloop/window-state' }] },
     ])
   })
 
   it('restores the exact pre-state after a late transaction failure and reruns cleanly', async () => {
-    const { scaffoldPackage } = await import(scaffoldModulePath)
+    const { scaffoldPackage } = await loadScaffoldModule()
     const root = fixtureRoot()
     const directory = join(root, 'packages/openloop/workbench')
     mkdirSync(join(directory, 'tests'), { recursive: true })
@@ -376,7 +392,7 @@ describe('OpenLoop package scaffolder', () => {
     'README.md',
     'tsconfig.json',
   ])('refuses to overwrite owned path %s', async (ownedPath) => {
-    const { scaffoldPackage } = await import(scaffoldModulePath)
+    const { scaffoldPackage } = await loadScaffoldModule()
     const root = fixtureRoot()
     const directory = join(root, 'packages/openloop/existing')
     const path = join(directory, ownedPath)
@@ -391,7 +407,7 @@ describe('OpenLoop package scaffolder', () => {
   })
 
   it('refuses duplicate bundle rows before creating package files', async () => {
-    const { scaffoldPackage } = await import(scaffoldModulePath)
+    const { scaffoldPackage } = await loadScaffoldModule()
     const root = fixtureRoot()
     const bundleDirectory = join(root, 'packages/openloop/desktop')
     writeJson(join(bundleDirectory, 'package.json'), {

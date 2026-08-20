@@ -246,10 +246,10 @@ describe('OpenLoop profile atomic publication', () => {
 
     expect(state.quarantinePaths).toHaveLength(1)
     const quarantinePath = state.quarantinePaths[0]!
-    expect(failure).toEqual(expect.objectContaining({
-      message: expect.stringContaining(patchPath),
-    }))
-    expect((failure as Error).message).toContain(quarantinePath)
+    expect(failure).toBeInstanceOf(Error)
+    if (!(failure instanceof Error)) throw new TypeError('profile publication must fail')
+    expect(failure.message).toContain(patchPath)
+    expect(failure.message).toContain(quarantinePath)
     expect(readFileSync(patchPath, 'utf8')).toBe('# concurrent path occupant\n')
     expect(readFileSync(quarantinePath, 'utf8')).toBe('# user file held in quarantine\n')
   })
