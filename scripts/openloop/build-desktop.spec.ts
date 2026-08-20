@@ -34,6 +34,31 @@ interface ArtifactGeneratorModule {
   ) => { readonly bytes: string }
 }
 
+interface DesktopModule {
+  readonly parseDesktopBuildArguments: (args: string[]) => Record<string, string>
+  readonly DesktopBuilder: new (dependencies: Record<string, unknown>) => {
+    readonly build: () => Promise<void>
+  }
+  readonly nodeFileSystem: {
+    readonly cleanDist: (...args: readonly unknown[]) => Promise<void>
+    readonly generateBundleGraph: (...args: readonly unknown[]) => Promise<void>
+    readonly verify: (...args: readonly unknown[]) => Promise<void>
+  }
+  readonly createProcessRunner: (...args: readonly unknown[]) => {
+    readonly run: (...args: readonly unknown[]) => Promise<{
+      readonly stdout: string
+      readonly stderr: string
+    }>
+  }
+  readonly verifyDesktopBuild: (
+    context: Record<string, unknown>,
+    runner: Record<string, unknown>,
+  ) => Promise<void>
+  readonly createDesktopBuilder: (options?: Record<string, unknown>) => {
+    readonly dependencies: Record<string, unknown>
+  }
+}
+
 function temporaryRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'openloop-desktop-builder-'))
   temporaryRoots.push(root)
@@ -50,7 +75,7 @@ describe('Openloop desktop build orchestrator', () => {
   it.each(['none', 'app', 'dmg', 'all'] as const)(
     'parses the single supported target with %s bundles',
     async (bundle) => {
-      const { parseDesktopBuildArguments } = await import(modulePath)
+      const { parseDesktopBuildArguments } = await import(modulePath) as DesktopModule
 
       expect(parseDesktopBuildArguments([
         '--channel',
@@ -75,13 +100,13 @@ describe('Openloop desktop build orchestrator', () => {
     [['--channel', 'test', '--target', 'x86_64-apple-darwin', '--bundle', 'app'], /target.*aarch64/u],
     [['--channel', 'test', '--target', 'aarch64-apple-darwin', '--bundle', 'pkg'], /bundle.*none.*app.*dmg.*all/u],
   ] as const)('rejects ambiguous or unsupported arguments %#', async (args, error) => {
-    const { parseDesktopBuildArguments } = await import(modulePath)
+    const { parseDesktopBuildArguments } = await import(modulePath) as DesktopModule
 
     expect(() => parseDesktopBuildArguments([...args])).toThrow(error)
   })
 
   it('runs the eight desktop build stages in strict order', async () => {
-    const { DesktopBuilder } = await import(modulePath)
+    const { DesktopBuilder } = await import(modulePath) as DesktopModule
     const events: string[] = []
     const runner = {
       run: async ({ command, args }: { command: string; args: string[] }) => {
@@ -161,7 +186,7 @@ describe('Openloop desktop build orchestrator', () => {
     expectedBundleArgs,
     expectedReleaseArtifacts,
   ) => {
-    const { DesktopBuilder } = await import(modulePath)
+    const { DesktopBuilder } = await import(modulePath) as DesktopModule
     const commands: Array<{ command: string; args: string[]; cwd: string }> = []
     const manifests: Array<Record<string, string>> = []
     const runner = {
@@ -235,7 +260,7 @@ describe('Openloop desktop build orchestrator', () => {
   })
 
   it('deletes only a git-ignored real dist-openloop directory', async () => {
-    const { nodeFileSystem } = await import(modulePath)
+    const { nodeFileSystem } = await import(modulePath) as DesktopModule
     const root = temporaryRoot()
     const dist = join(root, 'dist-openloop')
     const keep = join(root, 'keep')
@@ -304,7 +329,7 @@ describe('Openloop desktop build orchestrator', () => {
   })
 
   it('writes a canonical fixed-path Web bundle graph and rejects symlinks', async () => {
-    const { nodeFileSystem } = await import(modulePath)
+    const { nodeFileSystem } = await import(modulePath) as DesktopModule
     const root = temporaryRoot()
     const web = join(root, 'apps/web/dist')
     const graph = join(root, 'dist-openloop/openloop-web-bundle-graph.json')
@@ -355,7 +380,7 @@ describe('Openloop desktop build orchestrator', () => {
   })
 
   it('spawns subprocesses with argv and shell disabled', async () => {
-    const { createProcessRunner } = await import(modulePath)
+    const { createProcessRunner } = await import(modulePath) as DesktopModule
     const calls: unknown[][] = []
     const spawn = (...args: unknown[]) => {
       calls.push(args)
@@ -394,7 +419,7 @@ describe('Openloop desktop build orchestrator', () => {
   })
 
   it('verifies final hashes, embedded base identity, App binaries, signatures, and health', async () => {
-    const { verifyDesktopBuild } = await import(modulePath)
+    const { verifyDesktopBuild } = await import(modulePath) as DesktopModule
     const { generateArtifactManifest } = await import(
       artifactGeneratorPath,
     ) as ArtifactGeneratorModule
@@ -452,6 +477,18 @@ describe('Openloop desktop build orchestrator', () => {
     }
     generateArtifactManifest({ ...baseInputs, app }, { trustedRoot: root })
     const coreSha256 = createHash('sha256').update(readFileSync(core)).digest('hex')
+    const validReadiness = {
+      type: 'openloop.runtime.ready',
+      version: 1,
+      profile: 'openloop',
+      host: '127.0.0.1',
+      port: 49152,
+      origin: 'http://127.0.0.1:49152',
+      coreManifestSha256: coreSha256,
+      healthSmoke: { method: 'GET', path: '/', status: 200 },
+    }
+    let readinessPayload: Record<string, unknown> = validReadiness
+    let healthSmokeStderr = ''
     const commands: Array<{ command: string; args: string[] }> = []
     const runner = {
       run: async (command: { command: string; args: string[] }) => {
@@ -468,17 +505,8 @@ describe('Openloop desktop build orchestrator', () => {
         }
         if (command.command === bundledSidecar) {
           return {
-            stdout: `${JSON.stringify({
-              type: 'openloop.runtime.ready',
-              version: 1,
-              profile: 'openloop',
-              host: '127.0.0.1',
-              port: 49152,
-              origin: 'http://127.0.0.1:49152',
-              coreManifestSha256: coreSha256,
-              healthSmoke: { method: 'GET', path: '/', status: 200 },
-            })}\n`,
-            stderr: '',
+            stdout: `${JSON.stringify(readinessPayload)}\n`,
+            stderr: healthSmokeStderr,
           }
         }
         return { stdout: '', stderr: '' }
@@ -510,6 +538,43 @@ describe('Openloop desktop build orchestrator', () => {
       args: ['--health-smoke'],
       capture: true,
     })
+
+    healthSmokeStderr = 'unexpected diagnostic\n'
+    await expect(verifyDesktopBuild(context, runner))
+      .rejects.toThrow(/stderr/iu)
+    healthSmokeStderr = ''
+
+    const invalidReadinessCases: Array<[string, Record<string, unknown>]> = [
+      ['missing type', Object.fromEntries(
+        Object.entries(validReadiness).filter(([key]) => key !== 'type'),
+      )],
+      ['extra field', { ...validReadiness, extra: true }],
+      ['wrong version', { ...validReadiness, version: 2 }],
+      ['wrong profile', { ...validReadiness, profile: 'dsh' }],
+      ['wrong host', { ...validReadiness, host: 'localhost' }],
+      ['port zero', { ...validReadiness, port: 0 }],
+      ['port unsafe', { ...validReadiness, port: Number.MAX_SAFE_INTEGER + 1 }],
+      ['port fractional', { ...validReadiness, port: 49152.5 }],
+      ['origin mismatch', { ...validReadiness, origin: 'http://127.0.0.1:49153' }],
+      ['hash mismatch', { ...validReadiness, coreManifestSha256: 'b'.repeat(64) }],
+      ['missing health smoke', Object.fromEntries(
+        Object.entries(validReadiness).filter(([key]) => key !== 'healthSmoke'),
+      )],
+      ['extra health smoke field', {
+        ...validReadiness,
+        healthSmoke: { ...validReadiness.healthSmoke as Record<string, unknown>, extra: true },
+      }],
+      ['wrong health smoke', {
+        ...validReadiness,
+        healthSmoke: { method: 'POST', path: '/', status: 200 },
+      }],
+    ]
+    for (const [label, payload] of invalidReadinessCases) {
+      readinessPayload = payload
+      await expect(verifyDesktopBuild(context, runner), label)
+        .rejects.toThrow(/readiness.*contract|port|origin|stderr/iu)
+    }
+    readinessPayload = validReadiness
 
     writeFileSync(runtimeSbom, '{"version":2}\n')
     await expect(verifyDesktopBuild(context, runner))
@@ -545,7 +610,7 @@ describe('Openloop desktop build orchestrator', () => {
       DesktopBuilder,
       nodeFileSystem,
       verifyDesktopBuild,
-    } = await import(modulePath)
+    } = await import(modulePath) as DesktopModule
     const runner = { run: async () => ({ stdout: '', stderr: '' }) }
     const builder = createDesktopBuilder({ root: '/repo', runner })
 

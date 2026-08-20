@@ -104,6 +104,81 @@ fn is_lower_hex(value: &str, length: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+fn is_semver_identifier_list(value: &str, allow_numeric_leading_zero: bool) -> bool {
+    !value.is_empty()
+        && value.split('.').all(|identifier| {
+            if identifier.is_empty()
+                || !identifier
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                return false;
+            }
+            if allow_numeric_leading_zero {
+                return true;
+            }
+            !identifier.bytes().all(|byte| byte.is_ascii_digit())
+                || identifier.len() == 1
+                || !identifier.starts_with('0')
+        })
+}
+
+fn is_semver(value: &str) -> bool {
+    let (without_build, build) = value
+        .split_once('+')
+        .map_or((value, None), |(core, metadata)| (core, Some(metadata)));
+    if let Some(metadata) = build {
+        if !is_semver_identifier_list(metadata, true) {
+            return false;
+        }
+    }
+
+    let (core, prerelease) = without_build
+        .split_once('-')
+        .map_or((without_build, None), |(core, suffix)| (core, Some(suffix)));
+    let core_parts: Vec<&str> = core.split('.').collect();
+    if core_parts.len() != 3
+        || core_parts.iter().any(|part| {
+            part.is_empty()
+                || !part.bytes().all(|byte| byte.is_ascii_digit())
+                || (part.len() > 1 && part.starts_with('0'))
+        })
+    {
+        return false;
+    }
+    if let Some(prerelease) = prerelease {
+        if !is_semver_identifier_list(prerelease, false) {
+            return false;
+        }
+        if prerelease.split('.').any(|identifier| {
+            identifier.bytes().all(|byte| byte.is_ascii_digit())
+                && identifier.len() > 1
+                && identifier.starts_with('0')
+        }) {
+            return false;
+        }
+        if prerelease.split('.').any(|identifier| {
+            !identifier.bytes().all(|byte| byte.is_ascii_digit())
+                && !identifier
+                    .bytes()
+                    .any(|byte| byte.is_ascii_alphabetic() || byte == b'-')
+        }) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_safe_positive_integer(value: u64) -> bool {
+    (1..=MAX_SAFE_INTEGER).contains(&value)
+}
+
+fn is_safe_nonnegative_integer(value: u64) -> bool {
+    value <= MAX_SAFE_INTEGER
+}
+
 fn validate_core(manifest: &CanonicalBuildManifest) -> Result<(), Box<dyn std::error::Error>> {
     if manifest.channel != "test" && manifest.channel != "stable" {
         return Err(invalid_data("Openloop core manifest channel must be test or stable").into());
@@ -114,12 +189,14 @@ fn validate_core(manifest: &CanonicalBuildManifest) -> Result<(), Box<dyn std::e
         )
         .into());
     }
-    if manifest.app_version.is_empty()
+    if !is_semver(&manifest.app_version)
         || manifest.dsh_tag.is_empty()
-        || manifest.ui_sdk_version.is_empty()
-        || manifest.plugin_package_spec_version.is_empty()
-        || manifest.runtime_version == 0
-        || manifest.bridge_protocol_version == 0
+        || !is_semver(&manifest.ui_sdk_version)
+        || !is_semver(&manifest.plugin_package_spec_version)
+        || !is_safe_positive_integer(manifest.runtime_version)
+        || !is_safe_positive_integer(manifest.bridge_protocol_version)
+        || !is_safe_nonnegative_integer(manifest.openloop_data_version)
+        || !is_safe_nonnegative_integer(manifest.dsh_data_version)
     {
         return Err(
             invalid_data("Openloop core manifest contains an invalid required value").into(),
@@ -266,22 +343,25 @@ mod tests {
         .into_bytes()
     }
 
+    fn valid_core_manifest() -> CanonicalBuildManifest {
+        CanonicalBuildManifest {
+            app_version: "0.1.0".into(),
+            channel: "test".into(),
+            dsh_tag: "dsh-v0.1.0-rc.7".into(),
+            dsh_commit: "99f6f02fecdb7dff40c3fbc9470f5907c29f74ca".into(),
+            runtime_version: 1,
+            bridge_protocol_version: 1,
+            ui_sdk_version: "0.1.0".into(),
+            plugin_package_spec_version: "0.1.0".into(),
+            openloop_data_version: 0,
+            dsh_data_version: 0,
+        }
+    }
+
     fn core_bytes() -> Vec<u8> {
         format!(
             "{}\n",
-            serde_json::to_string_pretty(&CanonicalBuildManifest {
-                app_version: "0.1.0".into(),
-                channel: "test".into(),
-                dsh_tag: "dsh-v0.1.0-rc.7".into(),
-                dsh_commit: "99f6f02fecdb7dff40c3fbc9470f5907c29f74ca".into(),
-                runtime_version: 1,
-                bridge_protocol_version: 1,
-                ui_sdk_version: "0.1.0".into(),
-                plugin_package_spec_version: "0.1.0".into(),
-                openloop_data_version: 0,
-                dsh_data_version: 0,
-            })
-            .unwrap()
+            serde_json::to_string_pretty(&valid_core_manifest()).unwrap()
         )
         .into_bytes()
     }
@@ -394,5 +474,82 @@ mod tests {
             );
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mirrors_typescript_version_contract_boundaries() {
+        let mut manifest = valid_core_manifest();
+        manifest.app_version = "1.0".into();
+        assert!(
+            validate_core(&manifest).is_err(),
+            "appVersion must be semver"
+        );
+
+        let mut manifest = valid_core_manifest();
+        manifest.ui_sdk_version = "v0.1.0".into();
+        assert!(
+            validate_core(&manifest).is_err(),
+            "uiSdkVersion must be semver"
+        );
+
+        let mut manifest = valid_core_manifest();
+        manifest.plugin_package_spec_version = "1.0.0-01".into();
+        assert!(
+            validate_core(&manifest).is_err(),
+            "pluginPackageSpecVersion must reject numeric prerelease leading zeroes"
+        );
+
+        let mut manifest = valid_core_manifest();
+        manifest.runtime_version = 0;
+        assert!(
+            validate_core(&manifest).is_err(),
+            "runtimeVersion zero is invalid"
+        );
+
+        let mut manifest = valid_core_manifest();
+        manifest.bridge_protocol_version = 0;
+        assert!(
+            validate_core(&manifest).is_err(),
+            "bridgeProtocolVersion zero is invalid"
+        );
+
+        let mut manifest = valid_core_manifest();
+        manifest.runtime_version = 9_007_199_254_740_992;
+        assert!(
+            validate_core(&manifest).is_err(),
+            "runtimeVersion above MAX_SAFE_INTEGER is invalid"
+        );
+
+        let mut manifest = valid_core_manifest();
+        manifest.bridge_protocol_version = 9_007_199_254_740_992;
+        assert!(
+            validate_core(&manifest).is_err(),
+            "bridgeProtocolVersion above MAX_SAFE_INTEGER is invalid"
+        );
+
+        let mut manifest = valid_core_manifest();
+        manifest.openloop_data_version = 9_007_199_254_740_992;
+        assert!(
+            validate_core(&manifest).is_err(),
+            "openloopDataVersion above MAX_SAFE_INTEGER is invalid"
+        );
+
+        let mut manifest = valid_core_manifest();
+        manifest.dsh_data_version = 9_007_199_254_740_992;
+        assert!(
+            validate_core(&manifest).is_err(),
+            "dshDataVersion above MAX_SAFE_INTEGER is invalid"
+        );
+
+        let mut manifest = valid_core_manifest();
+        manifest.app_version = "1.2.3-rc.1+desktop".into();
+        manifest.ui_sdk_version = "2.0.0-alpha.7".into();
+        manifest.plugin_package_spec_version = "3.4.5-beta.2+plugin".into();
+        manifest.openloop_data_version = 0;
+        manifest.dsh_data_version = 0;
+        assert!(
+            validate_core(&manifest).is_ok(),
+            "valid semver prereleases and zero data versions must be accepted"
+        );
     }
 }

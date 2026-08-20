@@ -319,6 +319,13 @@ async function verifyMachO(path, runner, requireHardenedRuntime = true) {
   }
 }
 
+function hasExactObjectKeys(value, expectedKeys) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const actualKeys = Object.keys(value)
+  return actualKeys.length === expectedKeys.length
+    && actualKeys.every(key => expectedKeys.includes(key))
+}
+
 /** Verify the final external manifest and every executable desktop product. */
 export async function verifyDesktopBuild(context, runner) {
   const fixed = assertFixedVerificationPaths(context)
@@ -411,6 +418,9 @@ export async function verifyDesktopBuild(context, runner) {
     args: ['--health-smoke'],
     capture: true,
   })
+  if (health.stderr !== '') {
+    throw new Error('build-desktop: sidecar health smoke stderr must be empty')
+  }
   if (!/^[^\n]+\n$/u.test(health.stdout)) {
     throw new Error('build-desktop: sidecar health smoke must emit exactly one JSON line')
   }
@@ -424,11 +434,32 @@ export async function verifyDesktopBuild(context, runner) {
       }`,
     )
   }
-  if (readiness.type !== 'openloop.runtime.ready'
+  const readinessKeys = [
+    'type',
+    'version',
+    'profile',
+    'host',
+    'port',
+    'origin',
+    'coreManifestSha256',
+    'healthSmoke',
+  ]
+  const healthSmokeKeys = ['method', 'path', 'status']
+  const validPort = Number.isSafeInteger(readiness?.port)
+    && readiness.port >= 1
+    && readiness.port <= 65535
+  if (!hasExactObjectKeys(readiness, readinessKeys)
+    || !hasExactObjectKeys(readiness.healthSmoke, healthSmokeKeys)
+    || readiness.type !== 'openloop.runtime.ready'
+    || readiness.version !== 1
+    || readiness.profile !== 'openloop'
+    || readiness.host !== '127.0.0.1'
+    || !validPort
+    || readiness.origin !== `http://127.0.0.1:${String(readiness.port)}`
     || readiness.coreManifestSha256 !== coreSha256
-    || readiness.healthSmoke?.method !== 'GET'
-    || readiness.healthSmoke?.path !== '/'
-    || readiness.healthSmoke?.status !== 200) {
+    || readiness.healthSmoke.method !== 'GET'
+    || readiness.healthSmoke.path !== '/'
+    || readiness.healthSmoke.status !== 200) {
     throw new Error('build-desktop: sidecar health smoke readiness contract is invalid')
   }
 }
