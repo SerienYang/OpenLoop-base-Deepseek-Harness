@@ -3,7 +3,7 @@ use std::{
     ffi::OsStr,
     fmt, fs, io,
     os::unix::fs::{MetadataExt, PermissionsExt},
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
     process::{Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
@@ -65,7 +65,9 @@ impl BundleHealthProbe {
         &self,
         app: &Path,
         timeout: Duration,
+        dsh_home: &Path,
     ) -> Result<HealthProbeReport, HealthProbeError> {
+        validate_dsh_home(dsh_home, None)?;
         require_real_directory(app, "candidate app")?;
         if app.extension() != Some(OsStr::new("app")) {
             return Err(HealthProbeError::invalid(
@@ -99,7 +101,7 @@ impl BundleHealthProbe {
         let sidecar = macos.join("openloop-runtime");
         require_regular_file(&sidecar, "candidate runtime sidecar", true)?;
         let mut command = Command::new(&sidecar);
-        command.arg("--health-smoke");
+        command.arg("--health-smoke").env("DSH_HOME", dsh_home);
         let output = bounded_output(command, timeout)?;
         validate_success_output(&output, "runtime sidecar health smoke")?;
         let readiness: RuntimeHealthSmoke =
@@ -150,16 +152,19 @@ impl BundleHealthProbe {
 #[derive(Debug, Clone)]
 pub struct CandidateProcessHealth {
     expected_version: String,
+    dsh_home: PathBuf,
 }
 
 impl CandidateProcessHealth {
-    pub fn new(expected_version: impl Into<String>) -> Self {
+    pub fn new(expected_version: impl Into<String>, dsh_home: impl Into<PathBuf>) -> Self {
         Self {
             expected_version: expected_version.into(),
+            dsh_home: dsh_home.into(),
         }
     }
 
     fn run(&self, candidate: &Path, timeout: Duration) -> Result<(), HealthProbeError> {
+        validate_dsh_home(&self.dsh_home, None)?;
         require_real_directory(candidate, "published candidate app")?;
         let contents = candidate.join("Contents");
         let macos = contents.join("MacOS");
@@ -173,7 +178,9 @@ impl CandidateProcessHealth {
         require_regular_file(&executable, "published candidate main executable", true)?;
 
         let mut command = Command::new(executable);
-        command.arg(HEALTH_PROBE_ARGUMENT);
+        command
+            .arg(HEALTH_PROBE_ARGUMENT)
+            .env("DSH_HOME", &self.dsh_home);
         let output = bounded_output(command, timeout)?;
         validate_success_output(&output, "candidate Host health probe")?;
         let report: HealthProbeReport =
@@ -198,6 +205,34 @@ impl CandidateHealth for CandidateProcessHealth {
             Err(error) => HealthStatus::Failed(error.to_string()),
         }
     }
+}
+
+pub fn required_dsh_home(
+    value: Option<&OsStr>,
+    data_root_name: &str,
+) -> Result<PathBuf, HealthProbeError> {
+    let path = value
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| HealthProbeError::invalid("candidate Host requires DSH_HOME"))?;
+    validate_dsh_home(&path, Some(data_root_name))?;
+    Ok(path)
+}
+
+fn validate_dsh_home(path: &Path, data_root_name: Option<&str>) -> Result<(), HealthProbeError> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+        || path.file_name() != Some(OsStr::new("dsh"))
+        || data_root_name
+            .is_some_and(|name| path.parent().and_then(Path::file_name) != Some(OsStr::new(name)))
+    {
+        return Err(HealthProbeError::invalid(
+            "DSH_HOME must be the absolute channel data root dsh directory",
+        ));
+    }
+    require_real_directory(path, "DSH_HOME")
 }
 
 #[derive(Debug, Deserialize)]

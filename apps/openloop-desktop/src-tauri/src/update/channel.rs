@@ -119,6 +119,10 @@ impl UpdateChannelConfig {
         app_data.join(self.data_root_name())
     }
 
+    pub fn dsh_home(&self, app_data: &Path) -> PathBuf {
+        self.data_root(app_data).join("dsh")
+    }
+
     pub fn public_key_environment(&self) -> &'static str {
         self.channel.public_key_environment()
     }

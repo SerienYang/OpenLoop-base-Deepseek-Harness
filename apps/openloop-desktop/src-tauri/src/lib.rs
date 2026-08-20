@@ -16,10 +16,13 @@ use crate::launcher::{
 use crate::update::{
     archive::stage_verified_archive,
     coordinator::{
-        parse_host_action, CheckReport, DownloadStatus, HostAction, InstallPublication,
-        InstallReport,
+        parse_host_action, CheckReport, DownloadStatus, DownloadUrlPolicy, HostAction,
+        InstallPublication, InstallReport,
     },
-    health::{BundleHealthProbe, CandidateProcessHealth, TEST_PROBE_FAILURE_ENVIRONMENT},
+    health::{
+        required_dsh_home, BundleHealthProbe, CandidateProcessHealth,
+        TEST_PROBE_FAILURE_ENVIRONMENT,
+    },
     recovery::{PublicationOutcome, RecoveryTransaction},
 };
 
@@ -176,14 +179,10 @@ fn start_runtime(
     app: &AppHandle,
     updater_config: &update::channel::UpdateChannelConfig,
 ) -> Result<Option<RuntimeProcessState>, String> {
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("Openloop app data directory is unavailable: {error}"))?;
-    let channel_root = app_data.join(updater_config.data_root_name());
-    let dsh_home = channel_root.join("dsh");
-    fs::create_dir_all(&dsh_home)
-        .map_err(|error| format!("Openloop channel data root is unavailable: {error}"))?;
+    let dsh_home = channel_dsh_home(app, updater_config)?;
+    let channel_root = dsh_home
+        .parent()
+        .ok_or_else(|| "Openloop channel data root is unavailable".to_owned())?;
     let launch_id_path = channel_root.join("openloop-runtime.sock");
     let secrets = LaunchSecrets::generate(launch_id_path.clone())
         .map_err(|error| format!("runtime launch secret generation failed: {error}"))?;
@@ -230,6 +229,20 @@ fn start_runtime(
         _instance: instance,
         child: Mutex::new(child),
     }))
+}
+
+fn channel_dsh_home(
+    app: &AppHandle,
+    updater_config: &update::channel::UpdateChannelConfig,
+) -> Result<PathBuf, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Openloop app data directory is unavailable: {error}"))?;
+    let dsh_home = updater_config.dsh_home(&app_data);
+    fs::create_dir_all(&dsh_home)
+        .map_err(|error| format!("Openloop channel data root is unavailable: {error}"))?;
+    Ok(dsh_home)
 }
 
 fn embedded_channel() -> Result<update::channel::ReleaseChannel, String> {
@@ -287,6 +300,9 @@ fn run_health_probe(
     manifest: &OpenloopBuildManifest,
     updater_config: &update::channel::UpdateChannelConfig,
 ) -> Result<(), String> {
+    let dsh_home_value = std::env::var_os("DSH_HOME");
+    let dsh_home = required_dsh_home(dsh_home_value.as_deref(), updater_config.data_root_name())
+        .map_err(|error| error.to_string())?;
     let probe = BundleHealthProbe::new(
         &manifest.app_version,
         updater_config.bundle_identifier(),
@@ -301,7 +317,7 @@ fn run_health_probe(
     }
     let app = current_app_bundle()?;
     let report = probe
-        .inspect(&app, Duration::from_secs(45))
+        .inspect(&app, Duration::from_secs(45), &dsh_home)
         .map_err(|error| error.to_string())?;
     write_stdout_line(&report.to_json_line().map_err(|error| error.to_string())?)
 }
@@ -311,12 +327,19 @@ async fn run_update_spike(
     action: HostAction,
     current: &str,
 ) -> Result<String, String> {
+    let updater_config = app.state::<update::channel::UpdateChannelConfig>();
     let update = app
         .updater()
         .map_err(|error| format!("create signed updater failed: {error}"))?
         .check()
         .await
         .map_err(|error| format!("signed update check failed: {error}"))?;
+    let download_policy = DownloadUrlPolicy::production(updater_config.channel());
+    if let Some(update) = update.as_ref() {
+        download_policy
+            .validate(&update.download_url, &update.version)
+            .map_err(|error| error.to_string())?;
+    }
     let check = CheckReport {
         current: current.to_owned(),
         available: update.as_ref().map(|value| value.version.clone()),
@@ -348,7 +371,8 @@ async fn run_update_spike(
         .ok_or_else(|| "installed app has no recovery root".to_owned())?;
     let transaction = RecoveryTransaction::open(root, &installed, candidate.path())
         .map_err(|error| format!("open candidate recovery transaction failed: {error}"))?;
-    let mut health = CandidateProcessHealth::new(&update.version);
+    let dsh_home = channel_dsh_home(app, &updater_config)?;
+    let mut health = CandidateProcessHealth::new(&update.version, dsh_home);
     let publication = match transaction
         .publish(&mut health)
         .map_err(|error| format!("publish candidate recovery transaction failed: {error}"))?

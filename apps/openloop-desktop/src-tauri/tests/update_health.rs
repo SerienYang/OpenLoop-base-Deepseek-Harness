@@ -9,7 +9,7 @@ use std::{
 use openloop_desktop_lib::update::{
     coordinator::{parse_host_action, HostAction},
     health::{
-        BundleHealthProbe, CandidateProcessHealth, HEALTH_PROBE_ARGUMENT,
+        required_dsh_home, BundleHealthProbe, CandidateProcessHealth, HEALTH_PROBE_ARGUMENT,
         TEST_PROBE_FAILURE_ENVIRONMENT,
     },
     recovery::{CandidateHealth, HealthStatus},
@@ -111,15 +111,19 @@ fn accepts_only_exact_private_host_update_arguments() {
 
 #[test]
 fn self_probe_validates_info_plist_and_bundled_sidecar_core_identity() {
+    let dsh_home_root = tempdir().expect("DSH_HOME root");
+    let dsh_home = dsh_home_root.path().join("Openloop-Test/dsh");
+    fs::create_dir_all(&dsh_home).expect("DSH_HOME");
     let sidecar = format!(
-        "#!/bin/sh\n[ \"$#\" -eq 1 ] && [ \"$1\" = \"--health-smoke\" ] || exit 91\nprintf '%s\\n' '{}'\n",
+        "#!/bin/sh\n[ \"$#\" -eq 1 ] && [ \"$1\" = \"--health-smoke\" ] || exit 91\n[ \"$DSH_HOME\" = '{}' ] || exit 92\nprintf '%s\\n' '{}'\n",
+        dsh_home.display(),
         healthy_runtime_readiness()
     );
     let (_root, app) = app_bundle("#!/bin/sh\nexit 0\n", &sidecar);
     let probe = BundleHealthProbe::new(VERSION, IDENTIFIER, CORE_SHA256);
 
     let report = probe
-        .inspect(&app, Duration::from_secs(2))
+        .inspect(&app, Duration::from_secs(2), &dsh_home)
         .expect("valid candidate bundle health");
 
     assert_eq!(report.app_version, VERSION);
@@ -131,7 +135,9 @@ fn self_probe_validates_info_plist_and_bundled_sidecar_core_identity() {
     )
     .expect("replace Info.plist");
     assert!(
-        probe.inspect(&app, Duration::from_secs(2)).is_err(),
+        probe
+            .inspect(&app, Duration::from_secs(2), &dsh_home)
+            .is_err(),
         "mismatched build version passed health"
     );
 
@@ -143,19 +149,25 @@ fn self_probe_validates_info_plist_and_bundled_sidecar_core_identity() {
     let wrong_core = sidecar.replace(CORE_SHA256, &"b".repeat(64));
     executable(&app.join("Contents/MacOS/openloop-runtime"), &wrong_core);
     assert!(
-        probe.inspect(&app, Duration::from_secs(2)).is_err(),
+        probe
+            .inspect(&app, Duration::from_secs(2), &dsh_home)
+            .is_err(),
         "mismatched sidecar core identity passed health"
     );
 }
 
 #[test]
 fn candidate_process_health_reports_success_failure_and_timeout() {
+    let dsh_home_root = tempdir().expect("DSH_HOME root");
+    let dsh_home = dsh_home_root.path().join("Openloop-Test/dsh");
+    fs::create_dir_all(&dsh_home).expect("DSH_HOME");
     let success = format!(
-        "#!/bin/sh\n[ \"$#\" -eq 1 ] && [ \"$1\" = \"{HEALTH_PROBE_ARGUMENT}\" ] || exit 91\nprintf '%s\\n' '{}'\n",
+        "#!/bin/sh\n[ \"$#\" -eq 1 ] && [ \"$1\" = \"{HEALTH_PROBE_ARGUMENT}\" ] || exit 91\n[ \"$DSH_HOME\" = '{}' ] || exit 92\nprintf '%s\\n' '{}'\n",
+        dsh_home.display(),
         healthy_probe_report()
     );
     let (_success_root, success_app) = app_bundle(&success, "#!/bin/sh\nexit 0\n");
-    let mut health = CandidateProcessHealth::new(VERSION);
+    let mut health = CandidateProcessHealth::new(VERSION, &dsh_home);
     assert_eq!(
         health.await_health(&success_app, Duration::from_secs(2)),
         HealthStatus::Healthy
@@ -165,7 +177,7 @@ fn candidate_process_health_reports_success_failure_and_timeout() {
         "#!/bin/sh\n[ \"$1\" = \"{HEALTH_PROBE_ARGUMENT}\" ] || exit 91\nprintf 'probe failed\\n' >&2\nexit 7\n"
     );
     let (_failure_root, failure_app) = app_bundle(&failure, "#!/bin/sh\nexit 0\n");
-    let mut health = CandidateProcessHealth::new(VERSION);
+    let mut health = CandidateProcessHealth::new(VERSION, &dsh_home);
     let status = health.await_health(&failure_app, Duration::from_secs(2));
     assert!(
         matches!(status, HealthStatus::Failed(ref message) if message.contains("status") || message.contains("failed")),
@@ -179,7 +191,7 @@ fn candidate_process_health_reports_success_failure_and_timeout() {
         marker.display()
     );
     let (_timeout_root, timeout_app) = app_bundle(&timeout, "#!/bin/sh\nexit 0\n");
-    let mut health = CandidateProcessHealth::new(VERSION);
+    let mut health = CandidateProcessHealth::new(VERSION, &dsh_home);
     assert_eq!(
         health.await_health(&timeout_app, Duration::from_millis(30)),
         HealthStatus::TimedOut
@@ -189,6 +201,32 @@ fn candidate_process_health_reports_success_failure_and_timeout() {
         !marker.exists(),
         "timed-out Host probe left its descendant running"
     );
+}
+
+#[test]
+fn candidate_host_requires_a_channel_specific_dsh_home() {
+    let root = tempdir().expect("app data");
+    let test = root.path().join("Openloop-Test/dsh");
+    let stable = root.path().join("Openloop/dsh");
+    fs::create_dir_all(&test).expect("test DSH_HOME");
+    fs::create_dir_all(&stable).expect("stable DSH_HOME");
+
+    assert_eq!(
+        required_dsh_home(Some(test.as_os_str()), "Openloop-Test").expect("test DSH_HOME"),
+        test
+    );
+    assert_eq!(
+        required_dsh_home(Some(stable.as_os_str()), "Openloop").expect("stable DSH_HOME"),
+        stable
+    );
+    assert_ne!(test, stable);
+    assert!(required_dsh_home(None, "Openloop-Test").is_err());
+    assert!(required_dsh_home(Some(stable.as_os_str()), "Openloop-Test").is_err());
+    assert!(required_dsh_home(
+        Some(Path::new("Openloop-Test/dsh").as_os_str()),
+        "Openloop-Test"
+    )
+    .is_err());
 }
 
 #[test]

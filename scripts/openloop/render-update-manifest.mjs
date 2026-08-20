@@ -133,23 +133,52 @@ function validRfc3339(value) {
     && Number(second) <= 59
 }
 
+function validateArtifactUrl(value, version) {
+  let artifactUrl
+  try {
+    artifactUrl = new URL(value)
+  } catch {
+    throw new Error('artifact URL must be a valid GitHub release URL')
+  }
+  if (artifactUrl.protocol !== 'https:') {
+    throw new Error('artifact URL must use HTTPS')
+  }
+  if (artifactUrl.username !== '' || artifactUrl.password !== '' || artifactUrl.hash !== '') {
+    throw new Error('artifact URL must not contain credentials or a fragment')
+  }
+  const expectedPrefix = 'https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/'
+  if (!value.startsWith(expectedPrefix)
+    || artifactUrl.hostname !== 'github.com'
+    || artifactUrl.host !== 'github.com'
+    || artifactUrl.search !== ''
+  ) {
+    throw new Error(
+      'artifact URL must be the credential-free GitHub release URL without a custom port, query, or fragment',
+    )
+  }
+  if (artifactUrl.pathname.includes('%')) {
+    throw new Error('artifact URL must not contain an encoded release path')
+  }
+  const segments = artifactUrl.pathname.split('/').slice(1)
+  if (segments.length !== 6
+    || segments[0] !== 'SerienYang'
+    || segments[1] !== 'OpenLoop-base-Deepseek-Harness'
+    || segments[2] !== 'releases'
+    || segments[3] !== 'download'
+    || segments[5] !== 'Openloop.app.tar.gz') {
+    throw new Error('artifact URL must use the exact immutable GitHub release asset path')
+  }
+  const tag = segments[4]
+  if (tag !== `openloop-test-a-v${version}` && tag !== `openloop-test-b-v${version}`) {
+    throw new Error('artifact URL test release tag must match openloop-test-[ab]-v<version>')
+  }
+}
+
 function validateValues(renderOptions) {
   if (!semverPattern.test(renderOptions.version)) {
     throw new Error('version must be valid semver')
   }
-  let artifactUrl
-  try {
-    artifactUrl = new URL(renderOptions.artifactUrl)
-  } catch {
-    throw new Error('artifact URL must be a valid HTTPS URL')
-  }
-  if (artifactUrl.protocol !== 'https:'
-    || artifactUrl.username !== ''
-    || artifactUrl.password !== ''
-    || artifactUrl.hash !== ''
-    || artifactUrl.hostname === '') {
-    throw new Error('artifact URL must be an HTTPS URL without credentials or fragments')
-  }
+  validateArtifactUrl(renderOptions.artifactUrl, renderOptions.version)
   if (renderOptions.notes.trim() === '') {
     throw new Error('release notes must be non-empty')
   }

@@ -11,7 +11,11 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use openloop_desktop_lib::update::{
-    coordinator::{check_update, install_checked_update, DownloadStatus, InstallPublication},
+    channel::ReleaseChannel,
+    coordinator::{
+        check_update, install_checked_update, validate_download_url, DownloadStatus,
+        DownloadUrlPolicy, InstallPublication,
+    },
     recovery::{CandidateHealth, HealthStatus},
 };
 use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime};
@@ -222,8 +226,11 @@ fn installed_app(root: &Path) -> PathBuf {
 
 fn checked_update(server: &TestServer, public_key: &str) -> (tauri::App<MockRuntime>, Update) {
     let (app, updater) = fixture_updater(public_key, server.url("/manifest"));
+    let policy =
+        DownloadUrlPolicy::local_test_fixture(&server.url("/archive")).expect("fixture policy");
     let (_report, update) =
-        tauri::async_runtime::block_on(check_update(&updater, "0.1.0")).expect("check update");
+        tauri::async_runtime::block_on(check_update(&updater, "0.1.0", &policy))
+            .expect("check update");
     (app, update.expect("available update"))
 }
 
@@ -232,9 +239,11 @@ fn coordinator_check_reports_no_update_and_detected_update() {
     let no_update_server = TestServer::new(1, |_| HashMap::from([("/manifest", no_content())]));
     let (_app, updater) =
         fixture_updater(SIGNED_TEST_PUBLIC_KEY, no_update_server.url("/manifest"));
+    let policy = DownloadUrlPolicy::local_test_fixture(&no_update_server.url("/archive"))
+        .expect("fixture policy");
 
-    let (report, update) =
-        tauri::async_runtime::block_on(check_update(&updater, "0.1.0")).expect("check no update");
+    let (report, update) = tauri::async_runtime::block_on(check_update(&updater, "0.1.0", &policy))
+        .expect("check no update");
 
     assert_eq!(report.current, "0.1.0");
     assert_eq!(report.available, None);
@@ -245,13 +254,63 @@ fn coordinator_check_reports_no_update_and_detected_update() {
         HashMap::from([("/manifest", manifest(base_url, "0.2.0", TEST_SIGNATURE))])
     });
     let (_app, updater) = fixture_updater(SIGNED_TEST_PUBLIC_KEY, update_server.url("/manifest"));
+    let policy = DownloadUrlPolicy::local_test_fixture(&update_server.url("/archive"))
+        .expect("fixture policy");
 
-    let (report, update) =
-        tauri::async_runtime::block_on(check_update(&updater, "0.1.0")).expect("check update");
+    let (report, update) = tauri::async_runtime::block_on(check_update(&updater, "0.1.0", &policy))
+        .expect("check update");
 
     assert_eq!(report.current, "0.1.0");
     assert_eq!(report.available.as_deref(), Some("0.2.0"));
     assert!(update.is_some());
+}
+
+#[test]
+fn production_download_policy_accepts_only_immutable_repository_release_assets() {
+    let accepted = [
+        (
+            ReleaseChannel::Test,
+            "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v1.2.3/Openloop.app.tar.gz",
+        ),
+        (
+            ReleaseChannel::Test,
+            "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-b-v1.2.3/Openloop.app.tar.gz",
+        ),
+        (
+            ReleaseChannel::Stable,
+            "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-stable-v1.2.3/Openloop.app.tar.gz",
+        ),
+    ];
+    for (channel, value) in accepted {
+        let url = value.parse().expect("accepted URL");
+        validate_download_url(&url, "1.2.3", channel).expect(value);
+    }
+
+    let rejected = [
+        "http://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v1.2.3/Openloop.app.tar.gz",
+        "https://example.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v1.2.3/Openloop.app.tar.gz",
+        "https://localhost/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v1.2.3/Openloop.app.tar.gz",
+        "https://user:pass@github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v1.2.3/Openloop.app.tar.gz",
+        "https://github.com:444/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v1.2.3/Openloop.app.tar.gz",
+        "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v1.2.3/Openloop.app.tar.gz?redirect=https://example.com",
+        "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v1.2.3/Openloop.app.tar.gz#fragment",
+        "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v1.2.3/Openloop.app.tar.gz/redirect",
+        "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v1.2.3%2Fignored/Openloop.app.tar.gz",
+        "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-a-v9.9.9/Openloop.app.tar.gz",
+        "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-rolling/Openloop.app.tar.gz",
+    ];
+    for value in rejected {
+        let url = value.parse().expect("syntactically valid rejected URL");
+        assert!(
+            validate_download_url(&url, "1.2.3", ReleaseChannel::Test).is_err(),
+            "accepted unsafe download URL {value}"
+        );
+    }
+    let test_asset = accepted[0].1.parse().expect("test asset URL");
+    assert!(
+        validate_download_url(&test_asset, "1.2.3", ReleaseChannel::Stable).is_err(),
+        "stable channel accepted a test release tag"
+    );
 }
 
 #[test]
@@ -290,10 +349,16 @@ fn signature_failure_never_stages_or_publishes_a_candidate() {
     let installed = installed_app(root.path());
     let mut health =
         HealthProbe(|_: &Path, _: Duration| panic!("health must not run for a signature failure"));
+    let policy =
+        DownloadUrlPolicy::local_test_fixture(&server.url("/archive")).expect("fixture policy");
 
-    let error =
-        tauri::async_runtime::block_on(install_checked_update(update, &installed, &mut health))
-            .expect_err("tampered download must fail");
+    let error = tauri::async_runtime::block_on(install_checked_update(
+        update,
+        &installed,
+        &mut health,
+        &policy,
+    ))
+    .expect_err("tampered download must fail");
 
     assert!(
         error.to_string().contains("signature") || error.to_string().contains("verify"),
@@ -348,10 +413,16 @@ fn verified_download_commits_healthy_candidate_and_rolls_back_failed_health() {
             );
             status.clone()
         });
+        let policy =
+            DownloadUrlPolicy::local_test_fixture(&server.url("/archive")).expect("fixture policy");
 
-        let report =
-            tauri::async_runtime::block_on(install_checked_update(update, &installed, &mut health))
-                .expect("verified install transaction");
+        let report = tauri::async_runtime::block_on(install_checked_update(
+            update,
+            &installed,
+            &mut health,
+            &policy,
+        ))
+        .expect("verified install transaction");
 
         assert_eq!(report.download, DownloadStatus::Verified);
         assert_eq!(report.publication, expected_publication);

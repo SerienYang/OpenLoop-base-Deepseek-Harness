@@ -1,10 +1,12 @@
 use std::{error::Error, ffi::OsString, fmt, os::unix::ffi::OsStrExt, path::Path};
 
 use serde::Serialize;
+use tauri::Url;
 use tauri_plugin_updater::{Update, Updater};
 
 use super::{
     archive::{stage_verified_archive, ArchiveStageError},
+    channel::ReleaseChannel,
     health::HEALTH_PROBE_ARGUMENT,
     recovery::{
         CandidateHealth, HealthStatus, PublicationOutcome, RecoveryError, RecoveryTransaction,
@@ -14,6 +16,14 @@ use super::{
 const CHECK_ARGUMENT: &str = "--openloop-update-spike=check";
 const INSTALL_ARGUMENT: &str = "--openloop-update-spike=install";
 const PRIVATE_ARGUMENT_PREFIX: &[u8] = b"--openloop-update";
+const RELEASE_HOST: &str = "github.com";
+const RELEASE_PATH_PREFIX: [&str; 4] = [
+    "SerienYang",
+    "OpenLoop-base-Deepseek-Harness",
+    "releases",
+    "download",
+];
+const RELEASE_ASSET: &str = "Openloop.app.tar.gz";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostAction {
@@ -89,11 +99,124 @@ impl InstallReport {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct DownloadUrlPolicy {
+    channel: ReleaseChannel,
+    #[cfg(debug_assertions)]
+    local_fixture: Option<Url>,
+}
+
+impl DownloadUrlPolicy {
+    pub fn production(channel: ReleaseChannel) -> Self {
+        Self {
+            channel,
+            #[cfg(debug_assertions)]
+            local_fixture: None,
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn local_test_fixture(expected: &Url) -> Result<Self, CoordinatorError> {
+        if expected.scheme() != "http"
+            || expected.host_str() != Some("127.0.0.1")
+            || expected.port().is_none()
+            || expected.username() != ""
+            || expected.password().is_some()
+            || expected.query().is_some()
+            || expected.fragment().is_some()
+            || expected.path() != "/archive"
+        {
+            return Err(CoordinatorError::UnsafeDownloadUrl(
+                "local test policy requires one exact loopback /archive URL".to_owned(),
+            ));
+        }
+        Ok(Self {
+            channel: ReleaseChannel::Test,
+            local_fixture: Some(expected.clone()),
+        })
+    }
+
+    pub fn validate(&self, url: &Url, version: &str) -> Result<(), CoordinatorError> {
+        #[cfg(debug_assertions)]
+        if self.local_fixture.as_ref() == Some(url) {
+            return Ok(());
+        }
+        validate_download_url(url, version, self.channel)
+    }
+}
+
+pub fn validate_download_url(
+    url: &Url,
+    version: &str,
+    channel: ReleaseChannel,
+) -> Result<(), CoordinatorError> {
+    if url.scheme() != "https"
+        || url.host_str() != Some(RELEASE_HOST)
+        || url.port().is_some()
+        || url.username() != ""
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path().contains('%')
+    {
+        return Err(CoordinatorError::UnsafeDownloadUrl(
+            "update download URL must be canonical credential-free HTTPS on github.com without a custom port, query, fragment, or encoding".to_owned(),
+        ));
+    }
+    let segments = url
+        .path_segments()
+        .ok_or_else(|| {
+            CoordinatorError::UnsafeDownloadUrl(
+                "update download URL must have a hierarchical release path".to_owned(),
+            )
+        })?
+        .collect::<Vec<_>>();
+    if segments.len() != 6 || segments[..4] != RELEASE_PATH_PREFIX || segments[5] != RELEASE_ASSET {
+        return Err(CoordinatorError::UnsafeDownloadUrl(
+            "update download URL must use the exact OpenLoop immutable release asset path"
+                .to_owned(),
+        ));
+    }
+    let tag = segments[4];
+    let safe_tag = !tag.is_empty()
+        && tag
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+'))
+        && !tag.to_ascii_lowercase().contains("rolling")
+        && !tag.to_ascii_lowercase().contains("latest");
+    if !safe_tag {
+        return Err(CoordinatorError::UnsafeDownloadUrl(
+            "update release tag must be immutable".to_owned(),
+        ));
+    }
+    match channel {
+        ReleaseChannel::Test
+            if tag != format!("openloop-test-a-v{version}")
+                && tag != format!("openloop-test-b-v{version}") =>
+        {
+            return Err(CoordinatorError::UnsafeDownloadUrl(
+                "test update release tag must match openloop-test-[ab]-v<version>".to_owned(),
+            ));
+        }
+        ReleaseChannel::Stable if tag.starts_with("openloop-test-") => {
+            return Err(CoordinatorError::UnsafeDownloadUrl(
+                "stable updates must not use a test release tag".to_owned(),
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub async fn check_update(
     updater: &Updater,
     current: &str,
+    policy: &DownloadUrlPolicy,
 ) -> Result<(CheckReport, Option<Update>), CoordinatorError> {
     let update = updater.check().await.map_err(CoordinatorError::Check)?;
+    if let Some(update) = update.as_ref() {
+        policy.validate(&update.download_url, &update.version)?;
+    }
     let report = CheckReport {
         current: current.to_owned(),
         available: update.as_ref().map(|value| value.version.clone()),
@@ -105,7 +228,9 @@ pub async fn install_checked_update(
     update: Update,
     installed_app: &Path,
     health: &mut impl CandidateHealth,
+    policy: &DownloadUrlPolicy,
 ) -> Result<InstallReport, CoordinatorError> {
+    policy.validate(&update.download_url, &update.version)?;
     let current = update.current_version.clone();
     let available = update.version.clone();
     let archive = update
@@ -148,6 +273,7 @@ pub enum CoordinatorError {
     Stage(ArchiveStageError),
     MissingInstallationRoot,
     Recovery(RecoveryError),
+    UnsafeDownloadUrl(String),
     Serialize(serde_json::Error),
 }
 
@@ -170,6 +296,9 @@ impl fmt::Display for CoordinatorError {
             Self::Recovery(source) => {
                 write!(formatter, "candidate recovery transaction failed: {source}")
             }
+            Self::UnsafeDownloadUrl(message) => {
+                write!(formatter, "unsafe update download URL: {message}")
+            }
             Self::Serialize(source) => {
                 write!(formatter, "serialize update result failed: {source}")
             }
@@ -180,7 +309,9 @@ impl fmt::Display for CoordinatorError {
 impl Error for CoordinatorError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::InvalidArguments | Self::MissingInstallationRoot => None,
+            Self::InvalidArguments | Self::MissingInstallationRoot | Self::UnsafeDownloadUrl(_) => {
+                None
+            }
             Self::Check(source) | Self::Download(source) => Some(source),
             Self::Stage(source) => Some(source),
             Self::Recovery(source) => Some(source),
