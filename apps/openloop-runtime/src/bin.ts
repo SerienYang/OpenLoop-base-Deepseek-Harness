@@ -262,11 +262,31 @@ export function parseRuntimeArgs(argv: readonly string[]): RuntimeOptions {
   throw new Error(`${BIN_NAME}: usage: ${BIN_NAME} [--health-smoke]`)
 }
 
+export function readLaunchSecretsForRuntime(
+  options: RuntimeOptions,
+  read: () => LaunchSecrets = readLaunchSecretsFromFd,
+): LaunchSecrets | undefined {
+  return options.healthSmoke ? undefined : read()
+}
+
 function profilePatches(profile: RuntimeProfile): PatchOptions[] {
-  return [
+  return filterHostBootstrapPatches([
     ...profile.layers.flatMap(layer => layer.patches),
     ...profile.patches,
-  ]
+  ], true)
+}
+
+function filterHostBootstrapPatches(
+  patches: readonly PatchOptions[],
+  includeHostBootstrap: boolean,
+): PatchOptions[] {
+  if (includeHostBootstrap) return [...patches]
+  return patches.filter(patch => !patch.insert?.some(entry => entry.id === 'openloop-bootstrap'))
+}
+
+function zeroizeLaunchSecrets(secrets: RuntimeLaunchSecrets): void {
+  secrets.bootstrapToken.fill(0)
+  secrets.bridgeSecret.fill(0)
 }
 
 function assertWebRows(rows: readonly EntryOptions[]): void {
@@ -413,7 +433,8 @@ export async function runOpenloopRuntime(
   if (profile.name !== PROFILE || profile.dir !== profileDir) {
     throw new Error(`${BIN_NAME}: resolved profile identity does not match ${PROFILE}`)
   }
-  const patches = profilePatches(profile)
+  const includeHostBootstrap = launchSecrets !== undefined
+  const patches = filterHostBootstrapPatches(profilePatches(profile), includeHostBootstrap)
   assertWebRows(dependencies.composeEntries([patches]))
   const environment = dependencies.loadLayeredEnv(BIN_NAME)
   const shutdown = new RuntimeShutdown(dependencies)
@@ -432,7 +453,14 @@ export async function runOpenloopRuntime(
       (hostContext) => {
         shutdown.setContext(hostContext)
         if (launchSecrets !== undefined) {
-          shutdown.setBootstrapDisposer(installRuntimeBootstrap(hostContext, launchSecrets))
+          try {
+            shutdown.setBootstrapDisposer(installRuntimeBootstrap(hostContext, launchSecrets, {
+              manifest: core.manifest as unknown as Readonly<Record<string, unknown>>,
+              sha256: core.sha256,
+            }))
+          } finally {
+            zeroizeLaunchSecrets(launchSecrets)
+          }
         }
         hostContext.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
         dependencies.provideCmdline(hostContext, {
@@ -448,7 +476,10 @@ export async function runOpenloopRuntime(
       binName: BIN_NAME,
       filename: profile.patchPath,
       compose: userPatches => structuredClone([
-        ...profile.layers.flatMap(layer => layer.patches),
+        ...filterHostBootstrapPatches(
+          profile.layers.flatMap(layer => layer.patches),
+          includeHostBootstrap,
+        ),
         ...userPatches,
       ]),
     })
@@ -536,9 +567,12 @@ const defaultDependencies: RuntimeDependencies = {
 
 async function main(): Promise<void> {
   try {
-    const launchSecrets: LaunchSecrets = readLaunchSecretsFromFd()
     const options = parseRuntimeArgs(process.argv.slice(2))
-    await runOpenloopRuntime(options, defaultDependencies, launchSecrets)
+    await runOpenloopRuntime(
+      options,
+      defaultDependencies,
+      readLaunchSecretsForRuntime(options),
+    )
   } catch (error) {
     process.stderr.write(`${BIN_NAME}: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`)
     process.exit(1)

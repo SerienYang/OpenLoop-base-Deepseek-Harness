@@ -68,6 +68,13 @@ impl LaunchSecrets {
             socket_path,
         ))
     }
+
+    pub fn bootstrap_token_hex(&self) -> String {
+        self.bootstrap_token
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
 }
 
 impl fmt::Debug for LaunchSecrets {

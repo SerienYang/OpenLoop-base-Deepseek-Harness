@@ -13,13 +13,23 @@ describe('runtime bootstrap Host service', () => {
       bootstrapToken: token,
       bridgeSecret: bridge,
       socketPath: '/tmp/openloop-runtime.sock',
+    }, {
+      manifest: { appVersion: '0.1.0', channel: 'test' },
+      sha256: 'a'.repeat(64),
     })
 
     expect(ctx.runtimeBootstrap.launchId()).toBe('8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90')
     expect(ctx.runtimeBootstrap.socketPath()).toBe('/tmp/openloop-runtime.sock')
-    expect(ctx.runtimeBootstrap.consumeBootstrapToken()).toEqual(token)
-    expect(ctx.runtimeBootstrap.consumeBootstrapToken()).toBeUndefined()
+    expect(ctx.runtimeBootstrap.consumeBootstrapTokenIfMatches(Uint8Array.from([9, 9, 9]))).toBe('invalid')
+    expect(ctx.runtimeBootstrap.consumeBootstrapTokenIfMatches(token)).toBe('consumed')
+    expect(ctx.runtimeBootstrap.consumeBootstrapTokenIfMatches(token)).toBe('expired')
     expect(ctx.runtimeBootstrap.consumeBridgeSecret()).toEqual(bridge)
+    const session = ctx.runtimeBootstrap.issueBootstrapSession()
+    expect(session).toMatch(/^[0-9a-f]{64}$/u)
+    expect(ctx.runtimeBootstrap.validateBootstrapSession(session)).toBe(true)
+    expect(ctx.runtimeBootstrap.validateBootstrapSession('0'.repeat(64))).toBe(false)
+    expect(ctx.runtimeBootstrap.coreManifest()).toEqual({ appVersion: '0.1.0', channel: 'test' })
+    expect(ctx.runtimeBootstrap.coreManifestSha256()).toBe('a'.repeat(64))
     expect(JSON.stringify(ctx.runtimeBootstrap)).not.toContain('1,2,3')
     expect(JSON.stringify(ctx.runtimeBootstrap)).not.toContain('4,5,6')
     expect((ctx.runtimeBootstrap as unknown as Record<string, unknown>).toJSON).toBeUndefined()

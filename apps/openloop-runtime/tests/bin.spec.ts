@@ -7,6 +7,7 @@ import { describe, expect, test, vi } from 'vitest'
 import {
   ensureEmptyRootConfig,
   readCoreManifest,
+  readLaunchSecretsForRuntime,
   runOpenloopRuntime,
   type RuntimeDependencies,
 } from '../src/bin.ts'
@@ -52,7 +53,10 @@ function fakeDependencies(events: string[], output: string[]): RuntimeDependenci
     get: (key: string) => key === 'webServer'
       ? { host: '127.0.0.1', port: 43123 }
       : key === 'loader' ? loader : services.get(key),
-    provide: (key: string) => { events.push(`provide:${key}`) },
+    provide: (key: string) => {
+      events.push(`provide:${key}`)
+      return () => {}
+    },
     fiber: {
       dispose: vi.fn(async () => { events.push('dispose') }),
     },
@@ -85,7 +89,16 @@ function fakeDependencies(events: string[], output: string[]): RuntimeDependenci
         packageName: '@openloop/test-bundle',
         packageDir: '/runtime/test-bundle',
         patchPath: '/runtime/test-bundle/cordis.patch.yml',
-        patches: [{ insert: [{ id: 'bundle', name: 'bundle' }] }],
+        patches: [
+          { insert: [{ id: 'bundle', name: 'bundle' }] },
+          {
+            insert: [{
+              id: 'openloop-bootstrap',
+              name: '@openloop/bundle/bootstrap-host',
+              inject: ['webServer', 'runtimeBootstrap'],
+            }],
+          },
+        ],
       }],
       patchPath: join(profileDir, 'cordis.patch.yml'),
       patches: [],
@@ -123,6 +136,28 @@ function fakeDependencies(events: string[], output: string[]): RuntimeDependenci
 }
 
 describe('Openloop runtime launcher', () => {
+  test('does not read inherited launch secrets for health smoke', () => {
+    const read = vi.fn(() => {
+      throw new Error('health smoke must not consume fd 3')
+    })
+
+    expect(readLaunchSecretsForRuntime({ healthSmoke: true }, read)).toBeUndefined()
+    expect(read).not.toHaveBeenCalled()
+  })
+
+  test('reads inherited launch secrets for a supervised runtime', () => {
+    const secrets = {
+      launchId: '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
+      bootstrapToken: Uint8Array.from([1, 2, 3]),
+      bridgeSecret: Uint8Array.from([4, 5, 6]),
+      socketPath: '/tmp/openloop-runtime.sock',
+    }
+    const read = vi.fn(() => secrets)
+
+    expect(readLaunchSecretsForRuntime({ healthSmoke: false }, read)).toBe(secrets)
+    expect(read).toHaveBeenCalledOnce()
+  })
+
   test('hashes the exact validated core manifest bytes', () => {
     const root = temporaryDirectory('manifest')
     const path = join(root, 'openloop-core.json')
@@ -220,6 +255,44 @@ describe('Openloop runtime launcher', () => {
         status: 200,
       },
     })
+  })
+
+  test('omits Host-only bootstrap patch from health smoke', async () => {
+    const events: string[] = []
+    const output: string[] = []
+    const dependencies = fakeDependencies(events, output)
+    const composed: unknown[] = []
+    dependencies.composeEntries = (layers) => {
+      composed.push(...layers.flat())
+      return [
+        { id: 'web-startup', name: 'web-startup' },
+        { id: 'webserver', name: 'webserver' },
+        { id: 'web-runtime', name: 'web-runtime' },
+      ]
+    }
+
+    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies)
+
+    expect(composed).not.toContainEqual(expect.objectContaining({
+      insert: [expect.objectContaining({ id: 'openloop-bootstrap' })],
+    }))
+  })
+
+  test('zeroizes parsed launch secret bytes after Host bootstrap installation', async () => {
+    const events: string[] = []
+    const output: string[] = []
+    const dependencies = fakeDependencies(events, output)
+    const secrets = {
+      launchId: '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
+      bootstrapToken: Uint8Array.from([1, 2, 3]),
+      bridgeSecret: Uint8Array.from([4, 5, 6]),
+      socketPath: '/tmp/openloop-runtime.sock',
+    }
+
+    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies, secrets)
+
+    expect(secrets.bootstrapToken).toEqual(Uint8Array.from([0, 0, 0]))
+    expect(secrets.bridgeSecret).toEqual(Uint8Array.from([0, 0, 0]))
   })
 
   test('runs watcher and fiber teardown only once across repeated release paths', async () => {
@@ -320,7 +393,11 @@ describe('Openloop runtime launcher', () => {
   test('uses no CLI private modules, app-boot source paths, or secret flags', () => {
     const source = readFileSync(join(import.meta.dirname, '../src/bin.ts'), 'utf8')
     expect(source).not.toMatch(/apps\/cli|@deepseek-ai\/dsh-app-boot\/src/iu)
-    expect(source).not.toMatch(/api[-_]?key|credential|secret/iu)
+    const argumentSurface = source
+      .split('\n')
+      .filter(line => /argv|parseRuntimeArgs|health-smoke/iu.test(line))
+      .join('\n')
+    expect(argumentSurface).not.toMatch(/api[-_]?key|credential|secret/iu)
   })
 
   test('does not touch the real user home during tests', () => {

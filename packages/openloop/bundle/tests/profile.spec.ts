@@ -62,6 +62,22 @@ describe('OpenLoop profile', () => {
     })
   })
 
+  it('inserts the Host bootstrap entry into the composed runtime profile', () => {
+    const require = createRequire(import.meta.url)
+    const manifestPath = require.resolve('@openloop/bundle/package.json')
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as BundleManifest
+    const patchPath = join(manifestPath, '..', manifest.dsh!.bundle!.patch!)
+    const patch = yaml.load(readFileSync(patchPath, 'utf8'), {
+      schema: entryListSchema,
+    }) as PatchOptions[]
+
+    expect(composeEntries([patch]).find(entry => entry.id === 'openloop-bootstrap')).toEqual({
+      id: 'openloop-bootstrap',
+      name: '@openloop/bundle/bootstrap-host',
+      inject: ['webServer', 'runtimeBootstrap'],
+    })
+  })
+
   it('initializes the OpenLoop profile once with the official bundle order', () => {
     const home = tmp()
 
@@ -270,6 +286,7 @@ describe('OpenLoop profile', () => {
         '@deepseek-ai/dsh-app-boot': 'workspace:^',
         '@deepseek-ai/dsh-base': 'workspace:^',
         '@deepseek-ai/dsh-web-app': 'workspace:^',
+        '@openloop/runtime-bootstrap': 'workspace:^',
       },
       dsh: { bundle: { patch: './cordis.patch.yml' } },
       exports: {
@@ -281,6 +298,10 @@ describe('OpenLoop profile', () => {
           types: './lib/types/invariant.d.ts',
           default: './lib/invariant.js',
         },
+        './bootstrap-host': {
+          types: './lib/types/bootstrap-host.d.ts',
+          default: './lib/bootstrap-host.js',
+        },
         './cordis.patch.yml': './cordis.patch.yml',
         './package.json': './package.json',
       },
@@ -288,6 +309,7 @@ describe('OpenLoop profile', () => {
     expect(manifest.files).toEqual([
       'lib/index.js',
       'lib/invariant.js',
+      'lib/bootstrap-host.js',
       'cordis.patch.yml',
       'lib/types/**/*.d.ts',
     ])

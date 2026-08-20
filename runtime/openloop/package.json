@@ -201,6 +201,7 @@
     "@deepseek-ai/schemastery": "workspace:^",
     "@openloop/build-contract": "workspace:^",
     "@openloop/bundle": "workspace:^",
-    "@openloop/runtime": "workspace:^"
+    "@openloop/runtime": "workspace:^",
+    "@openloop/runtime-bootstrap": "workspace:^"
   }
 }

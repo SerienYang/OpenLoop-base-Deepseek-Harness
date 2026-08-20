@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use tauri::{AppHandle, Manager, RunEvent};
+use tauri::{AppHandle, Manager, RunEvent, Url};
 
 use crate::launcher::{
     InstanceAction, LaunchReadinessExpectation, LaunchSecrets, SingleInstance, SupervisedChild,
@@ -150,9 +150,10 @@ fn start_runtime(app: &AppHandle) -> Result<Option<RuntimeProcessState>, String>
         return Ok(None);
     }
     let window = app.get_webview_window("main");
+    let forward_window = window.clone();
     instance
         .spawn_open_request_forwarder(move || {
-            if let Some(window) = window.as_ref() {
+            if let Some(window) = forward_window.as_ref() {
                 let _ = window.show();
                 let _ = window.set_focus();
             }
@@ -165,9 +166,21 @@ fn start_runtime(app: &AppHandle) -> Result<Option<RuntimeProcessState>, String>
     };
     let mut child =
         SupervisedChild::spawn(&executable, &secrets).map_err(|error| error.to_string())?;
-    child
+    let readiness = child
         .wait_readiness(&expectation, Duration::from_secs(10))
         .map_err(|error| error.to_string())?;
+    let bootstrap_url = format!(
+        "{}#bootstrap={}&launch={}",
+        readiness.origin,
+        secrets.bootstrap_token_hex(),
+        secrets.launch_id,
+    );
+    let window = window.ok_or_else(|| "Openloop main webview is missing".to_owned())?;
+    window
+        .navigate(Url::parse(&bootstrap_url).map_err(|error| {
+            format!("Openloop runtime bootstrap URL is invalid: {error}")
+        })?)
+        .map_err(|error| format!("Openloop main webview navigation failed: {error}"))?;
     Ok(Some(RuntimeProcessState {
         _instance: instance,
         child: Mutex::new(child),

@@ -5604,6 +5604,9 @@ importers:
       '@deepseek-ai/dsh-web-app':
         specifier: workspace:^
         version: link:../../bundle/web-app
+      '@openloop/runtime-bootstrap':
+        specifier: workspace:^
+        version: link:../runtime-bootstrap
       js-yaml:
         specifier: ^4.2.0
         version: 4.2.0
@@ -9345,6 +9348,9 @@ importers:
       '@openloop/runtime':
         specifier: workspace:^
         version: link:../../apps/openloop-runtime
+      '@openloop/runtime-bootstrap':
+        specifier: workspace:^
+        version: link:../../packages/openloop/runtime-bootstrap
 
   vendor/cordis:
     dependencies:
