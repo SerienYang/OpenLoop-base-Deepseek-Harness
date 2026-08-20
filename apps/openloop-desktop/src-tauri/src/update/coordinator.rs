@@ -1,0 +1,190 @@
+use std::{error::Error, ffi::OsString, fmt, os::unix::ffi::OsStrExt, path::Path};
+
+use serde::Serialize;
+use tauri_plugin_updater::{Update, Updater};
+
+use super::{
+    archive::{stage_verified_archive, ArchiveStageError},
+    health::HEALTH_PROBE_ARGUMENT,
+    recovery::{
+        CandidateHealth, HealthStatus, PublicationOutcome, RecoveryError, RecoveryTransaction,
+    },
+};
+
+const CHECK_ARGUMENT: &str = "--openloop-update-spike=check";
+const INSTALL_ARGUMENT: &str = "--openloop-update-spike=install";
+const PRIVATE_ARGUMENT_PREFIX: &[u8] = b"--openloop-update";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostAction {
+    Normal,
+    Check,
+    Install,
+    HealthProbe,
+}
+
+pub fn parse_host_action(arguments: &[OsString]) -> Result<HostAction, CoordinatorError> {
+    if arguments.is_empty() {
+        return Ok(HostAction::Normal);
+    }
+    if arguments.len() == 1 {
+        match arguments[0].to_str() {
+            Some(CHECK_ARGUMENT) => return Ok(HostAction::Check),
+            Some(INSTALL_ARGUMENT) => return Ok(HostAction::Install),
+            Some(HEALTH_PROBE_ARGUMENT) => return Ok(HostAction::HealthProbe),
+            _ => {}
+        }
+    }
+    if arguments.iter().any(|argument| {
+        argument
+            .as_os_str()
+            .as_bytes()
+            .starts_with(PRIVATE_ARGUMENT_PREFIX)
+    }) {
+        return Err(CoordinatorError::InvalidArguments);
+    }
+    Ok(HostAction::Normal)
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckReport {
+    pub current: String,
+    pub available: Option<String>,
+}
+
+impl CheckReport {
+    pub fn json_line(&self) -> Result<String, CoordinatorError> {
+        json_line(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DownloadStatus {
+    NotStarted,
+    Verified,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", tag = "result", content = "health")]
+pub enum InstallPublication {
+    NoUpdate,
+    Committed,
+    RolledBack(HealthStatus),
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallReport {
+    pub current: String,
+    pub available: Option<String>,
+    pub download: DownloadStatus,
+    pub publication: InstallPublication,
+}
+
+impl InstallReport {
+    pub fn json_line(&self) -> Result<String, CoordinatorError> {
+        json_line(self)
+    }
+}
+
+pub async fn check_update(
+    updater: &Updater,
+    current: &str,
+) -> Result<(CheckReport, Option<Update>), CoordinatorError> {
+    let update = updater.check().await.map_err(CoordinatorError::Check)?;
+    let report = CheckReport {
+        current: current.to_owned(),
+        available: update.as_ref().map(|value| value.version.clone()),
+    };
+    Ok((report, update))
+}
+
+pub async fn install_checked_update(
+    update: Update,
+    installed_app: &Path,
+    health: &mut impl CandidateHealth,
+) -> Result<InstallReport, CoordinatorError> {
+    let current = update.current_version.clone();
+    let available = update.version.clone();
+    let archive = update
+        .download(|_, _| {}, || {})
+        .await
+        .map_err(CoordinatorError::Download)?;
+    let candidate =
+        stage_verified_archive(&archive, installed_app).map_err(CoordinatorError::Stage)?;
+    let root = installed_app
+        .parent()
+        .ok_or(CoordinatorError::MissingInstallationRoot)?;
+    let transaction = RecoveryTransaction::open(root, installed_app, candidate.path())
+        .map_err(CoordinatorError::Recovery)?;
+    let publication = match transaction
+        .publish(health)
+        .map_err(CoordinatorError::Recovery)?
+    {
+        PublicationOutcome::Committed => InstallPublication::Committed,
+        PublicationOutcome::RolledBack(status) => InstallPublication::RolledBack(status),
+    };
+    Ok(InstallReport {
+        current,
+        available: Some(available),
+        download: DownloadStatus::Verified,
+        publication,
+    })
+}
+
+fn json_line(value: &impl Serialize) -> Result<String, CoordinatorError> {
+    serde_json::to_string(value)
+        .map(|value| format!("{value}\n"))
+        .map_err(CoordinatorError::Serialize)
+}
+
+#[derive(Debug)]
+pub enum CoordinatorError {
+    InvalidArguments,
+    Check(tauri_plugin_updater::Error),
+    Download(tauri_plugin_updater::Error),
+    Stage(ArchiveStageError),
+    MissingInstallationRoot,
+    Recovery(RecoveryError),
+    Serialize(serde_json::Error),
+}
+
+impl fmt::Display for CoordinatorError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidArguments => formatter
+                .write_str("unknown or non-exact private Openloop update process arguments"),
+            Self::Check(source) => write!(formatter, "signed update check failed: {source}"),
+            Self::Download(source) => {
+                write!(
+                    formatter,
+                    "signed update download or verification failed: {source}"
+                )
+            }
+            Self::Stage(source) => write!(formatter, "verified update staging failed: {source}"),
+            Self::MissingInstallationRoot => {
+                formatter.write_str("installed app has no recovery root")
+            }
+            Self::Recovery(source) => {
+                write!(formatter, "candidate recovery transaction failed: {source}")
+            }
+            Self::Serialize(source) => {
+                write!(formatter, "serialize update result failed: {source}")
+            }
+        }
+    }
+}
+
+impl Error for CoordinatorError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidArguments | Self::MissingInstallationRoot => None,
+            Self::Check(source) | Self::Download(source) => Some(source),
+            Self::Stage(source) => Some(source),
+            Self::Recovery(source) => Some(source),
+            Self::Serialize(source) => Some(source),
+        }
+    }
+}

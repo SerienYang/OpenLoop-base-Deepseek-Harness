@@ -12,7 +12,8 @@ use std::{
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", tag = "status", content = "detail")]
 pub enum HealthStatus {
     Healthy,
     TimedOut,

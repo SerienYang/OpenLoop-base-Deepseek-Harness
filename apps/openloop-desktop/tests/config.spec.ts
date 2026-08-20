@@ -553,14 +553,35 @@ describe('Openloop desktop foundation configuration', () => {
     expect(updaterDependency).toMatchObject({ version: '=2.10.1' })
     expect(npmDependencyNames.filter(name => dangerous.test(name))).toEqual([])
     expect(bundle.createUpdaterArtifacts).toBe(false)
-    expect(updater).toEqual({
-      pubkey: '',
-      endpoints: [
-        'https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-rolling/latest-test-k1.json',
-      ],
-    })
+    expect(Object.keys(updater).sort()).toEqual(['endpoints', 'pubkey'])
+    expect(typeof updater.pubkey).toBe('string')
+    if (typeof updater.pubkey !== 'string') throw new TypeError('updater.pubkey must be a string')
+    expect(updater.pubkey).toMatch(/^[A-Za-z0-9+/]+={0,2}$/u)
+    expect(updater.endpoints).toEqual([
+      'https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-rolling/latest-test-k1.json',
+    ])
     expect(library).toContain('tauri_plugin_updater::Builder::new()')
+    expect(library).toContain('UpdaterExt')
+    expect(library).toMatch(/\.updater\s*\(\s*\)[^]*\.check\s*\(\s*\)\s*\.await/u)
+    expect(library).toMatch(/\.download\s*\(/u)
+    expect(library).not.toMatch(/\.install\s*\(|download_and_install/u)
+    expect(library).toContain('RecoveryTransaction')
     expect(library).toContain('.plugin(')
+    expect(buildScript).not.toContain('env::var(variable).unwrap_or_default()')
+    expect(buildScript.indexOf('valid Tauri updater public key')).toBeLessThan(
+      buildScript.indexOf('tauri_build::try_build'),
+    )
+  })
+
+  test('derives channel runtime identity below app data and passes exact DSH_HOME to the sidecar', () => {
+    const library = readText('apps/openloop-desktop/src-tauri/src/lib.rs')
+    const process = readText('apps/openloop-desktop/src-tauri/src/launcher/process.rs')
+
+    expect(library).toContain('.app_data_dir()')
+    expect(library).toContain('data_root_name()')
+    expect(library).not.toContain('std::env::temp_dir().join("openloop-runtime.sock")')
+    expect(library).toMatch(/openloop-runtime\.sock/u)
+    expect(process).toContain('"DSH_HOME"')
   })
 
   test('uses generated macOS icons and a restrained bootstrap-only frontend', () => {

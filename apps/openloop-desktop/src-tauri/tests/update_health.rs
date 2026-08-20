@@ -1,0 +1,218 @@
+use std::{
+    ffi::OsString,
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+use openloop_desktop_lib::update::{
+    coordinator::{parse_host_action, HostAction},
+    health::{
+        BundleHealthProbe, CandidateProcessHealth, HEALTH_PROBE_ARGUMENT,
+        TEST_PROBE_FAILURE_ENVIRONMENT,
+    },
+    recovery::{CandidateHealth, HealthStatus},
+};
+use tempfile::tempdir;
+
+const VERSION: &str = "1.2.3-test.4";
+const IDENTIFIER: &str = "ai.openloop.desktop.test";
+const CORE_SHA256: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+fn executable(path: &Path, script: &str) {
+    fs::write(path, script).expect("write executable fixture");
+    let mut permissions = fs::metadata(path).expect("fixture metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).expect("fixture permissions");
+}
+
+fn info_plist(executable_name: &str, version: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>{executable_name}</string>
+<key>CFBundleIdentifier</key><string>{IDENTIFIER}</string>
+<key>CFBundleShortVersionString</key><string>{version}</string>
+<key>CFBundleVersion</key><string>{version}</string>
+</dict></plist>
+"#
+    )
+}
+
+fn app_bundle(main_script: &str, sidecar_script: &str) -> (tempfile::TempDir, PathBuf) {
+    let root = tempdir().expect("fixture root");
+    let app = root.path().join("Openloop.app");
+    let macos = app.join("Contents/MacOS");
+    fs::create_dir_all(&macos).expect("app MacOS directory");
+    fs::write(
+        app.join("Contents/Info.plist"),
+        info_plist("openloop-desktop", VERSION),
+    )
+    .expect("Info.plist");
+    executable(&macos.join("openloop-desktop"), main_script);
+    executable(&macos.join("openloop-runtime"), sidecar_script);
+    (root, app)
+}
+
+fn healthy_probe_report() -> String {
+    format!(
+        "{{\"status\":\"healthy\",\"appVersion\":\"{VERSION}\",\"coreManifestSha256\":\"{CORE_SHA256}\"}}"
+    )
+}
+
+fn healthy_runtime_readiness() -> String {
+    format!(
+        "{{\"type\":\"openloop.runtime.ready\",\"version\":1,\"profile\":\"openloop\",\"host\":\"127.0.0.1\",\"port\":43123,\"origin\":\"http://127.0.0.1:43123\",\"coreManifestSha256\":\"{CORE_SHA256}\",\"healthSmoke\":{{\"method\":\"GET\",\"path\":\"/\",\"status\":200}}}}"
+    )
+}
+
+#[test]
+fn accepts_only_exact_private_host_update_arguments() {
+    assert_eq!(parse_host_action(&[]).expect("normal"), HostAction::Normal);
+    assert_eq!(
+        parse_host_action(&[OsString::from("--openloop-update-spike=check")]).expect("check"),
+        HostAction::Check
+    );
+    assert_eq!(
+        parse_host_action(&[OsString::from("--openloop-update-spike=install")]).expect("install"),
+        HostAction::Install
+    );
+    assert_eq!(
+        parse_host_action(&[OsString::from(HEALTH_PROBE_ARGUMENT)]).expect("health"),
+        HostAction::HealthProbe
+    );
+    assert_eq!(
+        parse_host_action(&[OsString::from("--ordinary-tauri-argument")]).expect("ordinary"),
+        HostAction::Normal
+    );
+
+    for args in [
+        vec![OsString::from("--openloop-update")],
+        vec![OsString::from("--openloop-update-spike")],
+        vec![OsString::from("--openloop-update-spike=unknown")],
+        vec![
+            OsString::from("--openloop-update-spike=check"),
+            OsString::from("extra"),
+        ],
+        vec![
+            OsString::from(HEALTH_PROBE_ARGUMENT),
+            OsString::from("extra"),
+        ],
+        vec![OsString::from("--openloop-update-health-probe=1")],
+    ] {
+        assert!(
+            parse_host_action(&args).is_err(),
+            "accepted private update arguments {args:?}"
+        );
+    }
+}
+
+#[test]
+fn self_probe_validates_info_plist_and_bundled_sidecar_core_identity() {
+    let sidecar = format!(
+        "#!/bin/sh\n[ \"$#\" -eq 1 ] && [ \"$1\" = \"--health-smoke\" ] || exit 91\nprintf '%s\\n' '{}'\n",
+        healthy_runtime_readiness()
+    );
+    let (_root, app) = app_bundle("#!/bin/sh\nexit 0\n", &sidecar);
+    let probe = BundleHealthProbe::new(VERSION, IDENTIFIER, CORE_SHA256);
+
+    let report = probe
+        .inspect(&app, Duration::from_secs(2))
+        .expect("valid candidate bundle health");
+
+    assert_eq!(report.app_version, VERSION);
+    assert_eq!(report.core_manifest_sha256, CORE_SHA256);
+
+    fs::write(
+        app.join("Contents/Info.plist"),
+        info_plist("openloop-desktop", "9.9.9"),
+    )
+    .expect("replace Info.plist");
+    assert!(
+        probe.inspect(&app, Duration::from_secs(2)).is_err(),
+        "mismatched build version passed health"
+    );
+
+    fs::write(
+        app.join("Contents/Info.plist"),
+        info_plist("openloop-desktop", VERSION),
+    )
+    .expect("restore Info.plist");
+    let wrong_core = sidecar.replace(CORE_SHA256, &"b".repeat(64));
+    executable(&app.join("Contents/MacOS/openloop-runtime"), &wrong_core);
+    assert!(
+        probe.inspect(&app, Duration::from_secs(2)).is_err(),
+        "mismatched sidecar core identity passed health"
+    );
+}
+
+#[test]
+fn candidate_process_health_reports_success_failure_and_timeout() {
+    let success = format!(
+        "#!/bin/sh\n[ \"$#\" -eq 1 ] && [ \"$1\" = \"{HEALTH_PROBE_ARGUMENT}\" ] || exit 91\nprintf '%s\\n' '{}'\n",
+        healthy_probe_report()
+    );
+    let (_success_root, success_app) = app_bundle(&success, "#!/bin/sh\nexit 0\n");
+    let mut health = CandidateProcessHealth::new(VERSION);
+    assert_eq!(
+        health.await_health(&success_app, Duration::from_secs(2)),
+        HealthStatus::Healthy
+    );
+
+    let failure = format!(
+        "#!/bin/sh\n[ \"$1\" = \"{HEALTH_PROBE_ARGUMENT}\" ] || exit 91\nprintf 'probe failed\\n' >&2\nexit 7\n"
+    );
+    let (_failure_root, failure_app) = app_bundle(&failure, "#!/bin/sh\nexit 0\n");
+    let mut health = CandidateProcessHealth::new(VERSION);
+    let status = health.await_health(&failure_app, Duration::from_secs(2));
+    assert!(
+        matches!(status, HealthStatus::Failed(ref message) if message.contains("status") || message.contains("failed")),
+        "unexpected failed status: {status:?}"
+    );
+
+    let timeout_marker = tempdir().expect("timeout marker root");
+    let marker = timeout_marker.path().join("descendant-survived");
+    let timeout = format!(
+        "#!/bin/sh\n[ \"$1\" = \"{HEALTH_PROBE_ARGUMENT}\" ] || exit 91\nnohup sh -c \"sleep 0.2; touch '{}'\" >/dev/null 2>&1 &\nwait\n",
+        marker.display()
+    );
+    let (_timeout_root, timeout_app) = app_bundle(&timeout, "#!/bin/sh\nexit 0\n");
+    let mut health = CandidateProcessHealth::new(VERSION);
+    assert_eq!(
+        health.await_health(&timeout_app, Duration::from_millis(30)),
+        HealthStatus::TimedOut
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !marker.exists(),
+        "timed-out Host probe left its descendant running"
+    );
+}
+
+#[test]
+fn probe_failure_injection_is_test_channel_private_mode_only() {
+    let probe = BundleHealthProbe::new(VERSION, IDENTIFIER, CORE_SHA256);
+
+    assert!(probe
+        .test_failure_injection("test", Some("1"))
+        .expect("test channel injection"));
+    assert!(!probe
+        .test_failure_injection("test", None)
+        .expect("missing injection"));
+    assert!(
+        probe.test_failure_injection("stable", Some("1")).is_err(),
+        "stable channel accepted health failure injection"
+    );
+    assert!(
+        probe
+            .test_failure_injection("test", Some("unknown"))
+            .is_err(),
+        "unknown health failure injection value was ignored"
+    );
+    assert_eq!(
+        TEST_PROBE_FAILURE_ENVIRONMENT,
+        "OPENLOOP_UPDATE_SPIKE_PROBE_FAILURE"
+    );
+}

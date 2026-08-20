@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -49,6 +50,7 @@ struct CanonicalArtifacts {
 
 #[derive(Debug, PartialEq, Eq)]
 struct EmbeddedHashes {
+    channel: String,
     core: String,
     artifact_manifest: String,
     sidecar: String,
@@ -262,6 +264,7 @@ fn embed_manifests(
     fs::write(out_dir.join("openloop-core.json"), &core_bytes)?;
     fs::write(out_dir.join("openloop-artifacts.json"), &artifact_bytes)?;
     Ok(EmbeddedHashes {
+        channel: core.channel,
         core: core_sha256,
         artifact_manifest: format!("{:x}", Sha256::digest(&artifact_bytes)),
         sidecar: artifacts.artifacts.sidecar,
@@ -269,6 +272,96 @@ fn embed_manifests(
         web: artifacts.artifacts.web,
         bundle_graph: artifacts.artifacts.bundle_graph,
     })
+}
+
+const TEST_UPDATER_PUBLIC_KEY_FALLBACK: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU4OTU2OENBMkZCQUZBODUKUldTRityb3Z5bWlWNkowTThHZC9YZEpBN1kvWDMyaEljcEVZOEw4K2RtR1poQlY1MzJsWjh0aXYK";
+
+#[derive(Debug, PartialEq, Eq)]
+struct SelectedUpdaterPublicKey {
+    environment: &'static str,
+    value: String,
+}
+
+fn validate_updater_public_key(environment: &str, value: &str) -> Result<(), io::Error> {
+    let invalid = || {
+        invalid_data(format!(
+            "{environment} must contain a valid Tauri updater public key as non-empty single-line canonical base64"
+        ))
+    };
+    if value.is_empty()
+        || value.trim() != value
+        || value.contains('\r')
+        || value.contains('\n')
+        || value.len() % 4 != 0
+    {
+        return Err(invalid());
+    }
+    let decoded = STANDARD.decode(value).map_err(|_| invalid())?;
+    if STANDARD.encode(&decoded) != value {
+        return Err(invalid());
+    }
+    let decoded = std::str::from_utf8(&decoded).map_err(|_| invalid())?;
+    let lines = decoded
+        .strip_suffix('\n')
+        .unwrap_or(decoded)
+        .split('\n')
+        .collect::<Vec<_>>();
+    if lines.len() != 2 || !lines[0].starts_with("untrusted comment: ") {
+        return Err(invalid());
+    }
+    let key = STANDARD.decode(lines[1]).map_err(|_| invalid())?;
+    if STANDARD.encode(&key) != lines[1]
+        || key.len() != 42
+        || key[0] != b'E'
+        || (key[1] != b'd' && key[1] != b'D')
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn select_updater_public_key(
+    channel: &str,
+    test_key: Option<&str>,
+    stable_key: Option<&str>,
+) -> Result<SelectedUpdaterPublicKey, io::Error> {
+    let (environment, value) = match channel {
+        "test" => (
+            "OPENLOOP_UPDATER_PUBLIC_KEY",
+            test_key.unwrap_or(TEST_UPDATER_PUBLIC_KEY_FALLBACK),
+        ),
+        "stable" => (
+            "OPENLOOP_STABLE_UPDATER_PUBLIC_KEY",
+            stable_key.ok_or_else(|| {
+                invalid_data(
+                    "OPENLOOP_STABLE_UPDATER_PUBLIC_KEY is required for stable desktop builds",
+                )
+            })?,
+        ),
+        _ => {
+            return Err(invalid_data(
+                "Openloop updater channel must be test or stable",
+            ))
+        }
+    };
+    validate_updater_public_key(environment, value)?;
+    Ok(SelectedUpdaterPublicKey {
+        environment,
+        value: value.to_owned(),
+    })
+}
+
+fn updater_environment_value(
+    variable: &str,
+    value: Result<String, env::VarError>,
+) -> Result<Option<String>, io::Error> {
+    match value {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(invalid_data(format!(
+            "{variable} must contain a valid Tauri updater public key as UTF-8"
+        ))),
+    }
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -309,14 +402,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "OPENLOOP_STABLE_UPDATER_PUBLIC_KEY",
     ] {
         println!("cargo:rerun-if-env-changed={variable}");
-        let value = env::var(variable).unwrap_or_default();
-        if value.contains('\r') || value.contains('\n') {
-            return Err(
-                invalid_data(format!("{variable} must be a single-line base64 value")).into(),
-            );
-        }
-        println!("cargo:rustc-env={variable}={value}");
     }
+    let test_key = updater_environment_value(
+        "OPENLOOP_UPDATER_PUBLIC_KEY",
+        env::var("OPENLOOP_UPDATER_PUBLIC_KEY"),
+    )?;
+    let stable_key = updater_environment_value(
+        "OPENLOOP_STABLE_UPDATER_PUBLIC_KEY",
+        env::var("OPENLOOP_STABLE_UPDATER_PUBLIC_KEY"),
+    )?;
+    let updater_key =
+        select_updater_public_key(&hashes.channel, test_key.as_deref(), stable_key.as_deref())?;
+    println!(
+        "cargo:rustc-env={}={}",
+        updater_key.environment, updater_key.value
+    );
 
     tauri_build::try_build(
         Attributes::new().app_manifest(AppManifest::new().commands(&["build_manifest"])),

@@ -2190,12 +2190,14 @@ name = "openloop-desktop"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "flate2",
  "getrandom 0.3.4",
  "libc",
  "minisign-verify",
  "serde",
  "serde_json",
  "sha2",
+ "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-updater",
@@ -2726,7 +2728,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

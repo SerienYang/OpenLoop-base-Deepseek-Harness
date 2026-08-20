@@ -19,6 +19,7 @@ use openloop_desktop_lib::update::{
 use tempfile::tempdir;
 
 const VALID_TAURI_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkgRTc2MjBGMTg0MkI0RTgxRgpSV1FmNkxSQ0dBOWk1M21sWWVjTzRJelQ1MVRHUHB2V3VjTlNDaDFDQk0wUVRhTG43M1k3R0ZPMwo=";
+const REPOSITORY_TEST_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU4OTU2OENBMkZCQUZBODUKUldTRityb3Z5bWlWNkowTThHZC9YZEpBN1kvWDMyaEljcEVZOEw4K2RtR1poQlY1MzJsWjh0aXYK";
 
 #[test]
 fn channel_contracts_are_explicit_isolated_and_use_the_actual_repository() {
@@ -81,6 +82,14 @@ fn channel_configuration_fails_closed_without_a_valid_tauri_public_key() {
             "unexpected error: {error}"
         );
     }
+}
+
+#[test]
+fn embedded_test_channel_has_the_current_repository_public_key_without_environment_setup() {
+    let config = UpdateChannelConfig::embedded(ReleaseChannel::Test)
+        .expect("test builds must embed a valid updater key");
+
+    assert_eq!(config.public_key(), REPOSITORY_TEST_PUBLIC_KEY);
 }
 
 #[test]

@@ -1,14 +1,26 @@
 use std::{
+    ffi::{OsStr, OsString},
     fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::Mutex,
     time::Duration,
 };
 
 use tauri::{AppHandle, Manager, RunEvent, Url};
+use tauri_plugin_updater::UpdaterExt;
 
 use crate::launcher::{
     InstanceAction, LaunchReadinessExpectation, LaunchSecrets, SingleInstance, SupervisedChild,
+};
+use crate::update::{
+    archive::stage_verified_archive,
+    coordinator::{
+        parse_host_action, CheckReport, DownloadStatus, HostAction, InstallPublication,
+        InstallReport,
+    },
+    health::{BundleHealthProbe, CandidateProcessHealth, TEST_PROBE_FAILURE_ENVIRONMENT},
+    recovery::{PublicationOutcome, RecoveryTransaction},
 };
 
 pub mod browser;
@@ -220,17 +232,179 @@ fn start_runtime(
     }))
 }
 
-pub fn run() {
-    let channel = embedded_build_manifest()
-        .and_then(|manifest| {
-            manifest
-                .channel
-                .parse()
-                .map_err(|error: update::channel::ChannelConfigError| error.to_string())
-        })
-        .expect("embedded Openloop release channel is invalid");
-    let updater_config = update::channel::UpdateChannelConfig::embedded(channel)
-        .expect("signed Openloop updater configuration is invalid");
+fn embedded_channel() -> Result<update::channel::ReleaseChannel, String> {
+    embedded_build_manifest().and_then(|manifest| {
+        manifest
+            .channel
+            .parse()
+            .map_err(|error: update::channel::ChannelConfigError| error.to_string())
+    })
+}
+
+fn current_app_bundle() -> Result<PathBuf, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("current Host executable is unavailable: {error}"))?;
+    let macos = executable
+        .parent()
+        .ok_or_else(|| "current Host executable has no parent".to_owned())?;
+    if macos.file_name() != Some(OsStr::new("MacOS")) {
+        return Err("current Host executable is not inside an App MacOS directory".to_owned());
+    }
+    let contents = macos
+        .parent()
+        .ok_or_else(|| "current Host executable has no Contents directory".to_owned())?;
+    if contents.file_name() != Some(OsStr::new("Contents")) {
+        return Err("current Host executable is not inside an App Contents directory".to_owned());
+    }
+    let app = contents
+        .parent()
+        .ok_or_else(|| "current Host executable has no App bundle".to_owned())?;
+    if app.extension() != Some(OsStr::new("app")) {
+        return Err("current Host executable is not inside an .app bundle".to_owned());
+    }
+    Ok(app.to_owned())
+}
+
+fn write_stdout_line(line: &str) -> Result<(), String> {
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(line.as_bytes())
+        .and_then(|()| stdout.flush())
+        .map_err(|error| format!("write Host spike output failed: {error}"))
+}
+
+fn write_failure_json(error: &str) {
+    let value = serde_json::json!({
+        "result": "failed",
+        "error": error,
+    });
+    if let Ok(line) = serde_json::to_string(&value) {
+        let _ = write_stdout_line(&format!("{line}\n"));
+    }
+}
+
+fn run_health_probe(
+    manifest: &OpenloopBuildManifest,
+    updater_config: &update::channel::UpdateChannelConfig,
+) -> Result<(), String> {
+    let probe = BundleHealthProbe::new(
+        &manifest.app_version,
+        updater_config.bundle_identifier(),
+        CORE_MANIFEST_SHA256,
+    );
+    let injected = std::env::var(TEST_PROBE_FAILURE_ENVIRONMENT).ok();
+    if probe
+        .test_failure_injection(&manifest.channel, injected.as_deref())
+        .map_err(|error| error.to_string())?
+    {
+        return Err("trusted test health failure was injected".to_owned());
+    }
+    let app = current_app_bundle()?;
+    let report = probe
+        .inspect(&app, Duration::from_secs(45))
+        .map_err(|error| error.to_string())?;
+    write_stdout_line(&report.to_json_line().map_err(|error| error.to_string())?)
+}
+
+async fn run_update_spike(
+    app: &AppHandle,
+    action: HostAction,
+    current: &str,
+) -> Result<String, String> {
+    let update = app
+        .updater()
+        .map_err(|error| format!("create signed updater failed: {error}"))?
+        .check()
+        .await
+        .map_err(|error| format!("signed update check failed: {error}"))?;
+    let check = CheckReport {
+        current: current.to_owned(),
+        available: update.as_ref().map(|value| value.version.clone()),
+    };
+    if action == HostAction::Check {
+        return check.json_line().map_err(|error| error.to_string());
+    }
+    let Some(update) = update else {
+        return InstallReport {
+            current: check.current,
+            available: None,
+            download: DownloadStatus::NotStarted,
+            publication: InstallPublication::NoUpdate,
+        }
+        .json_line()
+        .map_err(|error| error.to_string());
+    };
+    let installed = current_app_bundle()?;
+    let current = update.current_version.clone();
+    let available = update.version.clone();
+    let archive = update
+        .download(|_, _| {}, || {})
+        .await
+        .map_err(|error| format!("signed update download or verification failed: {error}"))?;
+    let candidate = stage_verified_archive(&archive, &installed)
+        .map_err(|error| format!("verified update staging failed: {error}"))?;
+    let root = installed
+        .parent()
+        .ok_or_else(|| "installed app has no recovery root".to_owned())?;
+    let transaction = RecoveryTransaction::open(root, &installed, candidate.path())
+        .map_err(|error| format!("open candidate recovery transaction failed: {error}"))?;
+    let mut health = CandidateProcessHealth::new(&update.version);
+    let publication = match transaction
+        .publish(&mut health)
+        .map_err(|error| format!("publish candidate recovery transaction failed: {error}"))?
+    {
+        PublicationOutcome::Committed => InstallPublication::Committed,
+        PublicationOutcome::RolledBack(status) => InstallPublication::RolledBack(status),
+    };
+    InstallReport {
+        current,
+        available: Some(available),
+        download: DownloadStatus::Verified,
+        publication,
+    }
+    .json_line()
+    .map_err(|error| error.to_string())
+}
+
+pub fn run() -> i32 {
+    let arguments = std::env::args_os().skip(1).collect::<Vec<OsString>>();
+    let action = match parse_host_action(&arguments) {
+        Ok(action) => action,
+        Err(error) => {
+            write_failure_json(&error.to_string());
+            return 2;
+        }
+    };
+    let manifest = match embedded_build_manifest() {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            write_failure_json(&error);
+            return 1;
+        }
+    };
+    let channel = match embedded_channel() {
+        Ok(channel) => channel,
+        Err(error) => {
+            write_failure_json(&error);
+            return 1;
+        }
+    };
+    let updater_config = match update::channel::UpdateChannelConfig::embedded(channel) {
+        Ok(config) => config,
+        Err(error) => {
+            write_failure_json(&error.to_string());
+            return 1;
+        }
+    };
+    if action == HostAction::HealthProbe {
+        return match run_health_probe(&manifest, &updater_config) {
+            Ok(()) => 0,
+            Err(error) => {
+                write_failure_json(&error);
+                1
+            }
+        };
+    }
     let updater_plugin = tauri_plugin_updater::Builder::new()
         .pubkey(updater_config.public_key())
         .build();
@@ -238,7 +412,10 @@ pub fn run() {
         .plugin(updater_plugin)
         .manage(updater_config)
         .invoke_handler(tauri::generate_handler![build_manifest])
-        .setup(|app| {
+        .setup(move |app| {
+            if action != HostAction::Normal {
+                return Ok(());
+            }
             let updater_config = app.state::<update::channel::UpdateChannelConfig>();
             if let Some(state) = start_runtime(&app.handle(), &updater_config)? {
                 app.manage(state);
@@ -247,6 +424,25 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("failed to build Openloop desktop application");
+    if matches!(action, HostAction::Check | HostAction::Install) {
+        return match tauri::async_runtime::block_on(run_update_spike(
+            &app.handle(),
+            action,
+            &manifest.app_version,
+        )) {
+            Ok(line) => match write_stdout_line(&line) {
+                Ok(()) => 0,
+                Err(error) => {
+                    write_failure_json(&error);
+                    1
+                }
+            },
+            Err(error) => {
+                write_failure_json(&error);
+                1
+            }
+        };
+    }
     app.run(|app, event| {
         if matches!(event, RunEvent::Exit) {
             if let Some(state) = app.try_state::<RuntimeProcessState>() {
@@ -256,6 +452,7 @@ pub fn run() {
             }
         }
     });
+    0
 }
 
 #[cfg(test)]
