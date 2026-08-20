@@ -184,6 +184,12 @@ describe('Openloop spike release workflow', () => {
     expect(publish).toMatch(/gh release create[^]*--prerelease/u)
     expect(publish).toMatch(/immutable_state=published/u)
     expect(publish).toMatch(/published immutable prerelease[^]*resume rolling/iu)
+    expect(publish).toMatch(
+      /gh release download "\$RELEASE_TAG"[^]*Openloop\.app\.tar\.gz[^]*Openloop\.app\.tar\.gz\.sig/u,
+    )
+    expect(publish).toMatch(
+      /render-update-manifest\.mjs[^]*--artifact "\$published_updater"[^]*--signature "\$published_signature"/u,
+    )
     expect(publish).toMatch(/if test "\$immutable_state" = draft; then/u)
     expect(publish).toMatch(/gh release upload "\$RELEASE_TAG"[^]*--clobber/u)
     expect(publish).toMatch(/gh release edit "\$RELEASE_TAG" --draft=false[^]*fi/u)

@@ -170,7 +170,12 @@ jobs:
           }
 
           release_error="$(mktemp)"
-          trap 'rm -f "$release_error"' EXIT
+          published_assets_dir=""
+          cleanup_release_state() {
+            rm -f "$release_error"
+            test -z "$published_assets_dir" || rm -rf "$published_assets_dir"
+          }
+          trap cleanup_release_state EXIT
           set +e
           release_json="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease,tagName,targetCommitish,name,body,assets 2>"$release_error")"
           release_status=$?
@@ -182,6 +187,25 @@ jobs:
             else
               validate_required_assets "$release_json" "published immutable prerelease"
               immutable_state=published
+              published_assets_dir="$(mktemp -d)"
+              gh release download "$RELEASE_TAG" \
+                --pattern "Openloop.app.tar.gz" \
+                --pattern "Openloop.app.tar.gz.sig" \
+                --dir "$published_assets_dir"
+              published_updater="$published_assets_dir/Openloop.app.tar.gz"
+              published_signature="${published_updater}.sig"
+              test -f "$published_updater"
+              test -f "$published_signature"
+              artifact_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/Openloop.app.tar.gz"
+              node scripts/openloop/render-update-manifest.mjs \
+                --version "$APP_VERSION" \
+                --artifact-url "$artifact_url" \
+                --artifact "$published_updater" \
+                --signature "$published_signature" \
+                --public-key "$OPENLOOP_UPDATER_PUBLIC_KEY" \
+                --notes "$RELEASE_NOTES" \
+                --pub-date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                --out dist-openloop/latest-test-k1.json
               echo "published immutable prerelease $RELEASE_TAG matches this run; resume rolling manifest publication"
             fi
           elif grep -Fqi "release not found" "$release_error"; then

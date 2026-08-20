@@ -74,6 +74,7 @@ impl BundleHealthProbe {
         timeout: Duration,
         dsh_home: &Path,
     ) -> Result<HealthProbeReport, HealthProbeError> {
+        let deadline = Instant::now() + timeout;
         validate_dsh_home(dsh_home, None)?;
         require_real_directory(app, "candidate app")?;
         if app.extension() != Some(OsStr::new("app")) {
@@ -81,7 +82,7 @@ impl BundleHealthProbe {
                 "candidate bundle must use the .app extension",
             ));
         }
-        verify_bundle_code_signature(app)?;
+        verify_bundle_code_signature(app, remaining_health_budget(deadline)?)?;
         let contents = app.join("Contents");
         let macos = contents.join("MacOS");
         require_real_directory(&contents, "candidate Contents")?;
@@ -110,7 +111,7 @@ impl BundleHealthProbe {
         require_regular_file(&sidecar, "candidate runtime sidecar", true)?;
         let mut command = Command::new(&sidecar);
         command.arg("--health-smoke").env("DSH_HOME", dsh_home);
-        let output = bounded_output(command, timeout)?;
+        let output = bounded_output(command, remaining_health_budget(deadline)?)?;
         validate_success_output(&output, "runtime sidecar health smoke")?;
         let readiness: RuntimeHealthSmoke =
             parse_single_json_line(&output.stdout, "runtime sidecar health smoke")?;
@@ -172,9 +173,10 @@ impl CandidateProcessHealth {
     }
 
     fn run(&self, candidate: &Path, timeout: Duration) -> Result<(), HealthProbeError> {
+        let deadline = Instant::now() + timeout;
         validate_dsh_home(&self.dsh_home, None)?;
         require_real_directory(candidate, "published candidate app")?;
-        verify_bundle_code_signature(candidate)?;
+        verify_bundle_code_signature(candidate, remaining_health_budget(deadline)?)?;
         let contents = candidate.join("Contents");
         let macos = contents.join("MacOS");
         require_real_directory(&contents, "published candidate Contents")?;
@@ -190,7 +192,7 @@ impl CandidateProcessHealth {
         command
             .arg(HEALTH_PROBE_ARGUMENT)
             .env("DSH_HOME", &self.dsh_home);
-        let output = bounded_output(command, timeout)?;
+        let output = bounded_output(command, remaining_health_budget(deadline)?)?;
         validate_success_output(&output, "candidate Host health probe")?;
         let report: HealthProbeReport =
             parse_single_json_line(&output.stdout, "candidate Host health probe")?;
@@ -486,12 +488,19 @@ fn plist_value(path: &Path, key: &str) -> Result<String, HealthProbeError> {
     Ok(value.to_owned())
 }
 
-fn verify_bundle_code_signature(app: &Path) -> Result<(), HealthProbeError> {
-    let output = Command::new("/usr/bin/codesign")
-        .args(["--verify", "--deep", "--strict"])
-        .arg(app)
-        .output()
-        .map_err(|source| HealthProbeError::io("run candidate codesign verification", source))?;
+fn remaining_health_budget(deadline: Instant) -> Result<Duration, HealthProbeError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        Err(HealthProbeError::TimedOut)
+    } else {
+        Ok(remaining)
+    }
+}
+
+fn verify_bundle_code_signature(app: &Path, timeout: Duration) -> Result<(), HealthProbeError> {
+    let mut command = Command::new("/usr/bin/codesign");
+    command.args(["--verify", "--deep", "--strict"]).arg(app);
+    let output = bounded_output(command, timeout)?;
     if !output.status.success() {
         return Err(HealthProbeError::invalid(format!(
             "candidate app code signature verification failed{}",
