@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { linkSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
@@ -136,7 +136,7 @@ describe('Openloop runtime launcher', () => {
     })
   })
 
-  test('creates and resets only a regular launcher-owned empty root config', () => {
+  test('creates and validates only a regular launcher-owned empty root config', () => {
     const root = temporaryDirectory('root')
     const path = join(root, 'cordis.yml')
 
@@ -144,8 +144,8 @@ describe('Openloop runtime launcher', () => {
     expect(readFileSync(path, 'utf8')).toBe('[]\n')
 
     writeFileSync(path, 'mutated by loader\n')
-    ensureEmptyRootConfig(path)
-    expect(readFileSync(path, 'utf8')).toBe('[]\n')
+    expect(() => { ensureEmptyRootConfig(path) }).toThrow(/exact empty root|unexpected content/iu)
+    expect(readFileSync(path, 'utf8')).toBe('mutated by loader\n')
   })
 
   test('refuses to overwrite a symlink root config', () => {
@@ -157,6 +157,29 @@ describe('Openloop runtime launcher', () => {
 
     expect(() => { ensureEmptyRootConfig(path) }).toThrow(/symbolic link|regular file/iu)
     expect(readFileSync(target, 'utf8')).toBe('keep\n')
+  })
+
+  test('refuses a hardlinked root config without modifying the other link', () => {
+    const root = temporaryDirectory('hardlink')
+    const target = join(root, 'target')
+    const path = join(root, 'cordis.yml')
+    writeFileSync(target, 'keep\n')
+    linkSync(target, path)
+
+    expect(() => { ensureEmptyRootConfig(path) }).toThrow(/hardlink|link count|single link/iu)
+    expect(readFileSync(target, 'utf8')).toBe('keep\n')
+    expect(readFileSync(path, 'utf8')).toBe('keep\n')
+  })
+
+  test('refuses an intermediate symlink below the trusted parent', () => {
+    const root = temporaryDirectory('intermediate-root')
+    const outside = temporaryDirectory('intermediate-outside')
+    const path = join(root, 'redirect/nested/cordis.yml')
+    mkdirSync(join(outside, 'nested'), { recursive: true })
+    symlinkSync(outside, join(root, 'redirect'), 'dir')
+
+    expect(() => { ensureEmptyRootConfig(path, root) }).toThrow(/symbolic link|trusted parent|canonical/iu)
+    expect(() => readFileSync(join(outside, 'nested/cordis.yml'))).toThrow()
   })
 
   test('publishes readiness only after settled boot, watcher setup, and HTTP health', async () => {

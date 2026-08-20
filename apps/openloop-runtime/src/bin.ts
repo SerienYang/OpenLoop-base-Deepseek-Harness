@@ -4,13 +4,15 @@ import { createHash } from 'node:crypto'
 import {
   closeSync,
   constants,
+  existsSync,
   fstatSync,
-  ftruncateSync,
+  lstatSync,
   openSync,
   readFileSync,
+  realpathSync,
   writeFileSync,
 } from 'node:fs'
-import { join, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
@@ -154,32 +156,94 @@ export function readCoreManifest(path: string): LoadedCoreManifest {
 }
 
 /**
- * Create or reset the launcher's empty Include root through one no-follow file
- * descriptor. A link, directory, fifo, or device is never truncated.
+ * Resolve one config below a trusted parent without following path links.
  */
-export function ensureEmptyRootConfig(path: string): void {
+function canonicalRootConfigPath(path: string, trustedParent: string): string {
+  const root = resolve(trustedParent)
+  const target = resolve(path)
+  const child = relative(root, target)
+  if (child === '' || child === '..' || child.startsWith(`..${sep}`) || isAbsolute(child)) {
+    throw new Error(`${BIN_NAME}: root config must stay below its trusted parent: ${path}`)
+  }
+  const rootMetadata = lstatSync(root)
+  if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) {
+    throw new Error(`${BIN_NAME}: root config trusted parent must be a real directory: ${root}`)
+  }
+  const canonicalRoot = realpathSync(root)
+  const components = child.split(sep)
+  let current = root
+  for (const component of components.slice(0, -1)) {
+    current = join(current, component)
+    if (!existsSync(current)) {
+      throw new Error(`${BIN_NAME}: root config parent is missing: ${current}`)
+    }
+    const metadata = lstatSync(current)
+    if (metadata.isSymbolicLink()) {
+      throw new Error(`${BIN_NAME}: root config path contains a symbolic link: ${current}`)
+    }
+    if (!metadata.isDirectory()) {
+      throw new Error(`${BIN_NAME}: root config parent must be a directory: ${current}`)
+    }
+    const canonical = realpathSync(current)
+    const canonicalChild = relative(canonicalRoot, canonical)
+    if (canonicalChild === '..'
+      || canonicalChild.startsWith(`..${sep}`)
+      || isAbsolute(canonicalChild)) {
+      throw new Error(`${BIN_NAME}: root config canonical parent escaped its trusted parent: ${current}`)
+    }
+  }
+  return join(realpathSync(current), components.at(-1) as string)
+}
+
+/**
+ * Create the launcher's empty Include root once, or validate exact existing
+ * bytes. Existing files are never truncated or rewritten.
+ */
+export function ensureEmptyRootConfig(path: string, trustedParent = dirname(path)): void {
+  const target = canonicalRootConfigPath(path, trustedParent)
   let descriptor: number
+  let created = false
   try {
     descriptor = openSync(
-      path,
+      target,
       constants.O_CREAT
-      | constants.O_RDWR
+      | constants.O_EXCL
+      | constants.O_WRONLY
       | constants.O_NOFOLLOW
       | constants.O_NONBLOCK,
       0o600,
     )
+    created = true
   } catch (error) {
-    throw new Error(`${BIN_NAME}: root config must be a regular file, not a symbolic link or special file: ${path}`, {
-      cause: error,
-    })
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw new Error(`${BIN_NAME}: root config must be a regular file, not a symbolic link or special file: ${path}`, {
+        cause: error,
+      })
+    }
+    try {
+      descriptor = openSync(
+        target,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      )
+    } catch (openError) {
+      throw new Error(`${BIN_NAME}: root config must be a regular file, not a symbolic link or special file: ${path}`, {
+        cause: openError,
+      })
+    }
   }
   try {
     const stat = fstatSync(descriptor)
     if (!stat.isFile()) {
       throw new Error(`${BIN_NAME}: root config must be a regular file, not a symbolic link or special file: ${path}`)
     }
-    ftruncateSync(descriptor, 0)
-    writeFileSync(descriptor, EMPTY_ROOT)
+    if (stat.nlink !== 1) {
+      throw new Error(`${BIN_NAME}: root config must have a single link, not a hardlink: ${path}`)
+    }
+    if (created) {
+      writeFileSync(descriptor, EMPTY_ROOT)
+    } else if (!readFileSync(descriptor).equals(Buffer.from(EMPTY_ROOT))) {
+      throw new Error(`${BIN_NAME}: root config has unexpected content; expected the exact empty root: ${path}`)
+    }
   } finally {
     closeSync(descriptor)
   }
@@ -323,7 +387,7 @@ export async function runOpenloopRuntime(
   const core = dependencies.loadCoreManifest(dependencies.coreManifestPath)
   const profileDir = dependencies.ensureOpenloopProfile(options.home)
   const rootConfig = join(profileDir, 'cordis.yml')
-  ensureEmptyRootConfig(rootConfig)
+  ensureEmptyRootConfig(rootConfig, profileDir)
   dependencies.healProfilesModuleFallback(dependencies.installAnchor, options.home)
   const profile = dependencies.loadProfile(
     BIN_NAME,

@@ -38,6 +38,7 @@ function artifactManifest() {
     coreManifestSha256: sha256,
     artifacts: {
       sidecar: sha256,
+      runtimeSbom: sha256,
       web: sha256,
       bundleGraph: sha256,
     },
@@ -167,6 +168,12 @@ describe('OpenLoop artifact manifest contract', () => {
       ...artifactManifest(),
       artifacts,
     })).toThrow(/web|missing required/u)
+
+    const { runtimeSbom: _runtimeSbom, ...withoutRuntimeSbom } = artifactManifest().artifacts
+    expect(() => parseOpenloopArtifactManifest({
+      ...artifactManifest(),
+      artifacts: withoutRuntimeSbom,
+    })).toThrow(/runtimeSbom|missing required/u)
   })
 
   it('rejects short hashes and unknown artifact fields', () => {

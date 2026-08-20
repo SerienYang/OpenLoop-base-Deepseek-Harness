@@ -7,6 +7,7 @@ import {
   cp,
   lstat,
   mkdir,
+  readlink,
   readFile,
   readdir,
   realpath,
@@ -47,6 +48,12 @@ export const ASSET_GLOBS = [
   'node_modules/@deepseek-ai/dsh-web-frontend/dist/**/*',
   'node_modules/@deepseek-ai/dsh/config/**/*',
   'node_modules/@openloop/runtime/openloop-core.json',
+  '!node_modules/**/test/**/*',
+  '!node_modules/**/tests/**/*',
+  '!node_modules/**/__tests__/**/*',
+  '!node_modules/**/fixture/**/*',
+  '!node_modules/**/fixtures/**/*',
+  '!node_modules/**/*.{test,spec}.{js,cjs,mjs}',
 ] as const
 
 export interface PackageManifest {
@@ -213,7 +220,7 @@ export interface RuntimeBuildRunner {
 
 export interface RuntimeBuildFileSystem {
   exists(path: string): boolean
-  clearStaging?(staging: string): Promise<void>
+  clearStaging?(root: string, staging: string): Promise<void>
   synchronizeClosure(root: string): Promise<void>
   prepareDeploymentWorkspace(root: string): Promise<string>
   cleanupDeploymentWorkspace(workspace: string): Promise<void>
@@ -231,12 +238,40 @@ function assertInside(path: string, boundary: string, label: string): void {
   throw new Error(`build-runtime-exe: ${label} ${normalizedPath} is outside boundary ${normalizedBoundary}`)
 }
 
+async function assertSafeRepositoryPath(root: string, path: string, label: string): Promise<void> {
+  const repositoryRoot = resolve(root)
+  const target = resolve(path)
+  assertInside(target, repositoryRoot, label)
+  const rootMetadata = await lstat(repositoryRoot)
+  if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) {
+    throw new Error(`build-runtime-exe: repository root must be a real directory: ${repositoryRoot}`)
+  }
+  const canonicalRoot = await realpath(repositoryRoot)
+  const components = relative(repositoryRoot, target).split(sep).filter(Boolean)
+  let current = repositoryRoot
+  for (const [index, component] of components.entries()) {
+    current = join(current, component)
+    if (!existsSync(current)) return
+    const metadata = await lstat(current)
+    if (metadata.isSymbolicLink()) {
+      throw new Error(`build-runtime-exe: ${label} path contains symlink: ${current}`)
+    }
+    if (index < components.length - 1 && !metadata.isDirectory()) {
+      throw new Error(`build-runtime-exe: ${label} ancestor is not a directory: ${current}`)
+    }
+    assertInside(await realpath(current), canonicalRoot, `canonical ${label}`)
+  }
+}
+
 async function copyWithoutNestedModules(source: string, destination: string): Promise<void> {
   const metadata = await stat(source)
   if (metadata.isFile()) {
     await mkdir(dirname(destination), { recursive: true })
     await copyFile(source, destination)
     return
+  }
+  if (!metadata.isDirectory()) {
+    throw new Error(`build-runtime-exe: symlink target must be a regular file or directory: ${source}`)
   }
   const nested = join(source, 'node_modules')
   await cp(source, destination, {
@@ -279,7 +314,9 @@ function deployWorkspaceCopyFilter(sourceRoot: string, path: string): boolean {
  */
 export async function prepareDeploymentWorkspace(root: string): Promise<string> {
   const workspace = join(root, DEPLOY_WORKSPACE_RELATIVE)
+  await assertSafeRepositoryPath(root, workspace, 'deployment workspace')
   await rm(workspace, { recursive: true, force: true })
+  await assertSafeRepositoryPath(root, workspace, 'deployment workspace')
   await mkdir(workspace, { recursive: true })
   for (const entry of DEPLOY_WORKSPACE_ENTRIES) {
     const source = join(root, entry)
@@ -312,11 +349,57 @@ async function firstSymlink(directory: string): Promise<string | undefined> {
   return undefined
 }
 
+function canonicalTrustedPath(path: string, root: string, canonicalRoot: string): string {
+  const absolute = resolve(path)
+  try {
+    assertInside(absolute, root, 'symlink target')
+    return resolve(canonicalRoot, relative(resolve(root), absolute))
+  } catch {
+    assertInside(absolute, canonicalRoot, 'symlink target')
+    return absolute
+  }
+}
+
+async function assertTrustedTraversal(
+  path: string,
+  root: string,
+  canonicalRoot: string,
+  visited = new Set<string>(),
+): Promise<void> {
+  const trustedPath = canonicalTrustedPath(path, root, canonicalRoot)
+  const child = relative(canonicalRoot, trustedPath)
+  let current = canonicalRoot
+  for (const component of child === '' ? [] : child.split(sep)) {
+    current = join(current, component)
+    const metadata = await lstat(current)
+    if (!metadata.isSymbolicLink()) continue
+    if (visited.has(current)) {
+      throw new Error(`build-runtime-exe: symlink target chain contains a cycle: ${current}`)
+    }
+    visited.add(current)
+    const target = resolve(dirname(current), await readlink(current))
+    canonicalTrustedPath(target, root, canonicalRoot)
+    await assertTrustedTraversal(target, root, canonicalRoot, visited)
+    current = await realpath(current)
+    assertInside(current, canonicalRoot, 'canonical symlink target')
+  }
+}
+
 /** Replace every staged link with the bytes at its resolved target. */
-export async function materializeSymlinks(staging: string): Promise<void> {
+export async function materializeSymlinks(staging: string, root: string): Promise<void> {
+  const trustedRoot = await realpath(root)
+  const canonicalStaging = await realpath(staging)
+  assertInside(canonicalStaging, trustedRoot, 'canonical staging path')
   let link = await firstSymlink(staging)
   while (link !== undefined) {
+    const target = resolve(dirname(link), await readlink(link))
+    await assertTrustedTraversal(target, root, trustedRoot)
     const source = await realpath(link)
+    assertInside(source, trustedRoot, 'canonical symlink target')
+    const metadata = await stat(source)
+    if (!metadata.isFile() && !metadata.isDirectory()) {
+      throw new Error(`build-runtime-exe: symlink target must be a regular file or directory: ${source}`)
+    }
     await rm(link, { recursive: true, force: true })
     await copyWithoutNestedModules(source, link)
     link = await firstSymlink(staging)
@@ -340,13 +423,15 @@ async function restoreLegacyHoists(root: string, staging: string): Promise<void>
 }
 
 async function nodePrepareStaging(root: string, staging: string): Promise<void> {
+  await assertSafeRepositoryPath(root, staging, 'staging path')
   await restoreLegacyHoists(root, staging)
-  await materializeSymlinks(staging)
+  await materializeSymlinks(staging, root)
   const remaining = await firstSymlink(staging)
   if (remaining !== undefined) throw new Error(`build-runtime-exe: staged symlink remains: ${remaining}`)
 }
 
 async function nodeInjectCoreManifest(root: string, staging: string): Promise<void> {
+  await assertSafeRepositoryPath(root, staging, 'staging path')
   const source = join(root, CORE_MANIFEST_RELATIVE)
   const destination = join(staging, 'node_modules/@openloop/runtime/openloop-core.json')
   if (!existsSync(source)) {
@@ -358,7 +443,8 @@ async function nodeInjectCoreManifest(root: string, staging: string): Promise<vo
   await copyFile(source, destination)
 }
 
-async function nodePatchPkgManifest(_root: string, staging: string): Promise<void> {
+async function nodePatchPkgManifest(root: string, staging: string): Promise<void> {
+  await assertSafeRepositoryPath(root, staging, 'staging path')
   const path = join(staging, 'package.json')
   if (!existsSync(join(staging, ENTRY_BIN))) {
     throw new Error(`build-runtime-exe: built runtime entry is missing: ${join(staging, ENTRY_BIN)}`)
@@ -372,6 +458,8 @@ async function nodePatchPkgManifest(_root: string, staging: string): Promise<voi
 }
 
 async function nodeCopyProducts(root: string, staging: string, executable: string): Promise<void> {
+  await assertSafeRepositoryPath(root, staging, 'staging path')
+  await assertSafeRepositoryPath(root, executable, 'executable path')
   const helper = join(
     staging,
     'node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper',
@@ -379,6 +467,7 @@ async function nodeCopyProducts(root: string, staging: string, executable: strin
   if (!existsSync(executable)) throw new Error(`build-runtime-exe: executable is missing: ${executable}`)
   if (!existsSync(helper)) throw new Error(`build-runtime-exe: node-pty spawn helper is missing: ${helper}`)
   const binaries = join(root, TAURI_BINARIES_RELATIVE)
+  await assertSafeRepositoryPath(root, binaries, 'Tauri binaries path')
   const mainDestination = join(binaries, OUTPUT_BASENAME)
   const helperDestination = join(binaries, HELPER_BASENAME)
   await mkdir(binaries, { recursive: true })
@@ -410,12 +499,17 @@ async function allFiles(directory: string): Promise<string[]> {
 /** Gather stable, repository-relative provenance inputs for the runtime SBOM. */
 export async function collectSbomInputs(root: string, staging: string): Promise<SbomInput[]> {
   const fixed = [
-    'pnpm-lock.yaml',
     'package.json',
+    'pnpm-lock.yaml',
+    'pnpm-workspace.yaml',
     'apps/openloop-runtime/package.json',
+    'apps/openloop-runtime/tsdown.config.ts',
     RUNTIME_MANIFEST_RELATIVE,
     CORE_MANIFEST_RELATIVE,
+    'scripts/openloop/build-runtime-exe.ts',
     'scripts/openloop/upstream-baseline.json',
+    'tsconfig.host.json',
+    'tsdown.config.ts',
   ].map(path => join(root, path))
   const staged = await allFiles(staging)
   const patches = await allFiles(join(root, 'patches'))
@@ -423,16 +517,7 @@ export async function collectSbomInputs(root: string, staging: string): Promise<
     join(root, TAURI_BINARIES_RELATIVE, OUTPUT_BASENAME),
     join(root, TAURI_BINARIES_RELATIVE, HELPER_BASENAME),
   ]
-  const selectedStaged = staged.filter((path) => {
-    const normalized = path.split(sep).join('/')
-    return normalized.endsWith('/package.json')
-      || normalized.includes('/@deepseek-ai/dsh-web-frontend/dist/')
-      || normalized.endsWith('.node')
-      || normalized.endsWith('.dylib')
-      || normalized.endsWith('/spawn-helper')
-      || normalized.endsWith('/@openloop/runtime/openloop-core.json')
-  })
-  const candidates = [...fixed, ...selectedStaged, ...patches, ...products]
+  const candidates = [...fixed, ...staged, ...patches, ...products]
     .filter(path => existsSync(path))
     .map(path => resolve(path))
   const unique = [...new Set(candidates)].sort((left, right) =>
@@ -447,6 +532,12 @@ export async function collectSbomInputs(root: string, staging: string): Promise<
 }
 
 async function nodeWriteSbom(root: string, staging: string): Promise<void> {
+  await assertSafeRepositoryPath(root, staging, 'staging path')
+  await assertSafeRepositoryPath(
+    root,
+    join(root, 'dist-openloop/openloop-runtime-sbom-inputs.json'),
+    'runtime SBOM path',
+  )
   const document = {
     version: 1,
     packageBuilder: PKG_SPEC,
@@ -461,7 +552,10 @@ async function nodeWriteSbom(root: string, staging: string): Promise<void> {
 
 const nodeFileSystem: RuntimeBuildFileSystem = {
   exists: existsSync,
-  clearStaging: async staging => rm(staging, { recursive: true, force: true }),
+  clearStaging: async (root, staging) => {
+    await assertSafeRepositoryPath(root, staging, 'staging path')
+    await rm(staging, { recursive: true, force: true })
+  },
   synchronizeClosure: async (root) => {
     await syncRuntimeManifest(root, false)
     await syncRuntimeManifest(root, true)
@@ -528,7 +622,23 @@ export class RuntimeExeBuilder {
     return this.options.runner.run({ command, args, cwd })
   }
 
+  private async validateDestinations(): Promise<void> {
+    await assertSafeRepositoryPath(this.root, this.staging, 'staging path')
+    await assertSafeRepositoryPath(this.root, this.executable, 'executable path')
+    await assertSafeRepositoryPath(
+      this.root,
+      join(this.root, DEPLOY_WORKSPACE_RELATIVE),
+      'deployment workspace',
+    )
+    await assertSafeRepositoryPath(
+      this.root,
+      join(this.root, TAURI_BINARIES_RELATIVE),
+      'Tauri binaries path',
+    )
+  }
+
   async copyProducts(): Promise<void> {
+    await this.validateDestinations()
     const helper = join(
       this.staging,
       'node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper',
@@ -543,9 +653,11 @@ export class RuntimeExeBuilder {
   }
 
   async build(): Promise<void> {
+    await this.validateDestinations()
     if (!this.options.skipBuild) await this.command('pnpm', ['run', 'build'])
     await this.options.files.synchronizeClosure(this.root)
-    await this.options.files.clearStaging?.(this.staging)
+    await this.validateDestinations()
+    await this.options.files.clearStaging?.(this.root, this.staging)
     const deploymentWorkspace = await this.options.files.prepareDeploymentWorkspace(this.root)
     try {
       await this.command('pnpm', [
@@ -566,9 +678,12 @@ export class RuntimeExeBuilder {
     }
     await this.options.files.injectCoreManifest(this.root, this.staging)
     await this.options.files.patchPkgManifest(this.root, this.staging)
-    await this.command('pnpm', [
-      'dlx',
-      PKG_SPEC,
+    await this.validateDestinations()
+    const pkg = join(this.root, 'node_modules/.bin/pkg')
+    if (!this.options.files.exists(pkg)) {
+      throw new Error(`build-runtime-exe: lockfile-pinned pkg executable is missing: ${pkg}`)
+    }
+    await this.command(pkg, [
       this.staging,
       '--sea',
       '--targets',

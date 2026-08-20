@@ -23,6 +23,7 @@ const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url))
 const requiredOptions = new Map([
   ['--core', 'core'],
   ['--sidecar', 'sidecar'],
+  ['--runtime-sbom', 'runtimeSbom'],
   ['--web', 'web'],
   ['--bundle-graph', 'bundleGraph'],
   ['--out', 'out'],
@@ -36,6 +37,7 @@ const optionalOptions = new Map([
 ])
 const artifactOrder = [
   'sidecar',
+  'runtimeSbom',
   'web',
   'bundleGraph',
   'app',
@@ -243,10 +245,11 @@ export function generateArtifactManifest(options, dependencies = {}) {
   const trustedRoot = dependencies.trustedRoot ?? repositoryRoot
   const core = existingInput(options.core, 'core', false, trustedRoot)
   const sidecar = existingInput(options.sidecar, 'sidecar', false, trustedRoot)
+  const runtimeSbom = existingInput(options.runtimeSbom, 'runtime SBOM', false, trustedRoot)
   const web = existingInput(options.web, 'web', true, trustedRoot)
   const bundleGraph = existingInput(options.bundleGraph, 'bundle graph', false, trustedRoot)
-  const paths = { sidecar, web, bundleGraph }
-  for (const name of artifactOrder.slice(3)) {
+  const paths = { sidecar, runtimeSbom, web, bundleGraph }
+  for (const name of artifactOrder.slice(4)) {
     if (options[name] !== undefined) {
       paths[name] = existingInput(options[name], name, true, trustedRoot)
     }

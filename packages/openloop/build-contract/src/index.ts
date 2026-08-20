@@ -22,6 +22,7 @@ export interface OpenloopBuildManifest {
 /** Required build artifacts plus optional release-only products. */
 export interface OpenloopArtifacts {
   readonly sidecar: string
+  readonly runtimeSbom: string
   readonly web: string
   readonly bundleGraph: string
   readonly app?: string
@@ -72,6 +73,7 @@ const optionalSha256 = z.string().pattern(sha256Pattern).default(
 
 const artifactsSchema: z<OpenloopArtifacts> = z.object({
   sidecar: sha256,
+  runtimeSbom: sha256,
   web: sha256,
   bundleGraph: sha256,
   app: optionalSha256,
@@ -101,6 +103,7 @@ const buildFields = [
 ] as const
 const artifactFields = [
   'sidecar',
+  'runtimeSbom',
   'web',
   'bundleGraph',
   'app',

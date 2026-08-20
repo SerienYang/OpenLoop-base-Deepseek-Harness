@@ -22,6 +22,7 @@ const generatorModulePath: string = './generate-artifact-manifest.mjs'
 interface ArtifactOptions {
   readonly core: string
   readonly sidecar: string
+  readonly runtimeSbom: string
   readonly web: string
   readonly bundleGraph: string
   readonly out: string
@@ -86,12 +87,14 @@ function fixture() {
   const paths = {
     core: join(root, 'core.json'),
     sidecar: join(root, 'sidecar'),
+    runtimeSbom: join(root, 'runtime-sbom.json'),
     web: join(root, 'web'),
     bundleGraph: join(root, 'bundle-graph.json'),
     out: join(root, 'dist/artifacts.json'),
   }
   writeFileSync(paths.core, `${JSON.stringify(coreManifest(), null, 2)}\n`)
   writeFileSync(paths.sidecar, 'sidecar bytes')
+  writeFileSync(paths.runtimeSbom, '{"version":1}\n')
   mkdirSync(paths.web)
   writeFileSync(join(paths.web, 'index.html'), '<main>OpenLoop</main>')
   writeFileSync(paths.bundleGraph, '{"entry":"index.html"}\n')
@@ -107,12 +110,21 @@ describe('OpenLoop artifact manifest generator', () => {
     expect(() => parseArtifactManifestArguments([
       '--core', 'core.json',
       '--sidecar', 'sidecar',
+      '--runtime-sbom', 'runtime-sbom.json',
       '--web', 'web',
       '--out', 'artifacts.json',
     ])).toThrow(/--bundle-graph/u)
     expect(() => parseArtifactManifestArguments([
       '--core', 'core.json',
       '--sidecar', 'sidecar',
+      '--web', 'web',
+      '--bundle-graph', 'bundle.json',
+      '--out', 'artifacts.json',
+    ])).toThrow(/--runtime-sbom/u)
+    expect(() => parseArtifactManifestArguments([
+      '--core', 'core.json',
+      '--sidecar', 'sidecar',
+      '--runtime-sbom', 'runtime-sbom.json',
       '--web', 'web',
       '--bundle-graph', 'bundle.json',
       '--out', 'artifacts.json',
@@ -131,6 +143,7 @@ describe('OpenLoop artifact manifest generator', () => {
     )
     expect(result.manifest.artifacts).toEqual({
       sidecar: hashArtifact(paths.sidecar, dependencies),
+      runtimeSbom: hashArtifact(paths.runtimeSbom, dependencies),
       web: hashArtifact(paths.web, dependencies),
       bundleGraph: hashArtifact(paths.bundleGraph, dependencies),
     })
@@ -221,6 +234,7 @@ describe('OpenLoop artifact manifest generator', () => {
 
     expect(Object.keys(result.manifest.artifacts)).toEqual([
       'sidecar',
+      'runtimeSbom',
       'web',
       'bundleGraph',
       'app',

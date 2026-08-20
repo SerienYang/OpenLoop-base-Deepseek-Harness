@@ -15,6 +15,7 @@ interface OpenloopArtifactManifest {
   coreManifestSha256: string
   artifacts: {
     sidecar: string
+    runtimeSbom: string
     web: string
     bundleGraph: string
     app?: string

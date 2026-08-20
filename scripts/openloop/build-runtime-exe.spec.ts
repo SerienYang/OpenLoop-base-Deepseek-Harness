@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 import {
   ASSET_GLOBS,
+  HELPER_BASENAME,
   OUTPUT_BASENAME,
   RuntimeExeBuilder,
   collectSbomInputs,
@@ -190,7 +192,14 @@ describe('Openloop macOS arm64 single-exe builder', () => {
       'node_modules/@deepseek-ai/dsh-web-frontend/dist/**/*',
       'node_modules/@deepseek-ai/dsh/config/**/*',
       'node_modules/@openloop/runtime/openloop-core.json',
+      '!node_modules/**/test/**/*',
+      '!node_modules/**/tests/**/*',
+      '!node_modules/**/__tests__/**/*',
+      '!node_modules/**/fixture/**/*',
+      '!node_modules/**/fixtures/**/*',
+      '!node_modules/**/*.{test,spec}.{js,cjs,mjs}',
     ]))
+    expect(ASSET_GLOBS).not.toContain('!node_modules/**/src/**/*')
   })
 
   test('runs build, closure sync/check, deploy, pkg, and sidecar copy in order', async () => {
@@ -244,9 +253,7 @@ describe('Openloop macOS arm64 single-exe builder', () => {
         join(root, 'dist-openloop/runtime-staging'),
       ],
       [
-        'pnpm',
-        'dlx',
-        '@yao-pkg/pkg@6.21.0',
+        join(root, 'node_modules/.bin/pkg'),
         join(root, 'dist-openloop/runtime-staging'),
         '--sea',
         '--targets',
@@ -264,7 +271,7 @@ describe('Openloop macOS arm64 single-exe builder', () => {
       'cleanup-isolate',
       'core',
       'pkg-manifest',
-      `command:pnpm dlx @yao-pkg/pkg@6.21.0 ${join(root, 'dist-openloop/runtime-staging')} --sea --targets node24-macos-arm64 --output ${join(root, `dist-openloop/${OUTPUT_BASENAME}`)}`,
+      `command:${join(root, 'node_modules/.bin/pkg')} ${join(root, 'dist-openloop/runtime-staging')} --sea --targets node24-macos-arm64 --output ${join(root, `dist-openloop/${OUTPUT_BASENAME}`)}`,
       'copy',
       'sbom',
     ])
@@ -361,6 +368,75 @@ describe('Openloop macOS arm64 single-exe builder', () => {
     })).toThrow(/outside|boundary/iu)
   })
 
+  test.each([
+    ['a symlinked dist-openloop ancestor', 'dist'],
+    ['a symlinked runtime staging path', 'staging'],
+    ['a symlinked executable path', 'executable'],
+  ])('rejects %s before any build operation', async (_label, boundary) => {
+    const root = temporaryDirectory(`boundary-${boundary}`)
+    const outside = temporaryDirectory(`boundary-${boundary}-outside`)
+    const operations: string[] = []
+    write(join(outside, 'sentinel'), 'keep\n')
+    if (boundary === 'dist') {
+      symlinkSync(outside, join(root, 'dist-openloop'), 'dir')
+    } else {
+      mkdirSync(join(root, 'dist-openloop'), { recursive: true })
+      const path = boundary === 'staging'
+        ? join(root, 'dist-openloop/runtime-staging')
+        : join(root, `dist-openloop/${OUTPUT_BASENAME}`)
+      symlinkSync(outside, path, boundary === 'staging' ? 'dir' : 'file')
+    }
+    const files = {
+      ...RuntimeExeBuilder.nodeFileSystem,
+      exists: () => true,
+      clearStaging: async () => { operations.push('clear') },
+      synchronizeClosure: async () => { operations.push('closure') },
+      prepareDeploymentWorkspace: async () => {
+        operations.push('isolate')
+        return join(root, 'dist-openloop/runtime-deploy-workspace')
+      },
+      cleanupDeploymentWorkspace: async () => { operations.push('cleanup') },
+      prepareStaging: async () => { operations.push('prepare') },
+      injectCoreManifest: async () => { operations.push('core') },
+      patchPkgManifest: async () => { operations.push('manifest') },
+      copyProducts: async () => { operations.push('copy') },
+      writeSbom: async () => { operations.push('sbom') },
+    } satisfies RuntimeBuildFileSystem
+    const builder = new RuntimeExeBuilder({
+      root,
+      target: 'aarch64-apple-darwin',
+      skipBuild: true,
+      runner: { run: async () => { operations.push('command') } },
+      files,
+    })
+
+    await expect(builder.build()).rejects.toThrow(/symlink|canonical|boundary/iu)
+    expect(operations).toEqual([])
+    expect(readFileSync(join(outside, 'sentinel'), 'utf8')).toBe('keep\n')
+  })
+
+  test('rejects a symlinked Tauri binaries directory before copying products', async () => {
+    const root = temporaryDirectory('boundary-binaries')
+    const outside = temporaryDirectory('boundary-binaries-outside')
+    const executable = join(root, `dist-openloop/${OUTPUT_BASENAME}`)
+    const helper = join(root, 'dist-openloop/runtime-staging/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper')
+    const binaries = join(root, 'apps/openloop-desktop/src-tauri/binaries')
+    write(executable, 'exe')
+    write(helper, 'helper')
+    mkdirSync(dirname(binaries), { recursive: true })
+    symlinkSync(outside, binaries, 'dir')
+    const builder = new RuntimeExeBuilder({
+      root,
+      target: 'aarch64-apple-darwin',
+      skipBuild: true,
+      runner: { run: async () => {} },
+      files: RuntimeExeBuilder.nodeFileSystem,
+    })
+
+    await expect(builder.copyProducts()).rejects.toThrow(/symlink|canonical|boundary/iu)
+    expect(() => statSync(join(outside, OUTPUT_BASENAME))).toThrow()
+  })
+
   test('materializes every symlink and leaves a zero-symlink staging tree', async () => {
     const root = temporaryDirectory('links')
     const external = join(root, 'external')
@@ -370,11 +446,61 @@ describe('Openloop macOS arm64 single-exe builder', () => {
     mkdirSync(join(staging, 'node_modules/@scope'), { recursive: true })
     symlinkSync(external, join(staging, 'node_modules/@scope/linked'))
 
-    await materializeSymlinks(staging)
+    await materializeSymlinks(staging, root)
 
     const linked = join(staging, 'node_modules/@scope/linked')
     expect(lstatSync(linked).isSymbolicLink()).toBe(false)
     expect(readFileSync(join(linked, 'lib/index.js'), 'utf8')).toBe('export {}\n')
+  })
+
+  test('rejects a staged symlink whose canonical target is outside the repository', async () => {
+    const root = temporaryDirectory('external-link-root')
+    const outside = temporaryDirectory('external-link-target')
+    const staging = join(root, 'dist-openloop/runtime-staging')
+    write(join(outside, 'package.json'), '{"name":"outside"}\n')
+    mkdirSync(staging, { recursive: true })
+    symlinkSync(outside, join(staging, 'outside'))
+
+    await expect(materializeSymlinks(staging, root)).rejects.toThrow(/outside|trusted root|boundary/iu)
+    expect(lstatSync(join(staging, 'outside')).isSymbolicLink()).toBe(true)
+  })
+
+  test('rejects a staged symlink chain that leaves and re-enters the repository', async () => {
+    const root = temporaryDirectory('escaping-chain-root')
+    const outside = temporaryDirectory('escaping-chain-target')
+    const staging = join(root, 'dist-openloop/runtime-staging')
+    const allowed = join(root, 'allowed')
+    write(join(allowed, 'index.js'), 'export {}\n')
+    symlinkSync(allowed, join(outside, 'return'), 'dir')
+    mkdirSync(staging, { recursive: true })
+    symlinkSync(join(outside, 'return'), join(staging, 'escaped'))
+
+    await expect(materializeSymlinks(staging, root)).rejects.toThrow(/outside|trusted root|boundary/iu)
+    expect(lstatSync(join(staging, 'escaped')).isSymbolicLink()).toBe(true)
+  })
+
+  test('rejects a cyclic staged symlink chain without mutating it', async () => {
+    const root = temporaryDirectory('cyclic-chain')
+    const staging = join(root, 'dist-openloop/runtime-staging')
+    mkdirSync(staging, { recursive: true })
+    symlinkSync('second', join(staging, 'first'))
+    symlinkSync('first', join(staging, 'second'))
+
+    await expect(materializeSymlinks(staging, root)).rejects.toThrow(/cycle|loop/iu)
+    expect(lstatSync(join(staging, 'first')).isSymbolicLink()).toBe(true)
+    expect(lstatSync(join(staging, 'second')).isSymbolicLink()).toBe(true)
+  })
+
+  test.runIf(process.platform !== 'win32')('rejects staged symlinks to special files', async () => {
+    const root = temporaryDirectory('special-link')
+    const staging = join(root, 'dist-openloop/runtime-staging')
+    const fifo = join(root, 'runtime.fifo')
+    mkdirSync(staging, { recursive: true })
+    execFileSync('mkfifo', [fifo])
+    symlinkSync(fifo, join(staging, 'special'))
+
+    await expect(materializeSymlinks(staging, root)).rejects.toThrow(/regular file|directory|special/iu)
+    expect(lstatSync(join(staging, 'special')).isSymbolicLink()).toBe(true)
   })
 
   test('fails when the executable or node-pty helper is missing', async () => {
@@ -424,16 +550,25 @@ describe('Openloop runtime SBOM inputs', () => {
   test('hashes stable sorted paths for manifests, frontend, native files, helper, and patches', async () => {
     const root = temporaryDirectory('sbom')
     const paths = [
+      'package.json',
       'pnpm-lock.yaml',
+      'pnpm-workspace.yaml',
+      'scripts/openloop/build-runtime-exe.ts',
+      'apps/openloop-runtime/package.json',
+      'apps/openloop-runtime/tsdown.config.ts',
       'runtime/openloop/package.json',
       'dist-openloop/openloop-core.json',
       'scripts/openloop/upstream-baseline.json',
       'dist-openloop/runtime-staging/package.json',
       'dist-openloop/runtime-staging/node_modules/a/package.json',
+      'dist-openloop/runtime-staging/node_modules/a/lib/index.js',
+      'dist-openloop/runtime-staging/node_modules/a/config/runtime.yaml',
       'dist-openloop/runtime-staging/node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html',
       'dist-openloop/runtime-staging/node_modules/node-pty/prebuilds/darwin-arm64/pty.node',
       'dist-openloop/runtime-staging/node_modules/@img/sharp-libvips-darwin-arm64/lib/libvips.dylib',
       'dist-openloop/runtime-staging/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper',
+      `apps/openloop-desktop/src-tauri/binaries/${OUTPUT_BASENAME}`,
+      `apps/openloop-desktop/src-tauri/binaries/${HELPER_BASENAME}`,
       'patches/node-pty.patch',
     ]
     for (const path of paths.reverse()) write(join(root, path), path)
@@ -478,6 +613,14 @@ describe('Openloop runtime repository wiring', () => {
     expect(hostConfig).toContain('{ "path": "./apps/openloop-runtime" }')
     expect(rootTsdown).toContain("'apps/openloop-runtime'")
     expect(runtimeTsdown).toContain("entry: ['lib/types/bin.js']")
+  })
+
+  test('pins the pkg executable in the root lockfile-owned development closure', () => {
+    const rootPackage = JSON.parse(
+      readFileSync(join(repositoryRoot, 'package.json'), 'utf8'),
+    ) as { devDependencies?: Record<string, string> }
+
+    expect(rootPackage.devDependencies?.['@yao-pkg/pkg']).toBe('6.21.0')
   })
 
   test('keeps the generated deploy manifest closed over Web bundles and required peers', () => {
