@@ -9,7 +9,9 @@ import {
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { composeEntries } from '@deepseek-ai/dsh-app-boot'
 import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
+import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import * as yaml from 'js-yaml'
 import { describe, expect, it } from 'vitest'
 import {
@@ -38,6 +40,26 @@ describe('OpenLoop profile', () => {
       '@deepseek-ai/dsh-web-app',
       '@openloop/bundle',
     ])
+  })
+
+  it('composes a quiet Web runtime without dropping its surface or trust config', () => {
+    const require = createRequire(import.meta.url)
+    const layers = OPENLOOP_PROFILE_BUNDLES.map((packageName) => {
+      const manifestPath = require.resolve(`${packageName}/package.json`)
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as BundleManifest
+      const patchPath = join(manifestPath, '..', manifest.dsh!.bundle!.patch!)
+      return yaml.load(readFileSync(patchPath, 'utf8'), {
+        schema: entryListSchema,
+      }) as PatchOptions[]
+    })
+
+    const webRuntime = composeEntries(layers).find(entry => entry.id === 'web-runtime')
+
+    expect(webRuntime?.config).toEqual({
+      printUrl: false,
+      surfaceContext: true,
+      trustedHosts: { __jsExpr: 'ctx.webStartup.trustedHosts' },
+    })
   })
 
   it('initializes the OpenLoop profile once with the official bundle order', () => {
@@ -177,9 +199,8 @@ describe('OpenLoop profile', () => {
     expect(readFileSync(join(dir, 'pnpm-workspace.yaml'), 'utf8')).toBe(workspace)
     expect(existsSync(join(dir, 'cordis.patch.yml'))).toBe(false)
     expect(existsSync(join(dir, 'package.json'))).toBe(false)
-    expect(failure).toEqual(expect.objectContaining({
-      message: expect.stringMatching(/pnpm-workspace\.yaml.*packages.*non-empty strings/i),
-    }))
+    expect((failure as Error).message)
+      .toMatch(/pnpm-workspace\.yaml.*packages.*non-empty strings/i)
   })
 
   it('preserves a valid existing custom patch array while creating the profile manifest', () => {
@@ -236,13 +257,11 @@ describe('OpenLoop profile', () => {
     }
   })
 
-  it('ships an empty private host bundle with the required package surface', () => {
+  it('ships a private host bundle with the required package surface', () => {
     const require = createRequire(import.meta.url)
     const manifestPath = require.resolve('@openloop/bundle/package.json')
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as BundleManifest
-    const patchPath = join(manifestPath, '..', manifest.dsh!.bundle!.patch!)
 
-    expect(readFileSync(patchPath, 'utf8').trim()).toBe('[]')
     expect(manifest).toMatchObject({
       name: '@openloop/bundle',
       private: true,

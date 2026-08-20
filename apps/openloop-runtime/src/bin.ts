@@ -226,20 +226,29 @@ async function ensurePatchWatcherServices(context: Context, profileDir: string):
   }
 }
 
+class RuntimeTeardownTimeoutError extends Error {
+  constructor() {
+    super(`${BIN_NAME}: runtime teardown exceeded ${String(SHUTDOWN_TIMEOUT_MS)}ms`)
+    this.name = 'RuntimeTeardownTimeoutError'
+  }
+}
+
 async function stopWithinLimit(
   action: () => Promise<void>,
   dependencies: RuntimeDependencies,
 ): Promise<void> {
-  let timer!: ReturnType<typeof setTimeout>
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
     await Promise.race([
       action(),
-      new Promise<void>((resolve) => {
-        timer = dependencies.setTimeout(resolve, SHUTDOWN_TIMEOUT_MS)
+      new Promise<never>((_resolve, reject) => {
+        timer = dependencies.setTimeout(() => {
+          reject(new RuntimeTeardownTimeoutError())
+        }, SHUTDOWN_TIMEOUT_MS)
       }),
     ])
   } finally {
-    dependencies.clearTimeout(timer)
+    if (timer !== undefined) dependencies.clearTimeout(timer)
   }
 }
 
@@ -285,7 +294,7 @@ class RuntimeShutdown {
     this.requested = true
     void stopWithinLimit(async () => {
       await this.release()
-    }, this.dependencies).finally(() => {
+    }, this.dependencies).catch(() => {}).finally(() => {
       this.doneResolve()
       this.dependencies.process.exit(code)
     })
@@ -397,6 +406,7 @@ export async function runOpenloopRuntime(
     }
     return readiness
   } catch (error) {
+    if (error instanceof RuntimeTeardownTimeoutError) throw error
     try {
       await stopWithinLimit(() => shutdown.release(), dependencies)
     } catch (releaseError) {

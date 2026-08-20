@@ -216,6 +216,46 @@ describe('Openloop runtime launcher', () => {
     expect(events.filter(event => event === 'dispose')).toHaveLength(1)
   })
 
+  test('fails health smoke after one bounded teardown window when disposal hangs', async () => {
+    const events: string[] = []
+    const output: string[] = []
+    const dependencies = fakeDependencies(events, output)
+    let timeoutCount = 0
+    dependencies.watchUserPatches = async () => async () => {
+      events.push('stop-watch')
+      await new Promise<never>(() => {})
+    }
+    dependencies.setTimeout = (handler) => {
+      timeoutCount += 1
+      return setTimeout(handler, 0)
+    }
+
+    await expect(runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies))
+      .rejects.toThrow(/teardown.*5000/iu)
+
+    expect(timeoutCount).toBe(1)
+    expect(output).toHaveLength(1)
+    expect(events).not.toContain('dispose')
+  })
+
+  test('forces a signal exit after the bounded teardown window when disposal hangs', async () => {
+    const events: string[] = []
+    const output: string[] = []
+    const dependencies = fakeDependencies(events, output)
+    dependencies.process.argv = ['runtime']
+    dependencies.watchUserPatches = async () => async () => {
+      events.push('stop-watch')
+      await new Promise<never>(() => {})
+    }
+
+    const running = runOpenloopRuntime({ healthSmoke: false, home: '/home' }, dependencies)
+    await vi.waitFor(() => { expect(output).toHaveLength(1) })
+    dependencies.process.emit('SIGTERM')
+    await running
+
+    expect(events.slice(-2)).toEqual(['stop-watch', 'exit:0'])
+  })
+
   test('fails before boot when the composed Web rows are incomplete', async () => {
     const events: string[] = []
     const output: string[] = []
