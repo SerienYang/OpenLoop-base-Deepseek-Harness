@@ -969,12 +969,6 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
-    key: 'runtimeBootstrap',
-    summary: 'Host-only service for one-time launch-secret handoff, bootstrap-session validation, and runtime build identity.',
-    description: 'Host-only service for one-time launch-secret handoff, bootstrap-session validation, and runtime build identity. Its Cordis inspect entry documents an internal Host contract, not a public Plugin API; Plugins must never receive raw bootstrap tokens or bridge secrets.',
-    methods: [],
-  },
-  {
     key: 'sandbox',
     summary: 'Abstract process-sandbox service.',
     description: 'Abstract process-sandbox service. confine must return enforcing argv or fail closed at wrap or runner-execution time; silent unconfined passthrough is forbidden. Functional probes arbitrate multi-runner chains and may be skipped for a sole candidate, whose own refusal remains the fail-closed end.',
