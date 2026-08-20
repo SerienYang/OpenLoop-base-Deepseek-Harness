@@ -1,3 +1,17 @@
+use std::{
+    path::{Path, PathBuf},
+    sync::Mutex,
+    time::Duration,
+};
+
+use tauri::{AppHandle, Manager, RunEvent};
+
+use crate::launcher::{
+    InstanceAction, LaunchReadinessExpectation, LaunchSecrets, SingleInstance, SupervisedChild,
+};
+
+pub mod launcher;
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct OpenloopBuildManifest {
@@ -101,11 +115,85 @@ fn build_manifest() -> Result<OpenloopBuildManifest, String> {
         .map_err(|error| format!("embedded build manifest is invalid: {error}"))
 }
 
+struct RuntimeProcessState {
+    _instance: SingleInstance,
+    child: Mutex<SupervisedChild>,
+}
+
+fn runtime_executable(app: &AppHandle) -> Result<PathBuf, String> {
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("runtime resource directory is unavailable: {error}"))?;
+    let candidates = [
+        resource_dir.join("binaries/openloop-runtime"),
+        resource_dir.join(format!(
+            "binaries/openloop-runtime-{}-apple-darwin",
+            std::env::consts::ARCH
+        )),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries/openloop-runtime"),
+    ];
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| "bundled Openloop runtime sidecar is missing".to_owned())
+}
+
+fn start_runtime(app: &AppHandle) -> Result<Option<RuntimeProcessState>, String> {
+    let launch_id_path = std::env::temp_dir().join("openloop-runtime.sock");
+    let secrets = LaunchSecrets::generate(launch_id_path.clone())
+        .map_err(|error| format!("runtime launch secret generation failed: {error}"))?;
+    let instance = SingleInstance::acquire(&secrets.socket_path)
+        .map_err(|error| format!("single-instance acquisition failed: {error}"))?;
+    if instance.action() == InstanceAction::Forwarded {
+        app.exit(0);
+        return Ok(None);
+    }
+    let window = app.get_webview_window("main");
+    instance
+        .spawn_open_request_forwarder(move || {
+            if let Some(window) = window.as_ref() {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        })
+        .map_err(|error| format!("single-instance forwarding setup failed: {error}"))?;
+    let executable = runtime_executable(app)?;
+    let expectation = LaunchReadinessExpectation {
+        launch_id: secrets.launch_id,
+        core_manifest_sha256: CORE_MANIFEST_SHA256.to_owned(),
+    };
+    let mut child =
+        SupervisedChild::spawn(&executable, &secrets).map_err(|error| error.to_string())?;
+    child
+        .wait_readiness(&expectation, Duration::from_secs(10))
+        .map_err(|error| error.to_string())?;
+    Ok(Some(RuntimeProcessState {
+        _instance: instance,
+        child: Mutex::new(child),
+    }))
+}
+
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![build_manifest])
-        .run(tauri::generate_context!())
-        .expect("failed to run Openloop desktop application");
+        .setup(|app| {
+            if let Some(state) = start_runtime(&app.handle())? {
+                app.manage(state);
+            }
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("failed to build Openloop desktop application");
+    app.run(|app, event| {
+        if matches!(event, RunEvent::Exit) {
+            if let Some(state) = app.try_state::<RuntimeProcessState>() {
+                if let Ok(mut child) = state.child.lock() {
+                    let _ = child.terminate_if_verified();
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]

@@ -25,6 +25,7 @@
     "@deepseek-ai/dsh-invariants": "workspace:^",
     "@deepseek-ai/cordis": "workspace:^",
     "@openloop/build-contract": "workspace:^",
-    "@openloop/bundle": "workspace:^"
+    "@openloop/bundle": "workspace:^",
+    "@openloop/runtime-bootstrap": "workspace:^"
   }
 }

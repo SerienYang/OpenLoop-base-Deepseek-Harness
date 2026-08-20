@@ -295,6 +295,7 @@
     { "path": "./apps/cli" },
     { "path": "./apps/openloop-runtime" },
     { "path": "./packages/openloop/build-contract" },
+    { "path": "./packages/openloop/runtime-bootstrap" },
     { "path": "./packages/openloop/bundle" }
   ]
 }

@@ -40,6 +40,11 @@ import {
   ensureOpenloopProfile,
   OPENLOOP_PROFILE_BUNDLES,
 } from '@openloop/bundle'
+import {
+  installRuntimeBootstrap,
+  type RuntimeLaunchSecrets,
+} from '@openloop/runtime-bootstrap'
+import { readLaunchSecretsFromFd, type LaunchSecrets } from './launch-secrets.ts'
 
 const BIN_NAME = 'openloop-runtime'
 const PROFILE = 'openloop'
@@ -59,6 +64,7 @@ export interface LoadedCoreManifest {
 export interface RuntimeReadiness {
   type: 'openloop.runtime.ready'
   version: 1
+  launchId?: string
   profile: 'openloop'
   host: '127.0.0.1'
   port: number
@@ -321,6 +327,7 @@ class RuntimeShutdown {
   private stopWatcher: (() => Promise<void>) | undefined
   private releaseTask?: Promise<void>
   private requested = false
+  private disposeBootstrap: (() => void) | undefined
   private readonly doneResolve: () => void
   readonly done: Promise<void>
 
@@ -338,13 +345,20 @@ class RuntimeShutdown {
     this.stopWatcher = stopWatcher
   }
 
+  setBootstrapDisposer(dispose: () => void): void {
+    this.disposeBootstrap = dispose
+  }
+
   async release(): Promise<void> {
     this.releaseTask ??= (async () => {
       const stopWatcher = this.stopWatcher
       const context = this.context
+      const disposeBootstrap = this.disposeBootstrap
       this.stopWatcher = undefined
       this.context = undefined
+      this.disposeBootstrap = undefined
       await stopWatcher?.()
+      disposeBootstrap?.()
       await context?.fiber.dispose()
     })()
     await this.releaseTask
@@ -383,6 +397,7 @@ function installSignals(shutdown: RuntimeShutdown, proc: RuntimeProcess): () => 
 export async function runOpenloopRuntime(
   options: RuntimeOptions,
   dependencies: RuntimeDependencies = defaultDependencies,
+  launchSecrets?: RuntimeLaunchSecrets,
 ): Promise<RuntimeReadiness> {
   const core = dependencies.loadCoreManifest(dependencies.coreManifestPath)
   const profileDir = dependencies.ensureOpenloopProfile(options.home)
@@ -416,6 +431,9 @@ export async function runOpenloopRuntime(
       structuredClone(patches),
       (hostContext) => {
         shutdown.setContext(hostContext)
+        if (launchSecrets !== undefined) {
+          shutdown.setBootstrapDisposer(installRuntimeBootstrap(hostContext, launchSecrets))
+        }
         hostContext.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
         dependencies.provideCmdline(hostContext, {
           args: ['--host', HOST, '--port', '0'],
@@ -450,6 +468,7 @@ export async function runOpenloopRuntime(
     const readiness: RuntimeReadiness = {
       type: 'openloop.runtime.ready',
       version: 1,
+      ...(launchSecrets === undefined ? {} : { launchId: launchSecrets.launchId }),
       profile: PROFILE,
       host: HOST,
       port: webServer.port,
@@ -517,8 +536,9 @@ const defaultDependencies: RuntimeDependencies = {
 
 async function main(): Promise<void> {
   try {
+    const launchSecrets: LaunchSecrets = readLaunchSecretsFromFd()
     const options = parseRuntimeArgs(process.argv.slice(2))
-    await runOpenloopRuntime(options)
+    await runOpenloopRuntime(options, defaultDependencies, launchSecrets)
   } catch (error) {
     process.stderr.write(`${BIN_NAME}: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`)
     process.exit(1)

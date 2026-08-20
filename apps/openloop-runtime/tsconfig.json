@@ -49,6 +49,9 @@
     },
     {
       "path": "../../packages/openloop/bundle"
+    },
+    {
+      "path": "../../packages/openloop/runtime-bootstrap"
     }
   ]
 }
