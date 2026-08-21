@@ -318,6 +318,20 @@ describe('Openloop desktop build orchestrator', () => {
     expect(existsSync(dist)).toBe(false)
   })
 
+  it('refuses a tracked regular file at the fixed dist directory path', async () => {
+    const { createProcessRunner, nodeFileSystem } = await import(modulePath) as DesktopModule
+    const root = temporaryRoot()
+    const dist = join(root, 'dist-openloop')
+    execFileSync('git', ['init', '-q'], { cwd: root })
+    writeFileSync(join(root, '.gitignore'), 'dist-openloop/\n')
+    writeFileSync(dist, 'tracked payload\n')
+    execFileSync('git', ['add', '-f', 'dist-openloop'], { cwd: root })
+
+    await expect(nodeFileSystem.cleanDist(root, dist, createProcessRunner()))
+      .rejects.toThrow(/real directory/iu)
+    expect(readFileSync(dist, 'utf8')).toBe('tracked payload\n')
+  })
+
   it('deletes only a git-ignored real dist-openloop directory', async () => {
     const { nodeFileSystem } = await import(modulePath) as DesktopModule
     const root = temporaryRoot()
