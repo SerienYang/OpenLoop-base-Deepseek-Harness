@@ -33,6 +33,15 @@ async function eventually(test: () => boolean, message: string): Promise<void> {
   }
 }
 
+async function settleMacosCiPollingRegistration(): Promise<void> {
+  if (process.platform !== 'darwin' || process.env.CI !== 'true') return
+  // Chokidar 4 emits ready after fs.watchFile registration, before Node's
+  // first asynchronous stat baseline. Let that baseline complete before a
+  // mutation that could otherwise become the unseen initial state.
+  const interval = Number.parseInt(process.env.CHOKIDAR_INTERVAL ?? '100', 10)
+  await new Promise(resolve => setTimeout(resolve, interval * 2))
+}
+
 const settleChokidarChangeThrottle = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 75))
 
 describe('loadOptionalPatches', () => {
@@ -319,7 +328,12 @@ describe('boot with user patches', () => {
     const basePatches = [{ id: 'noop', config: { value: 'generated' } }]
     const ctx = await boot(NAME, writeTree(dir), basePatches)
     await ctx.plugin(Timer)
-    await ctx.plugin(Hmr, { root: [], ignored: [], debounce: 0 })
+    await ctx.plugin(Hmr, {
+      root: [],
+      ignored: [],
+      debounce: 0,
+      usePolling: process.platform === 'darwin' && process.env.CI === 'true',
+    })
     const failures: Array<{ filename: string; error: Error }> = []
     ctx.on('hmr/config-update-failed', (failedFilename, error) => {
       failures.push({ filename: failedFilename, error })
@@ -330,6 +344,7 @@ describe('boot with user patches', () => {
       compose: userPatches => [...basePatches, ...userPatches],
     })
     try {
+      await settleMacosCiPollingRegistration()
       writeFileSync(filename, '- id: noop\n  config:\n    value: live\n')
       await eventually(() => (entryConfig(ctx, 'noop') as { value?: string }).value === 'live', 'user patch addition was not applied')
 
@@ -358,9 +373,9 @@ describe('boot with user patches', () => {
       // Default compose: the user layer IS the whole patch list, so a
       // fresh generation replaces the app-owned layer instead of stacking on it.
       await dispose()
+      writeFileSync(filename, '- id: noop\n  config:\n    value: identity\n')
       const disposeDefault = await watchUserPatches(ctx, { binName: NAME, filename })
       try {
-        writeFileSync(filename, '- id: noop\n  config:\n    value: identity\n')
         await eventually(() => (entryConfig(ctx, 'noop') as { value?: string }).value === 'identity', 'default-compose user patch was not applied')
       } finally {
         await disposeDefault()
@@ -410,7 +425,12 @@ describe('boot with user patches', () => {
     const ctx = await boot(NAME, writeTree(dir))
     try {
       await ctx.plugin(Timer)
-      await ctx.plugin(Hmr, { root: [], ignored: [], debounce: 0 })
+      await ctx.plugin(Hmr, {
+        root: [],
+        ignored: [],
+        debounce: 0,
+        usePolling: process.platform === 'darwin' && process.env.CI === 'true',
+      })
       const dispose = await watchUserPatches(ctx, { binName: NAME, filename })
       // Same user-layer path registered twice: HMR refuses; not a teardown race.
       await expect(watchUserPatches(ctx, { binName: NAME, filename })).rejects.toThrow('already registered')

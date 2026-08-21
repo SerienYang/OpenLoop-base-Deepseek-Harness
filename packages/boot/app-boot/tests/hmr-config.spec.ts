@@ -18,7 +18,7 @@ async function bootHmr(dir: string, root: string[] = [], usePolling?: boolean): 
     root,
     ignored: [],
     debounce: 0,
-    ...usePolling === undefined ? {} : { usePolling },
+    usePolling: usePolling ?? (process.platform === 'darwin' && process.env.CI === 'true'),
   })
   return ctx
 }
@@ -31,6 +31,19 @@ async function eventually(test: () => boolean, message: string): Promise<void> {
   }
 }
 
+async function settleMacosCiPollingRegistration(): Promise<void> {
+  if (process.platform !== 'darwin' || process.env.CI !== 'true') return
+  // Chokidar 4 emits ready after fs.watchFile registration, before Node's
+  // first asynchronous stat baseline. Let that baseline complete before a
+  // mutation that could otherwise become the unseen initial state.
+  const interval = Number.parseInt(process.env.CHOKIDAR_INTERVAL ?? '100', 10)
+  await new Promise(resolve => setTimeout(resolve, interval * 2))
+}
+
+interface HmrInternals {
+  refreshConfig(key: object, filename: string, refresh: () => Promise<void> | void): void
+}
+
 describe('HMR exact config paths', () => {
   it('observes module changes when its watch base is a filesystem alias', { timeout: 30_000 }, async () => {
     const target = mkdtempSync(join(tmpdir(), 'dsh-hmr-module-canonical-'))
@@ -38,8 +51,8 @@ describe('HMR exact config paths', () => {
     const aliasFilename = join(alias, 'module.ts')
     symlinkSync(target, alias, process.platform === 'win32' ? 'junction' : 'dir')
     writeFileSync(aliasFilename, 'export const generation = 0\n')
-    // This acceptance owns alias-to-cache identity. Other cases below exercise
-    // native events; polling keeps Windows fs.watch queue pressure out of it.
+    // This acceptance owns alias-to-cache identity. It always polls; the other
+    // cases poll only on loaded macOS CI and exercise native events elsewhere.
     const ctx = await bootHmr(alias, ['.'], true)
     const filename = join(await realpath(target), 'module.ts')
     const expected = pathToFileURL(filename).href
@@ -97,6 +110,7 @@ describe('HMR exact config paths', () => {
           observed.push('missing')
         }
       })
+      await settleMacosCiPollingRegistration()
 
       writeFileSync(filename, 'one', { flag: 'wx' })
       await eventually(() => observed.includes('one'), 'HMR did not observe config creation')
@@ -119,6 +133,7 @@ describe('HMR exact config paths', () => {
       await ctx.hmr.registerConfig(filename, () => {
         observed.push(readFileSync(filename, 'utf8'))
       })
+      await settleMacosCiPollingRegistration()
       mkdirSync(dir)
       writeFileSync(filename, 'created')
       await eventually(() => observed.includes('created'), 'HMR did not observe config creation under a new parent')
@@ -132,38 +147,45 @@ describe('HMR exact config paths', () => {
     const filename = join(dir, 'plugins.yml')
     writeFileSync(filename, 'one')
     const ctx = await bootHmr(dir)
-    const started = Promise.withResolvers<undefined>()
-    const release = Promise.withResolvers<undefined>()
+    const firstStarted = Promise.withResolvers<undefined>()
+    const releaseFirst = Promise.withResolvers<undefined>()
     const observed: string[] = []
     let active = 0
     let maxActive = 0
+    const hmr = ctx.hmr as unknown as HmrInternals
+    const originalRefreshConfig = hmr.refreshConfig.bind(hmr)
+    let refreshCount = 0
+    const refreshConfig = vi.spyOn(hmr, 'refreshConfig').mockImplementation((...args) => {
+      refreshCount += 1
+      originalRefreshConfig(...args)
+    })
     try {
       const dispose = await ctx.hmr.registerConfig(filename, async () => {
         active += 1
         maxActive = Math.max(maxActive, active)
         observed.push(readFileSync(filename, 'utf8'))
         if (observed.length === 1) {
-          started.resolve(undefined)
-          await release.promise
+          firstStarted.resolve(undefined)
+          await releaseFirst.promise
         }
         active -= 1
       })
-      await started.promise
+      await firstStarted.promise
+      await settleMacosCiPollingRegistration()
       writeFileSync(filename, 'two')
-      // Chokidar coalesces atomic writes for 100 ms by default. Wait beyond
-      // that window so this edit is queued before registration disposal.
-      await new Promise(resolve => setTimeout(resolve, 250))
+      await eventually(() => refreshCount >= 2, 'HMR did not queue the second config refresh')
 
       let disposed = false
       const disposal = dispose().then(() => { disposed = true })
       await Promise.resolve()
       expect(disposed).toBe(false)
-      release.resolve(undefined)
+      releaseFirst.resolve(undefined)
       await disposal
       expect(maxActive).toBe(1)
       expect(observed).toEqual(['one', 'two'])
     } finally {
-      release.resolve(undefined)
+      releaseFirst.resolve(undefined)
+      refreshConfig.mockRestore()
       await ctx.fiber.dispose()
     }
   })
@@ -183,6 +205,7 @@ describe('HMR exact config paths', () => {
         failure.resolve({ filename: failedFilename, error })
       })
       await ctx.hmr.registerConfig(filename, () => { throw 42 })
+      await settleMacosCiPollingRegistration()
       writeFileSync(filename, 'invalid')
 
       const observed = await failure.promise
