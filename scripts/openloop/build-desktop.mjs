@@ -166,7 +166,7 @@ async function cleanDist(root, requestedDist, runner) {
   }
   await runner.run({
     command: 'git',
-    args: ['check-ignore', '-q', '--', 'dist-openloop'],
+    args: ['check-ignore', '-q', '--', 'dist-openloop/'],
     cwd: repositoryRoot,
   })
   await rm(dist, { recursive: true, force: true })

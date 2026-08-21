@@ -8,6 +8,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
@@ -305,6 +306,18 @@ describe('Openloop desktop build orchestrator', () => {
     },
   )
 
+  it('accepts an absent dist directory covered by the fixed ignore rule', async () => {
+    const { createProcessRunner, nodeFileSystem } = await import(modulePath) as DesktopModule
+    const root = temporaryRoot()
+    const dist = join(root, 'dist-openloop')
+    execFileSync('git', ['init', '-q'], { cwd: root })
+    writeFileSync(join(root, '.gitignore'), 'dist-openloop/\n')
+
+    await expect(nodeFileSystem.cleanDist(root, dist, createProcessRunner()))
+      .resolves.toBeUndefined()
+    expect(existsSync(dist)).toBe(false)
+  })
+
   it('deletes only a git-ignored real dist-openloop directory', async () => {
     const { nodeFileSystem } = await import(modulePath) as DesktopModule
     const root = temporaryRoot()
@@ -326,7 +339,7 @@ describe('Openloop desktop build orchestrator', () => {
 
     expect(commands).toEqual([{
       command: 'git',
-      args: ['check-ignore', '-q', '--', 'dist-openloop'],
+      args: ['check-ignore', '-q', '--', 'dist-openloop/'],
       cwd: root,
     }])
     expect(existsSync(dist)).toBe(false)
