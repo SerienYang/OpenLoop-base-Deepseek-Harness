@@ -751,20 +751,20 @@ describe('Openloop desktop foundation configuration', () => {
     ])
   })
 
-  test('exposes the root desktop builder as the only build orchestrator', () => {
+  test('bootstraps host build tools before the only desktop build orchestrator', () => {
     const rootPackage = readJson('package.json')
     const rootScripts = stringRecord(rootPackage.scripts, 'root package scripts')
     const desktopPackage = readJson('apps/openloop-desktop/package.json')
     const desktopScripts = stringRecord(desktopPackage.scripts, 'desktop package scripts')
 
     expect(rootScripts['openloop:build-desktop']).toBe(
-      'node scripts/openloop/build-desktop.mjs',
+      'pnpm run build:lib:host && node scripts/openloop/build-desktop.mjs',
     )
     expect(desktopScripts.build).toContain('openloop:build-desktop')
     expect(desktopScripts.build).not.toContain('tauri build')
     expect(Object.values(rootScripts).filter(script =>
       script.includes('build-desktop.mjs'))).toEqual([
-      'node scripts/openloop/build-desktop.mjs',
+      'pnpm run build:lib:host && node scripts/openloop/build-desktop.mjs',
     ])
   })
 
