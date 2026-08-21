@@ -605,6 +605,41 @@ describe('Openloop runtime SBOM inputs', () => {
       expect(relative(root, join(root, input.path))).not.toMatch(/^\.\./u)
     }
   })
+
+  test.runIf(process.platform !== 'win32')(
+    'bounds file reads below a constrained process descriptor limit',
+    () => {
+      const root = temporaryDirectory('sbom-descriptors')
+      const staging = join(root, 'dist-openloop/runtime-staging')
+      for (let index = 0; index < 512; index += 1) {
+        write(join(staging, `input-${index}.js`), `input-${index}\n`)
+      }
+      const script = [
+        'import { collectSbomInputs } from "./scripts/openloop/build-runtime-exe.ts"',
+        'const inputs = await collectSbomInputs(process.env.ROOT, process.env.STAGING)',
+        'console.log(inputs.length)',
+      ].join('; ')
+
+      const output = execFileSync('/bin/bash', [
+        '-c',
+        'ulimit -n 64; exec "$1" --import tsx --input-type=module --eval "$2"',
+        '_',
+        process.execPath,
+        script,
+      ], {
+        cwd: resolve(import.meta.dirname, '../..'),
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          ROOT: root,
+          STAGING: staging,
+          VITEST: '1',
+        },
+      })
+
+      expect(output.trim()).toBe('512')
+    },
+  )
 })
 
 describe('Openloop runtime repository wiring', () => {
