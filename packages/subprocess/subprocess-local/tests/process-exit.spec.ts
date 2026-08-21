@@ -86,7 +86,11 @@ function cleanupTree(state: TreeState | undefined, identities: ProcessIdentity[]
   }
 }
 
-async function runScenario(kind: ManagedKind, trigger: ExitTrigger) {
+async function runScenario(
+  kind: ManagedKind,
+  trigger: ExitTrigger,
+  options: { stagedTreeState?: boolean } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), `dsh-subprocess-host-exit-${kind}-${trigger}-`))
   const launch = resolveExampleLaunch({
     srcBin: hostScript,
@@ -96,7 +100,10 @@ async function runScenario(kind: ManagedKind, trigger: ExitTrigger) {
   })
   const child = execa(launch.command, launch.args, {
     cwd: repoRoot,
-    env: launch.env,
+    env: {
+      ...launch.env,
+      DSH_PROCESS_EXIT_STAGED_TREE_STATE: options.stagedTreeState === true ? '1' : '0',
+    },
     stdin: 'ignore',
     reject: false,
     timeout: scenarioTimeoutMs,
@@ -139,6 +146,12 @@ async function runScenario(kind: ManagedKind, trigger: ExitTrigger) {
 }
 
 describe('synchronous cleanup on host exit', () => {
+  it('waits for the complete managed-tree state before publishing readiness', { timeout: 45_000 }, async () => {
+    const { outcome } = await runScenario('ordinary', 'direct', { stagedTreeState: true })
+    expect(outcome.exitCode).toBe(23)
+    expect(outcome.signal).toBeUndefined()
+  })
+
   it.each([
     { trigger: 'direct' as const, expectedCode: 23, diagnostic: undefined },
     { trigger: 'uncaught-exception' as const, expectedCode: 1, diagnostic: 'host-exit-uncaught-exception' },
