@@ -485,6 +485,8 @@ export interface SbomInput {
   sha256: string
 }
 
+const SBOM_HASH_CONCURRENCY = 16
+
 async function allFiles(directory: string): Promise<string[]> {
   if (!existsSync(directory)) return []
   const files: string[] = []
@@ -522,13 +524,28 @@ export async function collectSbomInputs(root: string, staging: string): Promise<
     .map(path => resolve(path))
   const unique = [...new Set(candidates)].sort((left, right) =>
     relative(root, left).localeCompare(relative(root, right)))
-  return Promise.all(unique.map(async (path) => {
-    assertInside(path, root, 'SBOM input')
-    return {
-      path: relative(root, path).split(sep).join('/'),
-      sha256: createHash('sha256').update(await readFile(path)).digest('hex'),
+  const inputs = new Array<SbomInput>(unique.length)
+  let nextIndex = 0
+  const hashNext = async (): Promise<void> => {
+    while (nextIndex < unique.length) {
+      const index = nextIndex
+      nextIndex += 1
+      const path = unique[index]
+      if (path === undefined) return
+      assertInside(path, root, 'SBOM input')
+      inputs[index] = {
+        path: relative(root, path).split(sep).join('/'),
+        sha256: createHash('sha256').update(await readFile(path)).digest('hex'),
+      }
     }
-  }))
+  }
+  await Promise.all(
+    Array.from(
+      { length: Math.min(SBOM_HASH_CONCURRENCY, unique.length) },
+      hashNext,
+    ),
+  )
+  return inputs
 }
 
 async function nodeWriteSbom(root: string, staging: string): Promise<void> {
