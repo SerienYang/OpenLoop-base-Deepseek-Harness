@@ -21,9 +21,10 @@ fn unique_account(label: &str) -> CredentialAccount {
         .duration_since(UNIX_EPOCH)
         .expect("clock follows Unix epoch")
         .as_nanos();
+    let label = label.replace('-', "_").to_ascii_uppercase();
     CredentialAccount::new(
         "foundation-task",
-        &format!("{label}-{}-{nonce}", std::process::id()),
+        &format!("{label}_{}_{nonce}", std::process::id()),
     )
     .expect("unique account is valid")
 }
@@ -60,10 +61,10 @@ fn services_are_exact_and_derived_only_from_release_channel() {
 #[test]
 fn account_is_exact_and_rejects_ambiguous_or_non_ascii_identifiers() {
     let account =
-        CredentialAccount::new("anthropic-api", "workspace.primary").expect("valid account");
-    assert_eq!(account.as_str(), "anthropic-api:workspace.primary");
+        CredentialAccount::new("anthropic-api", "DEEPSEEK_API_KEY").expect("valid account");
+    assert_eq!(account.as_str(), "anthropic-api:DEEPSEEK_API_KEY");
 
-    for invalid in [
+    for invalid_provider in [
         "",
         "Uppercase",
         " leading",
@@ -85,18 +86,36 @@ fn account_is_exact_and_rejects_ambiguous_or_non_ascii_identifiers() {
         "double__separator",
     ] {
         assert!(
-            CredentialAccount::new(invalid, "reference").is_err(),
-            "accepted invalid provider {invalid:?}"
-        );
-        assert!(
-            CredentialAccount::new("provider", invalid).is_err(),
-            "accepted invalid reference {invalid:?}"
+            CredentialAccount::new(invalid_provider, "VALID_REFERENCE").is_err(),
+            "accepted invalid provider {invalid_provider:?}"
         );
     }
 
-    assert!(CredentialAccount::new(&"a".repeat(64), &"b".repeat(128)).is_ok());
-    assert!(CredentialAccount::new(&"a".repeat(65), "reference").is_err());
-    assert!(CredentialAccount::new("provider", &"b".repeat(129)).is_err());
+    for invalid_reference in [
+        "",
+        " leading",
+        "trailing ",
+        "1_LEADING_DIGIT",
+        "-leading",
+        "trailing-",
+        ".leading",
+        "trailing.",
+        "has:colon",
+        "has/slash",
+        "has%percent",
+        "has space",
+        "has\tcontrol",
+        "unicodé",
+    ] {
+        assert!(
+            CredentialAccount::new("provider", invalid_reference).is_err(),
+            "accepted invalid reference {invalid_reference:?}"
+        );
+    }
+
+    assert!(CredentialAccount::new(&"a".repeat(64), &format!("A{}", "b".repeat(127))).is_ok());
+    assert!(CredentialAccount::new(&"a".repeat(65), "VALID_REFERENCE").is_err());
+    assert!(CredentialAccount::new("provider", &format!("A{}", "b".repeat(128))).is_err());
 }
 
 #[test]

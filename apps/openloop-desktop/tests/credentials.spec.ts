@@ -27,16 +27,17 @@ function deferred(): {
 }
 
 describe('Openloop credential prompt', () => {
-  test('clears the input before IPC and zeroes the transferred bytes afterward', async () => {
+  test('clears secret bytes after synchronous IPC handoff, before its response', async () => {
     const promptToken = '11'.repeat(32)
     let received: Uint8Array | undefined
+    let serialized: number[] | undefined
     const gate = deferred()
     const invoke = vi.fn<CredentialInvoke>(async (command, args) => {
       expect(command).toBe('credentials_set')
       expect(args.promptToken).toBe(promptToken)
       if (args.secret === undefined) throw new Error('missing credential bytes')
       received = args.secret
-      expect([...args.secret]).toEqual([...new TextEncoder().encode('sk-private')])
+      serialized = [...args.secret]
       await gate.promise
     })
     const input = { value: 'sk-private' }
@@ -47,7 +48,8 @@ describe('Openloop credential prompt', () => {
     expect(input.value).toBe('')
     expect(received).toBeInstanceOf(Uint8Array)
     expect(received).not.toBeUndefined()
-    expect([...received!]).not.toEqual(Array(received!.length).fill(0))
+    expect(serialized).toEqual([...new TextEncoder().encode('sk-private')])
+    expect([...received!]).toEqual(Array(received!.length).fill(0))
 
     gate.resolve()
     await expect(pending).resolves.toBe(true)

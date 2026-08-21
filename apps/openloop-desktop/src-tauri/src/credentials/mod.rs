@@ -29,7 +29,7 @@ const KEYCHAIN_SPIKE_SET: &str = "--openloop-keychain-spike=set";
 const KEYCHAIN_SPIKE_VERIFY: &str = "--openloop-keychain-spike=verify";
 const KEYCHAIN_SPIKE_CLEANUP: &str = "--openloop-keychain-spike=cleanup";
 const SPIKE_PROVIDER: &str = "openloop";
-const SPIKE_REFERENCE: &str = "foundation-task-15-spike";
+const SPIKE_REFERENCE: &str = "OPENLOOP_FOUNDATION_TASK_15_SPIKE";
 const SPIKE_SECRET: &[u8] = b"openloop-keychain-spike-v1";
 
 #[derive(Clone, PartialEq, Eq)]
@@ -37,8 +37,8 @@ pub struct CredentialAccount(String);
 
 impl CredentialAccount {
     pub fn new(provider_id: &str, credential_reference: &str) -> Result<Self, CredentialError> {
-        validate_identifier(provider_id, 64)?;
-        validate_identifier(credential_reference, 128)?;
+        validate_provider_id(provider_id)?;
+        validate_credential_reference(credential_reference)?;
         Ok(Self(format!("{provider_id}:{credential_reference}")))
     }
 
@@ -53,8 +53,8 @@ impl fmt::Debug for CredentialAccount {
     }
 }
 
-fn validate_identifier(value: &str, maximum: usize) -> Result<(), CredentialError> {
-    if value.is_empty() || value.len() > maximum || !value.is_ascii() {
+fn validate_provider_id(value: &str) -> Result<(), CredentialError> {
+    if value.is_empty() || value.len() > 64 || !value.is_ascii() {
         return Err(CredentialError::invalid_identifier());
     }
     let bytes = value.as_bytes();
@@ -70,6 +70,21 @@ fn validate_identifier(value: &str, maximum: usize) -> Result<(), CredentialErro
             return Err(CredentialError::invalid_identifier());
         }
         previous_was_separator = separator;
+    }
+    Ok(())
+}
+
+fn validate_credential_reference(value: &str) -> Result<(), CredentialError> {
+    if value.is_empty() || value.len() > 128 || !value.is_ascii() {
+        return Err(CredentialError::invalid_identifier());
+    }
+    let mut bytes = value.bytes();
+    if !bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(CredentialError::invalid_identifier());
     }
     Ok(())
 }

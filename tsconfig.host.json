@@ -83,6 +83,8 @@
     "apps/web/tests/workflow-run.e2e.ts",
     "apps/web/stress-tests/reasoning-chunks.stress.ts",
     "apps/cli/tests/**/*.ts",
+    "apps/openloop-desktop/src/credentials.ts",
+    "apps/openloop-desktop/src/style-modules.d.ts",
     "apps/openloop-desktop/tests/config.spec.ts",
     "apps/openloop-desktop/tests/credentials.spec.ts",
     "apps/openloop-runtime/tests/**/*.ts",

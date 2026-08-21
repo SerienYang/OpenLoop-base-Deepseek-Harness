@@ -55,7 +55,13 @@ export function createCredentialCommands(
 ): CredentialCommands {
   const promptToken = requirePromptToken(token)
   return {
-    set: secret => invokeCredential('credentials_set', { promptToken, secret }),
+    set: (secret) => {
+      try {
+        return invokeCredential('credentials_set', { promptToken, secret })
+      } finally {
+        secret.fill(0)
+      }
+    },
     unset: () => invokeCredential('credentials_unset', { promptToken }),
     status: async () => {
       const configured = await invokeCredential('credentials_status', { promptToken })
