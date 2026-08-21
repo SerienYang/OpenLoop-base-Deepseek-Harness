@@ -354,6 +354,17 @@ describe('Openloop desktop foundation configuration', () => {
     expect(vitestConfig.match(/hookTimeout: aggregateHookTimeout/gu)).toHaveLength(2)
   })
 
+  test('uses polling for exact config watcher tests on macOS CI', () => {
+    for (const filename of [
+      'packages/boot/app-boot/tests/hmr-config.spec.ts',
+      'packages/boot/app-boot/tests/user-patches.spec.ts',
+    ]) {
+      expect(readText(filename)).toContain(
+        "process.platform === 'darwin' && process.env.CI === 'true'",
+      )
+    }
+  })
+
   test('inherits the platform aggregate timeout for the Cargo metadata probe', () => {
     expect(readText('apps/openloop-desktop/tests/config.spec.ts')).not.toMatch(
       /test\(\s*'declares a Rust baseline at least as high as the locked dependency closure'\s*,\s*\{\s*timeout:/u,

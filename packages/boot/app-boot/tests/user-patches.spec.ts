@@ -319,7 +319,12 @@ describe('boot with user patches', () => {
     const basePatches = [{ id: 'noop', config: { value: 'generated' } }]
     const ctx = await boot(NAME, writeTree(dir), basePatches)
     await ctx.plugin(Timer)
-    await ctx.plugin(Hmr, { root: [], ignored: [], debounce: 0 })
+    await ctx.plugin(Hmr, {
+      root: [],
+      ignored: [],
+      debounce: 0,
+      usePolling: process.platform === 'darwin' && process.env.CI === 'true',
+    })
     const failures: Array<{ filename: string; error: Error }> = []
     ctx.on('hmr/config-update-failed', (failedFilename, error) => {
       failures.push({ filename: failedFilename, error })
@@ -410,7 +415,12 @@ describe('boot with user patches', () => {
     const ctx = await boot(NAME, writeTree(dir))
     try {
       await ctx.plugin(Timer)
-      await ctx.plugin(Hmr, { root: [], ignored: [], debounce: 0 })
+      await ctx.plugin(Hmr, {
+        root: [],
+        ignored: [],
+        debounce: 0,
+        usePolling: process.platform === 'darwin' && process.env.CI === 'true',
+      })
       const dispose = await watchUserPatches(ctx, { binName: NAME, filename })
       // Same user-layer path registered twice: HMR refuses; not a teardown race.
       await expect(watchUserPatches(ctx, { binName: NAME, filename })).rejects.toThrow('already registered')
