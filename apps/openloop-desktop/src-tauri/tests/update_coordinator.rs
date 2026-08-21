@@ -13,8 +13,8 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use openloop_desktop_lib::update::{
     channel::ReleaseChannel,
     coordinator::{
-        check_update, install_checked_update, validate_download_url, DownloadStatus,
-        DownloadUrlPolicy, InstallPublication,
+        check_update, install_checked_update, updater_plugin_builder, validate_download_url,
+        DownloadStatus, DownloadUrlPolicy, InstallPublication,
     },
     recovery::{CandidateHealth, HealthStatus},
 };
@@ -292,6 +292,27 @@ fn fixture_updater(public_key: &str, endpoint: tauri::Url) -> (tauri::App<MockRu
     (app, updater)
 }
 
+fn fixture_updater_with_openloop_target(
+    public_key: &str,
+    endpoint: tauri::Url,
+) -> (tauri::App<MockRuntime>, Updater) {
+    let mut context = mock_context(noop_assets());
+    context.config_mut().plugins.0.insert(
+        "updater".to_owned(),
+        serde_json::json!({
+            "pubkey": public_key,
+            "endpoints": [endpoint.as_str()],
+            "dangerousInsecureTransportProtocol": true,
+        }),
+    );
+    let app = mock_builder()
+        .plugin(updater_plugin_builder(public_key).build())
+        .build(context)
+        .expect("mock Tauri updater app");
+    let updater = app.handle().updater().expect("fixture updater");
+    (app, updater)
+}
+
 struct HealthProbe<F>(F);
 
 impl<F> CandidateHealth for HealthProbe<F>
@@ -352,6 +373,24 @@ fn coordinator_check_reports_no_update_and_detected_update() {
     assert_eq!(report.current, "0.1.0");
     assert_eq!(report.available.as_deref(), Some("0.2.0"));
     assert!(update.is_some());
+}
+
+#[test]
+fn coordinator_pins_tauri_to_the_static_openloop_platform_target() {
+    let fixture = update_fixture_guard();
+    let server = TestServer::new(&fixture, 1, |base_url| {
+        HashMap::from([("/manifest", manifest(base_url, "0.2.0", TEST_SIGNATURE))])
+    });
+    let (_app, updater) =
+        fixture_updater_with_openloop_target(SIGNED_TEST_PUBLIC_KEY, server.url("/manifest"));
+    let policy =
+        DownloadUrlPolicy::local_test_fixture(&server.url("/archive")).expect("fixture policy");
+
+    let (report, update) = tauri::async_runtime::block_on(check_update(&updater, "0.1.0", &policy))
+        .expect("Openloop target must retain the selected raw platform URL");
+
+    assert_eq!(report.available.as_deref(), Some("0.2.0"));
+    assert_eq!(update.expect("available update").target, "darwin-aarch64");
 }
 
 #[test]

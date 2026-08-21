@@ -15,8 +15,8 @@ use crate::launcher::{
 use crate::update::{
     archive::stage_verified_archive,
     coordinator::{
-        parse_host_action, CheckReport, DownloadStatus, DownloadUrlPolicy, HostAction,
-        InstallPublication, InstallReport,
+        parse_host_action, updater_plugin_builder, CheckReport, DownloadStatus, DownloadUrlPolicy,
+        HostAction, InstallPublication, InstallReport,
     },
     health::{
         ensure_channel_dsh_home, required_dsh_home, BundleHealthProbe, CandidateProcessHealth,
@@ -453,9 +453,7 @@ pub fn run() -> i32 {
             }
         };
     }
-    let updater_plugin = tauri_plugin_updater::Builder::new()
-        .pubkey(updater_config.public_key())
-        .build();
+    let updater_plugin = updater_plugin_builder(updater_config.public_key()).build();
     let app = tauri::Builder::default()
         .plugin(updater_plugin)
         .manage(updater_config)

@@ -8,7 +8,7 @@ use std::{
 
 use serde::Serialize;
 use tauri::Url;
-use tauri_plugin_updater::{Update, Updater};
+use tauri_plugin_updater::{Builder as UpdaterPluginBuilder, Update, Updater};
 
 use super::{
     archive::{stage_verified_archive, ArchiveStageError},
@@ -30,6 +30,13 @@ const RELEASE_PATH_PREFIX: [&str; 4] = [
     "download",
 ];
 const RELEASE_ASSET: &str = "Openloop.app.tar.gz";
+const UPDATE_TARGET: &str = "darwin-aarch64";
+
+pub fn updater_plugin_builder(public_key: &str) -> UpdaterPluginBuilder {
+    UpdaterPluginBuilder::new()
+        .target(UPDATE_TARGET)
+        .pubkey(public_key)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostAction {
