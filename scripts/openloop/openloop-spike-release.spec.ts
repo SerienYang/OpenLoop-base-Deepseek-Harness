@@ -145,6 +145,9 @@ describe('Openloop spike release workflow', () => {
       /REMOTE_TAG=.*git ls-remote[^]*refs\/tags\/\$\{RELEASE_TAG\}/u,
     )
     expect(preflight).toMatch(/REMOTE_TAG_SHA=/u)
+    expect(preflight).toContain(
+      'END { print (peeled != "" ? peeled : direct) }',
+    )
     expect(preflight).toMatch(
       /test -z "\$REMOTE_TAG_SHA"[^]*"\$REMOTE_TAG_SHA" = "\$GITHUB_SHA"/u,
     )
