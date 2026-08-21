@@ -8,7 +8,11 @@ use std::{
 
 use tauri::{AppHandle, Manager, RunEvent, Url};
 use tauri_plugin_updater::UpdaterExt;
+#[cfg(target_os = "macos")]
+use zeroize::Zeroizing;
 
+#[cfg(target_os = "macos")]
+use crate::credentials::{KeychainStore, SecurePromptState};
 use crate::launcher::{
     InstanceAction, LaunchReadinessExpectation, LaunchSecrets, SingleInstance, SupervisedChild,
 };
@@ -27,6 +31,8 @@ use crate::update::{
 };
 
 pub mod browser;
+#[cfg(target_os = "macos")]
+pub mod credentials;
 pub mod launcher;
 pub mod spikes;
 pub mod update;
@@ -144,6 +150,72 @@ fn validate_embedded_artifact_manifest() -> Result<(), String> {
 fn build_manifest() -> Result<OpenloopBuildManifest, String> {
     validate_embedded_artifact_manifest()?;
     embedded_build_manifest()
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn credentials_set(
+    secret: Vec<u8>,
+    prompt_token: String,
+    window: tauri::WebviewWindow,
+    prompt_state: tauri::State<'_, SecurePromptState>,
+    keychain: tauri::State<'_, KeychainStore>,
+) -> Result<(), String> {
+    let secret = Zeroizing::new(secret);
+    let account = prompt_state
+        .account_for_prompt(window.label(), &prompt_token)
+        .map_err(|error| error.to_string())?;
+    keychain
+        .set(&account, secret.as_slice())
+        .map_err(|error| error.to_string())?;
+    destroy_credentials_prompt(&window, &prompt_state, &prompt_token)
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn credentials_unset(
+    prompt_token: String,
+    window: tauri::WebviewWindow,
+    prompt_state: tauri::State<'_, SecurePromptState>,
+    keychain: tauri::State<'_, KeychainStore>,
+) -> Result<(), String> {
+    let account = prompt_state
+        .account_for_prompt(window.label(), &prompt_token)
+        .map_err(|error| error.to_string())?;
+    keychain
+        .delete(&account)
+        .map_err(|error| error.to_string())?;
+    destroy_credentials_prompt(&window, &prompt_state, &prompt_token)
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn credentials_status(
+    prompt_token: String,
+    window: tauri::WebviewWindow,
+    prompt_state: tauri::State<'_, SecurePromptState>,
+    keychain: tauri::State<'_, KeychainStore>,
+) -> Result<bool, String> {
+    let account = prompt_state
+        .account_for_prompt(window.label(), &prompt_token)
+        .map_err(|error| error.to_string())?;
+    keychain.status(&account).map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn destroy_credentials_prompt(
+    window: &tauri::WebviewWindow,
+    prompt_state: &SecurePromptState,
+    prompt_token: &str,
+) -> Result<(), String> {
+    let clear_result = prompt_state
+        .clear_for_prompt(window.label(), prompt_token)
+        .map(|_| ())
+        .map_err(|error| error.to_string());
+    let destroy_result = window
+        .destroy()
+        .map_err(|error| format!("credential prompt destruction failed: {error}"));
+    clear_result.and(destroy_result)
 }
 
 fn embedded_build_manifest() -> Result<OpenloopBuildManifest, String> {
@@ -437,6 +509,27 @@ pub fn run() -> i32 {
             return 1;
         }
     };
+    #[cfg(target_os = "macos")]
+    match credentials::parse_keychain_spike_action(&arguments, channel) {
+        Ok(Some(action)) => {
+            return match credentials::run_keychain_spike(action)
+                .and_then(|report| report.json_line())
+                .map_err(|error| error.to_string())
+                .and_then(|line| write_stdout_line(&line))
+            {
+                Ok(()) => 0,
+                Err(error) => {
+                    write_failure_json(&error);
+                    1
+                }
+            };
+        }
+        Ok(None) => {}
+        Err(error) => {
+            write_failure_json(&error.to_string());
+            return 2;
+        }
+    }
     let updater_config = match update::channel::UpdateChannelConfig::embedded(channel) {
         Ok(config) => config,
         Err(error) => {
@@ -457,10 +550,22 @@ pub fn run() -> i32 {
         .target("darwin-aarch64")
         .pubkey(updater_config.public_key())
         .build();
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(updater_plugin)
-        .manage(updater_config)
-        .invoke_handler(tauri::generate_handler![build_manifest])
+        .manage(updater_config);
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .manage(KeychainStore::new(channel))
+        .manage(SecurePromptState::default())
+        .invoke_handler(tauri::generate_handler![
+            build_manifest,
+            credentials_set,
+            credentials_unset,
+            credentials_status
+        ]);
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.invoke_handler(tauri::generate_handler![build_manifest]);
+    let app = builder
         .setup(move |app| {
             if action != HostAction::Normal {
                 return Ok(());
