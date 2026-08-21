@@ -158,6 +158,10 @@ async function cleanDist(root, requestedDist, runner) {
   }
   const canonicalRoot = await realpath(repositoryRoot)
   if (existsSync(dist)) {
+    const distMetadata = await lstat(dist)
+    if (distMetadata.isSymbolicLink() || !distMetadata.isDirectory()) {
+      throw new Error('build-desktop: dist-openloop deletion target must be a real directory, not a symlink or regular file')
+    }
     await assertTreeContainsNoSymlinks(dist)
     const canonicalDist = await realpath(dist)
     if (canonicalDist !== join(canonicalRoot, 'dist-openloop')) {
@@ -166,7 +170,7 @@ async function cleanDist(root, requestedDist, runner) {
   }
   await runner.run({
     command: 'git',
-    args: ['check-ignore', '-q', '--', 'dist-openloop'],
+    args: ['check-ignore', '-q', '--', 'dist-openloop/'],
     cwd: repositoryRoot,
   })
   await rm(dist, { recursive: true, force: true })
