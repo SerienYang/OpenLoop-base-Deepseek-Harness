@@ -18,7 +18,7 @@ async function bootHmr(dir: string, root: string[] = [], usePolling?: boolean): 
     root,
     ignored: [],
     debounce: 0,
-    ...usePolling === undefined ? {} : { usePolling },
+    usePolling: usePolling ?? (process.platform === 'darwin' && process.env.CI === 'true'),
   })
   return ctx
 }
@@ -38,8 +38,8 @@ describe('HMR exact config paths', () => {
     const aliasFilename = join(alias, 'module.ts')
     symlinkSync(target, alias, process.platform === 'win32' ? 'junction' : 'dir')
     writeFileSync(aliasFilename, 'export const generation = 0\n')
-    // This acceptance owns alias-to-cache identity. Other cases below exercise
-    // native events; polling keeps Windows fs.watch queue pressure out of it.
+    // This acceptance owns alias-to-cache identity. It always polls; the other
+    // cases poll only on loaded macOS CI and exercise native events elsewhere.
     const ctx = await bootHmr(alias, ['.'], true)
     const filename = join(await realpath(target), 'module.ts')
     const expected = pathToFileURL(filename).href
