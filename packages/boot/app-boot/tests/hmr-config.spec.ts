@@ -31,6 +31,15 @@ async function eventually(test: () => boolean, message: string): Promise<void> {
   }
 }
 
+async function settleMacosCiPollingRegistration(): Promise<void> {
+  if (process.platform !== 'darwin' || process.env.CI !== 'true') return
+  // Chokidar 4 emits ready after fs.watchFile registration, before Node's
+  // first asynchronous stat baseline. Let that baseline complete before a
+  // mutation that could otherwise become the unseen initial state.
+  const interval = Number.parseInt(process.env.CHOKIDAR_INTERVAL ?? '100', 10)
+  await new Promise(resolve => setTimeout(resolve, interval * 2))
+}
+
 interface HmrInternals {
   refreshConfig(key: object, filename: string, refresh: () => Promise<void> | void): void
 }
@@ -101,6 +110,7 @@ describe('HMR exact config paths', () => {
           observed.push('missing')
         }
       })
+      await settleMacosCiPollingRegistration()
 
       writeFileSync(filename, 'one', { flag: 'wx' })
       await eventually(() => observed.includes('one'), 'HMR did not observe config creation')
@@ -123,6 +133,7 @@ describe('HMR exact config paths', () => {
       await ctx.hmr.registerConfig(filename, () => {
         observed.push(readFileSync(filename, 'utf8'))
       })
+      await settleMacosCiPollingRegistration()
       mkdirSync(dir)
       writeFileSync(filename, 'created')
       await eventually(() => observed.includes('created'), 'HMR did not observe config creation under a new parent')
@@ -160,6 +171,7 @@ describe('HMR exact config paths', () => {
         active -= 1
       })
       await firstStarted.promise
+      await settleMacosCiPollingRegistration()
       writeFileSync(filename, 'two')
       await eventually(() => refreshCount >= 2, 'HMR did not queue the second config refresh')
 
@@ -193,6 +205,7 @@ describe('HMR exact config paths', () => {
         failure.resolve({ filename: failedFilename, error })
       })
       await ctx.hmr.registerConfig(filename, () => { throw 42 })
+      await settleMacosCiPollingRegistration()
       writeFileSync(filename, 'invalid')
 
       const observed = await failure.promise

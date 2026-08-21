@@ -33,6 +33,15 @@ async function eventually(test: () => boolean, message: string): Promise<void> {
   }
 }
 
+async function settleMacosCiPollingRegistration(): Promise<void> {
+  if (process.platform !== 'darwin' || process.env.CI !== 'true') return
+  // Chokidar 4 emits ready after fs.watchFile registration, before Node's
+  // first asynchronous stat baseline. Let that baseline complete before a
+  // mutation that could otherwise become the unseen initial state.
+  const interval = Number.parseInt(process.env.CHOKIDAR_INTERVAL ?? '100', 10)
+  await new Promise(resolve => setTimeout(resolve, interval * 2))
+}
+
 const settleChokidarChangeThrottle = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 75))
 
 describe('loadOptionalPatches', () => {
@@ -335,6 +344,7 @@ describe('boot with user patches', () => {
       compose: userPatches => [...basePatches, ...userPatches],
     })
     try {
+      await settleMacosCiPollingRegistration()
       writeFileSync(filename, '- id: noop\n  config:\n    value: live\n')
       await eventually(() => (entryConfig(ctx, 'noop') as { value?: string }).value === 'live', 'user patch addition was not applied')
 
