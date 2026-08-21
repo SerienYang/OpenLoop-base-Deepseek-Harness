@@ -132,11 +132,12 @@ function tauriCommandNames(source: string): readonly string[] {
 
 function invokeHandlerCommands(source: string): readonly string[] {
   const handlers = [...source.matchAll(/tauri::generate_handler!\s*\[([\s\S]*?)\]/gu)]
-  if (handlers.length !== 1) return []
-  return (handlers[0]?.[1] ?? '')
-    .split(',')
-    .map(command => command.trim())
-    .filter(Boolean)
+  return [...new Set(handlers.flatMap(handler =>
+    (handler[1] ?? '')
+      .split(',')
+      .map(command => command.trim())
+      .filter(Boolean),
+  ))]
 }
 
 function rustStructFields(source: string, name: string): Record<string, string> {
@@ -305,6 +306,15 @@ describe('Openloop desktop foundation configuration', () => {
     )
     const cargoPackage = record(cargo.package, 'Cargo.toml package')
     const dependencies = record(cargo.dependencies, 'Cargo.toml dependencies')
+    const targets = record(cargo.target, 'Cargo.toml target dependencies')
+    const macosTarget = record(
+      targets['cfg(target_os = "macos")'],
+      'Cargo.toml macOS target',
+    )
+    const macosDependencies = record(
+      macosTarget.dependencies,
+      'Cargo.toml macOS dependencies',
+    )
     const buildDependencies = record(
       cargo['build-dependencies'],
       'Cargo.toml build-dependencies',
@@ -322,6 +332,10 @@ describe('Openloop desktop foundation configuration', () => {
     expect(tauriBuildDependency.version).toBe('=2.6.3')
     expect(record(dependencies.serde, 'Cargo.toml serde dependency').version).toBe('=1.0.229')
     expect(dependencies.serde_json).toBe('=1.0.151')
+    expect(macosDependencies).toEqual({
+      'security-framework': '=3.7.0',
+      'security-framework-sys': '=2.17.0',
+    })
     expect(buildDependencies.serde_json).toBe('=1.0.151')
     expect(buildDependencies.sha2).toBe('=0.10.9')
   })
@@ -428,7 +442,7 @@ describe('Openloop desktop foundation configuration', () => {
       resizable: false,
       fullscreen: false,
     }])
-    expect(security.capabilities).toEqual(['main'])
+    expect(security.capabilities).toEqual(['main', 'credentials'])
     expect(security.freezePrototype).toBe(true)
     expect(csp).toEqual(new Map([
       ['default-src', ["'self'"]],
@@ -479,11 +493,14 @@ describe('Openloop desktop foundation configuration', () => {
     })
   })
 
-  test('grants only build_manifest to the local main window on macOS', () => {
-    const capability = readJson('apps/openloop-desktop/src-tauri/capabilities/main.json')
-    const serialized = JSON.stringify(capability)
+  test('grants exact non-wildcard commands to the main and credentials windows', () => {
+    const mainCapability = readJson('apps/openloop-desktop/src-tauri/capabilities/main.json')
+    const credentialsCapability = readJson(
+      'apps/openloop-desktop/src-tauri/capabilities/credentials.json',
+    )
+    const serialized = JSON.stringify([mainCapability, credentialsCapability])
 
-    expect(capability).toEqual({
+    expect(mainCapability).toEqual({
       $schema: '../gen/schemas/desktop-schema.json',
       identifier: 'main',
       description: 'Local capability for the Openloop bootstrap window.',
@@ -492,16 +509,78 @@ describe('Openloop desktop foundation configuration', () => {
       platforms: ['macOS'],
       permissions: ['allow-build-manifest'],
     })
-    expect(capability).not.toHaveProperty('remote')
+    expect(credentialsCapability).toEqual({
+      $schema: '../gen/schemas/desktop-schema.json',
+      identifier: 'credentials',
+      description: 'Local capability for the Openloop credential prompt.',
+      local: true,
+      windows: ['credentials'],
+      platforms: ['macOS'],
+      permissions: [
+        'allow-credentials-set',
+        'allow-credentials-unset',
+        'allow-credentials-status',
+      ],
+    })
+    expect(mainCapability).not.toHaveProperty('remote')
+    expect(credentialsCapability).not.toHaveProperty('remote')
     expect(serialized).not.toContain('*')
 
     const buildScript = readText('apps/openloop-desktop/src-tauri/build.rs')
-    expect(commandNamesFromBuildScript(buildScript)).toEqual(['build_manifest'])
+    expect(commandNamesFromBuildScript(buildScript)).toEqual([
+      'build_manifest',
+      'credentials_set',
+      'credentials_unset',
+      'credentials_status',
+    ])
     expect([...buildScript.matchAll(/\.commands\s*\(/gu)]).toHaveLength(1)
 
     const library = readText('apps/openloop-desktop/src-tauri/src/lib.rs')
-    expect(tauriCommandNames(library)).toEqual(['build_manifest'])
-    expect(invokeHandlerCommands(library)).toEqual(['build_manifest'])
+    expect(tauriCommandNames(library)).toEqual([
+      'build_manifest',
+      'credentials_set',
+      'credentials_unset',
+      'credentials_status',
+    ])
+    expect(invokeHandlerCommands(library)).toEqual([
+      'build_manifest',
+      'credentials_set',
+      'credentials_unset',
+      'credentials_status',
+    ])
+    expect([...library.matchAll(/tauri::generate_handler!\s*\[/gu)]).toHaveLength(2)
+    const macosBuilder = /#\[cfg\(target_os = "macos"\)\]\s*let builder = builder([\s\S]*?);/u
+      .exec(library)?.[1] ?? ''
+    const otherBuilder = /#\[cfg\(not\(target_os = "macos"\)\)\]\s*let builder = builder([\s\S]*?);/u
+      .exec(library)?.[1] ?? ''
+    expect(macosBuilder).toContain('.manage(KeychainStore::new(channel))')
+    expect(macosBuilder).toContain('.manage(SecurePromptState::default())')
+    expect(macosBuilder).toContain('credentials_status')
+    expect(otherBuilder).toContain(
+      '.invoke_handler(tauri::generate_handler![build_manifest])',
+    )
+    expect(otherBuilder).not.toMatch(/KeychainStore|SecurePromptState|credentials_/u)
+    expect(serialized).not.toMatch(/resolve|spike|open_secure_prompt/u)
+    expect(commandNamesFromBuildScript(buildScript)).not.toContain('resolve')
+    expect(invokeHandlerCommands(library)).not.toContain('resolve')
+    expect(tauriCommandNames(library)).not.toContain('open_secure_prompt')
+
+    const credentialsModule = readText(
+      'apps/openloop-desktop/src-tauri/src/credentials/mod.rs',
+    )
+    const securePrompt = readText(
+      'apps/openloop-desktop/src-tauri/src/credentials/secure_prompt.rs',
+    )
+    expect(fs.existsSync(path.join(
+      repositoryRoot,
+      'apps/openloop-desktop/src-tauri/src/credentials.rs',
+    ))).toBe(false)
+    expect(credentialsModule).toContain('mod secure_prompt;')
+    expect(credentialsModule).toContain('pub use secure_prompt::{')
+    expect(credentialsModule).not.toContain('pub struct SecurePromptState')
+    expect(securePrompt).toContain('pub struct SecurePromptState')
+    expect(securePrompt).toContain('.initialization_script(')
+    expect(securePrompt).toContain('Object.defineProperty')
   })
 
   test('keeps the Rust and TypeScript build-manifest contracts identical', () => {
@@ -619,7 +698,7 @@ describe('Openloop desktop foundation configuration', () => {
     expect(process).toContain('"DSH_HOME"')
   })
 
-  test('uses generated macOS icons and a restrained bootstrap-only frontend', () => {
+  test('uses generated macOS icons and restrained local frontends', () => {
     const iconPaths = [
       'apps/openloop-desktop/src-tauri/icons/32x32.png',
       'apps/openloop-desktop/src-tauri/icons/128x128.png',
@@ -632,13 +711,39 @@ describe('Openloop desktop foundation configuration', () => {
     const mainSource = readText('apps/openloop-desktop/src/main.ts')
     const styles = readText('apps/openloop-desktop/src/styles.css')
     const index = readText('apps/openloop-desktop/index.html')
-    const frontend = `${viteConfig}\n${mainSource}\n${styles}\n${index}`.toLowerCase()
+    const credentials = readText('apps/openloop-desktop/src/credentials.ts')
+    const credentialsStyles = readText('apps/openloop-desktop/src/credentials.css')
+    const credentialsHtml = readText('apps/openloop-desktop/src/credentials.html')
+    const frontend = [
+      viteConfig,
+      mainSource,
+      styles,
+      index,
+      credentials,
+      credentialsStyles,
+      credentialsHtml,
+    ].join('\n').toLowerCase()
 
     expect(viteConfig).toMatch(/port:\s*1420/u)
     expect(viteConfig).toMatch(/strictPort:\s*true/u)
+    expect(viteConfig).toContain("main: resolve(import.meta.dirname, 'index.html')")
+    expect(viteConfig).toContain(
+      "credentials: resolve(import.meta.dirname, 'src/credentials.html')",
+    )
     expect(mainSource).toContain('../../../assets/brand/openloop-icon.svg')
     expect(mainSource).toContain("invoke<OpenloopBuildManifest>('build_manifest')")
     expect(index).toContain('<title>Openloop</title>')
+    expect(credentialsHtml).toContain('<title>Openloop Credentials</title>')
+    expect(credentials).toContain(
+      "invokeCredential('credentials_set', { promptToken, secret })",
+    )
+    expect(credentials).toContain(
+      "invokeCredential('credentials_status', { promptToken })",
+    )
+    expect(credentials).toContain(
+      "invokeCredential('credentials_unset', { promptToken })",
+    )
+    expect(credentials).not.toMatch(/credentials_(?:resolve|open)|keychain_spike/u)
     expect(frontend).not.toMatch(/\bcyan\b|#00ffff|#0ff\b|rgb\s*\(\s*0\s*,\s*255\s*,\s*255\s*\)/u)
     expect(frontend).not.toMatch(/\b(?:linear|radial|conic)-gradient\s*\(/u)
     expect(frontend).not.toMatch(/\borbs?\b|\bcards?\b/u)

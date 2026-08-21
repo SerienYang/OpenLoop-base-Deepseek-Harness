@@ -1,3 +1,4 @@
+import { resolve } from 'node:path'
 import { defineConfig } from 'vite'
 
 export default defineConfig({
@@ -9,5 +10,11 @@ export default defineConfig({
   },
   build: {
     target: 'safari13',
+    rollupOptions: {
+      input: {
+        main: resolve(import.meta.dirname, 'index.html'),
+        credentials: resolve(import.meta.dirname, 'src/credentials.html'),
+      },
+    },
   },
 })
