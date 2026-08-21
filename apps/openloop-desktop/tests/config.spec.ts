@@ -595,6 +595,7 @@ describe('Openloop desktop foundation configuration', () => {
       'https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-rolling/latest-test-k1.json',
     ])
     expect(library).toContain('tauri_plugin_updater::Builder::new()')
+    expect(library).toContain('.target("darwin-aarch64")')
     expect(library).toContain('UpdaterExt')
     expect(library).toMatch(/\.updater\s*\(\s*\)[^]*\.check\s*\(\s*\)\s*\.await/u)
     expect(library).toMatch(/\.download\s*\(/u)

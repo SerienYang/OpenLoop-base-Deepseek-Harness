@@ -454,6 +454,7 @@ pub fn run() -> i32 {
         };
     }
     let updater_plugin = tauri_plugin_updater::Builder::new()
+        .target("darwin-aarch64")
         .pubkey(updater_config.public_key())
         .build();
     let app = tauri::Builder::default()
