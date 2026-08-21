@@ -12,5 +12,10 @@ const descendant = spawn(process.execPath, [
 ], { stdio: 'ignore' })
 if (descendant.pid === undefined) throw new Error('managed descendant did not publish a pid')
 
-await writeFile(statePath, JSON.stringify({ root: process.pid, descendant: descendant.pid }))
+const state = JSON.stringify({ root: process.pid, descendant: descendant.pid })
+if (process.env.DSH_PROCESS_EXIT_STAGED_TREE_STATE === '1') {
+  await writeFile(statePath, state.slice(0, 1))
+  await new Promise(resolve => setTimeout(resolve, 250))
+}
+await writeFile(statePath, state)
 setInterval(() => {}, 60_000)

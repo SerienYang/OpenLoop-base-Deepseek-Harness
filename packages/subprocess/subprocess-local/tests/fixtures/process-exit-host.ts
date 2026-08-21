@@ -28,10 +28,39 @@ async function waitForFile(path: string): Promise<void> {
   }
 }
 
+async function waitForPublishedTree(path: string): Promise<void> {
+  for (;;) {
+    let text: string
+    try {
+      text = await readFile(path, 'utf8')
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      await new Promise(resolve => setTimeout(resolve, 10))
+      continue
+    }
+
+    let published: { root?: unknown; descendant?: unknown }
+    try {
+      published = JSON.parse(text) as { root?: unknown; descendant?: unknown }
+    } catch (error: unknown) {
+      if (!(error instanceof SyntaxError)) throw error
+      await new Promise(resolve => setTimeout(resolve, 10))
+      continue
+    }
+    if (!Number.isSafeInteger(published.root) || !Number.isSafeInteger(published.descendant)) {
+      throw new Error('managed tree published invalid process ids')
+    }
+    return
+  }
+}
+
 const listenersBefore = process.listenerCount('exit')
 const ctx = new Context()
 const fiber = await ctx.plugin(LocalSubprocessRuntime)
 const listenersAfterLoad = process.listenerCount('exit')
+if (process.env.DSH_PROCESS_EXIT_STAGED_TREE_STATE === '1') {
+  await writeFile(treeState, '{')
+}
 if (kind === 'ordinary') {
   ctx.subprocess.spawn({
     argv: [process.execPath, managedTree, treeState],
@@ -53,11 +82,7 @@ if (kind === 'ordinary') {
   })
 }
 
-await waitForFile(treeState)
-const published = JSON.parse(await readFile(treeState, 'utf8')) as { root?: unknown; descendant?: unknown }
-if (!Number.isSafeInteger(published.root) || !Number.isSafeInteger(published.descendant)) {
-  throw new Error('managed tree published invalid process ids')
-}
+await waitForPublishedTree(treeState)
 await writeFile(ready, 'ready')
 await waitForFile(proceed)
 
