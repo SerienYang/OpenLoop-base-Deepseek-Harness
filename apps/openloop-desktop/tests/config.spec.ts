@@ -207,6 +207,33 @@ function findBaselineUrl(relativePath: string): string | undefined {
   return baselineUrl
 }
 
+function pollingAssignmentInitializers(relativePath: string): readonly string[] {
+  const source = ts.createSourceFile(
+    relativePath,
+    readText(relativePath),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  )
+  const initializers: string[] = []
+  const visit = (node: ts.Node): void => {
+    if (ts.isPropertyAssignment(node)
+      && ts.isIdentifier(node.name)
+      && node.name.text === 'usePolling') {
+      let initializer = node.initializer
+      if (ts.isBinaryExpression(initializer)
+        && initializer.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken) {
+        initializer = initializer.right
+      }
+      while (ts.isParenthesizedExpression(initializer)) initializer = initializer.expression
+      initializers.push(initializer.getText(source))
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  return initializers
+}
+
 describe('Openloop desktop foundation configuration', () => {
   test('pins package identity, versions, scripts, and the test build manifest', () => {
     const packageJson = readJson('apps/openloop-desktop/package.json')
@@ -366,6 +393,18 @@ describe('Openloop desktop foundation configuration', () => {
     )
     expect(vitestConfig.match(/testTimeout: aggregateTestTimeout/gu)).toHaveLength(2)
     expect(vitestConfig.match(/hookTimeout: aggregateHookTimeout/gu)).toHaveLength(2)
+  })
+
+  test('uses polling for exact config watcher tests on macOS CI', () => {
+    const pollingCondition = "process.platform === 'darwin' && process.env.CI === 'true'"
+    for (const [filename, expectedCount] of [
+      ['packages/boot/app-boot/tests/hmr-config.spec.ts', 1],
+      ['packages/boot/app-boot/tests/user-patches.spec.ts', 2],
+    ] as const) {
+      expect(pollingAssignmentInitializers(filename)).toEqual(
+        Array.from({ length: expectedCount }, () => pollingCondition),
+      )
+    }
   })
 
   test('inherits the platform aggregate timeout for the Cargo metadata probe', () => {
