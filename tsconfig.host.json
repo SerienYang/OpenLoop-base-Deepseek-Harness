@@ -84,6 +84,7 @@
     "apps/web/stress-tests/reasoning-chunks.stress.ts",
     "apps/cli/tests/**/*.ts",
     "apps/openloop-desktop/tests/config.spec.ts",
+    "apps/openloop-desktop/tests/credentials.spec.ts",
     "apps/openloop-runtime/tests/**/*.ts",
     "examples/*/src/**/*.ts",
     "examples/*/start.ts",
