@@ -31,6 +31,10 @@ async function eventually(test: () => boolean, message: string): Promise<void> {
   }
 }
 
+interface HmrInternals {
+  refreshConfig(key: object, filename: string, refresh: () => Promise<void> | void): void
+}
+
 describe('HMR exact config paths', () => {
   it('observes module changes when its watch base is a filesystem alias', { timeout: 30_000 }, async () => {
     const target = mkdtempSync(join(tmpdir(), 'dsh-hmr-module-canonical-'))
@@ -132,38 +136,44 @@ describe('HMR exact config paths', () => {
     const filename = join(dir, 'plugins.yml')
     writeFileSync(filename, 'one')
     const ctx = await bootHmr(dir)
-    const started = Promise.withResolvers<undefined>()
-    const release = Promise.withResolvers<undefined>()
+    const firstStarted = Promise.withResolvers<undefined>()
+    const releaseFirst = Promise.withResolvers<undefined>()
     const observed: string[] = []
     let active = 0
     let maxActive = 0
+    const hmr = ctx.hmr as unknown as HmrInternals
+    const originalRefreshConfig = hmr.refreshConfig.bind(hmr)
+    let refreshCount = 0
+    const refreshConfig = vi.spyOn(hmr, 'refreshConfig').mockImplementation((...args) => {
+      refreshCount += 1
+      originalRefreshConfig(...args)
+    })
     try {
       const dispose = await ctx.hmr.registerConfig(filename, async () => {
         active += 1
         maxActive = Math.max(maxActive, active)
         observed.push(readFileSync(filename, 'utf8'))
         if (observed.length === 1) {
-          started.resolve(undefined)
-          await release.promise
+          firstStarted.resolve(undefined)
+          await releaseFirst.promise
         }
         active -= 1
       })
-      await started.promise
+      await firstStarted.promise
       writeFileSync(filename, 'two')
-      // Chokidar coalesces atomic writes for 100 ms by default. Wait beyond
-      // that window so this edit is queued before registration disposal.
-      await new Promise(resolve => setTimeout(resolve, 250))
+      await eventually(() => refreshCount >= 2, 'HMR did not queue the second config refresh')
 
       let disposed = false
       const disposal = dispose().then(() => { disposed = true })
       await Promise.resolve()
       expect(disposed).toBe(false)
-      release.resolve(undefined)
+      releaseFirst.resolve(undefined)
       await disposal
       expect(maxActive).toBe(1)
       expect(observed).toEqual(['one', 'two'])
     } finally {
-      release.resolve(undefined)
+      releaseFirst.resolve(undefined)
+      refreshConfig.mockRestore()
       await ctx.fiber.dispose()
     }
   })
