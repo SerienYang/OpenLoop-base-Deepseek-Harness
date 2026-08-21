@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     io::{Read, Write},
-    net::{TcpListener, TcpStream},
+    net::{Shutdown, TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
     thread,
@@ -157,7 +157,72 @@ fn serve(stream: &mut TcpStream, routes: &HashMap<&str, Response>) -> Result<(),
     stream
         .write_all(&response.body)
         .and_then(|()| stream.flush())
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    stream
+        .shutdown(Shutdown::Write)
+        .map_err(|error| format!("finish update response: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .map_err(|error| error.to_string())?;
+    let mut drain = [0_u8; 1024];
+    loop {
+        match stream.read(&mut drain) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            }
+            Err(error) => return Err(format!("drain update request: {error}")),
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn fixture_server_finishes_its_response_before_closing_the_socket() {
+    let fixture = update_fixture_guard();
+    let server = TestServer::new(&fixture, 1, |_| {
+        HashMap::from([(
+            "/manifest",
+            Response {
+                status: "200 OK",
+                content_type: "text/plain",
+                body: b"complete fixture response".to_vec(),
+            },
+        )])
+    });
+    let endpoint = server.url("/manifest");
+    let mut stream = TcpStream::connect((
+        endpoint.host_str().expect("fixture host"),
+        endpoint.port().expect("fixture port"),
+    ))
+    .expect("connect fixture server");
+    let trailing_request = vec![b'x'; 8192];
+    write!(
+        stream,
+        "GET /manifest HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n",
+        trailing_request.len()
+    )
+    .expect("write fixture request headers");
+    stream
+        .write_all(&trailing_request)
+        .expect("write trailing fixture request bytes");
+    stream.flush().expect("flush fixture request");
+
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .expect("read complete fixture response");
+    assert!(
+        response.ends_with(b"complete fixture response"),
+        "fixture response was truncated: {}",
+        String::from_utf8_lossy(&response)
+    );
 }
 
 fn no_content() -> Response {
