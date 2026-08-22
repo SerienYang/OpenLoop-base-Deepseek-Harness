@@ -230,11 +230,17 @@ struct RuntimeProcessState {
 }
 
 fn runtime_executable(app: &AppHandle) -> Result<PathBuf, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("current Host executable is unavailable: {error}"))?;
+    let executable_dir = executable
+        .parent()
+        .ok_or_else(|| "current Host executable has no parent".to_owned())?;
     let resource_dir = app
         .path()
         .resource_dir()
         .map_err(|error| format!("runtime resource directory is unavailable: {error}"))?;
     let candidates = [
+        executable_dir.join("openloop-runtime"),
         resource_dir.join("binaries/openloop-runtime"),
         resource_dir.join(format!(
             "binaries/openloop-runtime-{}-apple-darwin",
@@ -258,15 +264,15 @@ fn start_runtime(
         .ok_or_else(|| "Openloop channel data root is unavailable".to_owned())?;
     let update_lease = UpdateLease::shared(channel_root)
         .map_err(|error| format!("runtime update lease acquisition failed: {error}"))?;
-    let launch_id_path = channel_root.join("openloop-runtime.sock");
-    let secrets = LaunchSecrets::generate(launch_id_path.clone())
-        .map_err(|error| format!("runtime launch secret generation failed: {error}"))?;
-    let instance = SingleInstance::acquire(&secrets.socket_path)
+    let requested_socket_path = channel_root.join("openloop-runtime.sock");
+    let instance = SingleInstance::acquire(&requested_socket_path)
         .map_err(|error| format!("single-instance acquisition failed: {error}"))?;
     if instance.action() == InstanceAction::Forwarded {
         app.exit(0);
         return Ok(None);
     }
+    let secrets = LaunchSecrets::generate(instance.socket_path().to_path_buf())
+        .map_err(|error| format!("runtime launch secret generation failed: {error}"))?;
     let window = app.get_webview_window("main");
     let forward_window = window.clone();
     instance

@@ -1,7 +1,7 @@
 use std::{
     ffi::OsString,
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -203,4 +203,22 @@ fn second_instance_forwards_open_request_without_starting_a_sidecar() {
     assert!(matches!(first.action(), InstanceAction::Primary));
     drop(first);
     fs::remove_dir_all(root).expect("remove temp directory");
+}
+
+#[test]
+fn long_single_instance_socket_path_uses_a_bindable_endpoint() {
+    let fixture = tempfile::tempdir().expect("temporary socket root");
+    let socket = fixture
+        .path()
+        .join("x".repeat(128))
+        .join("openloop-runtime.sock");
+
+    let first = SingleInstance::acquire(&socket).expect("first instance");
+    let second = SingleInstance::acquire(&socket).expect("second instance must forward");
+
+    assert!(matches!(first.action(), InstanceAction::Primary));
+    assert!(matches!(second.action(), InstanceAction::Forwarded));
+    assert_eq!(first.socket_path(), second.socket_path());
+    assert!(first.socket_path().starts_with(std::env::temp_dir()));
+    assert!(first.socket_path().as_os_str().as_bytes().len() <= 103);
 }

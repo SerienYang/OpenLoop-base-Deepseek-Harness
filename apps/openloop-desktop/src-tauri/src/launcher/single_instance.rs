@@ -1,13 +1,31 @@
 use std::{
     fs,
     io::{self, Read, Write},
+    os::unix::ffi::OsStrExt,
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
     thread,
 };
 
+use sha2::{Digest, Sha256};
+
 const OPEN_REQUEST: &[u8] = b"{\"type\":\"openloop.open\"}\n";
 const MAX_OPEN_REQUEST_BYTES: usize = 4096;
+const MAX_UNIX_SOCKET_PATH_BYTES: usize = 103;
+const SOCKET_PATH_DIGEST_BYTES: usize = 16;
+
+fn bindable_socket_path(requested: &Path) -> PathBuf {
+    if requested.as_os_str().as_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES {
+        return requested.to_path_buf();
+    }
+
+    let digest = Sha256::digest(requested.as_os_str().as_bytes());
+    let suffix = digest[..SOCKET_PATH_DIGEST_BYTES]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    std::env::temp_dir().join(format!("openloop-{suffix}.sock"))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstanceAction {
@@ -23,22 +41,23 @@ pub struct SingleInstance {
 
 impl SingleInstance {
     pub fn acquire(socket_path: &Path) -> io::Result<Self> {
+        let socket_path = bindable_socket_path(socket_path);
         if let Some(parent) = socket_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        match UnixListener::bind(socket_path) {
+        match UnixListener::bind(&socket_path) {
             Ok(listener) => Ok(Self {
-                socket_path: socket_path.to_path_buf(),
+                socket_path,
                 listener: Some(listener),
                 action: InstanceAction::Primary,
             }),
             Err(bind_error) => {
-                match UnixStream::connect(socket_path) {
+                match UnixStream::connect(&socket_path) {
                     Ok(mut stream) => {
                         stream.write_all(OPEN_REQUEST)?;
                         stream.shutdown(std::net::Shutdown::Write)?;
                         Ok(Self {
-                            socket_path: socket_path.to_path_buf(),
+                            socket_path,
                             listener: None,
                             action: InstanceAction::Forwarded,
                         })
@@ -47,16 +66,16 @@ impl SingleInstance {
                         // A dead owner leaves only a socket pathname. It is
                         // safe to remove that pathname because connect failed;
                         // a live owner is never removed based on PID alone.
-                        fs::remove_file(socket_path).or_else(|error| {
+                        fs::remove_file(&socket_path).or_else(|error| {
                             if error.kind() == io::ErrorKind::NotFound {
                                 Ok(())
                             } else {
                                 Err(error)
                             }
                         })?;
-                        UnixListener::bind(socket_path)
+                        UnixListener::bind(&socket_path)
                             .map(|listener| Self {
-                                socket_path: socket_path.to_path_buf(),
+                                socket_path,
                                 listener: Some(listener),
                                 action: InstanceAction::Primary,
                             })
@@ -72,6 +91,10 @@ impl SingleInstance {
 
     pub fn action(&self) -> InstanceAction {
         self.action
+    }
+
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
     }
 
     pub fn accept_open_request(&self) -> io::Result<Vec<u8>> {
