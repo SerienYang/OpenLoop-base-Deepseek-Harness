@@ -229,12 +229,10 @@ struct RuntimeProcessState {
     child: Mutex<SupervisedChild>,
 }
 
-fn runtime_executable(app: &AppHandle) -> Result<PathBuf, String> {
-    let resource_dir = app
-        .path()
-        .resource_dir()
-        .map_err(|error| format!("runtime resource directory is unavailable: {error}"))?;
+fn find_runtime_executable(executable: &Path, resource_dir: &Path) -> Option<PathBuf> {
+    let executable_dir = executable.parent()?;
     let candidates = [
+        executable_dir.join("openloop-runtime"),
         resource_dir.join("binaries/openloop-runtime"),
         resource_dir.join(format!(
             "binaries/openloop-runtime-{}-apple-darwin",
@@ -242,9 +240,17 @@ fn runtime_executable(app: &AppHandle) -> Result<PathBuf, String> {
         )),
         Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries/openloop-runtime"),
     ];
-    candidates
-        .into_iter()
-        .find(|path| path.is_file())
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn runtime_executable(app: &AppHandle) -> Result<PathBuf, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("current Host executable is unavailable: {error}"))?;
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("runtime resource directory is unavailable: {error}"))?;
+    find_runtime_executable(&executable, &resource_dir)
         .ok_or_else(|| "bundled Openloop runtime sidecar is missing".to_owned())
 }
 
@@ -258,15 +264,15 @@ fn start_runtime(
         .ok_or_else(|| "Openloop channel data root is unavailable".to_owned())?;
     let update_lease = UpdateLease::shared(channel_root)
         .map_err(|error| format!("runtime update lease acquisition failed: {error}"))?;
-    let launch_id_path = channel_root.join("openloop-runtime.sock");
-    let secrets = LaunchSecrets::generate(launch_id_path.clone())
-        .map_err(|error| format!("runtime launch secret generation failed: {error}"))?;
-    let instance = SingleInstance::acquire(&secrets.socket_path)
+    let requested_socket_path = channel_root.join("openloop-runtime.sock");
+    let instance = SingleInstance::acquire(&requested_socket_path)
         .map_err(|error| format!("single-instance acquisition failed: {error}"))?;
     if instance.action() == InstanceAction::Forwarded {
         app.exit(0);
         return Ok(None);
     }
+    let secrets = LaunchSecrets::generate(instance.socket_path().to_path_buf())
+        .map_err(|error| format!("runtime launch secret generation failed: {error}"))?;
     let window = app.get_webview_window("main");
     let forward_window = window.clone();
     instance
@@ -612,6 +618,7 @@ pub fn run() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn reads_the_embedded_test_manifest() {
@@ -629,5 +636,19 @@ mod tests {
         assert_eq!(artifacts.artifacts.web, WEB_SHA256);
         assert_eq!(artifacts.artifacts.bundle_graph, BUNDLE_GRAPH_SHA256);
         assert_eq!(ARTIFACT_MANIFEST_SHA256.len(), 64);
+    }
+
+    #[test]
+    fn finds_the_packaged_runtime_next_to_the_host_executable() {
+        let fixture = tempfile::tempdir().expect("temporary app bundle");
+        let macos = fixture.path().join("Openloop.app/Contents/MacOS");
+        let resources = fixture.path().join("Openloop.app/Contents/Resources");
+        fs::create_dir_all(&macos).expect("MacOS directory");
+        fs::create_dir_all(&resources).expect("Resources directory");
+        let host = macos.join("openloop-desktop");
+        let runtime = macos.join("openloop-runtime");
+        fs::write(&runtime, b"runtime").expect("packaged runtime");
+
+        assert_eq!(find_runtime_executable(&host, &resources), Some(runtime),);
     }
 }

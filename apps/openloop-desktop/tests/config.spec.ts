@@ -734,6 +734,8 @@ describe('Openloop desktop foundation configuration', () => {
     expect(library).toContain('data_root_name()')
     expect(library).not.toContain('std::env::temp_dir().join("openloop-runtime.sock")')
     expect(library).toMatch(/openloop-runtime\.sock/u)
+    expect(library).toContain('std::env::current_exe()')
+    expect(library).toMatch(/executable_dir\.join\("openloop-runtime"\)/u)
     expect(process).toContain('"DSH_HOME"')
   })
 

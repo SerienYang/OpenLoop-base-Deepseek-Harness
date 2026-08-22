@@ -1,7 +1,10 @@
 use std::{
     ffi::OsString,
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{MetadataExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -203,4 +206,35 @@ fn second_instance_forwards_open_request_without_starting_a_sidecar() {
     assert!(matches!(first.action(), InstanceAction::Primary));
     drop(first);
     fs::remove_dir_all(root).expect("remove temp directory");
+}
+
+#[test]
+fn long_single_instance_socket_path_uses_a_bindable_endpoint() {
+    let fixture = tempfile::tempdir().expect("temporary socket root");
+    let socket = fixture
+        .path()
+        .join("x".repeat(128))
+        .join("openloop-runtime.sock");
+    let other_socket = fixture
+        .path()
+        .join("y".repeat(128))
+        .join("openloop-runtime.sock");
+
+    let first = SingleInstance::acquire(&socket).expect("first instance");
+    let second = SingleInstance::acquire(&socket).expect("second instance must forward");
+    let other = SingleInstance::acquire(&other_socket).expect("other channel instance");
+    let expected_root =
+        PathBuf::from("/private/tmp").join(format!("openloop-{}", unsafe { libc::geteuid() }));
+
+    assert!(matches!(first.action(), InstanceAction::Primary));
+    assert!(matches!(second.action(), InstanceAction::Forwarded));
+    assert!(matches!(other.action(), InstanceAction::Primary));
+    assert_eq!(first.socket_path(), second.socket_path());
+    assert_ne!(first.socket_path(), other.socket_path());
+    assert!(first.socket_path().starts_with(&expected_root));
+    assert!(first.socket_path().as_os_str().as_bytes().len() <= 103);
+    let root_metadata = fs::symlink_metadata(expected_root).expect("private socket root metadata");
+    assert!(root_metadata.is_dir());
+    assert_eq!(root_metadata.uid(), unsafe { libc::geteuid() });
+    assert_eq!(root_metadata.mode() & 0o077, 0);
 }
