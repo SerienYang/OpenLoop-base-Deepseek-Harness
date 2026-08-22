@@ -2,6 +2,7 @@
 
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -23,7 +24,15 @@ function writePackage(
   metadata: Record<string, unknown> = { dsh: { client: { platform: 'web' } } },
 ): string {
   root ??= realpathSync(mkdtempSync(join(tmpdir(), 'dsh-client-modules-')))
-  const pkgRoot = join(root, 'node_modules', ...packageName.split('/'))
+  return writePackageAt(root, packageName, metadata)
+}
+
+function writePackageAt(
+  moduleRoot: string,
+  packageName: string,
+  metadata: Record<string, unknown> = { dsh: { client: { platform: 'web' } } },
+): string {
+  const pkgRoot = join(moduleRoot, 'node_modules', ...packageName.split('/'))
   const clientPath = join(pkgRoot, 'lib', 'client.js')
   mkdirSync(pkgRoot, { recursive: true })
   writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({
@@ -38,7 +47,13 @@ function writePackage(
 }
 
 /** Construct the node-half service and capture its plugin-bundle route. */
-function constructWithRoute(packageNames: string[]): { service: ClientModuleRegistry; route: WebRoute } {
+function constructWithRoute(
+  packageNames: string[],
+  options: {
+    config?: unknown
+    installationBaseUrl?: string
+  } = {},
+): { service: ClientModuleRegistry; route: WebRoute } {
   const ctx = new Context()
   ctx.baseUrl = pathToFileURL(root!).href + '/'
   ctx.provide('loader', {
@@ -58,17 +73,89 @@ function constructWithRoute(packageNames: string[]): { service: ClientModuleRegi
     tapIndex: () => () => {},
   }
   ctx.provide('webServer', webServer as WebServer)
-  const service = new ClientModuleRegistry(ctx)
+  const service = new ClientModuleRegistry(ctx, options.config, options.installationBaseUrl)
   if (route === undefined) throw new Error('client bundle route was not registered')
   return { service, route }
 }
 
 /** Construct the node-half service over the enabled fixture entries. */
-function construct(packageNames: string[]): ClientModuleRegistry {
-  return constructWithRoute(packageNames).service
+function construct(
+  packageNames: string[],
+  options?: {
+    config?: unknown
+    installationBaseUrl?: string
+  },
+): ClientModuleRegistry {
+  return constructWithRoute(packageNames, options).service
 }
 
 describe('client bundle activation', () => {
+  it('resolves in-box package metadata from the installation anchor', () => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-client-modules-profile-')))
+    const installationRoot = join(root, 'installation')
+    const packageName = '@fixture/installation-client'
+    const clientPath = writePackageAt(installationRoot, packageName)
+    mkdirSync(dirname(clientPath), { recursive: true })
+    writeFileSync(clientPath, 'module.exports = {}\n')
+    const profileRequire = createRequire(pathToFileURL(root).href + '/')
+    const installationBaseUrl = pathToFileURL(join(installationRoot, 'anchor.js')).href
+
+    expect(() => profileRequire.resolve(`${packageName}/package.json`)).toThrow()
+    expect(construct([packageName], { installationBaseUrl }).graph().entries.map(entry => entry.id))
+      .toEqual([packageName])
+  })
+
+  it('prefers installation metadata when both anchors contain the same package', () => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-client-modules-profile-')))
+    const installationRoot = join(root, 'installation')
+    const packageName = '@fixture/in-box-package'
+    writePackageAt(root, packageName, {
+      dsh: { client: { platform: 'node' } },
+    })
+    const installationClientPath = writePackageAt(installationRoot, packageName)
+    mkdirSync(dirname(installationClientPath), { recursive: true })
+    writeFileSync(installationClientPath, 'module.exports = {}\n')
+    const installationBaseUrl = pathToFileURL(join(installationRoot, 'anchor.js')).href
+
+    expect(construct([packageName], { installationBaseUrl }).graph().entries.map(entry => entry.id))
+      .toEqual([packageName])
+  })
+
+  it('accepts Cordis config in the second constructor slot', () => {
+    const packageName = '@fixture/configured-client'
+    const clientPath = writePackage(packageName)
+    mkdirSync(dirname(clientPath), { recursive: true })
+    writeFileSync(clientPath, 'module.exports = {}\n')
+
+    expect(construct([packageName], { config: {} }).graph().entries.map(entry => entry.id))
+      .toEqual([packageName])
+  })
+
+  it('reads installation metadata without requiring a package.json export', () => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-client-modules-profile-')))
+    const installationRoot = join(root, 'installation')
+    const packageName = '@fixture/unexported-manifest'
+    const clientPath = writePackageAt(installationRoot, packageName, {
+      exports: { './client': './lib/client.js' },
+      dsh: { client: { platform: 'web' } },
+    })
+    mkdirSync(dirname(clientPath), { recursive: true })
+    writeFileSync(clientPath, 'module.exports = {}\n')
+    const installationBaseUrl = pathToFileURL(join(installationRoot, 'anchor.js')).href
+
+    expect(construct([packageName], { installationBaseUrl }).graph().entries.map(entry => entry.id))
+      .toEqual([packageName])
+  })
+
+  it('keeps an entry out when neither anchor can resolve its package', () => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-client-modules-profile-')))
+    const installationRoot = join(root, 'installation')
+    mkdirSync(installationRoot)
+    const installationBaseUrl = pathToFileURL(join(installationRoot, 'anchor.js')).href
+
+    expect(construct(['@fixture/missing'], { installationBaseUrl }).graph().entries).toEqual([])
+  })
+
   it('allows sibling dsh roles', () => {
     const currentName = '@fixture/current-client-field'
     const clientPath = writePackage(currentName, {
