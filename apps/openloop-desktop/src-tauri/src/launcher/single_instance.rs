@@ -1,8 +1,11 @@
 use std::{
     fs,
     io::{self, Read, Write},
-    os::unix::ffi::OsStrExt,
     os::unix::net::{UnixListener, UnixStream},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{DirBuilderExt, MetadataExt},
+    },
     path::{Path, PathBuf},
     thread,
 };
@@ -13,10 +16,36 @@ const OPEN_REQUEST: &[u8] = b"{\"type\":\"openloop.open\"}\n";
 const MAX_OPEN_REQUEST_BYTES: usize = 4096;
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 103;
 const SOCKET_PATH_DIGEST_BYTES: usize = 16;
+#[cfg(target_os = "macos")]
+const FALLBACK_SOCKET_PARENT: &str = "/private/tmp";
+#[cfg(not(target_os = "macos"))]
+const FALLBACK_SOCKET_PARENT: &str = "/tmp";
 
-fn bindable_socket_path(requested: &Path) -> PathBuf {
+fn private_socket_root() -> io::Result<PathBuf> {
+    // SAFETY: geteuid has no preconditions and does not dereference pointers.
+    let effective_user_id = unsafe { libc::geteuid() };
+    let root = PathBuf::from(FALLBACK_SOCKET_PARENT).join(format!("openloop-{effective_user_id}"));
+    match fs::DirBuilder::new().mode(0o700).create(&root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    let metadata = fs::symlink_metadata(&root)?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != effective_user_id
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "single-instance fallback root must be a private user-owned directory",
+        ));
+    }
+    Ok(root)
+}
+
+fn bindable_socket_path(requested: &Path) -> io::Result<PathBuf> {
     if requested.as_os_str().as_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES {
-        return requested.to_path_buf();
+        return Ok(requested.to_path_buf());
     }
 
     let digest = Sha256::digest(requested.as_os_str().as_bytes());
@@ -24,7 +53,7 @@ fn bindable_socket_path(requested: &Path) -> PathBuf {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    std::env::temp_dir().join(format!("openloop-{suffix}.sock"))
+    Ok(private_socket_root()?.join(format!("instance-{suffix}.sock")))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +70,7 @@ pub struct SingleInstance {
 
 impl SingleInstance {
     pub fn acquire(socket_path: &Path) -> io::Result<Self> {
-        let socket_path = bindable_socket_path(socket_path);
+        let socket_path = bindable_socket_path(socket_path)?;
         if let Some(parent) = socket_path.parent() {
             fs::create_dir_all(parent)?;
         }
