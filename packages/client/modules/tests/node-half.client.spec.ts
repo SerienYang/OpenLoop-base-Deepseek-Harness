@@ -96,6 +96,31 @@ describe('client bundle activation', () => {
       .toEqual([packageName])
   })
 
+  it('prefers profile metadata when both anchors contain the same package', () => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-client-modules-profile-')))
+    const installationRoot = join(root, 'installation')
+    const packageName = '@fixture/profile-override'
+    const profileClientPath = writePackageAt(root, packageName)
+    writePackageAt(installationRoot, packageName, {
+      dsh: { client: { platform: 'node' } },
+    })
+    mkdirSync(dirname(profileClientPath), { recursive: true })
+    writeFileSync(profileClientPath, 'module.exports = {}\n')
+    const installationBaseUrl = pathToFileURL(join(installationRoot, 'anchor.js')).href
+
+    expect(construct([packageName], installationBaseUrl).graph().entries.map(entry => entry.id))
+      .toEqual([packageName])
+  })
+
+  it('keeps an entry out when neither anchor can resolve its package', () => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-client-modules-profile-')))
+    const installationRoot = join(root, 'installation')
+    mkdirSync(installationRoot)
+    const installationBaseUrl = pathToFileURL(join(installationRoot, 'anchor.js')).href
+
+    expect(construct(['@fixture/missing'], installationBaseUrl).graph().entries).toEqual([])
+  })
+
   it('allows sibling dsh roles', () => {
     const currentName = '@fixture/current-client-field'
     const clientPath = writePackage(currentName, {
