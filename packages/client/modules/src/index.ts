@@ -200,17 +200,27 @@ export class ClientModuleRegistry extends Service {
    * Build the service: subscribe, seed, and run the activation flush.
    * @param ctx - plugin context carrying webServer and loader.
    */
-  constructor(ctx: Context) {
+  constructor(ctx: Context, installationBaseUrl: string = import.meta.url) {
     super(ctx, 'clientModules')
-    // Resolution anchor: the config tree's baseUrl (the cordis.yml directory,
-    // whose package declares every composed plugin as a dependency). The
-    // modules package's own URL would miss sibling packages under pnpm's
-    // isolated node_modules.
+    // Profile-local packages take precedence. The installation anchor is the
+    // fallback for bundled packages and remains resolvable inside SEA snapshots,
+    // where real-filesystem profile symlinks cannot reach /snapshot targets.
     if (ctx.baseUrl === undefined) {
       throw new Error('client-modules: ctx.baseUrl is unset — the node half needs the config-tree anchor to resolve plugin packages')
     }
-    const require = createRequire(ctx.baseUrl)
-    this.resolvePkgJson = spec => require.resolve(`${spec}/package.json`)
+    const profileRequire = createRequire(ctx.baseUrl)
+    const installationRequire = createRequire(installationBaseUrl)
+    this.resolvePkgJson = (spec) => {
+      try {
+        return profileRequire.resolve(`${spec}/package.json`)
+      } catch (profileError) {
+        try {
+          return installationRequire.resolve(`${spec}/package.json`)
+        } catch {
+          throw profileError
+        }
+      }
+    }
 
     // Subscribe before seeding so a fiber arriving mid-activation lands in the
     // same dirty set (Set idempotence makes the overlap harmless). An entry-less
