@@ -21,7 +21,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createRequire } from 'node:module'
@@ -157,6 +157,15 @@ function graphRow(id: string, rev: string, injectEdges: string[] | undefined, im
   }
 }
 
+/** Resolve package metadata from one Node module anchor without requiring a package.json export. */
+function packageJsonFromAnchor(anchor: string, packageName: string): string | undefined {
+  for (const searchPath of createRequire(anchor).resolve.paths(packageName) ?? []) {
+    const candidate = join(searchPath, packageName, 'package.json')
+    if (existsSync(candidate)) return candidate
+  }
+  return undefined
+}
+
 /**
  * Inject the boot entry graph into index.html: `window.__DSH_BOOT__` as the
  * first script in <head> (before the shell bundle reads it). `<` is escaped in
@@ -199,27 +208,22 @@ export class ClientModuleRegistry extends Service {
   /**
    * Build the service: subscribe, seed, and run the activation flush.
    * @param ctx - plugin context carrying webServer and loader.
+   * @param _config - reserved Cordis plugin configuration.
+   * @param installationBaseUrl - test seam for the installed runtime anchor.
    */
-  constructor(ctx: Context, installationBaseUrl: string = import.meta.url) {
+  constructor(ctx: Context, _config?: unknown, installationBaseUrl: string = import.meta.url) {
     super(ctx, 'clientModules')
-    // Profile-local packages take precedence. The installation anchor is the
-    // fallback for bundled packages and remains resolvable inside SEA snapshots,
-    // where real-filesystem profile symlinks cannot reach /snapshot targets.
+    // In-box packages must resolve from the same installation as their host
+    // halves. Profile packages remain the fallback for third-party additions.
     if (ctx.baseUrl === undefined) {
       throw new Error('client-modules: ctx.baseUrl is unset — the node half needs the config-tree anchor to resolve plugin packages')
     }
-    const profileRequire = createRequire(ctx.baseUrl)
-    const installationRequire = createRequire(installationBaseUrl)
+    const profileBaseUrl = ctx.baseUrl
     this.resolvePkgJson = (spec) => {
-      try {
-        return profileRequire.resolve(`${spec}/package.json`)
-      } catch (profileError) {
-        try {
-          return installationRequire.resolve(`${spec}/package.json`)
-        } catch {
-          throw profileError
-        }
-      }
+      const path = packageJsonFromAnchor(installationBaseUrl, spec)
+        ?? packageJsonFromAnchor(profileBaseUrl, spec)
+      if (path === undefined) throw new Error(`client-modules: cannot resolve package metadata for ${spec}`)
+      return path
     }
 
     // Subscribe before seeding so a fiber arriving mid-activation lands in the

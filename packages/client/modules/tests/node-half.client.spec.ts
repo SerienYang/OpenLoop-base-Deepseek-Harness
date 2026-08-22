@@ -49,7 +49,10 @@ function writePackageAt(
 /** Construct the node-half service and capture its plugin-bundle route. */
 function constructWithRoute(
   packageNames: string[],
-  installationBaseUrl?: string,
+  options: {
+    config?: unknown
+    installationBaseUrl?: string
+  } = {},
 ): { service: ClientModuleRegistry; route: WebRoute } {
   const ctx = new Context()
   ctx.baseUrl = pathToFileURL(root!).href + '/'
@@ -70,18 +73,24 @@ function constructWithRoute(
     tapIndex: () => () => {},
   }
   ctx.provide('webServer', webServer as WebServer)
-  const service = new ClientModuleRegistry(ctx, installationBaseUrl)
+  const service = new ClientModuleRegistry(ctx, options.config, options.installationBaseUrl)
   if (route === undefined) throw new Error('client bundle route was not registered')
   return { service, route }
 }
 
 /** Construct the node-half service over the enabled fixture entries. */
-function construct(packageNames: string[], installationBaseUrl?: string): ClientModuleRegistry {
-  return constructWithRoute(packageNames, installationBaseUrl).service
+function construct(
+  packageNames: string[],
+  options?: {
+    config?: unknown
+    installationBaseUrl?: string
+  },
+): ClientModuleRegistry {
+  return constructWithRoute(packageNames, options).service
 }
 
 describe('client bundle activation', () => {
-  it('falls back to installation metadata when the profile cannot resolve an in-box package', () => {
+  it('resolves in-box package metadata from the installation anchor', () => {
     root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-client-modules-profile-')))
     const installationRoot = join(root, 'installation')
     const packageName = '@fixture/installation-client'
@@ -92,23 +101,49 @@ describe('client bundle activation', () => {
     const installationBaseUrl = pathToFileURL(join(installationRoot, 'anchor.js')).href
 
     expect(() => profileRequire.resolve(`${packageName}/package.json`)).toThrow()
-    expect(construct([packageName], installationBaseUrl).graph().entries.map(entry => entry.id))
+    expect(construct([packageName], { installationBaseUrl }).graph().entries.map(entry => entry.id))
       .toEqual([packageName])
   })
 
-  it('prefers profile metadata when both anchors contain the same package', () => {
+  it('prefers installation metadata when both anchors contain the same package', () => {
     root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-client-modules-profile-')))
     const installationRoot = join(root, 'installation')
-    const packageName = '@fixture/profile-override'
-    const profileClientPath = writePackageAt(root, packageName)
-    writePackageAt(installationRoot, packageName, {
+    const packageName = '@fixture/in-box-package'
+    writePackageAt(root, packageName, {
       dsh: { client: { platform: 'node' } },
     })
-    mkdirSync(dirname(profileClientPath), { recursive: true })
-    writeFileSync(profileClientPath, 'module.exports = {}\n')
+    const installationClientPath = writePackageAt(installationRoot, packageName)
+    mkdirSync(dirname(installationClientPath), { recursive: true })
+    writeFileSync(installationClientPath, 'module.exports = {}\n')
     const installationBaseUrl = pathToFileURL(join(installationRoot, 'anchor.js')).href
 
-    expect(construct([packageName], installationBaseUrl).graph().entries.map(entry => entry.id))
+    expect(construct([packageName], { installationBaseUrl }).graph().entries.map(entry => entry.id))
+      .toEqual([packageName])
+  })
+
+  it('accepts Cordis config in the second constructor slot', () => {
+    const packageName = '@fixture/configured-client'
+    const clientPath = writePackage(packageName)
+    mkdirSync(dirname(clientPath), { recursive: true })
+    writeFileSync(clientPath, 'module.exports = {}\n')
+
+    expect(construct([packageName], { config: {} }).graph().entries.map(entry => entry.id))
+      .toEqual([packageName])
+  })
+
+  it('reads installation metadata without requiring a package.json export', () => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-client-modules-profile-')))
+    const installationRoot = join(root, 'installation')
+    const packageName = '@fixture/unexported-manifest'
+    const clientPath = writePackageAt(installationRoot, packageName, {
+      exports: { './client': './lib/client.js' },
+      dsh: { client: { platform: 'web' } },
+    })
+    mkdirSync(dirname(clientPath), { recursive: true })
+    writeFileSync(clientPath, 'module.exports = {}\n')
+    const installationBaseUrl = pathToFileURL(join(installationRoot, 'anchor.js')).href
+
+    expect(construct([packageName], { installationBaseUrl }).graph().entries.map(entry => entry.id))
       .toEqual([packageName])
   })
 
@@ -118,7 +153,7 @@ describe('client bundle activation', () => {
     mkdirSync(installationRoot)
     const installationBaseUrl = pathToFileURL(join(installationRoot, 'anchor.js')).href
 
-    expect(construct(['@fixture/missing'], installationBaseUrl).graph().entries).toEqual([])
+    expect(construct(['@fixture/missing'], { installationBaseUrl }).graph().entries).toEqual([])
   })
 
   it('allows sibling dsh roles', () => {
