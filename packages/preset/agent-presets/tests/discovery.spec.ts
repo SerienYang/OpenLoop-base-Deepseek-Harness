@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -6,13 +6,29 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { COMPOSITION_FILE, discoverPresets, scanRoot } from '@deepseek-ai/dsh-agent-presets'
 
 const fsHarness = vi.hoisted(() => ({
+  nextLstatError: undefined as NodeJS.ErrnoException | undefined,
   nextReadError: undefined as NodeJS.ErrnoException | undefined,
+  stringDirectoryEntries: false,
 }))
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   return {
     ...actual,
+    lstat: (async (path: Parameters<typeof actual.lstat>[0], options?: unknown) => {
+      const error = fsHarness.nextLstatError
+      if (error !== undefined) {
+        fsHarness.nextLstatError = undefined
+        throw error
+      }
+      return await actual.lstat(path, options as never)
+    }) as typeof actual.lstat,
+    readdir: (async (path: Parameters<typeof actual.readdir>[0], options?: unknown) => {
+      if (fsHarness.stringDirectoryEntries) {
+        return await actual.readdir(path)
+      }
+      return await actual.readdir(path, options as never)
+    }) as typeof actual.readdir,
     readFile: (async (path: unknown, ...rest: never[]) => {
       const error = fsHarness.nextReadError
       if (error !== undefined) {
@@ -29,7 +45,9 @@ const SYSTEM = { path: join(FIXTURES, 'system'), trust: 'system' as const }
 const USER = { path: join(FIXTURES, 'user'), trust: 'user' as const }
 
 beforeEach(() => {
+  fsHarness.nextLstatError = undefined
   fsHarness.nextReadError = undefined
+  fsHarness.stringDirectoryEntries = false
 })
 
 describe('display order', () => {
@@ -78,6 +96,29 @@ describe('preset discovery', () => {
       trust: 'system',
       path: join(SYSTEM.path, 'minimal', COMPOSITION_FILE),
     })
+  })
+
+  it('accepts string directory entries from a packaged virtual filesystem', async () => {
+    fsHarness.stringDirectoryEntries = true
+
+    const found = await scanRoot(SYSTEM)
+
+    expect(found.map(preset => preset.id)).toEqual(['minimal', 'standard'])
+  })
+
+  it('does not follow symlinked preset directories', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-presets-symlink-'))
+    const external = await mkdtemp(join(tmpdir(), 'dsh-preset-external-'))
+    await writeFile(join(external, COMPOSITION_FILE), '[]\n')
+    await symlink(external, join(root, 'linked'))
+
+    await expect(scanRoot({ path: root, trust: 'user' })).resolves.toEqual([])
+  })
+
+  it('surfaces failure to inspect a candidate preset directory', async () => {
+    fsHarness.nextLstatError = Object.assign(new Error('EACCES: denied'), { code: 'EACCES' })
+
+    await expect(scanRoot(SYSTEM)).rejects.toThrow(/cannot inspect preset directory.*EACCES/)
   })
 
   it('reports a directory with no composition as a broken preset slot', async () => {

@@ -338,11 +338,14 @@ export async function mountPreset(agentCtx: Context, preset: AgentPreset): Promi
     )
   }
   const config: Include.Config = { path: pathToFileURL(preset.path).href }
-  // Captured before the subtree exists: the standing scope context still
-  // carries the host composition's base, which is inside the installed
-  // harness and is therefore where a row's package name has to resolve from.
-  /* v8 ignore next -- the Loader sets `baseUrl` on the root before any scoped context derives from it */
-  if (agentCtx.baseUrl !== undefined) harnessBase.set(config, agentCtx.baseUrl)
+  // The root Loader's explicit base names the installed package graph in a
+  // closed runtime. Entry contexts inherit the profile config directory
+  // instead, which is correct for relative files but cannot resolve in-box
+  // packages from a SEA snapshot. Ordinary launches omit the Loader base and
+  // keep the context fallback.
+  const base = agentCtx.loader.config.baseUrl ?? agentCtx.baseUrl
+  /* v8 ignore next -- every booted Loader or scoped context supplies one base */
+  if (base !== undefined) harnessBase.set(config, base)
   // Before the record this mount is about to add: standing mounts are one per
   // preset and live until whole-tree teardown, so pruning here only sweeps
   // records of torn-down runtimes (tests; an HMR reload of the roster).
