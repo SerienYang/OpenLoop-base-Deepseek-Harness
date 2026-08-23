@@ -24,6 +24,7 @@ import {
   installFailLoud,
   loadLayeredEnv,
   loadProfile,
+  resolveBundleDir,
   watchUserPatches,
   type Profile,
 } from '@deepseek-ai/dsh-app-boot'
@@ -51,6 +52,8 @@ const PROFILE = 'openloop'
 const HOST = '127.0.0.1'
 const SHUTDOWN_TIMEOUT_MS = 5_000
 const REQUIRED_WEB_ROWS = ['web-startup', 'webserver', 'web-runtime'] as const
+const AGENT_PRESETS_ROW = 'agent-presets'
+const DSH_PACKAGE = '@deepseek-ai/dsh'
 const EMPTY_ROOT = '[]\n'
 
 /** Exact core bytes and their parsed identity. */
@@ -269,19 +272,45 @@ export function readLaunchSecretsForRuntime(
   return options.healthSmoke ? undefined : read()
 }
 
-function profilePatches(profile: RuntimeProfile): PatchOptions[] {
-  return filterHostBootstrapPatches([
-    ...profile.layers.flatMap(layer => layer.patches),
-    ...profile.patches,
-  ], true)
-}
-
 function filterHostBootstrapPatches(
   patches: readonly PatchOptions[],
   includeHostBootstrap: boolean,
 ): PatchOptions[] {
   if (includeHostBootstrap) return [...patches]
   return patches.filter(patch => !patch.insert?.some(entry => entry.id === 'openloop-bootstrap'))
+}
+
+/**
+ * Pin the system preset root to the DSH package from this runtime
+ * installation. Openloop owns its profile boot instead of using the CLI's
+ * launcher, so it must apply the same installation-derived overlay itself.
+ */
+function withShippedAgentPresetRoot(
+  patches: readonly PatchOptions[],
+  installAnchor: string,
+  profileDir: string,
+): PatchOptions[] {
+  const row = composeEntries([[...patches]]).find(entry => entry.id === AGENT_PRESETS_ROW)
+  if (row === undefined) return [...patches]
+
+  const presetRoot = join(
+    resolveBundleDir(BIN_NAME, DSH_PACKAGE, installAnchor, profileDir),
+    'config',
+    'agent-presets',
+  )
+  if (!existsSync(join(presetRoot, 'standard', 'agent.cordis.yml'))) {
+    throw new Error(`${BIN_NAME}: installed DSH package is missing the standard agent preset at ${presetRoot}`)
+  }
+  return [
+    ...patches,
+    {
+      id: AGENT_PRESETS_ROW,
+      config: {
+        ...(row.config ?? {}) as Record<string, unknown>,
+        roots: [{ path: presetRoot, trust: 'system' }],
+      },
+    },
+  ]
 }
 
 function zeroizeLaunchSecrets(secrets: RuntimeLaunchSecrets): void {
@@ -434,7 +463,16 @@ export async function runOpenloopRuntime(
     throw new Error(`${BIN_NAME}: resolved profile identity does not match ${PROFILE}`)
   }
   const includeHostBootstrap = launchSecrets !== undefined
-  const patches = filterHostBootstrapPatches(profilePatches(profile), includeHostBootstrap)
+  const composeRuntimePatches = (userPatches: readonly PatchOptions[]): PatchOptions[] =>
+    withShippedAgentPresetRoot(
+      filterHostBootstrapPatches([
+        ...profile.layers.flatMap(layer => layer.patches),
+        ...userPatches,
+      ], includeHostBootstrap),
+      dependencies.installAnchor,
+      profile.dir,
+    )
+  const patches = composeRuntimePatches(profile.patches)
   assertWebRows(dependencies.composeEntries([patches]))
   const environment = dependencies.loadLayeredEnv(BIN_NAME)
   const shutdown = new RuntimeShutdown(dependencies)
@@ -475,13 +513,7 @@ export async function runOpenloopRuntime(
     const stopWatcher = await dependencies.watchUserPatches(context, {
       binName: BIN_NAME,
       filename: profile.patchPath,
-      compose: userPatches => structuredClone([
-        ...filterHostBootstrapPatches(
-          profile.layers.flatMap(layer => layer.patches),
-          includeHostBootstrap,
-        ),
-        ...userPatches,
-      ]),
+      compose: userPatches => structuredClone(composeRuntimePatches(userPatches)),
     })
     shutdown.setWatcher(stopWatcher)
 

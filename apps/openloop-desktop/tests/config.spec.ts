@@ -478,7 +478,8 @@ describe('Openloop desktop foundation configuration', () => {
       height: 520,
       minWidth: 760,
       minHeight: 520,
-      resizable: false,
+      resizable: true,
+      maximizable: true,
       fullscreen: false,
     }])
     expect(security.capabilities).toEqual(['main', 'credentials'])

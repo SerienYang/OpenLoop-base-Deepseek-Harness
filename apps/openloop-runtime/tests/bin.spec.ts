@@ -257,6 +257,78 @@ describe('Openloop runtime launcher', () => {
     })
   })
 
+  test('pins the shipped agent preset root for boot and live profile recomposition', async () => {
+    const events: string[] = []
+    const output: string[] = []
+    const dependencies = fakeDependencies(events, output)
+    const installation = temporaryDirectory('preset-installation')
+    const installAnchor = join(installation, 'node_modules/@openloop/runtime/package.json')
+    const presetRoot = join(
+      installation,
+      'node_modules/@deepseek-ai/dsh/config/agent-presets',
+    )
+    mkdirSync(join(presetRoot, 'standard'), { recursive: true })
+    writeFileSync(join(presetRoot, 'standard/agent.cordis.yml'), '[]\n')
+    writeFileSync(
+      join(installation, 'node_modules/@deepseek-ai/dsh/package.json'),
+      '{"name":"@deepseek-ai/dsh"}\n',
+    )
+    dependencies.installAnchor = installAnchor
+    const loadProfile = dependencies.loadProfile.bind(dependencies)
+    dependencies.loadProfile = (...args) => {
+      const profile = loadProfile(...args)
+      return {
+        ...profile,
+        layers: [{
+          packageName: '@openloop/test-bundle',
+          packageDir: '/runtime/test-bundle',
+          patchPath: '/runtime/test-bundle/cordis.patch.yml',
+          patches: [{
+            insert: [{
+              id: 'agent-presets',
+              name: '@deepseek-ai/dsh-agent-presets',
+              config: { default: 'standard', includeUserRoot: true },
+            }],
+          }],
+        }],
+      }
+    }
+
+    let bootPatches: unknown[] = []
+    const boot = dependencies.boot.bind(dependencies)
+    dependencies.boot = async (binName, rootConfig, patches, prepare, bareModuleBaseUrl) => {
+      bootPatches = patches ?? []
+      return await boot(binName, rootConfig, patches, prepare, bareModuleBaseUrl)
+    }
+    let livePatches: unknown[] = []
+    dependencies.watchUserPatches = async (_ctx, options) => {
+      livePatches = options.compose?.([{
+        id: 'agent-presets',
+        config: { default: 'minimal', includeUserRoot: false },
+      }]) ?? []
+      return async () => {}
+    }
+
+    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies)
+
+    expect(bootPatches.at(-1)).toEqual({
+      id: 'agent-presets',
+      config: {
+        default: 'standard',
+        includeUserRoot: true,
+        roots: [{ path: presetRoot, trust: 'system' }],
+      },
+    })
+    expect(livePatches.at(-1)).toEqual({
+      id: 'agent-presets',
+      config: {
+        default: 'minimal',
+        includeUserRoot: false,
+        roots: [{ path: presetRoot, trust: 'system' }],
+      },
+    })
+  })
+
   test('omits Host-only bootstrap patch from health smoke', async () => {
     const events: string[] = []
     const output: string[] = []

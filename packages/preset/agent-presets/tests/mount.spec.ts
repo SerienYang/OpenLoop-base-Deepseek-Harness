@@ -102,6 +102,49 @@ describe('composing an agent from a preset', () => {
     expect(imported).toHaveBeenCalledWith(pathToFileURL(plugin).href, expect.any(String), {})
   })
 
+  it('resolves bare preset modules from the Loader installation base', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-preset-installed-module-'))
+    const installation = join(root, 'installation')
+    const packageDir = join(installation, 'node_modules', 'fixture-preset-plugin')
+    const presetRoot = join(root, 'presets')
+    const presetDir = join(presetRoot, 'standard')
+    const profileBaseUrl = pathToFileURL(join(root, 'profile/')).href
+    const installBaseUrl = pathToFileURL(join(installation, 'entry.js')).href
+    await mkdir(packageDir, { recursive: true })
+    await mkdir(presetDir, { recursive: true })
+    await writeFile(
+      join(packageDir, 'package.json'),
+      '{"name":"fixture-preset-plugin","type":"module","exports":"./index.js"}\n',
+    )
+    await writeFile(join(packageDir, 'index.js'), 'export default function apply() {}\n')
+    await writeFile(
+      join(presetDir, COMPOSITION_FILE),
+      '- id: installed\n  name: fixture-preset-plugin\n',
+    )
+
+    const scoped = new Context()
+    scoped.baseUrl = profileBaseUrl
+    await scoped.plugin(Loader, { baseUrl: installBaseUrl })
+    scoped.baseUrl = profileBaseUrl
+    scoped.loader.builtins.include = Include
+    await scoped.plugin(LlmRuntime)
+    await scoped.plugin(SessionStore)
+    await scoped.plugin(SystemPrompt, { persona: '' })
+    await scoped.plugin(ToolRuntime)
+    await scoped.plugin(AgentRegistry)
+    await scoped.plugin(AgentLoop, { agents: [] })
+    await scoped.plugin(AgentPresets, {
+      default: 'standard',
+      roots: [{ path: presetRoot, trust: 'system' }],
+      includeUserRoot: false,
+    })
+    const imported = vi.spyOn(scoped.loader.internal!, 'import')
+
+    await agentOn(scoped, 'sess-installed-module')
+
+    expect(imported).toHaveBeenCalledWith('fixture-preset-plugin', installBaseUrl, {})
+  })
+
   it('gives each session only its own preset\'s tools', async () => {
     const alpha = await agentOn(ctx, 'sess-alpha', 'standard')
     const beta = await agentOn(ctx, 'sess-beta', 'minimal')
