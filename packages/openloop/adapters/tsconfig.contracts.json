@@ -1,0 +1,26 @@
+{
+  "extends": "../../../tsconfig.base.client.json",
+  "compilerOptions": {
+    "composite": false,
+    "disableSourceOfProjectReferenceRedirect": true,
+    "incremental": false,
+    "noEmit": true,
+    "rootDir": ".",
+    "rewriteRelativeImportExtensions": false,
+    "tsBuildInfoFile": "./lib/tsconfig.contracts.tsbuildinfo"
+  },
+  "files": [
+    "contracts/current.ts"
+  ],
+  "references": [
+    {
+      "path": "./tsconfig.json"
+    },
+    {
+      "path": "../../client/web"
+    },
+    {
+      "path": "../../host/apiproxy"
+    }
+  ]
+}

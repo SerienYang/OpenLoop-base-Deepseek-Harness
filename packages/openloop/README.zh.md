@@ -17,6 +17,11 @@ Cordis 插件还需设置 `openloop.cordisPlugin`，并声明范围一致的
 Client 项目可以在自身项目图中引用 pure 包，但不能再把该 pure 包列入根 Client
 聚合。
 
+OpenLoop 业务包只能通过包根或已声明的公开子路径导出来使用 DSH，禁止访问私有
+`src`/`lib` 路径。受支持 DSH 版本之间的兼容逻辑归
+`@openloop/adapters` 所有；该包以带版本、无副作用的契约转换公开的 Shell、
+Workspace、设置与桌面数据，但不负责持久化或工作流状态。
+
 通过根命令创建包：
 
 ```sh

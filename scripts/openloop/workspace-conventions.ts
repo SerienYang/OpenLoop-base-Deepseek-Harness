@@ -1,5 +1,5 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import ts from 'typescript'
 
 const openLoopFaces = ['host', 'client', 'pure'] as const
@@ -19,6 +19,7 @@ interface OpenLoopManifest {
 }
 
 interface AggregateConfig {
+  extends?: unknown
   references?: ReadonlyArray<{ path?: unknown }>
 }
 
@@ -47,6 +48,184 @@ function aggregateReferences(root: string, face: 'host' | 'client'): readonly st
   return (config.references ?? [])
     .map(reference => reference.path)
     .filter((reference): reference is string => typeof reference === 'string')
+}
+
+function canonicalPath(path: string): string {
+  let ancestor = path
+  while (!existsSync(ancestor)) {
+    const parent = dirname(ancestor)
+    if (parent === ancestor) return resolve(path)
+    ancestor = parent
+  }
+  return resolve(realpathSync.native(ancestor), relative(ancestor, path))
+}
+
+function referenceConfigPath(sourceConfig: string, reference: string): string {
+  const target = resolve(dirname(sourceConfig), reference)
+  return target.endsWith('.json') ? target : join(target, 'tsconfig.json')
+}
+
+function formatConfigDiagnostic(root: string, configPath: string, diagnostic: ts.Diagnostic): Error {
+  const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')
+  return new Error(`${relative(root, configPath).split(sep).join('/')}: ${message}`)
+}
+
+function readConfig(root: string, configPath: string): AggregateConfig {
+  const parsed = ts.readConfigFile(configPath, path => ts.sys.readFile(path))
+  if (parsed.error !== undefined) throw formatConfigDiagnostic(root, configPath, parsed.error)
+  return parsed.config as AggregateConfig
+}
+
+function extendsConfigPaths(
+  root: string,
+  configPath: string,
+  value: unknown,
+): readonly string[] {
+  const extensions = Array.isArray(value) ? value : [value]
+  return extensions
+    .filter((extension): extension is string => typeof extension === 'string')
+    .flatMap((extension) => {
+      const sourceFile = ts.parseJsonText(
+        configPath,
+        JSON.stringify({ extends: extension, files: [] }),
+      ) as ts.TsConfigSourceFile
+      const parsed = ts.parseJsonSourceFileConfigFileContent(
+        sourceFile,
+        ts.sys,
+        dirname(configPath),
+        undefined,
+        configPath,
+      )
+      const [parentPath] = sourceFile.extendedSourceFiles ?? []
+      if (parentPath !== undefined) return [parentPath]
+      const error = parsed.errors.find(diagnostic =>
+        diagnostic.category === ts.DiagnosticCategory.Error
+        && diagnostic.code !== 18000
+        && diagnostic.code !== 18002
+        && diagnostic.code !== 18003)
+      if (error !== undefined) throw formatConfigDiagnostic(root, configPath, error)
+      return []
+    })
+}
+
+function isClientConfig(
+  root: string,
+  configPath: string,
+  config: AggregateConfig,
+  seen = new Set<string>(),
+): boolean {
+  const canonicalConfig = canonicalPath(configPath)
+  if (canonicalConfig === canonicalPath(join(root, 'tsconfig.base.client.json'))
+    || configPath.endsWith(`${sep}tsconfig.client.json`)) return true
+  if (seen.has(canonicalConfig)) return false
+  seen.add(canonicalConfig)
+
+  return extendsConfigPaths(root, configPath, config.extends).some((parentPath) => {
+    const canonicalParent = canonicalPath(parentPath)
+    if (!existsSync(canonicalParent)) return false
+    return isClientConfig(root, canonicalParent, readConfig(root, canonicalParent), seen)
+  })
+}
+
+function clientProjectConfigs(root: string): ReadonlySet<string> {
+  const rootConfig = join(root, 'tsconfig.client.json')
+  if (!existsSync(rootConfig)) return new Set()
+
+  const clientConfigs = new Set<string>()
+  const visited = new Set<string>()
+  const queue = [rootConfig]
+  while (queue.length > 0) {
+    const configPath = queue.shift()
+    if (configPath === undefined) break
+    const canonicalConfig = canonicalPath(configPath)
+    if (visited.has(canonicalConfig)) continue
+    visited.add(canonicalConfig)
+    if (!existsSync(configPath)) continue
+
+    const config = readConfig(root, configPath)
+    if (isClientConfig(root, configPath, config)) clientConfigs.add(canonicalConfig)
+    for (const reference of config.references ?? []) {
+      if (typeof reference.path !== 'string') continue
+      queue.push(referenceConfigPath(configPath, reference.path))
+    }
+  }
+  return clientConfigs
+}
+
+function pureClientConfigExtensions(
+  root: string,
+  packageDirectory: string,
+  clientConfigs: ReadonlySet<string>,
+): readonly string[] {
+  const configPath = join(packageDirectory, 'tsconfig.json')
+  if (!existsSync(configPath)) return []
+
+  const canonicalRoot = canonicalPath(root)
+  const forbiddenConfigs = new Set([
+    canonicalPath(join(root, 'tsconfig.base.client.json')),
+    ...clientConfigs,
+  ])
+  const clientExtensions = new Set<string>()
+  const visited = new Set<string>()
+  const queue = [configPath]
+  while (queue.length > 0) {
+    const currentConfig = queue.shift()
+    if (currentConfig === undefined) break
+    const canonicalConfig = canonicalPath(currentConfig)
+    if (visited.has(canonicalConfig)) continue
+    visited.add(canonicalConfig)
+    if (!existsSync(currentConfig)) continue
+
+    const config = readConfig(root, currentConfig)
+    for (const parentPath of extendsConfigPaths(root, currentConfig, config.extends)) {
+      const canonicalParent = canonicalPath(parentPath)
+      if (forbiddenConfigs.has(canonicalParent)) {
+        clientExtensions.add(canonicalParent)
+      } else {
+        queue.push(canonicalParent)
+      }
+    }
+  }
+
+  return [...clientExtensions]
+    .map(extension => relative(canonicalRoot, extension))
+    .map(extension => extension.split(sep).join('/'))
+    .sort()
+}
+
+function pureClientProjectReferences(
+  root: string,
+  packageDirectory: string,
+  clientConfigs: ReadonlySet<string>,
+): readonly string[] {
+  const configPath = join(packageDirectory, 'tsconfig.json')
+  if (!existsSync(configPath)) return []
+  const canonicalRoot = canonicalPath(root)
+  const clientReferences = new Set<string>()
+  const visited = new Set<string>()
+  const queue = [configPath]
+  while (queue.length > 0) {
+    const currentConfig = queue.shift()
+    if (currentConfig === undefined) break
+    const canonicalConfig = canonicalPath(currentConfig)
+    if (visited.has(canonicalConfig)) continue
+    visited.add(canonicalConfig)
+    if (!existsSync(currentConfig)) continue
+
+    const config = readConfig(root, currentConfig)
+    for (const reference of config.references ?? []) {
+      if (typeof reference.path !== 'string') continue
+      const targetConfig = referenceConfigPath(currentConfig, reference.path)
+      const canonicalTarget = canonicalPath(targetConfig)
+      if (clientConfigs.has(canonicalTarget)) clientReferences.add(canonicalTarget)
+      queue.push(targetConfig)
+    }
+  }
+
+  return [...clientReferences]
+    .map(reference => relative(canonicalRoot, dirname(reference)))
+    .map(reference => reference.split(sep).join('/'))
+    .sort()
 }
 
 /**
@@ -94,6 +273,7 @@ export function collectOpenLoopWorkspaceViolations(root: string): string[] {
     host: aggregateReferences(root, 'host'),
     client: aggregateReferences(root, 'client'),
   }
+  const clientConfigs = clientProjectConfigs(root)
   const packageDirectories = readdirSync(packagesRoot, { withFileTypes: true })
     .filter(entry => entry.isDirectory())
     .sort((left, right) => left.name.localeCompare(right.name))
@@ -124,6 +304,26 @@ export function collectOpenLoopWorkspaceViolations(root: string): string[] {
         errors.push(
           `${relativeManifestPath}: openloop.face ${String(face)} requires exactly one tsconfig.${expectedFace}.json reference and no tsconfig.${otherFace}.json reference (found ${expectedFace}=${expectedCount}, ${otherFace}=${otherCount})`,
         )
+      }
+      if (face === 'pure') {
+        for (const extension of pureClientConfigExtensions(
+          root,
+          join(packagesRoot, entry.name),
+          clientConfigs,
+        )) {
+          errors.push(
+            `packages/openloop/${entry.name}/tsconfig.json: pure production config must not extend Client config ${extension}`,
+          )
+        }
+        for (const reference of pureClientProjectReferences(
+          root,
+          join(packagesRoot, entry.name),
+          clientConfigs,
+        )) {
+          errors.push(
+            `packages/openloop/${entry.name}/tsconfig.json: pure production config must not reference Client project ${reference}`,
+          )
+        }
       }
     }
 

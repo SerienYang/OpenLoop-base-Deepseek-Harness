@@ -780,6 +780,17 @@
         "@deepseek-ai/dsh"
       ]
     },
+    "packages/openloop/adapters": {
+      "entry": [
+        "tests/**/*.spec.ts",
+        "contracts/**/*.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "tests/**/*.ts",
+        "contracts/**/*.ts"
+      ]
+    },
     "packages/openloop/bundle": {
       "ignoreDependencies": [
         "@deepseek-ai/dsh-base",

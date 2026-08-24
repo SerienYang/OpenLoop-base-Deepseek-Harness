@@ -869,6 +869,10 @@ describe('Openloop desktop foundation configuration', () => {
     const workspaces = record(knip.workspaces, 'knip workspaces')
     const runtime = record(workspaces['apps/openloop-runtime'], 'Openloop runtime knip config')
     const bundle = record(workspaces['packages/openloop/bundle'], 'Openloop bundle knip config')
+    const adapters = record(
+      workspaces['packages/openloop/adapters'],
+      'Openloop adapters knip config',
+    )
 
     expect(ignoredWorkspaces.filter(workspace => workspace.startsWith('runtime/'))).toEqual([
       'runtime/openloop',
@@ -897,6 +901,16 @@ describe('Openloop desktop foundation configuration', () => {
       '@deepseek-ai/dsh-base',
       '@deepseek-ai/dsh-web-app',
     ])
+    expect(stringArray(adapters.entry, 'Openloop adapters entry')).toEqual([
+      'tests/**/*.spec.ts',
+      'contracts/**/*.ts',
+    ])
+    expect(stringArray(adapters.project, 'Openloop adapters project')).toEqual([
+      'src/**/*.ts',
+      'tests/**/*.ts',
+      'contracts/**/*.ts',
+    ])
+    expect(adapters.ignoreDependencies).toBeUndefined()
   })
 
   test('bootstraps host build tools before the only desktop build orchestrator', () => {

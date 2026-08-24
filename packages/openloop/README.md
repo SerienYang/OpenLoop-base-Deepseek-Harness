@@ -19,6 +19,12 @@ shape and use the Host aggregate as their single repository check owner.
 Client projects may reference a pure package from their own project graph, but
 the pure package is not also listed in the root Client aggregate.
 
+OpenLoop business packages consume DSH only through package-root or declared
+public subpath exports. Private `src`/`lib` paths are forbidden. Compatibility
+with supported DSH revisions belongs in `@openloop/adapters`, whose versioned,
+side-effect-free contracts translate public Shell, Workspace, settings, and
+desktop data without owning persistence or workflow state.
+
 Create packages through the root command:
 
 ```sh
