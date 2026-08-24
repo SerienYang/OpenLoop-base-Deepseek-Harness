@@ -783,7 +783,8 @@
     "packages/openloop/bundle": {
       "ignoreDependencies": [
         "@deepseek-ai/dsh-base",
-        "@deepseek-ai/dsh-web-app"
+        "@deepseek-ai/dsh-web-app",
+        "@openloop/chat-zoom"
       ]
     }
   }

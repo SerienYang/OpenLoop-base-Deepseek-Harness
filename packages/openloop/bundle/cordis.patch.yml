@@ -7,3 +7,6 @@
     - id: openloop-bootstrap
       name: '@openloop/bundle/bootstrap-host'
       inject: [webServer, runtimeBootstrap]
+- insert:
+    - id: chat-zoom
+      name: '@openloop/chat-zoom'

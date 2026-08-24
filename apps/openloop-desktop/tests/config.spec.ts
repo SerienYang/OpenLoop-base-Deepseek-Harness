@@ -896,6 +896,7 @@ describe('Openloop desktop foundation configuration', () => {
     expect(stringArray(bundle.ignoreDependencies, 'Openloop bundle ignoreDependencies')).toEqual([
       '@deepseek-ai/dsh-base',
       '@deepseek-ai/dsh-web-app',
+      '@openloop/chat-zoom',
     ])
   })
 
