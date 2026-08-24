@@ -6,6 +6,8 @@
 .row {
   position: relative;
   overflow: hidden;
+  height: auto;
+  min-height: 24px;
 }
 
 .root[data-state='running'] .row::after {
@@ -39,6 +41,8 @@
 
 .title {
   font-weight: 400;
+  font-size: calc(14px * var(--dsh-chat-text-scale, 1));
+  line-height: calc(24px * var(--dsh-chat-text-scale, 1));
 }
 
 .separator {
@@ -55,8 +59,8 @@
   overflow: hidden;
   flex: 1 1 auto;
   color: var(--dsw-alias-label-tertiary);
-  font-size: 14px;
-  line-height: 24px;
+  font-size: calc(14px * var(--dsh-chat-text-scale, 1));
+  line-height: calc(24px * var(--dsh-chat-text-scale, 1));
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -68,8 +72,8 @@
 .thinkBody {
   padding: 4px 0 4px 22px;
   color: var(--dsw-alias-label-tertiary);
-  font-size: 14px;
-  line-height: 24px;
+  font-size: calc(14px * var(--dsh-chat-text-scale, 1));
+  line-height: calc(24px * var(--dsh-chat-text-scale, 1));
   white-space: pre-wrap;
   word-break: break-word;
 }
