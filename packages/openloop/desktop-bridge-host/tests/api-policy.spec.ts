@@ -26,6 +26,7 @@ import OpenloopBrowserApiPolicyService from '../src/index.ts'
 import {
   BROWSER_SAFE_METHODS,
   HOST_ONLY_METHODS,
+  OpenloopDesktopHostClient,
   OpenloopDesktopRemoteService,
 } from '../src/remote.ts'
 
@@ -365,6 +366,17 @@ describe('OpenLoop browser API policy', () => {
       expect.any(AbortSignal),
     )
     await ctx.fiber.dispose()
+  })
+
+  it('normalizes only a null credential bridge result to undefined', async () => {
+    const secret = [1, 2, 255]
+    const call = vi.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(secret)
+    const client = new OpenloopDesktopHostClient({ call } as unknown as DesktopBridgeClient)
+
+    await expect(client.resolveCredential('provider:missing')).resolves.toBeUndefined()
+    await expect(client.resolveCredential('provider:saved')).resolves.toBe(secret)
   })
 
   it('blocks all four settings actions before the real legacy handlers run', async () => {

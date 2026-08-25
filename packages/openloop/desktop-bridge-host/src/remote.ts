@@ -180,8 +180,13 @@ export class OpenloopDesktopHostClient {
     this.#client = client
   }
 
-  resolveCredential(ref: string, signal?: AbortSignal): Promise<SecretBytes | undefined> {
-    return this.#client.call<SecretBytes | undefined>('resolveCredential', { ref }, signal)
+  async resolveCredential(ref: string, signal?: AbortSignal): Promise<SecretBytes | undefined> {
+    const result = await this.#client.call<SecretBytes | null>(
+      'resolveCredential',
+      { ref },
+      signal,
+    )
+    return result ?? undefined
   }
 
   beginWorkspaceAuthorization(signal?: AbortSignal): Promise<PendingWorkspaceGrant> {
