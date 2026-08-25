@@ -22,8 +22,7 @@
       "default": "./lib/typert.remote-client.js"
     },
     "./types": {
-      "types": "./lib/types/types.d.ts",
-      "default": "./lib/types/types.js"
+      "types": "./lib/types/types.d.ts"
     },
     "./openloop-browser-api.json": "./openloop-browser-api.json",
     "./package.json": "./package.json"

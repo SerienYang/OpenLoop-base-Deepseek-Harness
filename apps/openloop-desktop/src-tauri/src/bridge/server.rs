@@ -11,7 +11,7 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Condvar, Mutex,
     },
     thread::{self, JoinHandle},
@@ -28,6 +28,8 @@ use super::protocol::{
     decode_nonce, read_json_frame, sign_response, write_frame, AuthenticatedBridgeRequest,
     AuthenticatedBridgeResponse, BridgeResponse, NonceReplayGuard,
 };
+
+const MAX_BRIDGE_CONNECTIONS: usize = 16;
 
 pub const BROWSER_SAFE_METHODS: [&str; 13] = [
     "getAppInfo",
@@ -239,12 +241,7 @@ impl AuthenticatedBridgeDispatcher {
         peer: PeerIdentity,
         envelope: AuthenticatedBridgeRequest,
     ) -> io::Result<BridgeResponse> {
-        authorize_peer(
-            peer,
-            self.inner.expected_uid,
-            &self.inner.expected_process,
-            &self.inner.expected_executable,
-        )?;
+        self.authorize_peer(peer)?;
         let request = super::protocol::verify_request(
             &envelope,
             &self.inner.launch_id,
@@ -294,6 +291,15 @@ impl AuthenticatedBridgeDispatcher {
             Ok(value) => BridgeResponse::success(&request.request_id, value),
             Err(error) => BridgeResponse::failure(&request.request_id, error.code, error.message),
         })
+    }
+
+    fn authorize_peer(&self, peer: PeerIdentity) -> io::Result<()> {
+        authorize_peer(
+            peer,
+            self.inner.expected_uid,
+            &self.inner.expected_process,
+            &self.inner.expected_executable,
+        )
     }
 
     fn dispatch_signed(
@@ -490,24 +496,53 @@ impl BridgeListener {
     }
 
     pub fn serve(self, dispatcher: AuthenticatedBridgeDispatcher) -> io::Result<BridgeServer> {
+        self.serve_with_connection_limit(dispatcher, MAX_BRIDGE_CONNECTIONS)
+    }
+
+    fn serve_with_connection_limit(
+        self,
+        dispatcher: AuthenticatedBridgeDispatcher,
+        maximum_connections: usize,
+    ) -> io::Result<BridgeServer> {
+        if maximum_connections == 0 {
+            return Err(invalid("desktop bridge connection limit must be positive"));
+        }
         self.listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
         let workers: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+        let connections = ConnectionLimiter::new(maximum_connections);
         let server_stop = stop.clone();
         let server_workers = workers.clone();
         let server_dispatcher = dispatcher.clone();
+        let server_connections = connections.clone();
         let thread = thread::Builder::new()
             .name("openloop-desktop-bridge".to_owned())
             .spawn(move || {
                 while !server_stop.load(Ordering::Acquire) {
                     match self.listener.accept() {
                         Ok((stream, _)) => {
+                            let peer = match peer_identity(&stream) {
+                                Ok(peer) => peer,
+                                Err(_) => continue,
+                            };
+                            let Some(permit) = server_connections.try_acquire() else {
+                                continue;
+                            };
+                            if server_dispatcher.authorize_peer(peer).is_err() {
+                                continue;
+                            }
                             let dispatcher = server_dispatcher.clone();
                             if let Ok(mut workers) = server_workers.lock() {
                                 workers.retain(|worker| !worker.is_finished());
-                                workers.push(thread::spawn(move || {
-                                    let _ = serve_connection(stream, &dispatcher);
-                                }));
+                                if let Ok(worker) = thread::Builder::new()
+                                    .name("openloop-desktop-bridge-worker".to_owned())
+                                    .spawn(move || {
+                                        let _permit = permit;
+                                        let _ = serve_connection(stream, peer, &dispatcher);
+                                    })
+                                {
+                                    workers.push(worker);
+                                }
                             }
                         }
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -521,6 +556,8 @@ impl BridgeListener {
             stop,
             dispatcher,
             workers,
+            #[cfg(test)]
+            connections,
             thread: Some(thread),
         })
     }
@@ -543,35 +580,86 @@ pub struct BridgeServer {
     stop: Arc<AtomicBool>,
     dispatcher: AuthenticatedBridgeDispatcher,
     workers: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    #[cfg(test)]
+    connections: ConnectionLimiter,
     thread: Option<JoinHandle<()>>,
+}
+
+impl BridgeServer {
+    #[cfg(test)]
+    fn active_connection_count(&self) -> usize {
+        self.connections.active()
+    }
 }
 
 impl Drop for BridgeServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        self.dispatcher.cancel_all();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        self.dispatcher.cancel_all();
         if let Ok(mut workers) = self.workers.lock() {
-            for worker in workers.drain(..) {
-                let _ = worker.join();
-            }
+            // Cancellation is cooperative; detaching prevents a faulty handler
+            // from blocking application shutdown indefinitely.
+            workers.clear();
         }
     }
 }
 
 fn serve_connection(
     mut stream: UnixStream,
+    peer: PeerIdentity,
     dispatcher: &AuthenticatedBridgeDispatcher,
 ) -> io::Result<()> {
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-    let peer = peer_identity(&stream)?;
     let envelope: AuthenticatedBridgeRequest = read_json_frame(&mut stream)?;
     let response = dispatcher.dispatch_signed(peer, envelope)?;
     write_frame(&mut stream, &response)?;
     stream.flush()
+}
+
+#[derive(Clone)]
+struct ConnectionLimiter {
+    active: Arc<AtomicUsize>,
+    maximum: usize,
+}
+
+impl ConnectionLimiter {
+    fn new(maximum: usize) -> Self {
+        Self {
+            active: Arc::new(AtomicUsize::new(0)),
+            maximum,
+        }
+    }
+
+    fn try_acquire(&self) -> Option<ConnectionPermit> {
+        self.active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < self.maximum).then_some(active + 1)
+            })
+            .ok()
+            .map(|_| ConnectionPermit {
+                active: self.active.clone(),
+            })
+    }
+
+    #[cfg(test)]
+    fn active(&self) -> usize {
+        self.active.load(Ordering::Acquire)
+    }
+}
+
+struct ConnectionPermit {
+    active: Arc<AtomicUsize>,
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 fn remove_stale_socket(path: &Path) -> io::Result<()> {
@@ -618,4 +706,187 @@ fn invalid(message: impl Into<String>) -> io::Error {
 
 fn permission_denied(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        io::Read,
+        os::unix::fs::PermissionsExt,
+        os::unix::net::UnixStream,
+        path::Path,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    use super::{
+        capture_process_identity, AuthenticatedBridgeDispatcher, BridgeDispatchTables,
+        BridgeListener, ProcessIdentity,
+    };
+
+    fn current_process() -> (ProcessIdentity, std::path::PathBuf) {
+        let executable = std::env::current_exe().expect("current test executable");
+        let identity = capture_process_identity(std::process::id(), &executable)
+            .expect("current process identity");
+        (identity, executable)
+    }
+
+    fn dispatcher(
+        expected_process: ProcessIdentity,
+        executable: &Path,
+    ) -> AuthenticatedBridgeDispatcher {
+        AuthenticatedBridgeDispatcher::new(
+            unsafe { libc::geteuid() },
+            expected_process,
+            executable.to_path_buf(),
+            Uuid::new_v4(),
+            vec![7; 32],
+            BridgeDispatchTables::unavailable(),
+        )
+        .expect("bridge dispatcher")
+    }
+
+    fn socket_path(directory: &TempDir) -> std::path::PathBuf {
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("private socket directory permissions");
+        directory.path().join("bridge.sock")
+    }
+
+    fn wait_until(timeout: Duration, predicate: impl Fn() -> bool) {
+        let deadline = Instant::now() + timeout;
+        while !predicate() {
+            assert!(
+                Instant::now() < deadline,
+                "condition was not met before timeout"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn assert_closed_promptly(mut stream: UnixStream) {
+        stream
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .expect("read timeout");
+        let mut byte = [0_u8; 1];
+        match stream.read(&mut byte) {
+            Ok(0) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                ) => {}
+            result => panic!("rejected bridge socket remained open: {result:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_an_unexpected_peer_before_allocating_a_worker() {
+        let directory = tempfile::tempdir().expect("private socket directory");
+        let path = socket_path(&directory);
+        let listener = BridgeListener::bind(&path).expect("bridge listener");
+        let (mut identity, executable) = current_process();
+        identity.pid = if identity.pid == 1 {
+            2
+        } else {
+            identity.pid - 1
+        };
+        let server = listener
+            .serve_with_connection_limit(dispatcher(identity, &executable), 1)
+            .expect("bridge server");
+
+        let client = UnixStream::connect(&path).expect("bridge client");
+
+        assert_closed_promptly(client);
+        assert_eq!(server.active_connection_count(), 0);
+    }
+
+    #[test]
+    fn caps_idle_connections_and_releases_capacity_on_worker_exit() {
+        let directory = tempfile::tempdir().expect("private socket directory");
+        let path = socket_path(&directory);
+        let listener = BridgeListener::bind(&path).expect("bridge listener");
+        let (identity, executable) = current_process();
+        let server = listener
+            .serve_with_connection_limit(dispatcher(identity, &executable), 2)
+            .expect("bridge server");
+        let first = UnixStream::connect(&path).expect("first bridge client");
+        let second = UnixStream::connect(&path).expect("second bridge client");
+        wait_until(Duration::from_secs(1), || {
+            server.active_connection_count() == 2
+        });
+
+        let excess = UnixStream::connect(&path).expect("excess bridge client");
+        assert_closed_promptly(excess);
+
+        drop(first);
+        wait_until(Duration::from_secs(1), || {
+            server.active_connection_count() == 1
+        });
+        let replacement = UnixStream::connect(&path).expect("replacement bridge client");
+        wait_until(Duration::from_secs(1), || {
+            server.active_connection_count() == 2
+        });
+
+        drop(second);
+        drop(replacement);
+        wait_until(Duration::from_secs(1), || {
+            server.active_connection_count() == 0
+        });
+    }
+
+    #[test]
+    fn shutdown_finishes_with_an_idle_connection() {
+        let directory = tempfile::tempdir().expect("private socket directory");
+        let path = socket_path(&directory);
+        let listener = BridgeListener::bind(&path).expect("bridge listener");
+        let (identity, executable) = current_process();
+        let server = listener
+            .serve_with_connection_limit(dispatcher(identity, &executable), 1)
+            .expect("bridge server");
+        let _client = UnixStream::connect(&path).expect("bridge client");
+        wait_until(Duration::from_secs(1), || {
+            server.active_connection_count() == 1
+        });
+        let (dropped, completed) = std::sync::mpsc::channel();
+
+        thread::spawn(move || {
+            drop(server);
+            dropped.send(()).expect("report server shutdown");
+        });
+
+        completed
+            .recv_timeout(Duration::from_secs(3))
+            .expect("bridge shutdown must remain bounded");
+    }
+
+    #[test]
+    fn shutdown_does_not_wait_for_a_non_cooperative_worker() {
+        let (release, blocked) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            blocked.recv().expect("release blocked worker");
+        });
+        let (identity, executable) = current_process();
+        let server = super::BridgeServer {
+            stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            dispatcher: dispatcher(identity, &executable),
+            workers: std::sync::Arc::new(std::sync::Mutex::new(vec![worker])),
+            connections: super::ConnectionLimiter::new(1),
+            thread: Some(thread::spawn(|| {})),
+        };
+        let (dropped, completed) = std::sync::mpsc::channel();
+        let shutdown = thread::spawn(move || {
+            drop(server);
+            dropped.send(()).expect("report server shutdown");
+        });
+
+        let result = completed.recv_timeout(Duration::from_millis(250));
+        release.send(()).expect("release blocked worker");
+        shutdown.join().expect("join shutdown probe");
+
+        result.expect("bridge shutdown must not wait for a non-cooperative worker");
+    }
 }
