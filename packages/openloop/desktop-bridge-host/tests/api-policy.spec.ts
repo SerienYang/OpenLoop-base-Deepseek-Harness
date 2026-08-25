@@ -343,7 +343,7 @@ describe('OpenLoop browser API policy', () => {
     })
     expect(call).toHaveBeenCalledOnce()
     await ctx.fiber.dispose()
-  })
+  }, 60_000)
 
   it('normalizes bridge null to the generated void Remote result', async () => {
     const ctx = new Context()

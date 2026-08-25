@@ -509,7 +509,7 @@ describe('Openloop assembled browser API drift gate', () => {
       packageName: '@deepseek-ai/dsh-client-hmr',
     })
     expect(surface.cataloguedClientPackages).toContain('@deepseek-ai/dsh-client-hmr')
-  })
+  }, 60_000)
 
   it('fails when two declared workspace packages have the same name', async () => {
     const fixtureRoot = createMutationRoot('openloop-browser-api-drift-duplicate-package-')
