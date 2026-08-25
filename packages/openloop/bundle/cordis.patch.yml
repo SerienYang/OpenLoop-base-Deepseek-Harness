@@ -30,6 +30,7 @@
 - insert:
     - id: desktop-bridge-host
       name: '@openloop/desktop-bridge-host'
+      inject: [runtimeBootstrap]
     - id: openloop-bootstrap
       name: '@openloop/bundle/bootstrap-host'
       inject: [webServer, runtimeBootstrap]

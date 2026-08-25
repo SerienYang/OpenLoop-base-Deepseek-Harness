@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import {
   closeSync,
   constants,
@@ -521,6 +521,21 @@ export async function runOpenloopRuntime(
             }))
           } finally {
             zeroizeLaunchSecrets(launchSecrets)
+          }
+        } else if (options.healthSmoke) {
+          const smokeSecrets: RuntimeLaunchSecrets = {
+            launchId: randomUUID(),
+            bootstrapToken: randomBytes(32),
+            bridgeSecret: randomBytes(32),
+            socketPath: join(profile.dir, '.openloop-health-smoke-bridge.sock'),
+          }
+          try {
+            shutdown.setBootstrapDisposer(installRuntimeBootstrap(hostContext, smokeSecrets, {
+              manifest: core.manifest as unknown as Readonly<Record<string, unknown>>,
+              sha256: core.sha256,
+            }))
+          } finally {
+            zeroizeLaunchSecrets(smokeSecrets)
           }
         }
         hostContext.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)

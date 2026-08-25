@@ -5643,6 +5643,10 @@ importers:
         version: 4.4.3
 
   packages/openloop/desktop-bridge-host:
+    dependencies:
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: workspace:^
@@ -5662,9 +5666,15 @@ importers:
       '@deepseek-ai/dsh-invariants':
         specifier: workspace:^
         version: link:../../runtime-diagnostics/invariants
+      '@deepseek-ai/dsh-typert-protocol':
+        specifier: workspace:^
+        version: link:../../typert/protocol
       '@deepseek-ai/dsh-typert-registry':
         specifier: workspace:^
         version: link:../../typert/registry
+      '@openloop/runtime-bootstrap':
+        specifier: workspace:^
+        version: link:../runtime-bootstrap
 
   packages/openloop/runtime-bootstrap:
     devDependencies:

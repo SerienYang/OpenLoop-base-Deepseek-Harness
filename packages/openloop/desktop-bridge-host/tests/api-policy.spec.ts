@@ -13,6 +13,7 @@ import {
 import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { WebRoute, WebServer } from '@deepseek-ai/dsh-host-webserver'
+import { installRuntimeBootstrap } from '@openloop/runtime-bootstrap'
 import { describe, expect, it, vi } from 'vitest'
 import {
   createBrowserApiPolicy,
@@ -100,6 +101,15 @@ function fakeResponse(): {
     },
   }) as unknown as ServerResponse
   return { response, state }
+}
+
+function installBridgeBootstrap(ctx: Context): () => void {
+  return installRuntimeBootstrap(ctx, {
+    launchId: '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
+    bootstrapToken: Uint8Array.from({ length: 32 }, () => 1),
+    bridgeSecret: Uint8Array.from({ length: 32 }, () => 2),
+    socketPath: '/tmp/openloop-policy-test.sock',
+  })
 }
 
 describe('OpenLoop browser API policy manifest', () => {
@@ -372,6 +382,7 @@ describe('OpenLoop browser API policy', () => {
 
   it('preflights the real Service before Connection reads a denied body and still checks admitted payloads', async () => {
     const ctx = new Context()
+    const disposeBootstrap = installBridgeBootstrap(ctx)
     const routes: WebRoute[] = []
     const replace = vi.fn()
     const create = vi.fn()
@@ -435,10 +446,12 @@ describe('OpenLoop browser API policy', () => {
     expect(create).not.toHaveBeenCalled()
     await connectionFiber.dispose()
     await policyFiber.dispose()
+    disposeBootstrap()
   })
 
   it('uses the same policy instance at legacy and Typert dispatch boundaries', async () => {
     const ctx = new Context()
+    const disposeBootstrap = installBridgeBootstrap(ctx)
     const policyFiber = ctx.plugin(OpenloopBrowserApiPolicyService)
     await policyFiber
     const policy = ctx.browserApiPolicy
@@ -477,6 +490,7 @@ describe('OpenLoop browser API policy', () => {
     expect(allows).toHaveBeenCalledWith('credentials/set', {})
     await policyFiber.dispose()
     expect(ctx.get('browserApiPolicy')).toBeUndefined()
+    disposeBootstrap()
   })
 
   it('uses exact canonical names and fails closed across legacy and Typert', () => {

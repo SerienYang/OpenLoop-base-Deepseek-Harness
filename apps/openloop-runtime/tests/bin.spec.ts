@@ -133,7 +133,11 @@ function fakeDependencies(events: string[], output: string[]): RuntimeDependenci
           patchPath: '/runtime/openloop-bundle/cordis.patch.yml',
           patches: [{
             insert: [
-              { id: 'desktop-bridge-host', name: '@openloop/desktop-bridge-host' },
+              {
+                id: 'desktop-bridge-host',
+                name: '@openloop/desktop-bridge-host',
+                inject: ['runtimeBootstrap'],
+              },
               {
                 id: 'openloop-bootstrap',
                 name: '@openloop/bundle/bootstrap-host',
@@ -281,6 +285,7 @@ describe('Openloop runtime launcher', () => {
       'load-env',
       'boot',
       'boot-base:file:///runtime/lib/bin.js',
+      'provide:runtimeBootstrap',
       'provide:launchEnvironment',
       'cmdline:--host 127.0.0.1 --port 0',
       'settled',

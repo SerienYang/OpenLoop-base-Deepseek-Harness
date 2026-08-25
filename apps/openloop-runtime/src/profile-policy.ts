@@ -144,6 +144,7 @@ export function assertOpenloopProfileSecurity(
   if (policyOwner.name !== '@openloop/desktop-bridge-host' || policyOwner.disabled === true) {
     throw new Error('openloop-runtime: browser policy owner must be enabled with its signed name')
   }
+  requireInject(policyOwner, 'runtimeBootstrap')
   requireInject(requireRow(effective, 'connection'), 'browserApiPolicy')
   requireInject(requireRow(effective, 'typert-gateway'), 'browserApiPolicy')
 

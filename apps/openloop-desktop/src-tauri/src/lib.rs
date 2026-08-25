@@ -11,6 +11,9 @@ use tauri_plugin_updater::UpdaterExt;
 #[cfg(target_os = "macos")]
 use zeroize::Zeroizing;
 
+use crate::bridge::{
+    AuthenticatedBridgeDispatcher, BridgeDispatchTables, BridgeListener, BridgeServer,
+};
 #[cfg(target_os = "macos")]
 use crate::credentials::{KeychainStore, SecurePromptState};
 use crate::launcher::{
@@ -30,6 +33,7 @@ use crate::update::{
     recovery::{PublicationOutcome, RecoveryTransaction},
 };
 
+pub mod bridge;
 pub mod browser;
 #[cfg(target_os = "macos")]
 pub mod credentials;
@@ -226,6 +230,7 @@ fn embedded_build_manifest() -> Result<OpenloopBuildManifest, String> {
 struct RuntimeProcessState {
     _instance: SingleInstance,
     _update_lease: UpdateLease,
+    _bridge: BridgeServer,
     child: Mutex<SupervisedChild>,
 }
 
@@ -271,8 +276,21 @@ fn start_runtime(
         app.exit(0);
         return Ok(None);
     }
-    let secrets = LaunchSecrets::generate(instance.socket_path().to_path_buf())
+    let bridge_socket_path = if instance.socket_path() == requested_socket_path {
+        channel_root.join("openloop-bridge.sock")
+    } else {
+        let mut bridge_socket_name = instance
+            .socket_path()
+            .file_name()
+            .ok_or_else(|| "single-instance socket has no file name".to_owned())?
+            .to_os_string();
+        bridge_socket_name.push(".bridge");
+        instance.socket_path().with_file_name(bridge_socket_name)
+    };
+    let secrets = LaunchSecrets::generate(bridge_socket_path)
         .map_err(|error| format!("runtime launch secret generation failed: {error}"))?;
+    let bridge_listener = BridgeListener::bind(&secrets.socket_path)
+        .map_err(|error| format!("desktop bridge bind failed: {error}"))?;
     let window = app.get_webview_window("main");
     let forward_window = window.clone();
     instance
@@ -290,6 +308,17 @@ fn start_runtime(
     };
     let mut child = SupervisedChild::spawn_with_dsh_home(&executable, &secrets, &dsh_home)
         .map_err(|error| error.to_string())?;
+    let bridge_dispatcher = AuthenticatedBridgeDispatcher::new(
+        unsafe { libc::geteuid() },
+        child.identity().clone(),
+        secrets.launch_id,
+        secrets.bridge_secret.to_vec(),
+        BridgeDispatchTables::unavailable(),
+    )
+    .map_err(|error| format!("desktop bridge authentication setup failed: {error}"))?;
+    let bridge = bridge_listener
+        .serve(bridge_dispatcher)
+        .map_err(|error| format!("desktop bridge server startup failed: {error}"))?;
     let readiness = child
         .wait_readiness(&expectation, Duration::from_secs(10))
         .map_err(|error| error.to_string())?;
@@ -309,6 +338,7 @@ fn start_runtime(
     Ok(Some(RuntimeProcessState {
         _instance: instance,
         _update_lease: update_lease,
+        _bridge: bridge,
         child: Mutex::new(child),
     }))
 }

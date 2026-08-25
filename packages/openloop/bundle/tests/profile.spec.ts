@@ -154,6 +154,7 @@ describe('OpenLoop profile', () => {
     expect(entries.find(entry => entry.id === 'desktop-bridge-host')).toEqual({
       id: 'desktop-bridge-host',
       name: '@openloop/desktop-bridge-host',
+      inject: ['runtimeBootstrap'],
     })
     expect(entries.find(entry => entry.id === 'connection')?.inject)
       .toEqual(['webRuntime', 'browserApiPolicy'])
