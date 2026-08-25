@@ -768,18 +768,30 @@ mod tests {
     }
 
     fn assert_closed_promptly(mut stream: UnixStream) {
-        stream
-            .set_read_timeout(Some(Duration::from_millis(250)))
-            .expect("read timeout");
+        stream.set_nonblocking(true).expect("nonblocking client");
+        let deadline = Instant::now() + Duration::from_secs(1);
         let mut byte = [0_u8; 1];
-        match stream.read(&mut byte) {
-            Ok(0) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
-                ) => {}
-            result => panic!("rejected bridge socket remained open: {result:?}"),
+        loop {
+            match stream.read(&mut byte) {
+                Ok(0) => return,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                    ) =>
+                {
+                    return;
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                result => panic!("rejected bridge socket remained open: {result:?}"),
+            }
         }
     }
 
