@@ -58,11 +58,12 @@ fn request(method: &str) -> BridgeRequest {
 }
 
 fn current_process_identity() -> ProcessIdentity {
-    capture_process_identity(
-        process::id(),
-        &std::env::current_exe().expect("current test executable"),
-    )
-    .expect("current process identity")
+    capture_process_identity(process::id(), &current_executable())
+        .expect("current process identity")
+}
+
+fn current_executable() -> std::path::PathBuf {
+    std::env::current_exe().expect("current test executable")
 }
 
 fn current_peer() -> PeerIdentity {
@@ -96,6 +97,7 @@ fn dispatcher(counter: Arc<AtomicUsize>) -> AuthenticatedBridgeDispatcher {
     AuthenticatedBridgeDispatcher::new(
         unsafe { libc::geteuid() },
         current_process_identity(),
+        current_executable(),
         Uuid::parse_str(LAUNCH_ID).expect("launch id"),
         secret(),
         tables(counter),
@@ -125,6 +127,29 @@ fn canonical_request_and_hmac_match_the_typescript_vector() {
 }
 
 #[test]
+fn utf8_key_ordering_and_hmac_match_the_typescript_vector() {
+    let mut request = request("getAppInfo");
+    request.payload = json!({ "\u{10000}": 1, "\u{e000}": 2 });
+
+    assert_eq!(
+        encode_hex(&canonical_request_bytes(&request, &nonce()).expect("canonical request")),
+        concat!(
+            "6f70656e6c6f6f702e6272696467652e726571756573742e763100",
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            "0000000100000009726571756573742d310000002438663564376531372d396232",
+            "622d346232632d396332612d3166336536623261346439300000000a6765744170",
+            "70496e666f000000127b22ee8080223a322c22f0908080223a317d",
+        ),
+    );
+    assert_eq!(
+        sign_request(request, nonce(), &secret())
+            .expect("authenticated request")
+            .mac,
+        "95f4c2f387f68c690a4afb58ae051e3372a2ea8142fbb4d0a0f505be3ee5351f",
+    );
+}
+
+#[test]
 fn wrong_version_hmac_launch_and_replayed_nonce_fail_before_business_dispatch() {
     let calls = Arc::new(AtomicUsize::new(0));
     let dispatcher = dispatcher(calls.clone());
@@ -150,7 +175,7 @@ fn wrong_version_hmac_launch_and_replayed_nonce_fail_before_business_dispatch() 
 }
 
 #[test]
-fn peer_uid_and_exact_supervised_pid_fail_before_business_dispatch() {
+fn peer_uid_and_exact_supervised_process_identity_fail_before_business_dispatch() {
     let calls = Arc::new(AtomicUsize::new(0));
     let request = sign_request(request("getAppInfo"), nonce(), &secret()).unwrap();
 
@@ -172,12 +197,24 @@ fn peer_uid_and_exact_supervised_pid_fail_before_business_dispatch() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 
     let expected = current_process_identity();
-    assert!(authorize_peer(current_peer(), unsafe { libc::geteuid() }, &expected).is_ok());
+    assert!(authorize_peer(
+        current_peer(),
+        unsafe { libc::geteuid() },
+        &expected,
+        &current_executable(),
+    )
+    .is_ok());
     let reused = ProcessIdentity {
-        pid: expected.pid.saturating_add(1),
+        start_time: expected.start_time.saturating_add(1),
         ..expected
     };
-    assert!(authorize_peer(current_peer(), unsafe { libc::geteuid() }, &reused).is_err());
+    assert!(authorize_peer(
+        current_peer(),
+        unsafe { libc::geteuid() },
+        &reused,
+        &current_executable(),
+    )
+    .is_err());
 }
 
 #[test]
@@ -296,6 +333,7 @@ fn authenticated_cancel_targets_only_the_exact_active_request() {
         AuthenticatedBridgeDispatcher::new(
             unsafe { libc::geteuid() },
             current_process_identity(),
+            current_executable(),
             Uuid::parse_str(LAUNCH_ID).unwrap(),
             secret(),
             BridgeDispatchTables::new(browser_safe, HashMap::new()).unwrap(),

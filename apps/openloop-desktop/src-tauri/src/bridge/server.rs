@@ -22,7 +22,7 @@ use serde_json::Value;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::launcher::ProcessIdentity;
+use crate::launcher::{capture_process_identity, process_identity_matches, ProcessIdentity};
 
 use super::protocol::{
     decode_nonce, read_json_frame, sign_response, write_frame, AuthenticatedBridgeRequest,
@@ -176,6 +176,7 @@ impl BridgeDispatchTables {
 struct DispatcherInner {
     expected_uid: libc::uid_t,
     expected_process: ProcessIdentity,
+    expected_executable: PathBuf,
     launch_id: Uuid,
     secret: Zeroizing<Vec<u8>>,
     nonces: NonceReplayGuard,
@@ -211,6 +212,7 @@ impl AuthenticatedBridgeDispatcher {
     pub fn new(
         expected_uid: libc::uid_t,
         expected_process: ProcessIdentity,
+        expected_executable: PathBuf,
         launch_id: Uuid,
         secret: Vec<u8>,
         tables: BridgeDispatchTables,
@@ -222,6 +224,7 @@ impl AuthenticatedBridgeDispatcher {
             inner: Arc::new(DispatcherInner {
                 expected_uid,
                 expected_process,
+                expected_executable,
                 launch_id,
                 secret: Zeroizing::new(secret),
                 nonces: NonceReplayGuard::default(),
@@ -236,7 +239,12 @@ impl AuthenticatedBridgeDispatcher {
         peer: PeerIdentity,
         envelope: AuthenticatedBridgeRequest,
     ) -> io::Result<BridgeResponse> {
-        authorize_peer(peer, self.inner.expected_uid, &self.inner.expected_process)?;
+        authorize_peer(
+            peer,
+            self.inner.expected_uid,
+            &self.inner.expected_process,
+            &self.inner.expected_executable,
+        )?;
         let request = super::protocol::verify_request(
             &envelope,
             &self.inner.launch_id,
@@ -354,8 +362,18 @@ pub fn authorize_peer(
     actual: PeerIdentity,
     expected_uid: libc::uid_t,
     expected_process: &ProcessIdentity,
+    expected_executable: &Path,
 ) -> io::Result<()> {
     if actual.uid != expected_uid || actual.pid != expected_process.pid {
+        return Err(permission_denied(
+            "desktop bridge peer is not the supervised runtime",
+        ));
+    }
+    let actual_process =
+        capture_process_identity(actual.pid, expected_executable).map_err(|_| {
+            permission_denied("desktop bridge peer process identity cannot be verified")
+        })?;
+    if !process_identity_matches(expected_process, &actual_process) {
         return Err(permission_denied(
             "desktop bridge peer is not the supervised runtime",
         ));

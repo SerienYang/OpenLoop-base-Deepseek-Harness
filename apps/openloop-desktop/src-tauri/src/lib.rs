@@ -311,6 +311,7 @@ fn start_runtime(
     let bridge_dispatcher = AuthenticatedBridgeDispatcher::new(
         unsafe { libc::geteuid() },
         child.identity().clone(),
+        executable,
         secrets.launch_id,
         secrets.bridge_secret.to_vec(),
         BridgeDispatchTables::unavailable(),

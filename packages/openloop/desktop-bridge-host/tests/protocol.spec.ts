@@ -50,6 +50,25 @@ describe('authenticated desktop bridge protocol', () => {
     )
   })
 
+  it('orders non-BMP and BMP object keys by UTF-8 bytes for cross-language HMACs', () => {
+    const unicodeOrderingRequest = {
+      ...request,
+      payload: { '\u{10000}': 1, '\uE000': 2 },
+    }
+    const canonical = canonicalRequestBytes(unicodeOrderingRequest, nonce)
+
+    expect(Buffer.from(canonical).toString('hex')).toBe(
+      '6f70656e6c6f6f702e6272696467652e726571756573742e763100'
+      + '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'
+      + '0000000100000009726571756573742d310000002438663564376531372d396232'
+      + '622d346232632d396332612d3166336536623261346439300000000a6765744170'
+      + '70496e666f000000127b22ee8080223a322c22f0908080223a317d',
+    )
+    expect(authenticateBridgeRequest(unicodeOrderingRequest, nonce, secret).mac).toBe(
+      '95f4c2f387f68c690a4afb58ae051e3372a2ea8142fbb4d0a0f505be3ee5351f',
+    )
+  })
+
   it('rejects a wrong version before dispatch', () => {
     const handler = vi.fn()
     const envelope = authenticateBridgeRequest(request, nonce, secret)

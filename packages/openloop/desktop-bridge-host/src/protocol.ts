@@ -309,7 +309,9 @@ function canonicalJson(value: unknown, ancestors = new Set<object>()): string {
     if (keys.some(key => typeof key !== 'string')) {
       throw new TypeError('bridge JSON objects must have string keys')
     }
-    const sorted = (keys as string[]).sort()
+    const sorted = (keys as string[]).sort((left, right) => (
+      Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'))
+    ))
     return `{${sorted.map(key => `${canonicalJson(key)}:${canonicalJson(record[key], ancestors)}`).join(',')}}`
   } finally {
     ancestors.delete(value)
