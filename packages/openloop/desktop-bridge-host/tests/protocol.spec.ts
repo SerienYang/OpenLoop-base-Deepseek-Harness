@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { createServer, type Socket } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { remoteMethods } from '@deepseek-ai/dsh-typert-protocol'
 import { installRuntimeBootstrap } from '@openloop/runtime-bootstrap'
@@ -17,6 +21,7 @@ import {
   NonceReplayGuard,
   verifyBridgeRequest,
 } from '../src/protocol.ts'
+import * as bridgeProtocol from '../src/protocol.ts'
 import {
   BROWSER_SAFE_METHODS,
   dispatchBridgeRequest,
@@ -33,6 +38,12 @@ const request = {
   launchId,
   method: 'getAppInfo',
   payload: { z: 1, a: [true, null] },
+}
+
+function sequencedNonce(sequence: bigint, fill = 0): Uint8Array {
+  const value = Buffer.alloc(32, fill)
+  value.writeBigUInt64BE(sequence)
+  return value
 }
 
 describe('authenticated desktop bridge protocol', () => {
@@ -118,6 +129,46 @@ describe('authenticated desktop bridge protocol', () => {
     expect(verifyBridgeRequest(envelope, { launchId, secret, nonces })).toEqual(request)
     expect(() => verifyBridgeRequest(envelope, { launchId, secret, nonces })).toThrow(/replay/)
     expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('keeps accepting monotonic nonces after the replay window fills without re-admitting old values', () => {
+    const nonces = new NonceReplayGuard(4)
+
+    nonces.claim(Buffer.from(sequencedNonce(10n)).toString('hex'))
+    nonces.claim(Buffer.from(sequencedNonce(12n)).toString('hex'))
+    nonces.claim(Buffer.from(sequencedNonce(11n)).toString('hex'))
+    nonces.claim(Buffer.from(sequencedNonce(9n)).toString('hex'))
+    expect(() => {
+      nonces.claim(Buffer.from(sequencedNonce(11n)).toString('hex'))
+    })
+      .toThrow(/replay/)
+
+    for (let sequence = 13n; sequence <= 4_109n; sequence += 1n) {
+      nonces.claim(Buffer.from(sequencedNonce(sequence)).toString('hex'))
+    }
+    expect(() => {
+      nonces.claim(Buffer.from(sequencedNonce(10n)).toString('hex'))
+    })
+      .toThrow(/replay|stale/)
+  })
+
+  it('generates a monotonic sequence in each nonce while retaining its launch-local entropy', () => {
+    const createNonceGenerator = Reflect.get(
+      bridgeProtocol,
+      'createBridgeNonceGenerator',
+    ) as unknown
+    expect(createNonceGenerator).toBeTypeOf('function')
+    if (typeof createNonceGenerator !== 'function') return
+    const generate = (createNonceGenerator as (
+      entropy: Uint8Array,
+    ) => () => Uint8Array)(Uint8Array.from({ length: 24 }, (_, index) => index + 1))
+
+    expect(Buffer.from(generate()).toString('hex')).toBe(
+      `0000000000000000${Buffer.from(Uint8Array.from({ length: 24 }, (_, index) => index + 1)).toString('hex')}`,
+    )
+    expect(Buffer.from(generate()).toString('hex')).toBe(
+      `0000000000000001${Buffer.from(Uint8Array.from({ length: 24 }, (_, index) => index + 1)).toString('hex')}`,
+    )
   })
 
   it('rejects an oversized frame from its length prefix without a body allocation', () => {
@@ -225,6 +276,50 @@ describe('authenticated desktop bridge protocol', () => {
       expect(seen).toEqual(['getAppInfo', '$cancel'])
     })
   })
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects an in-flight socket exchange promptly when the client closes',
+    async () => {
+      const directory = mkdtempSync(join(tmpdir(), 'openloop-bridge-client-close-'))
+      const socketPath = join(directory, 'bridge.sock')
+      let acceptConnection!: () => void
+      let acceptedSocket: Socket | undefined
+      const connected = new Promise<void>((resolve) => { acceptConnection = resolve })
+      const server = createServer({ allowHalfOpen: true }, (socket) => {
+        acceptedSocket = socket
+        socket.on('data', () => {})
+        acceptConnection()
+      })
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject)
+        server.listen(socketPath, resolve)
+      })
+      const client = new DesktopBridgeClient({ launchId, secret, socketPath })
+
+      try {
+        const pending = client.call('getAppInfo', null)
+        await connected
+        client.close()
+
+        await expect(Promise.race([
+          pending,
+          new Promise((_, reject) => {
+            setTimeout(() => { reject(new Error('pending exchange did not settle')) }, 250)
+          }),
+        ])).rejects.toThrow(/transport is closed/)
+      } finally {
+        client.close()
+        acceptedSocket?.destroy()
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => {
+            if (error === undefined) resolve()
+            else reject(error)
+          })
+        })
+        rmSync(directory, { recursive: true, force: true })
+      }
+    },
+  )
 
   it('requires runtime-bootstrap and consumes the bridge secret without reflecting it', async () => {
     expect(OpenloopBrowserApiPolicyService.inject).toEqual(['runtimeBootstrap'])

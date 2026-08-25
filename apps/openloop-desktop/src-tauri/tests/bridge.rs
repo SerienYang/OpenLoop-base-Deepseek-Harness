@@ -43,6 +43,12 @@ fn nonce() -> [u8; 32] {
     std::array::from_fn(|index| index as u8)
 }
 
+fn sequenced_nonce(sequence: u64) -> [u8; 32] {
+    let mut nonce = [0_u8; 32];
+    nonce[..8].copy_from_slice(&sequence.to_be_bytes());
+    nonce
+}
+
 fn encode_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -172,6 +178,22 @@ fn wrong_version_hmac_launch_and_replayed_nonce_fail_before_business_dispatch() 
     assert!(dispatcher.dispatch(current_peer(), replay).is_err());
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn replay_window_accepts_long_running_and_out_of_order_requests_without_replaying_old_values() {
+    let nonces = NonceReplayGuard::new(4);
+
+    nonces.claim(sequenced_nonce(10)).unwrap();
+    nonces.claim(sequenced_nonce(12)).unwrap();
+    nonces.claim(sequenced_nonce(11)).unwrap();
+    nonces.claim(sequenced_nonce(9)).unwrap();
+    assert!(nonces.claim(sequenced_nonce(11)).is_err());
+
+    for sequence in 13..=4_109 {
+        nonces.claim(sequenced_nonce(sequence)).unwrap();
+    }
+    assert!(nonces.claim(sequenced_nonce(10)).is_err());
 }
 
 #[test]

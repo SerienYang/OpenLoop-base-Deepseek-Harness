@@ -31,7 +31,20 @@
     "goals/resume",
     "messageFeedback/delete",
     "messageFeedback/list",
-    "messageFeedback/put"
+    "messageFeedback/put",
+    "openloopDesktop/authorizeWorkspace",
+    "openloopDesktop/checkForUpdate",
+    "openloopDesktop/describeCredential",
+    "openloopDesktop/getAppInfo",
+    "openloopDesktop/getCredentialMigrationStatus",
+    "openloopDesktop/getUpdateStatus",
+    "openloopDesktop/installUpdateAndRestart",
+    "openloopDesktop/listWorkspaceGrants",
+    "openloopDesktop/openCredentialReplacement",
+    "openloopDesktop/reauthorizeWorkspace",
+    "openloopDesktop/revealWorkspace",
+    "openloopDesktop/revokeWorkspace",
+    "openloopDesktop/unsetCredential"
   ],
   "payloadRules": {
     "session.create": {

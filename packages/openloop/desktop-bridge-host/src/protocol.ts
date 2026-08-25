@@ -1,8 +1,11 @@
-import { createHmac, timingSafeEqual } from 'node:crypto'
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 
 export const BRIDGE_PROTOCOL_VERSION = 1 as const
 export const MAX_BRIDGE_FRAME_BYTES = 64 * 1024
 const BRIDGE_NONCE_BYTES = 32
+const BRIDGE_NONCE_SEQUENCE_BYTES = 8
+const BRIDGE_NONCE_ENTROPY_BYTES = BRIDGE_NONCE_BYTES - BRIDGE_NONCE_SEQUENCE_BYTES
+const MAX_NONCE_SEQUENCE = 0xffff_ffff_ffff_ffffn
 
 const REQUEST_DOMAIN = Buffer.from('openloop.bridge.request.v1\0')
 const RESPONSE_DOMAIN = Buffer.from('openloop.bridge.response.v1\0')
@@ -55,24 +58,82 @@ export interface BridgeVerification {
   readonly nonces: NonceReplayGuard
 }
 
-/** Bounded launch-local replay set. Claims are synchronous and therefore atomic in Node. */
+/** Create launch-local nonces with an authenticated monotonic sequence prefix. */
+export function createBridgeNonceGenerator(
+  entropy: Uint8Array = randomBytes(BRIDGE_NONCE_ENTROPY_BYTES),
+): () => Uint8Array {
+  if (entropy.length !== BRIDGE_NONCE_ENTROPY_BYTES) {
+    throw new TypeError(`bridge nonce entropy must contain exactly ${BRIDGE_NONCE_ENTROPY_BYTES} bytes`)
+  }
+  const suffix = Uint8Array.from(entropy)
+  let sequence = 0n
+  return () => {
+    if (sequence > MAX_NONCE_SEQUENCE) {
+      throw new Error('bridge nonce sequence is exhausted')
+    }
+    const nonce = Buffer.alloc(BRIDGE_NONCE_BYTES)
+    nonce.writeBigUInt64BE(sequence)
+    nonce.set(suffix, BRIDGE_NONCE_SEQUENCE_BYTES)
+    sequence += 1n
+    return nonce
+  }
+}
+
+/** Bounded launch-local sequence window. Claims are synchronous and atomic in Node. */
 export class NonceReplayGuard {
   readonly #maximum: number
-  readonly #seen = new Set<string>()
+  readonly #seen: Uint32Array
+  #highest: bigint | undefined
 
   constructor(maximum = 4096) {
     if (!Number.isSafeInteger(maximum) || maximum <= 0) {
       throw new TypeError('bridge nonce cache size must be a positive safe integer')
     }
     this.#maximum = maximum
+    this.#seen = new Uint32Array(Math.ceil(maximum / 32))
   }
 
   claim(nonceHex: string): void {
-    if (this.#seen.has(nonceHex)) throw new Error('bridge nonce replay rejected')
-    if (this.#seen.size >= this.#maximum) {
-      throw new Error('bridge nonce cache is exhausted')
+    if (!LOWER_HEX_32_BYTES.test(nonceHex)) {
+      throw new TypeError('bridge nonce is not canonical lowercase hex')
     }
-    this.#seen.add(nonceHex)
+    const sequence = BigInt(`0x${nonceHex.slice(0, BRIDGE_NONCE_SEQUENCE_BYTES * 2)}`)
+    const highest = this.#highest
+    if (highest === undefined) {
+      this.#highest = sequence
+    } else if (sequence > highest) {
+      const advance = sequence - highest
+      if (advance >= BigInt(this.#maximum)) {
+        this.#seen.fill(0)
+      } else {
+        for (let current = highest + 1n; current <= sequence; current += 1n) {
+          this.#clear(current)
+        }
+      }
+      this.#highest = sequence
+    } else if (highest - sequence >= BigInt(this.#maximum)) {
+      throw new Error('bridge nonce replay rejected')
+    }
+
+    if (this.#has(sequence)) throw new Error('bridge nonce replay rejected')
+    this.#set(sequence)
+  }
+
+  #clear(sequence: bigint): void {
+    const index = Number(sequence % BigInt(this.#maximum))
+    const word = index >>> 5
+    this.#seen[word] = (this.#seen[word] ?? 0) & ~(1 << (index & 31))
+  }
+
+  #has(sequence: bigint): boolean {
+    const index = Number(sequence % BigInt(this.#maximum))
+    return ((this.#seen[index >>> 5] ?? 0) & (1 << (index & 31))) !== 0
+  }
+
+  #set(sequence: bigint): void {
+    const index = Number(sequence % BigInt(this.#maximum))
+    const word = index >>> 5
+    this.#seen[word] = (this.#seen[word] ?? 0) | (1 << (index & 31))
   }
 }
 

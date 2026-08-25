@@ -22,6 +22,29 @@ const manifest = JSON.parse(readFileSync(
   resolve(root, 'packages/openloop/desktop-bridge-host/openloop-browser-api.json'),
   'utf8',
 )) as unknown
+const openloopDesktopEndpoints = [
+  'openloopDesktop/authorizeWorkspace',
+  'openloopDesktop/checkForUpdate',
+  'openloopDesktop/describeCredential',
+  'openloopDesktop/getAppInfo',
+  'openloopDesktop/getCredentialMigrationStatus',
+  'openloopDesktop/getUpdateStatus',
+  'openloopDesktop/installUpdateAndRestart',
+  'openloopDesktop/listWorkspaceGrants',
+  'openloopDesktop/openCredentialReplacement',
+  'openloopDesktop/reauthorizeWorkspace',
+  'openloopDesktop/revealWorkspace',
+  'openloopDesktop/revokeWorkspace',
+  'openloopDesktop/unsetCredential',
+] as const
+const openloopDesktopHostOnlyEndpoints = [
+  'openloopDesktop/abortWorkspaceAuthorization',
+  'openloopDesktop/beginWorkspaceAuthorization',
+  'openloopDesktop/commitWorkspaceAuthorization',
+  'openloopDesktop/openWorkspaceFile',
+  'openloopDesktop/resolveCredential',
+  'openloopDesktop/spawnWorkspaceProcess',
+] as const
 const surfacePromise = collectOpenloopBrowserApiSurface(root)
 let mutationRoot: string
 let mutationSurface: OpenloopBrowserApiSurface
@@ -439,6 +462,17 @@ describe('Openloop assembled browser API drift gate', () => {
 
     expect(() => { assertOpenloopBrowserApiCoverage(surface, manifest) }).not.toThrow()
   }, 60_000)
+
+  it('requires every reviewed OpenLoop Remote facade and excludes every Host-only method', async () => {
+    const surface = await surfacePromise
+
+    for (const endpoint of openloopDesktopEndpoints) {
+      expect(surface.typertRemoteEndpoints.has(endpoint), endpoint).toBe(true)
+    }
+    for (const endpoint of openloopDesktopHostOnlyEndpoints) {
+      expect(surface.typertRemoteEndpoints.has(endpoint), endpoint).toBe(false)
+    }
+  })
 
   it('keeps signed non-Client rows with client-facing type exports out of the roster', async () => {
     const surface = await surfacePromise

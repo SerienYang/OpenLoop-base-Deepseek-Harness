@@ -4,7 +4,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Readable } from 'node:stream'
 import { Context, symbols } from '@deepseek-ai/cordis'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
+import { WorkspaceTypertGenerator } from '@deepseek-ai/dsh-typert-generator'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
+import type { TypertContribution } from '@deepseek-ai/dsh-typert-registry/types'
 import {
   API_PATH,
   apply as applyConnection,
@@ -19,7 +21,34 @@ import {
   createBrowserApiPolicy,
   parseBrowserApiPolicyManifest,
 } from '../src/api-policy.ts'
+import type { DesktopBridgeClient } from '../src/client.ts'
 import OpenloopBrowserApiPolicyService from '../src/index.ts'
+import {
+  BROWSER_SAFE_METHODS,
+  HOST_ONLY_METHODS,
+  OpenloopDesktopRemoteService,
+} from '../src/remote.ts'
+
+const root = new URL('../../../..', import.meta.url).pathname
+let openloopTypertPromise: Promise<TypertContribution> | undefined
+
+async function openloopTypert(): Promise<TypertContribution> {
+  openloopTypertPromise ??= (async () => {
+    const artifact = new WorkspaceTypertGenerator(root)
+      .generate(['@openloop/desktop-bridge-host'], ['host'])
+      .find(candidate => candidate.package === '@openloop/desktop-bridge-host')
+    if (artifact === undefined) throw new Error('OpenLoop bridge generated no Host artifact')
+    const executable = artifact.js.replace(
+      "from 'zod'",
+      `from ${JSON.stringify(import.meta.resolve('zod'))}`,
+    )
+    const generated = await import(`data:text/javascript,${encodeURIComponent(executable)}`) as {
+      TYPERT: TypertContribution
+    }
+    return generated.TYPERT
+  })()
+  return openloopTypertPromise
+}
 
 function shippedManifest(): unknown {
   return JSON.parse(
@@ -178,6 +207,32 @@ describe('OpenLoop browser API policy manifest', () => {
     }
   })
 
+  it('lists exactly the 13 browser facade endpoints while denying all six Host-only methods', () => {
+    const policy = createBrowserApiPolicy(shippedManifest())
+
+    expect(BROWSER_SAFE_METHODS.map(method => `openloopDesktop/${method}`).sort()).toEqual([
+      'openloopDesktop/authorizeWorkspace',
+      'openloopDesktop/checkForUpdate',
+      'openloopDesktop/describeCredential',
+      'openloopDesktop/getAppInfo',
+      'openloopDesktop/getCredentialMigrationStatus',
+      'openloopDesktop/getUpdateStatus',
+      'openloopDesktop/installUpdateAndRestart',
+      'openloopDesktop/listWorkspaceGrants',
+      'openloopDesktop/openCredentialReplacement',
+      'openloopDesktop/reauthorizeWorkspace',
+      'openloopDesktop/revealWorkspace',
+      'openloopDesktop/revokeWorkspace',
+      'openloopDesktop/unsetCredential',
+    ])
+    for (const method of BROWSER_SAFE_METHODS) {
+      expect(policy.allows(`openloopDesktop/${method}`, {}), method).toBe(true)
+    }
+    for (const method of HOST_ONLY_METHODS) {
+      expect(policy.allows(`openloopDesktop/${method}`, {}), method).toBe(false)
+    }
+  })
+
   it.each([
     ['wrong version', { ...manifest(), version: 2 }],
     ['wrong default', { ...manifest(), default: 'allow' }],
@@ -261,6 +316,57 @@ describe('OpenLoop browser API policy manifest', () => {
 })
 
 describe('OpenLoop browser API policy', () => {
+  it('admits a real safe Remote while denying a Host-only method before dispatch', async () => {
+    const ctx = new Context()
+    await ctx.plugin(TypertRegistry)
+    ctx.provide('browserApiPolicy', createBrowserApiPolicy(shippedManifest()))
+    await ctx.plugin(TypertGatewayService)
+    ctx.typert.register(await openloopTypert())
+    const call = vi.fn(async (method: string) => {
+      if (method === 'getAppInfo') return { appVersion: '0.1.0', channel: 'test' }
+      throw new Error(`unexpected bridge call ${method}`)
+    })
+    new OpenloopDesktopRemoteService(ctx, { call } as unknown as DesktopBridgeClient)
+
+    await expect(ctx.typertGateway.invoke({
+      namespace: 'openloopDesktop',
+      method: 'getAppInfo',
+      args: {},
+    })).resolves.toEqual({ appVersion: '0.1.0', channel: 'test' })
+    await expect(ctx.typertGateway.invoke({
+      namespace: 'openloopDesktop',
+      method: 'resolveCredential',
+      args: { ref: 'provider:key' },
+    })).rejects.toMatchObject({
+      code: 'policy-denied',
+      endpoint: 'openloopDesktop/resolveCredential',
+    })
+    expect(call).toHaveBeenCalledOnce()
+    await ctx.fiber.dispose()
+  })
+
+  it('normalizes bridge null to the generated void Remote result', async () => {
+    const ctx = new Context()
+    await ctx.plugin(TypertRegistry)
+    ctx.provide('browserApiPolicy', { version: 1 as const, allows: () => true })
+    await ctx.plugin(TypertGatewayService)
+    ctx.typert.register(await openloopTypert())
+    const call = vi.fn(async () => null)
+    new OpenloopDesktopRemoteService(ctx, { call } as unknown as DesktopBridgeClient)
+
+    await expect(ctx.typertGateway.invoke({
+      namespace: 'openloopDesktop',
+      method: 'revealWorkspace',
+      args: { workspaceId: 'workspace-1' },
+    })).resolves.toBeUndefined()
+    expect(call).toHaveBeenCalledWith(
+      'revealWorkspace',
+      { workspaceId: 'workspace-1' },
+      expect.any(AbortSignal),
+    )
+    await ctx.fiber.dispose()
+  })
+
   it('blocks all four settings actions before the real legacy handlers run', async () => {
     const openDocument = vi.fn(async (request: { rpcId: string }) => ({
       rpcId: request.rpcId,

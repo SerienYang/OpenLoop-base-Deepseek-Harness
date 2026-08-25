@@ -8,11 +8,12 @@
  * - Legacy calls: TypeScript-resolved callable symbols whose signature belongs
  *   to `IApiClient` and therefore carries a literal `RequestPayload<'...'>`.
  * - Typert calls: generated Remote descriptors selected by
- *   `packages/api/remotes/src/client/index.ts`. Direct Remote calls are parsed
- *   structurally so the gate also works before generated build output exists;
- *   callable aliases are followed through checker symbols and delegated
- *   package-local Remote interfaces are accepted only when their resolved
- *   member maps unambiguously to one generated namespace.
+ *   `packages/api/remotes/src/client/index.ts`, plus product-owned facade
+ *   packages explicitly mounted by the signed profile. Direct Remote calls
+ *   are parsed structurally so the gate also works before generated build
+ *   output exists; callable aliases are followed through checker symbols and
+ *   delegated package-local Remote interfaces are accepted only when their
+ *   resolved member maps unambiguously to one generated namespace.
  * - Transport calls: the fixed Connection downlinks/respond carrier and the
  *   session-log download controller. These are not part of either typed API
  *   catalog, so they remain an explicit, reviewed list tied to their owners.
@@ -75,6 +76,10 @@ const PROFILE_BUNDLES = [
   '@deepseek-ai/dsh-web-app',
   '@openloop/bundle',
 ] as const
+
+const PRODUCT_REMOTE_FACADES: ReadonlyArray<readonly [string, string]> = [
+  ['@openloop/desktop-bridge-host', 'desktop-bridge-host'],
+]
 
 const TRANSPORT_CALLS: ReadonlyArray<readonly [string, string]> = [
   ['connection', 'GET /api/events.mux'],
@@ -570,13 +575,13 @@ function packageForPath(
 function selectedRemotePackages(root: string): string[] {
   const path = resolve(root, 'packages/api/remotes/src/client/index.ts')
   const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true)
-  const packages: string[] = []
+  const packages = new Set(PRODUCT_REMOTE_FACADES.map(([packageName]) => packageName))
   for (const statement of source.statements) {
     if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue
     const specifier = statement.moduleSpecifier.text
-    if (specifier.endsWith('/remote')) packages.push(specifier.slice(0, -'/remote'.length))
+    if (specifier.endsWith('/remote')) packages.add(specifier.slice(0, -'/remote'.length))
   }
-  return packages
+  return [...packages]
 }
 
 async function generatedRemoteCatalog(
@@ -1041,6 +1046,20 @@ export async function collectOpenloopBrowserApiSurface(
   const legacyRpcMethods = new Map<string, Set<string>>()
   const typertRemoteEndpoints = new Map<string, Set<string>>()
   const dynamicReferenceLocations: string[] = []
+
+  for (const [packageName, owner] of PRODUCT_REMOTE_FACADES) {
+    const descriptors = remoteCatalog.get(packageName)
+    if (descriptors === undefined) {
+      throw new Error(`browser-api-drift: product Remote facade ${packageName} has no generated descriptors`)
+    }
+    for (const descriptor of descriptors) {
+      addCall(
+        typertRemoteEndpoints,
+        `${descriptor.namespace}/${descriptor.method}`,
+        owner,
+      )
+    }
+  }
 
   const legacyMethod = (declaration: ts.Declaration): string | undefined => {
     const method = requestPayloadMethod(declaration)

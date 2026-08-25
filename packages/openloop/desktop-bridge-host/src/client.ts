@@ -1,9 +1,10 @@
-import { randomBytes, randomUUID } from 'node:crypto'
-import { createConnection, type Socket } from 'node:net'
+import { randomUUID } from 'node:crypto'
+import { createConnection } from 'node:net'
 import type { RuntimeBootstrap } from '@openloop/runtime-bootstrap'
 import {
   authenticateBridgeRequest,
   BRIDGE_PROTOCOL_VERSION,
+  createBridgeNonceGenerator,
   decodeBridgeFrame,
   encodeBridgeFrame,
   MAX_BRIDGE_FRAME_BYTES,
@@ -51,7 +52,7 @@ export class DesktopBridgeClient {
       requiredSocketPath(options.socketPath),
     )
     this.#requestId = options.requestId ?? randomUUID
-    this.#nonce = options.nonce ?? (() => randomBytes(32))
+    this.#nonce = options.nonce ?? createBridgeNonceGenerator()
     clientSecrets.set(this, {
       bytes: Uint8Array.from(options.secret),
       closed: false,
@@ -151,7 +152,7 @@ export function bridgeClientFromRuntimeBootstrap(runtime: RuntimeBootstrap): Des
 
 class UnixBridgeTransport implements BridgeWireTransport {
   readonly #socketPath: string
-  readonly #sockets = new Set<Socket>()
+  readonly #pending = new Set<(error?: unknown, value?: Uint8Array) => void>()
   #closed = false
 
   constructor(socketPath: string) {
@@ -163,7 +164,6 @@ class UnixBridgeTransport implements BridgeWireTransport {
     if (this.#closed) return Promise.reject(new Error('desktop bridge transport is closed'))
     return new Promise((resolve, reject) => {
       const socket = createConnection({ path: this.#socketPath })
-      this.#sockets.add(socket)
       const chunks: Buffer[] = []
       let received = 0
       let expected: number | undefined
@@ -172,14 +172,16 @@ class UnixBridgeTransport implements BridgeWireTransport {
         if (settled) return
         settled = true
         signal?.removeEventListener('abort', onAbort)
-        this.#sockets.delete(socket)
+        this.#pending.delete(finish)
         socket.destroy()
+        socket.removeAllListeners()
         if (error === undefined && value !== undefined) resolve(value)
         else reject(error instanceof Error ? error : new Error('desktop bridge transport failed'))
       }
       const onAbort = (): void => {
         if (signal !== undefined) finish(abortReason(signal))
       }
+      this.#pending.add(finish)
       signal?.addEventListener('abort', onAbort, { once: true })
       socket.once('connect', () => {
         if (signal?.aborted === true) {
@@ -217,14 +219,18 @@ class UnixBridgeTransport implements BridgeWireTransport {
         finish(undefined, Buffer.concat(chunks, received))
       })
       socket.once('error', finish)
+      socket.once('close', () => {
+        finish(new Error('desktop bridge socket closed before response completed'))
+      })
     })
   }
 
   close(): void {
     if (this.#closed) return
     this.#closed = true
-    for (const socket of this.#sockets) socket.destroy()
-    this.#sockets.clear()
+    for (const finish of [...this.#pending]) {
+      finish(new Error('desktop bridge transport is closed'))
+    }
   }
 }
 

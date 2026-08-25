@@ -1,4 +1,4 @@
-import type { Context } from '@deepseek-ai/cordis'
+import { symbols, type Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type {} from 'zod'
 import type { BridgeRequest } from './protocol.ts'
@@ -46,6 +46,15 @@ export const HOST_ONLY_METHODS = [
 type BrowserSafeBridgeMethod = typeof BROWSER_SAFE_METHODS[number]
 type HostOnlyBridgeMethod = typeof HOST_ONLY_METHODS[number]
 type BridgeHandler = (payload: unknown, signal: AbortSignal) => unknown
+const remoteBridgeClients = new WeakMap<object, DesktopBridgeClient>()
+
+function remoteBridgeClient(service: object): DesktopBridgeClient {
+  const original = Reflect.get(service, symbols.original) as unknown
+  const owner = typeof original === 'object' && original !== null ? original : service
+  const client = remoteBridgeClients.get(owner)
+  if (client === undefined) throw new Error('desktop bridge Remote client is unavailable')
+  return client
+}
 
 export interface BridgeDispatchTables {
   readonly browserSafe: Partial<Record<BrowserSafeBridgeMethod, BridgeHandler>>
@@ -79,26 +88,24 @@ export function dispatchBridgeRequest(
 
 /** Browser-visible Remote facade. It contains no Host-only methods or secrets. */
 export class OpenloopDesktopRemoteService extends TypertRemoteService {
-  readonly #client: DesktopBridgeClient
-
   constructor(ctx: Context, client: DesktopBridgeClient) {
     super(ctx, 'openloopDesktop')
-    this.#client = client
+    remoteBridgeClients.set(this, client)
   }
 
   @Remote
   getAppInfo(signal: AbortSignal): Promise<AppInfo> {
-    return this.#client.call<AppInfo>('getAppInfo', null, signal)
+    return remoteBridgeClient(this).call<AppInfo>('getAppInfo', null, signal)
   }
 
   @Remote
   getUpdateStatus(signal: AbortSignal): Promise<UpdateStatus> {
-    return this.#client.call<UpdateStatus>('getUpdateStatus', null, signal)
+    return remoteBridgeClient(this).call<UpdateStatus>('getUpdateStatus', null, signal)
   }
 
   @Remote
   checkForUpdate(signal: AbortSignal): Promise<UpdateStatus> {
-    return this.#client.call<UpdateStatus>('checkForUpdate', null, signal)
+    return remoteBridgeClient(this).call<UpdateStatus>('checkForUpdate', null, signal)
   }
 
   @Remote
@@ -106,12 +113,12 @@ export class OpenloopDesktopRemoteService extends TypertRemoteService {
     updateId: string,
     signal: AbortSignal,
   ): Promise<'restarting' | 'cancelled'> {
-    return this.#client.call('installUpdateAndRestart', { updateId }, signal)
+    return remoteBridgeClient(this).call('installUpdateAndRestart', { updateId }, signal)
   }
 
   @Remote
   describeCredential(ref: string, signal: AbortSignal): Promise<CredentialStatus> {
-    return this.#client.call<CredentialStatus>('describeCredential', { ref }, signal)
+    return remoteBridgeClient(this).call<CredentialStatus>('describeCredential', { ref }, signal)
   }
 
   @Remote
@@ -119,17 +126,17 @@ export class OpenloopDesktopRemoteService extends TypertRemoteService {
     ref: string,
     signal: AbortSignal,
   ): Promise<'saved' | 'cancelled'> {
-    return this.#client.call('openCredentialReplacement', { ref }, signal)
+    return remoteBridgeClient(this).call('openCredentialReplacement', { ref }, signal)
   }
 
   @Remote
   unsetCredential(ref: string, signal: AbortSignal): Promise<'deleted' | 'cancelled'> {
-    return this.#client.call('unsetCredential', { ref }, signal)
+    return remoteBridgeClient(this).call('unsetCredential', { ref }, signal)
   }
 
   @Remote
   getCredentialMigrationStatus(signal: AbortSignal): Promise<CredentialMigrationStatus> {
-    return this.#client.call<CredentialMigrationStatus>(
+    return remoteBridgeClient(this).call<CredentialMigrationStatus>(
       'getCredentialMigrationStatus',
       null,
       signal,
@@ -138,12 +145,12 @@ export class OpenloopDesktopRemoteService extends TypertRemoteService {
 
   @Remote
   listWorkspaceGrants(signal: AbortSignal): Promise<WorkspaceGrantView[]> {
-    return this.#client.call<WorkspaceGrantView[]>('listWorkspaceGrants', null, signal)
+    return remoteBridgeClient(this).call<WorkspaceGrantView[]>('listWorkspaceGrants', null, signal)
   }
 
   @Remote
   authorizeWorkspace(signal: AbortSignal): Promise<WorkspaceGrantView | 'cancelled'> {
-    return this.#client.call('authorizeWorkspace', null, signal)
+    return remoteBridgeClient(this).call('authorizeWorkspace', null, signal)
   }
 
   @Remote
@@ -151,17 +158,17 @@ export class OpenloopDesktopRemoteService extends TypertRemoteService {
     workspaceId: string,
     signal: AbortSignal,
   ): Promise<WorkspaceGrantView | 'cancelled'> {
-    return this.#client.call('reauthorizeWorkspace', { workspaceId }, signal)
+    return remoteBridgeClient(this).call('reauthorizeWorkspace', { workspaceId }, signal)
   }
 
   @Remote
   revokeWorkspace(workspaceId: string, signal: AbortSignal): Promise<'revoked' | 'cancelled'> {
-    return this.#client.call('revokeWorkspace', { workspaceId }, signal)
+    return remoteBridgeClient(this).call('revokeWorkspace', { workspaceId }, signal)
   }
 
   @Remote
-  revealWorkspace(workspaceId: string, signal: AbortSignal): Promise<void> {
-    return this.#client.call<void>('revealWorkspace', { workspaceId }, signal)
+  async revealWorkspace(workspaceId: string, signal: AbortSignal): Promise<void> {
+    await remoteBridgeClient(this).call<null>('revealWorkspace', { workspaceId }, signal)
   }
 }
 

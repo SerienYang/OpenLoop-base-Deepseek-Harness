@@ -1,5 +1,4 @@
 use std::{
-    collections::HashSet,
     io::{self, Read, Write},
     sync::Mutex,
 };
@@ -94,7 +93,12 @@ pub struct AuthenticatedBridgeResponse {
 
 pub struct NonceReplayGuard {
     maximum: usize,
-    seen: Mutex<HashSet<[u8; BRIDGE_NONCE_BYTES]>>,
+    window: Mutex<NonceReplayWindow>,
+}
+
+struct NonceReplayWindow {
+    highest: Option<u64>,
+    seen: Vec<bool>,
 }
 
 impl Default for NonceReplayGuard {
@@ -108,22 +112,45 @@ impl NonceReplayGuard {
         assert!(maximum > 0, "nonce cache must not be empty");
         Self {
             maximum,
-            seen: Mutex::new(HashSet::new()),
+            window: Mutex::new(NonceReplayWindow {
+                highest: None,
+                seen: vec![false; maximum],
+            }),
         }
     }
 
     pub fn claim(&self, nonce: [u8; BRIDGE_NONCE_BYTES]) -> io::Result<()> {
-        let mut seen = self
-            .seen
+        let sequence = u64::from_be_bytes(
+            nonce[..8]
+                .try_into()
+                .map_err(|_| invalid("bridge nonce sequence is invalid"))?,
+        );
+        let mut window = self
+            .window
             .lock()
             .map_err(|_| invalid("bridge nonce cache lock is poisoned"))?;
-        if seen.contains(&nonce) {
+        if let Some(highest) = window.highest {
+            if sequence > highest {
+                let advance = sequence - highest;
+                if advance >= self.maximum as u64 {
+                    window.seen.fill(false);
+                } else {
+                    for current in highest + 1..=sequence {
+                        window.seen[(current % self.maximum as u64) as usize] = false;
+                    }
+                }
+                window.highest = Some(sequence);
+            } else if highest - sequence >= self.maximum as u64 {
+                return Err(permission_denied("bridge nonce replay rejected"));
+            }
+        } else {
+            window.highest = Some(sequence);
+        }
+        let index = (sequence % self.maximum as u64) as usize;
+        if window.seen[index] {
             return Err(permission_denied("bridge nonce replay rejected"));
         }
-        if seen.len() >= self.maximum {
-            return Err(permission_denied("bridge nonce cache is exhausted"));
-        }
-        seen.insert(nonce);
+        window.seen[index] = true;
         Ok(())
     }
 }
