@@ -91,6 +91,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
   static inject = ['typert']
 
   private srcClaims: ReadonlySet<string> | undefined
+  private readonly browserApiPolicyRequired: boolean
 
   /**
    * Register the Gateway against the active Typert registry.
@@ -98,6 +99,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
    */
   constructor(ctx: Context) {
     super(ctx, 'typertGateway')
+    this.browserApiPolicyRequired = Object.hasOwn(ctx.fiber.inject, 'browserApiPolicy')
     ctx.on('internal/service', () => {
       this.srcClaims = undefined
     })
@@ -114,6 +116,10 @@ export class TypertGatewayService extends Service implements TypertGateway {
   private claimsEndpoint(endpoint: string): boolean {
     const segments = endpoint.split('/')
     if (segments.length !== 2 || segments[0] === '' || segments[1] === '') return false
+    // A mounted product policy owns every syntactically valid Typert endpoint,
+    // including denied and not-yet-registered names. Otherwise Connection
+    // could fall through to a second dispatcher after a policy refusal.
+    if (this.browserApiPolicyRequired || this.ctx.get('browserApiPolicy') !== undefined) return true
     if (this.ctx.typert.local.get(endpoint) !== undefined || this.ctx.typert.local.hasSeen(endpoint)) return true
     this.srcClaims ??= this.collectSrcClaims()
     return this.srcClaims.has(endpoint)
@@ -144,6 +150,15 @@ export class TypertGatewayService extends Service implements TypertGateway {
    */
   async invoke(request: InvokeRemoteRequest): Promise<unknown> {
     const endpoint = endpointOf(request.namespace, request.method)
+    const policy = this.ctx.get('browserApiPolicy')
+    if ((policy === undefined && this.browserApiPolicyRequired)
+      || (policy !== undefined && !policy.allows(endpoint, request.args))) {
+      throw new TypertGatewayError(
+        'policy-denied',
+        endpoint,
+        'browser API policy denied this endpoint',
+      )
+    }
     const descriptor = this.resolveDescriptor(request.namespace, request.method, endpoint)
     assertExactArguments(request.args, descriptor, endpoint)
     const receiverContext = await this.resolveReceiverContext(descriptor, request.args, endpoint)
@@ -477,6 +492,16 @@ function rpcFailure(error: unknown): ConnectionRpcResult {
   }
   if (error instanceof TypertLookupFailure) {
     return { ok: false, error: error.failure as ConnectionRpcError }
+  }
+  if (error instanceof TypertGatewayError && error.code === 'policy-denied') {
+    return {
+      ok: false,
+      error: {
+        code: 'policy-denied',
+        message: error.message,
+        details: { endpoint: error.endpoint },
+      },
+    }
   }
   return {
     ok: false,

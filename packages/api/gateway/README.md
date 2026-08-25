@@ -8,9 +8,17 @@ Two-sided Typert RPC endpoint for Host and Client Cordis environments. The Host 
 
 `ctx.typertGateway.invoke()` resolves the current descriptor and Cordis Service for each call, validates exact named arguments, resolves registered object or Context identities, invokes the public business method, and validates its result. Business Services extend `TypertRemoteService` and mark methods with `@Remote` or `@RemoteScope` from [`dsh-typert-protocol`](../../typert/protocol/README.md); `bindTypertRemote()` remains available when another base class owns inheritance.
 
+When the optional version 1 `ctx.browserApiPolicy` service is present, Gateway
+checks the exact `<namespace>/<method>` endpoint before descriptor lookup,
+provider resolution, receiver access, or `Reflect.apply`. Every syntactically
+valid Typert endpoint is claimed while the policy is mounted, including denied
+and unknown endpoints, so API Proxy fallback cannot bypass a refusal. A Gateway
+that required-injects the policy keeps claiming and denying during provider
+teardown. Base DSH mounts no policy and retains its existing dispatch behavior.
+
 Strict mode reads generated invocation descriptors from `ctx.typert.local`. Lookup parameters use the currently active resolver in `ctx.typert.lookups`: the business package registers the stable declaration and default policy, while Host composition can override resolution behavior with effect-scoped `configure()`; `@RemoteScope` resolves its receiver through a registered Host Context provider. SRC mode is a development fallback for endpoints that have never had a strict definition; it parses simple parameter names and accepts only JSON-safe values for non-lookup parameters. Withdrawing an observed strict definition fails instead of weakening validation.
 
-The Host entry registers a trusted-host interceptor on Connection's shared `/api` FetchHandler. Connection passes this composite handler through its HTTP bridge; the handler dispatches claimed endpoints to Gateway and unclaimed endpoints to API Proxy. Direct `invoke()` calls preserve business errors; `TypertGatewayError` distinguishes failures owned by dispatch, binding, providers, lookup, Context, arguments, and codecs. A resolver may use `TypertLookupFailure` to carry an existing RPC error, preserving its original error code for policy rejections such as cold-resume failures or ownership fences.
+The Host entry registers a trusted-host interceptor on Connection's shared `/api` FetchHandler. Connection passes this composite handler through its HTTP bridge; the handler dispatches claimed endpoints to Gateway and unclaimed endpoints to API Proxy. Direct `invoke()` calls preserve business errors; `TypertGatewayError` distinguishes failures owned by dispatch, binding, providers, lookup, Context, arguments, and codecs. Browser-policy refusals retain the stable RPC `policy-denied` code and exact endpoint through this adapter instead of degrading to `internal`. A resolver may use `TypertLookupFailure` to carry an existing RPC error, preserving its original error code for policy rejections such as cold-resume failures or ownership fences.
 
 A cancellation-aware Remote method declares `signal: AbortSignal` as its final Host parameter. The signal is descriptor metadata rather than a wire argument: Connection supplies it to the Gateway, and the Gateway injects it after decoded business parameters. SRC recognizes the reserved final name, while strict generation additionally requires the global `AbortSignal` type.
 
@@ -34,7 +42,7 @@ No direct effect; invoked business Services own any model-visible result.
 
 ## Known Limitations and Deferred Work
 
-- The Connection adapter maps ordinary dispatch failures and business exceptions to the RPC `internal` code with empty details; lookup-policy errors carried by `TypertLookupFailure` are returned unchanged. Structured `TypertGatewayError` categories remain available only to same-process callers.
+- The Connection adapter maps ordinary dispatch failures and business exceptions to the RPC `internal` code with empty details; browser-policy refusals retain `policy-denied`, and lookup-policy errors carried by `TypertLookupFailure` are returned unchanged. Other structured `TypertGatewayError` categories remain available only to same-process callers.
 - SRC mode supports unique identifier parameters without destructuring, defaults, or rest parameters. It validates JSON safety rather than generated business types and never infers optional fields.
 - Only strict generated contributions can mount on the Client face. SRC markers have no Client codec or type projection.
 - The package dispatches unary methods only. Incremental Session data uses a separate named-stream protocol over the same Connection.

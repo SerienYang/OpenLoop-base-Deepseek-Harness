@@ -3,6 +3,8 @@ import { EventEmitter } from 'node:events'
 import { linkSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { composeEntries } from '@deepseek-ai/dsh-app-boot'
+import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import { describe, expect, test, vi } from 'vitest'
 import {
   ensureEmptyRootConfig,
@@ -85,29 +87,66 @@ function fakeDependencies(events: string[], output: string[]): RuntimeDependenci
     loadProfile: () => ({
       name: 'openloop',
       dir: profileDir,
-      layers: [{
-        packageName: '@openloop/test-bundle',
-        packageDir: '/runtime/test-bundle',
-        patchPath: '/runtime/test-bundle/cordis.patch.yml',
-        patches: [
-          { insert: [{ id: 'bundle', name: 'bundle' }] },
-          {
-            insert: [{
-              id: 'openloop-bootstrap',
-              name: '@openloop/bundle/bootstrap-host',
-              inject: ['webServer', 'runtimeBootstrap'],
-            }],
-          },
-        ],
-      }],
+      layers: [
+        {
+          packageName: '@deepseek-ai/dsh-base',
+          packageDir: '/runtime/dsh-base',
+          patchPath: '/runtime/dsh-base/cordis.patch.yml',
+          patches: [{
+            insert: [
+              { id: 'bundle', name: 'bundle', config: { original: true } },
+              { id: 'web-startup', name: 'web-startup' },
+              { id: 'webserver', name: 'webserver' },
+              { id: 'web-runtime', name: 'web-runtime' },
+              {
+                id: 'connection',
+                name: '@deepseek-ai/dsh-client-connection',
+                inject: ['webRuntime', 'browserApiPolicy'],
+              },
+              {
+                id: 'typert-gateway',
+                name: '@deepseek-ai/dsh-api-gateway',
+                inject: ['browserApiPolicy'],
+              },
+              {
+                id: 'cordis-client-runner',
+                name: '@deepseek-ai/dsh-cordis-client-runner',
+                disabled: true,
+              },
+              {
+                id: 'ui-cordis',
+                name: '@deepseek-ai/dsh-client-ui-cordis',
+                disabled: true,
+              },
+            ],
+          }],
+        },
+        {
+          packageName: '@deepseek-ai/dsh-web-app',
+          packageDir: '/runtime/dsh-web-app',
+          patchPath: '/runtime/dsh-web-app/cordis.patch.yml',
+          patches: [],
+        },
+        {
+          packageName: '@openloop/bundle',
+          packageDir: '/runtime/openloop-bundle',
+          patchPath: '/runtime/openloop-bundle/cordis.patch.yml',
+          patches: [{
+            insert: [
+              { id: 'desktop-bridge-host', name: '@openloop/desktop-bridge-host' },
+              {
+                id: 'openloop-bootstrap',
+                name: '@openloop/bundle/bootstrap-host',
+                inject: ['webServer', 'runtimeBootstrap'],
+              },
+            ],
+          }],
+        },
+      ],
       patchPath: join(profileDir, 'cordis.patch.yml'),
       patches: [],
     }),
-    composeEntries: () => [
-      { id: 'web-startup', name: 'web-startup' },
-      { id: 'webserver', name: 'webserver' },
-      { id: 'web-runtime', name: 'web-runtime' },
-    ],
+    composeEntries,
     loadLayeredEnv: () => {
       events.push('load-env')
       return { get: () => undefined, getFrom: () => undefined }
@@ -134,6 +173,18 @@ function fakeDependencies(events: string[], output: string[]): RuntimeDependenci
     clearTimeout,
   }
 }
+
+const MALICIOUS_USER_PATCHES: ReadonlyArray<readonly [string, PatchOptions[]]> = [
+  ['disable the policy owner', [{ id: 'desktop-bridge-host', disabled: true }]],
+  ['remove the Connection policy injection', [{ id: 'connection', inject: [] }]],
+  ['rename a signed row', [{ id: 'web-runtime', name: '@attacker/replacement' }]],
+  ['insert a third-party Client row', [{
+    insert: [{ id: 'third-party-client', name: '@attacker/client' }],
+  }]],
+  ['re-enable the dynamic Client runner', [{ id: 'cordis-client-runner', disabled: false }]],
+  ['target an unknown row', [{ id: 'not-in-signed-profile', config: { enabled: true } }]],
+  ['change config on a protected row', [{ id: 'connection', config: { trustedHosts: ['attacker'] } }]],
+]
 
 describe('Openloop runtime launcher', () => {
   test('does not read inherited launch secrets for health smoke', () => {
@@ -279,18 +330,21 @@ describe('Openloop runtime launcher', () => {
       const profile = loadProfile(...args)
       return {
         ...profile,
-        layers: [{
-          packageName: '@openloop/test-bundle',
-          packageDir: '/runtime/test-bundle',
-          patchPath: '/runtime/test-bundle/cordis.patch.yml',
-          patches: [{
-            insert: [{
-              id: 'agent-presets',
-              name: '@deepseek-ai/dsh-agent-presets',
-              config: { default: 'standard', includeUserRoot: true },
-            }],
-          }],
-        }],
+        layers: profile.layers.map(layer => layer.packageName === '@openloop/bundle'
+          ? {
+            ...layer,
+            patches: [
+              ...layer.patches,
+              {
+                insert: [{
+                  id: 'agent-presets',
+                  name: '@deepseek-ai/dsh-agent-presets',
+                  config: { default: 'standard', includeUserRoot: true },
+                }],
+              },
+            ],
+          }
+          : layer),
       }
     }
 
@@ -329,23 +383,126 @@ describe('Openloop runtime launcher', () => {
     })
   })
 
-  test('omits Host-only bootstrap patch from health smoke', async () => {
+  test.each(MALICIOUS_USER_PATCHES)(
+    'rejects an initial user patch that attempts to %s',
+    async (_label, userPatches) => {
+      const events: string[] = []
+      const output: string[] = []
+      const dependencies = fakeDependencies(events, output)
+      const loadProfile = dependencies.loadProfile.bind(dependencies)
+      dependencies.loadProfile = (...args) => ({
+        ...loadProfile(...args),
+        patches: structuredClone(userPatches),
+      })
+
+      await expect(runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies))
+        .rejects.toThrow(/user patch|protected|signed|topology|unknown/iu)
+      expect(events).not.toContain('boot')
+      expect(output).toEqual([])
+    },
+  )
+
+  test('rejects user-selected bundle layers instead of trusting them as the signed baseline', async () => {
     const events: string[] = []
     const output: string[] = []
     const dependencies = fakeDependencies(events, output)
-    const composed: unknown[] = []
-    dependencies.composeEntries = (layers) => {
-      composed.push(...layers.flat())
-      return [
-        { id: 'web-startup', name: 'web-startup' },
-        { id: 'webserver', name: 'webserver' },
-        { id: 'web-runtime', name: 'web-runtime' },
-      ]
+    const loadProfile = dependencies.loadProfile.bind(dependencies)
+    dependencies.loadProfile = (...args) => {
+      const profile = loadProfile(...args)
+      return {
+        ...profile,
+        layers: [{
+          packageName: '@attacker/bundle',
+          packageDir: '/profile/node_modules/@attacker/bundle',
+          patchPath: '/profile/node_modules/@attacker/bundle/cordis.patch.yml',
+          patches: profile.layers.flatMap(layer => layer.patches),
+        }],
+      }
+    }
+
+    await expect(runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies))
+      .rejects.toThrow(/signed bundle|bundle layers/iu)
+    expect(events).not.toContain('boot')
+  })
+
+  test.each(MALICIOUS_USER_PATCHES)(
+    'fails the runtime closed when an HMR user patch attempts to %s',
+    async (_label, userPatches) => {
+      const events: string[] = []
+      const output: string[] = []
+      const dependencies = fakeDependencies(events, output)
+      dependencies.process.argv = ['runtime']
+      let compose: ((patches: PatchOptions[]) => PatchOptions[]) | undefined
+      dependencies.watchUserPatches = async (_ctx, options) => {
+        compose = options.compose
+        return async () => { events.push('stop-watch') }
+      }
+
+      const running = runOpenloopRuntime({ healthSmoke: false, home: '/home' }, dependencies)
+      await vi.waitFor(() => {
+        expect(output).toHaveLength(1)
+        expect(compose).toBeTypeOf('function')
+      })
+      let failure: unknown
+      try {
+        compose?.(structuredClone(userPatches))
+      } catch (error) {
+        failure = error
+      }
+      if (failure === undefined) dependencies.process.emit('SIGTERM')
+      await running
+
+      expect(failure).toBeInstanceOf(Error)
+      expect((failure as Error).message).toMatch(/user patch|protected|signed|topology|unknown/iu)
+      expect(events).toContain('stop-watch')
+      expect(events).toContain('dispose')
+      expect(events).toContain('exit:1')
+    },
+  )
+
+  test('allows initial and HMR config patches for an existing non-protected signed row', async () => {
+    const events: string[] = []
+    const output: string[] = []
+    const dependencies = fakeDependencies(events, output)
+    const loadProfile = dependencies.loadProfile.bind(dependencies)
+    dependencies.loadProfile = (...args) => ({
+      ...loadProfile(...args),
+      patches: [{ id: 'bundle', config: { initial: true } }],
+    })
+    let hmrRows: ReturnType<typeof composeEntries> = []
+    dependencies.watchUserPatches = async (_ctx, options) => {
+      hmrRows = composeEntries([options.compose?.([
+        { id: 'bundle', config: { hmr: true } },
+      ]) ?? []])
+      return async () => {}
+    }
+    let bootRows: ReturnType<typeof composeEntries> = []
+    const boot = dependencies.boot.bind(dependencies)
+    dependencies.boot = async (binName, rootConfig, patches, prepare, bareModuleBaseUrl) => {
+      bootRows = composeEntries([patches ?? []])
+      return await boot(binName, rootConfig, patches, prepare, bareModuleBaseUrl)
     }
 
     await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies)
 
-    expect(composed).not.toContainEqual(expect.objectContaining({
+    expect(bootRows.find(row => row.id === 'bundle')?.config).toEqual({ initial: true })
+    expect(hmrRows.find(row => row.id === 'bundle')?.config).toEqual({ hmr: true })
+  })
+
+  test('omits Host-only bootstrap patch from health smoke', async () => {
+    const events: string[] = []
+    const output: string[] = []
+    const dependencies = fakeDependencies(events, output)
+    let bootPatches: PatchOptions[] = []
+    const boot = dependencies.boot.bind(dependencies)
+    dependencies.boot = async (binName, rootConfig, patches, prepare, bareModuleBaseUrl) => {
+      bootPatches = patches ?? []
+      return await boot(binName, rootConfig, patches, prepare, bareModuleBaseUrl)
+    }
+
+    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies)
+
+    expect(bootPatches).not.toContainEqual(expect.objectContaining({
       insert: [expect.objectContaining({ id: 'openloop-bootstrap' })],
     }))
   })
@@ -431,7 +588,7 @@ describe('Openloop runtime launcher', () => {
     dependencies.composeEntries = () => [{ id: 'webserver', name: 'webserver' }]
 
     await expect(runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies))
-      .rejects.toThrow(/web-startup.*web-runtime/isu)
+      .rejects.toThrow(/missing required row.*web-startup/isu)
     expect(events).not.toContain('boot')
     expect(output).toEqual([])
   })

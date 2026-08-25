@@ -3,7 +3,33 @@
     printUrl: false
     surfaceContext: true
     trustedHosts: !!js ctx.webStartup.trustedHosts
+- id: connection
+  inject: [webRuntime, browserApiPolicy]
+- id: typert-gateway
+  inject: [browserApiPolicy]
+- id: cordis-client-runner
+  disabled: true
+- id: ui-cordis
+  disabled: true
+- id: ui-workspace
+  disabled: true
+- id: ui-settings
+  disabled: true
+- id: ui-settings-general
+  disabled: true
+- id: ui-settings-models
+  disabled: true
+- id: ui-settings-plugin-inventory
+  disabled: true
+- id: ui-settings-plugins
+  disabled: true
+- id: ui-permission
+  disabled: true
+- id: ui-agent-preset
+  disabled: true
 - insert:
+    - id: desktop-bridge-host
+      name: '@openloop/desktop-bridge-host'
     - id: openloop-bootstrap
       name: '@openloop/bundle/bootstrap-host'
       inject: [webServer, runtimeBootstrap]

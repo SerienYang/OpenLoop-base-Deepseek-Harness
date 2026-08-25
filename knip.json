@@ -796,6 +796,15 @@
         "@deepseek-ai/dsh-base",
         "@deepseek-ai/dsh-web-app"
       ]
+    },
+    "packages/openloop/desktop-bridge-host": {
+      "entry": [
+        "tests/**/*.spec.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "tests/**/*.ts"
+      ]
     }
   }
 }

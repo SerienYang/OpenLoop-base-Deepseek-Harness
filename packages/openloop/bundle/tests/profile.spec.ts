@@ -8,10 +8,14 @@ import {
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { composeEntries } from '@deepseek-ai/dsh-app-boot'
 import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
+import { WorkspaceTypertGenerator } from '@deepseek-ai/dsh-typert-generator'
+import {
+  createBrowserApiPolicy,
+} from '@openloop/desktop-bridge-host'
 import * as yaml from 'js-yaml'
 import { describe, expect, it } from 'vitest'
 import {
@@ -31,7 +35,74 @@ interface BundleManifest {
   readonly dsh?: { readonly bundle?: { readonly patch?: string } }
 }
 
+interface ClientPackageManifest {
+  readonly name?: string
+  readonly dsh?: { readonly client?: { readonly platform?: string } }
+}
+
+interface RemoteContribution {
+  readonly descriptors: readonly {
+    readonly namespace: string
+    readonly method: string
+  }[]
+}
+
 const tmp = (): string => mkdtempSync(join(tmpdir(), 'openloop-profile-'))
+const repositoryRoot = resolve(import.meta.dirname, '../../../..')
+let dynamicCordisEndpointPromise: Promise<readonly string[]> | undefined
+
+function openloopEntries() {
+  const require = createRequire(import.meta.url)
+  const layers = OPENLOOP_PROFILE_BUNDLES.map((packageName) => {
+    const manifestPath = require.resolve(`${packageName}/package.json`)
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as BundleManifest
+    const patchPath = join(manifestPath, '..', manifest.dsh!.bundle!.patch!)
+    return yaml.load(readFileSync(patchPath, 'utf8'), {
+      schema: entryListSchema,
+    }) as PatchOptions[]
+  })
+  return composeEntries(layers)
+}
+
+function enabledClientPackages(): ReadonlySet<string> {
+  const require = createRequire(import.meta.url)
+  const packages = new Set<string>()
+  for (const entry of openloopEntries()) {
+    if (entry.disabled === true || typeof entry.name !== 'string') continue
+    let manifestPath: string
+    try {
+      manifestPath = require.resolve(`${entry.name}/package.json`)
+    } catch {
+      continue
+    }
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as ClientPackageManifest
+    if (manifest.dsh?.client?.platform === 'web' && manifest.name !== undefined) {
+      packages.add(manifest.name)
+    }
+  }
+  return packages
+}
+
+async function dynamicCordisEndpoints(): Promise<readonly string[]> {
+  dynamicCordisEndpointPromise ??= (async () => {
+    const artifact = new WorkspaceTypertGenerator(repositoryRoot)
+      .generate(['@deepseek-ai/dsh-cordis-host-runner'], ['host'])
+      .find(candidate => candidate.package === '@deepseek-ai/dsh-cordis-host-runner')
+    if (artifact?.remote === undefined) {
+      throw new Error('Dynamic Cordis Host source generated no Remote descriptor')
+    }
+    const executable = artifact.remote.js.replace(
+      "from 'zod'",
+      `from ${JSON.stringify(import.meta.resolve('zod'))}`,
+    )
+    const loaded = await import(`data:text/javascript,${encodeURIComponent(executable)}`) as {
+      default: RemoteContribution
+    }
+    return loaded.default.descriptors
+      .map(({ namespace, method }) => `${namespace}/${method}`)
+  })()
+  return dynamicCordisEndpointPromise
+}
 
 describe('OpenLoop profile', () => {
   it('uses the exact base, Web, and OpenLoop bundle order', () => {
@@ -76,6 +147,95 @@ describe('OpenLoop profile', () => {
       name: '@openloop/bundle/bootstrap-host',
       inject: ['webServer', 'runtimeBootstrap'],
     })
+  })
+
+  it('mounts one policy owner and makes both browser API dispatchers require it', () => {
+    const entries = openloopEntries()
+    expect(entries.find(entry => entry.id === 'desktop-bridge-host')).toEqual({
+      id: 'desktop-bridge-host',
+      name: '@openloop/desktop-bridge-host',
+    })
+    expect(entries.find(entry => entry.id === 'connection')?.inject)
+      .toEqual(['webRuntime', 'browserApiPolicy'])
+    expect(entries.find(entry => entry.id === 'typert-gateway')?.inject)
+      .toEqual(['browserApiPolicy'])
+  })
+
+  it('disables Client owners whose calls are intentionally absent from the first policy', () => {
+    const entries = openloopEntries()
+    const disabled = [
+      ['cordis-client-runner', '@deepseek-ai/dsh-cordis-client-runner'],
+      ['ui-cordis', '@deepseek-ai/dsh-client-ui-cordis'],
+      ['ui-workspace', '@deepseek-ai/dsh-client-ui-workspace'],
+      ['ui-settings', '@deepseek-ai/dsh-client-ui-settings'],
+      ['ui-settings-general', '@deepseek-ai/dsh-client-ui-settings-general'],
+      ['ui-settings-models', '@deepseek-ai/dsh-client-ui-settings-models'],
+      ['ui-settings-plugin-inventory', '@deepseek-ai/dsh-client-ui-settings-plugin-inventory'],
+      ['ui-settings-plugins', '@deepseek-ai/dsh-client-ui-settings-plugins'],
+      ['ui-permission', '@deepseek-ai/dsh-client-ui-permission-presets'],
+      ['ui-agent-preset', '@deepseek-ai/dsh-client-ui-agent-preset'],
+    ] as const
+
+    for (const [id, name] of disabled) {
+      expect(entries.find(entry => entry.id === id)).toMatchObject({
+        id,
+        name,
+        disabled: true,
+      })
+      expect(enabledClientPackages()).not.toContain(name)
+    }
+  })
+
+  it('denies every Dynamic Cordis browser endpoint while its Client plugins are disabled', async () => {
+    const policy = createBrowserApiPolicy(JSON.parse(
+      readFileSync(
+        new URL('../../desktop-bridge-host/openloop-browser-api.json', import.meta.url),
+        'utf8',
+      ),
+    ) as unknown)
+    const endpoints = await dynamicCordisEndpoints()
+
+    expect(endpoints.length).toBeGreaterThan(0)
+    for (const endpoint of endpoints) {
+      expect([endpoint, policy.allows(endpoint, {})]).toEqual([endpoint, false])
+    }
+  })
+
+  it('keeps every Dynamic Cordis lifecycle call allowed or all of its Client callers disabled', async () => {
+    const policy = createBrowserApiPolicy(JSON.parse(
+      readFileSync(
+        new URL('../../desktop-bridge-host/openloop-browser-api.json', import.meta.url),
+        'utf8',
+      ),
+    ) as unknown)
+    const active = enabledClientPackages()
+    const owners = [
+      '@deepseek-ai/dsh-cordis-client-runner',
+      '@deepseek-ai/dsh-client-ui-cordis',
+    ]
+
+    for (const endpoint of await dynamicCordisEndpoints()) {
+      const allowed = policy.allows(endpoint, {})
+      const allOwnersDisabled = owners.every(owner => !active.has(owner))
+      expect(allowed || allOwnersDisabled, endpoint).toBe(true)
+    }
+  })
+
+  it('leaves the default DSH Web bundle without an OpenLoop browser policy', () => {
+    const require = createRequire(import.meta.url)
+    const layers = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'].map((packageName) => {
+      const manifestPath = require.resolve(`${packageName}/package.json`)
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as BundleManifest
+      const patchPath = join(manifestPath, '..', manifest.dsh!.bundle!.patch!)
+      return yaml.load(readFileSync(patchPath, 'utf8'), {
+        schema: entryListSchema,
+      }) as PatchOptions[]
+    })
+
+    const entries = composeEntries(layers)
+    expect(entries.find(entry => entry.id === 'desktop-bridge-host')).toBeUndefined()
+    expect(entries.find(entry => entry.id === 'connection')?.inject).toEqual(['webRuntime'])
+    expect(entries.find(entry => entry.id === 'typert-gateway')?.inject).toBeUndefined()
   })
 
   it('initializes the OpenLoop profile once with the official bundle order', () => {

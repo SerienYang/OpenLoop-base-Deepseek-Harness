@@ -301,6 +301,7 @@
     { "path": "./packages/openloop/build-contract" },
     { "path": "./packages/openloop/runtime-bootstrap" },
     { "path": "./packages/openloop/bundle" },
-    { "path": "./packages/openloop/adapters" }
+    { "path": "./packages/openloop/adapters" },
+    { "path": "./packages/openloop/desktop-bridge-host" }
   ]
 }

@@ -46,12 +46,15 @@ import {
   type RuntimeLaunchSecrets,
 } from '@openloop/runtime-bootstrap'
 import { readLaunchSecretsFromFd, type LaunchSecrets } from './launch-secrets.ts'
+import {
+  assertOpenloopProfileSecurity,
+  validateOpenloopUserPatches,
+} from './profile-policy.ts'
 
 const BIN_NAME = 'openloop-runtime'
 const PROFILE = 'openloop'
 const HOST = '127.0.0.1'
 const SHUTDOWN_TIMEOUT_MS = 5_000
-const REQUIRED_WEB_ROWS = ['web-startup', 'webserver', 'web-runtime'] as const
 const AGENT_PRESETS_ROW = 'agent-presets'
 const DSH_PACKAGE = '@deepseek-ai/dsh'
 const EMPTY_ROOT = '[]\n'
@@ -277,7 +280,12 @@ function filterHostBootstrapPatches(
   includeHostBootstrap: boolean,
 ): PatchOptions[] {
   if (includeHostBootstrap) return [...patches]
-  return patches.filter(patch => !patch.insert?.some(entry => entry.id === 'openloop-bootstrap'))
+  return patches.flatMap((patch) => {
+    if (patch.insert === undefined) return [patch]
+    const insert = patch.insert.filter(entry => entry.id !== 'openloop-bootstrap')
+    if (insert.length === 0) return []
+    return [{ ...patch, insert }]
+  })
 }
 
 /**
@@ -318,11 +326,13 @@ function zeroizeLaunchSecrets(secrets: RuntimeLaunchSecrets): void {
   secrets.bridgeSecret.fill(0)
 }
 
-function assertWebRows(rows: readonly EntryOptions[]): void {
-  const present = new Set(rows.map(row => row.id).filter((id): id is string => typeof id === 'string'))
-  const missing = REQUIRED_WEB_ROWS.filter(id => !present.has(id))
-  if (missing.length > 0) {
-    throw new Error(`${BIN_NAME}: Openloop profile is missing required Web rows: ${missing.join(', ')}`)
+function assertSignedProfileLayers(profile: RuntimeProfile): void {
+  const actual = profile.layers.map(layer => layer.packageName)
+  if (actual.length !== OPENLOOP_PROFILE_BUNDLES.length
+    || actual.some((name, index) => name !== OPENLOOP_PROFILE_BUNDLES[index])) {
+    throw new Error(
+      `${BIN_NAME}: Openloop profile bundle layers must match the signed bundle tuple`,
+    )
   }
 }
 
@@ -462,18 +472,31 @@ export async function runOpenloopRuntime(
   if (profile.name !== PROFILE || profile.dir !== profileDir) {
     throw new Error(`${BIN_NAME}: resolved profile identity does not match ${PROFILE}`)
   }
+  assertSignedProfileLayers(profile)
   const includeHostBootstrap = launchSecrets !== undefined
-  const composeRuntimePatches = (userPatches: readonly PatchOptions[]): PatchOptions[] =>
-    withShippedAgentPresetRoot(
-      filterHostBootstrapPatches([
-        ...profile.layers.flatMap(layer => layer.patches),
-        ...userPatches,
-      ], includeHostBootstrap),
+  const signedLayerPatches = profile.layers.flatMap(layer => layer.patches)
+  const signedPatches = withShippedAgentPresetRoot(
+    filterHostBootstrapPatches(signedLayerPatches, includeHostBootstrap),
+    dependencies.installAnchor,
+    profile.dir,
+  )
+  const signedRows = dependencies.composeEntries([signedPatches])
+  assertOpenloopProfileSecurity(signedRows, signedRows, includeHostBootstrap)
+  const composeRuntimePatches = (userPatches: readonly PatchOptions[]): PatchOptions[] => {
+    const validated = validateOpenloopUserPatches(userPatches, signedRows)
+    const patches = withShippedAgentPresetRoot(
+      filterHostBootstrapPatches([...signedLayerPatches, ...validated], includeHostBootstrap),
       dependencies.installAnchor,
       profile.dir,
     )
+    assertOpenloopProfileSecurity(
+      signedRows,
+      dependencies.composeEntries([patches]),
+      includeHostBootstrap,
+    )
+    return patches
+  }
   const patches = composeRuntimePatches(profile.patches)
-  assertWebRows(dependencies.composeEntries([patches]))
   const environment = dependencies.loadLayeredEnv(BIN_NAME)
   const shutdown = new RuntimeShutdown(dependencies)
   const removeSignals = installSignals(shutdown, dependencies.process)
@@ -513,7 +536,14 @@ export async function runOpenloopRuntime(
     const stopWatcher = await dependencies.watchUserPatches(context, {
       binName: BIN_NAME,
       filename: profile.patchPath,
-      compose: userPatches => structuredClone(composeRuntimePatches(userPatches)),
+      compose: (userPatches) => {
+        try {
+          return structuredClone(composeRuntimePatches(userPatches))
+        } catch (error) {
+          shutdown.request(1)
+          throw error
+        }
+      },
     })
     shutdown.setWatcher(stopWatcher)
 
@@ -612,7 +642,3 @@ async function main(): Promise<void> {
 }
 
 if (process.env.VITEST === undefined) await main()
-
-// Keep the shipped tuple referenced by the launcher contract and visible to
-// static closure checks without reproducing it.
-void OPENLOOP_PROFILE_BUNDLES

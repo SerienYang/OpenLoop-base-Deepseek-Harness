@@ -71,6 +71,12 @@ import {
   subagentPromptRequestSchema,
 } from '../api/subagents.schema.ts'
 
+interface BrowserApiPolicy {
+  readonly version: 1
+  allowsTarget?(method: string): boolean
+  allows(method: string, payload: unknown): boolean
+}
+
 /**
  * Unary dispatch table, keyed by (and compiler-locked to) RpcMethodMap: a map row without a
  * route row fails to compile, and each row's schema/invoke pair is checked against that row's
@@ -238,9 +244,10 @@ function sseResponse(frames: AsyncIterable<RpcRequest<MuxFrame | HostFrame>>): R
 /**
  * Wraps an ApiProxy into a pure fetch function (isomorphic point: feed the returned fetch straight to InProcessApiClient).
  * @param api - the host-side ApiProxy implementation.
+ * @param policy - optional product policy checked before route-owned business work.
  * @returns an object holding `fetch(Request)`; paths outside /api/ return 404.
  */
-export function toFetchHandler(api: ApiProxy): { fetch: typeof fetch } {
+export function toFetchHandler(api: ApiProxy, policy?: BrowserApiPolicy): { fetch: typeof fetch } {
   return {
     // Signature matches global fetch: the isomorphic point hands this function to InProcessApiClient as its transport aspect,
     // Clients call in (url, init) form — normalize to Request before handling.
@@ -252,12 +259,21 @@ export function toFetchHandler(api: ApiProxy): { fetch: typeof fetch } {
       // No-envelope read channels (SSE GET streams + host-only download):
       // physical routes that answer directly, without a wire envelope.
       if (path === '/api/events.mux' && req.method === 'GET') {
+        if (policy !== undefined && !policy.allows('GET /api/events.mux', undefined)) {
+          return new Response('forbidden', { status: 403 })
+        }
         return sseResponse(api.events.mux({ rpcId: RpcId(randomUUID()), payload: {} }, req.signal))
       }
       if (path === '/api/events.host' && req.method === 'GET') {
+        if (policy !== undefined && !policy.allows('GET /api/events.host', undefined)) {
+          return new Response('forbidden', { status: 403 })
+        }
         return sseResponse(api.events.host({ rpcId: RpcId(randomUUID()), payload: {} }, req.signal))
       }
       if (path === '/api/session.export' && (req.method === 'GET' || req.method === 'HEAD')) {
+        if (policy !== undefined && !policy.allows(`${req.method} /api/session.export`, undefined)) {
+          return new Response('forbidden', { status: 403 })
+        }
         // Query params are a different boundary from the POST envelope, but
         // the request still casts its brands only through the domain schema.
         const parsed = sessionLogQuerySchema.safeParse(Object.fromEntries(url.searchParams))
@@ -271,7 +287,22 @@ export function toFetchHandler(api: ApiProxy): { fetch: typeof fetch } {
       }
 
       if (req.method !== 'POST' || !path.startsWith('/api/')) {
+        if (policy !== undefined && path.startsWith('/api/')
+          && !policy.allows(`${req.method} ${path}`, undefined)) {
+          return new Response('forbidden', { status: 403 })
+        }
         return new Response('not found', { status: 404 })
+      }
+
+      if (path === '/api/respond'
+        && policy !== undefined
+        && !policy.allows('POST /api/respond', undefined)) {
+        return new Response('forbidden', { status: 403 })
+      }
+
+      const methodName = path.slice('/api/'.length)
+      if (path !== '/api/respond' && policy?.allowsTarget?.(methodName) === false) {
+        return new Response('forbidden', { status: 403 })
       }
 
       // Cross-site write fence: browsers send "simple" POSTs (text/plain,
@@ -299,7 +330,13 @@ export function toFetchHandler(api: ApiProxy): { fetch: typeof fetch } {
         return Response.json(await api.respond(parsed.data))
       }
 
-      const method = methodFor(path.slice('/api/'.length))
+      const rawPayload = isRecord(body) && Object.hasOwn(body, 'payload')
+        ? body.payload
+        : undefined
+      if (policy !== undefined && !policy.allows(methodName, rawPayload)) {
+        return new Response('forbidden', { status: 403 })
+      }
+      const method = methodFor(methodName)
       if (method === undefined) return new Response('not found', { status: 404 })
 
       const envelope = clientRequestSchema.safeParse(body)
@@ -317,4 +354,8 @@ export function toFetchHandler(api: ApiProxy): { fetch: typeof fetch } {
       return handleUnary(api, method, message, req.signal)
     },
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
 }

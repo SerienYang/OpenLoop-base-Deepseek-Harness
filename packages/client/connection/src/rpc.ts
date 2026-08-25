@@ -1,6 +1,32 @@
 /** Generic unary RPC contracts shared by the Host and Client Connection halves. */
 
+import type {} from '@deepseek-ai/cordis'
 import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
+
+/**
+ * Versioned Host policy for browser-reachable API targets.
+ *
+ * Targets retain their transport's canonical spelling: legacy RPC uses
+ * `session.list`, Typert uses `commands/list`, and envelope-free routes use
+ * `GET /api/events.mux`.
+ */
+export interface BrowserApiPolicy {
+  readonly version: 1
+  /**
+   * Optional target-only preflight used before a carrier reads its request
+   * body. Returning true admits only the target; {@link allows} still decides
+   * the decoded payload.
+   */
+  allowsTarget?(method: string): boolean
+  allows(method: string, payload: unknown): boolean
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    /** Optional product policy; base DSH intentionally provides none. */
+    browserApiPolicy: BrowserApiPolicy
+  }
+}
 
 /** Trust fence applied before a Host RPC channel reaches its handler. */
 export type ConnectionRpcAuthority = 'trusted-host' | 'loopback'

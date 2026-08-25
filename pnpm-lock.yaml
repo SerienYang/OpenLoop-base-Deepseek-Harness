@@ -5616,6 +5616,9 @@ importers:
       '@deepseek-ai/dsh-web-app':
         specifier: workspace:^
         version: link:../../bundle/web-app
+      '@openloop/desktop-bridge-host':
+        specifier: workspace:*
+        version: link:../desktop-bridge-host
       '@openloop/runtime-bootstrap':
         specifier: workspace:^
         version: link:../runtime-bootstrap
@@ -5629,9 +5632,39 @@ importers:
       '@deepseek-ai/dsh-invariants':
         specifier: workspace:^
         version: link:../../runtime-diagnostics/invariants
+      '@deepseek-ai/dsh-typert-generator':
+        specifier: workspace:^
+        version: link:../../typert/generator
       '@types/js-yaml':
         specifier: ^4.0.9
         version: 4.0.9
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+
+  packages/openloop/desktop-bridge-host:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-api-gateway':
+        specifier: workspace:^
+        version: link:../../api/gateway
+      '@deepseek-ai/dsh-client-connection':
+        specifier: workspace:^
+        version: link:../../client/connection
+      '@deepseek-ai/dsh-host-apiproxy':
+        specifier: workspace:^
+        version: link:../../host/apiproxy
+      '@deepseek-ai/dsh-host-webserver':
+        specifier: workspace:^
+        version: link:../../host/webserver
+      '@deepseek-ai/dsh-invariants':
+        specifier: workspace:^
+        version: link:../../runtime-diagnostics/invariants
+      '@deepseek-ai/dsh-typert-registry':
+        specifier: workspace:^
+        version: link:../../typert/registry
 
   packages/openloop/runtime-bootstrap:
     devDependencies:
@@ -9357,6 +9390,9 @@ importers:
       '@openloop/bundle':
         specifier: workspace:^
         version: link:../../packages/openloop/bundle
+      '@openloop/desktop-bridge-host':
+        specifier: workspace:^
+        version: link:../../packages/openloop/desktop-bridge-host
       '@openloop/runtime':
         specifier: workspace:^
         version: link:../../apps/openloop-runtime

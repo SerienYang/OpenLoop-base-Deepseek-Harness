@@ -24,6 +24,7 @@ export const CORDIS_CONTEXT_SCAN_EXEMPTIONS: Readonly<Record<string, string>> = 
   launcherSessionQueryPath: 'Launcher-provided session query path.',
   dshHomePath: 'Boot-provided Harness home accessor.',
   launchEnvironment: 'Launcher-provided environment snapshot.',
+  browserApiPolicy: 'Product browser boundary enforced by transport dispatchers, not a model-visible service.',
   connection: 'Client interface service whose implementation has a different declaration name.',
   appShell: 'Client browser service.',
   settingsScope: 'Client settings transport service.',

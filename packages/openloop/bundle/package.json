@@ -39,6 +39,7 @@
     "@deepseek-ai/dsh-app-boot": "workspace:^",
     "@deepseek-ai/dsh-base": "workspace:^",
     "@deepseek-ai/dsh-web-app": "workspace:^",
+    "@openloop/desktop-bridge-host": "workspace:*",
     "@openloop/runtime-bootstrap": "workspace:^",
     "js-yaml": "^4.2.0"
   },
@@ -49,6 +50,8 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "workspace:^",
     "@deepseek-ai/dsh-invariants": "workspace:^",
-    "@types/js-yaml": "^4.0.9"
+    "@deepseek-ai/dsh-typert-generator": "workspace:^",
+    "@types/js-yaml": "^4.0.9",
+    "zod": "^4.4.3"
   }
 }

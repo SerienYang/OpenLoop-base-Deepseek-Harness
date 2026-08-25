@@ -30,6 +30,7 @@ export type TypertGatewayErrorCode =
   | 'lookup-not-found'
   | 'lookup-unavailable'
   | 'method-unavailable'
+  | 'policy-denied'
   | 'provider-mismatch'
   | 'result-invalid'
   | 'service-unavailable'

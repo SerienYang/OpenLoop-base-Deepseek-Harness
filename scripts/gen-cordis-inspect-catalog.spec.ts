@@ -6,6 +6,7 @@ import {
   SERVICE_API as HOST_SERVICE_API,
   queryServiceApi as queryHostServiceApi,
 } from '../packages/extensions/tool-cordis/src/api-catalog.ts'
+import { CORDIS_CONTEXT_SCAN_EXEMPTIONS } from './cordis-inspect-policy.ts'
 
 const repositoryRoot = fileURLToPath(new URL('..', import.meta.url))
 const tsxCli = fileURLToPath(new URL('../node_modules/tsx/dist/cli.mjs', import.meta.url))
@@ -50,6 +51,18 @@ describe('Cordis inspect catalog generator', () => {
     expect(() => queryHostServiceApi('runtimeBootstrap')).toThrow('no catalogued Service named "runtimeBootstrap"')
 
     expect(clientSource).not.toContain("key: 'runtimeBootstrap'")
+  })
+
+  it('keeps the browser API policy boundary out of model-visible catalogs', () => {
+    const hostSource = readFileSync(new URL(`../${catalogs[0]}`, import.meta.url), 'utf8')
+    const clientSource = readFileSync(new URL(`../${catalogs[1]}`, import.meta.url), 'utf8')
+
+    expect(CORDIS_CONTEXT_SCAN_EXEMPTIONS.browserApiPolicy).toMatch(/product browser boundary/iu)
+    expect(hostSource).not.toContain("key: 'browserApiPolicy'")
+    expect(HOST_SERVICE_API.some(service => service.key === 'browserApiPolicy')).toBe(false)
+    expect(() => queryHostServiceApi('browserApiPolicy'))
+      .toThrow('no catalogued Service named "browserApiPolicy"')
+    expect(clientSource).not.toContain("key: 'browserApiPolicy'")
   })
 
   it('rejects a Context declaration that the Typert projection cannot see', () => {

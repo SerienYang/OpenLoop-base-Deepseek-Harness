@@ -587,6 +587,127 @@ describe('unary round trip (handler ⇄ client, no network)', () => {
 describe('handler carrier-layer statuses', () => {
   const handler = toFetchHandler(fakeApi())
 
+  it('checks an optional browser policy before payload parsing, route lookup, or business dispatch', async () => {
+    const api = fakeApi()
+    const set = vi.spyOn(api.credentials, 'set')
+    const allows = vi.fn((method: string) => method === 'session.list')
+    const restricted = toFetchHandler(api, { version: 1, allows })
+    const deniedBody = JSON.stringify({
+      type: 'client-request',
+      rpcId: 'r-denied',
+      method: 'credentials.set',
+      payload: { name: 'TOKEN', value: 'secret' },
+    })
+
+    const denied = await restricted.fetch(new Request('http://x/api/credentials.set', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: deniedBody,
+    }))
+    expect(denied.status).toBe(403)
+    expect(await denied.text()).toBe('forbidden')
+    expect(allows).toHaveBeenCalledWith('credentials.set', { name: 'TOKEN', value: 'secret' })
+    expect(set).not.toHaveBeenCalled()
+
+    const unknown = await restricted.fetch(new Request('http://x/api/future.method', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'r-unknown',
+        method: 'future.method',
+        payload: {},
+      }),
+    }))
+    expect(unknown.status).toBe(403)
+  })
+
+  it('gates no-envelope transport routes before touching their business objects', async () => {
+    const api = fakeApi()
+    const mux = vi.spyOn(api.events, 'mux')
+    const host = vi.spyOn(api.events, 'host')
+    const respond = vi.spyOn(api, 'respond')
+    const sessionLog = vi.spyOn(api.downloads, 'sessionLog')
+    const allows = vi.fn((target: string) =>
+      target === 'GET /api/events.mux'
+      || target === 'GET /api/events.host'
+      || target === 'POST /api/respond'
+      || target === 'GET /api/session.export'
+      || target === 'HEAD /api/session.export')
+    const allowsTarget = vi.fn(() => false)
+    const restricted = toFetchHandler(api, { version: 1, allows, allowsTarget })
+
+    expect((await restricted.fetch(new Request('http://x/api/events.mux'))).status).toBe(200)
+    expect((await restricted.fetch(new Request('http://x/api/events.host'))).status).toBe(200)
+    expect((await restricted.fetch(new Request('http://x/api/respond', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-response',
+        rpcId: 'known',
+        result: { ok: true, value: null },
+      }),
+    }))).status).toBe(200)
+    expect((await restricted.fetch(new Request('http://x/api/session.export?sessionId=s'))).status).toBe(404)
+    expect((await restricted.fetch(new Request('http://x/api/session.export?sessionId=s', {
+      method: 'HEAD',
+    }))).status).toBe(404)
+    expect(mux).toHaveBeenCalledOnce()
+    expect(host).toHaveBeenCalledOnce()
+    expect(respond).toHaveBeenCalledOnce()
+    expect(sessionLog).toHaveBeenCalledTimes(2)
+    expect(allowsTarget).not.toHaveBeenCalledWith('respond')
+
+    for (const request of [
+      new Request('http://x/api/future-route'),
+      new Request('http://x/api/events.mux', { method: 'HEAD' }),
+      new Request('http://x/api/events.host', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      }),
+      new Request('http://x/api/respond'),
+      new Request('http://x/api/session.export?sessionId=s', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      }),
+    ]) {
+      expect((await restricted.fetch(request)).status).toBe(403)
+    }
+    expect(mux).toHaveBeenCalledOnce()
+    expect(host).toHaveBeenCalledOnce()
+    expect(respond).toHaveBeenCalledOnce()
+    expect(sessionLog).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not touch respond, export, or event objects when their route is denied', async () => {
+    const api = fakeApi()
+    const mux = vi.spyOn(api.events, 'mux')
+    const host = vi.spyOn(api.events, 'host')
+    const respond = vi.spyOn(api, 'respond')
+    const sessionLog = vi.spyOn(api.downloads, 'sessionLog')
+    const restricted = toFetchHandler(api, { version: 1, allows: () => false })
+
+    for (const request of [
+      new Request('http://x/api/events.mux'),
+      new Request('http://x/api/events.host'),
+      new Request('http://x/api/respond', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      }),
+      new Request('http://x/api/session.export?sessionId=s'),
+      new Request('http://x/api/session.export?sessionId=s', { method: 'HEAD' }),
+    ]) {
+      expect((await restricted.fetch(request)).status).toBe(403)
+    }
+    expect(mux).not.toHaveBeenCalled()
+    expect(host).not.toHaveBeenCalled()
+    expect(respond).not.toHaveBeenCalled()
+    expect(sessionLog).not.toHaveBeenCalled()
+  })
+
   it('404s unknown paths and non-POST non-stream methods', async () => {
     expect((await handler.fetch(new Request('http://x/other', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }))).status).toBe(404)
     expect((await handler.fetch(new Request('http://x/api/session.list', { method: 'GET' }))).status).toBe(404)

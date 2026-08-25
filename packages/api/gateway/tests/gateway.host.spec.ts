@@ -1,6 +1,6 @@
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context, Service, symbols } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import { apply as applyConnection, inject as connectionInject } from '@deepseek-ai/dsh-client-connection'
@@ -369,6 +369,107 @@ class InheritedMethodBase extends Service {
 class InheritedMethodService extends InheritedMethodBase {}
 
 describe('TypertGatewayService', () => {
+  it('checks the live browser policy before descriptor lookup, resolver, and business method', async () => {
+    const ctx = new Context()
+    await ctx.plugin(TypertRegistry)
+    const allows = vi.fn(() => false)
+    ctx.provide('browserApiPolicy', { version: 1, allows })
+    await ctx.plugin(TypertGatewayService)
+    const serviceFiber = ctx.plugin(GoalService)
+    await serviceFiber
+    const resolve = vi.fn(() => ({ id: 'agent-1' }))
+    ctx.typert.lookups.register('gatewayFixture', {
+      ...agentLookup({ id: 'agent-1' }),
+      resolve,
+    })
+    registerStrict(ctx, [createDescriptor()])
+    const descriptorLookup = vi.spyOn(ctx.typert.local, 'get')
+    const service = rawGoalService(ctx)
+
+    await expectCode(ctx.typertGateway.invoke({
+      namespace: 'goals',
+      method: 'create',
+      args: { agentId: 'agent-1', request: { title: 'ship' } },
+    }), 'policy-denied')
+
+    expect(allows).toHaveBeenCalledWith('goals/create', {
+      agentId: 'agent-1',
+      request: { title: 'ship' },
+    })
+    expect(descriptorLookup).not.toHaveBeenCalled()
+    expect(resolve).not.toHaveBeenCalled()
+    expect(service.calls).toEqual([])
+  })
+
+  it('fails closed before lookup and business work while a required policy is unloading', async () => {
+    class RequiredPolicyGateway extends TypertGatewayService {
+      static override inject = ['typert', 'browserApiPolicy']
+    }
+
+    const ctx = new Context()
+    await ctx.plugin(TypertRegistry)
+    await ctx.plugin(FakeConnectionService)
+    const removePolicy = ctx.provide('browserApiPolicy', {
+      version: 1,
+      allows: () => true,
+    })
+    const gatewayFiber = ctx.plugin(RequiredPolicyGateway)
+    await gatewayFiber
+    const exposed = ctx.typertGateway as TypertGatewayService & {
+      [symbols.original]?: TypertGatewayService
+    }
+    const gateway = exposed[symbols.original] ?? exposed
+    const serviceFiber = ctx.plugin(GoalService)
+    await serviceFiber
+    const resolve = vi.fn(() => ({ id: 'agent-1' }))
+    ctx.typert.lookups.register('gatewayFixture', {
+      ...agentLookup({ id: 'agent-1' }),
+      resolve,
+    })
+    registerStrict(ctx, [createDescriptor()])
+    const descriptorLookup = vi.spyOn(ctx.typert.local, 'get')
+    const service = rawGoalService(ctx)
+    const connection = rawConnection(ctx)
+    removePolicy()
+
+    expect(connection.matches?.('future/newEndpoint')).toBe(true)
+    await expectCode(gateway.invoke({
+      namespace: 'goals',
+      method: 'create',
+      args: { agentId: 'agent-1', request: { title: 'ship' } },
+    }), 'policy-denied')
+
+    expect(descriptorLookup).not.toHaveBeenCalled()
+    expect(resolve).not.toHaveBeenCalled()
+    expect(service.calls).toEqual([])
+    await gatewayFiber.await()
+    await gatewayFiber.dispose()
+  })
+
+  it('claims unknown denied endpoints so the API Proxy fallback cannot bypass policy', async () => {
+    const ctx = new Context()
+    await ctx.plugin(TypertRegistry)
+    const allows = vi.fn(() => false)
+    ctx.provide('browserApiPolicy', { version: 1, allows })
+    await ctx.plugin(FakeConnectionService)
+    await ctx.plugin(TypertGatewayService)
+    const connection = rawConnection(ctx)
+
+    expect(connection.matches?.('future/newEndpoint')).toBe(true)
+    await expect(connection.handler?.(
+      'future/newEndpoint',
+      { args: {} },
+      new AbortController().signal,
+    )).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: 'policy-denied',
+        details: { endpoint: 'future/newEndpoint' },
+      },
+    })
+    expect(allows).toHaveBeenCalledWith('future/newEndpoint', {})
+  })
+
   it('invokes a strict direct method with schema decoding and a live lookup', async () => {
     const { ctx, service } = await setup()
     const agent = { id: 'agent-1' }
@@ -1195,6 +1296,52 @@ describe('TypertGatewayService', () => {
       await connectionFiber.dispose()
     }
     expect(routes).toHaveLength(0)
+  })
+
+  it('preserves a browser policy denial through the real HTTP RPC carrier', async () => {
+    const ctx = new Context()
+    const routes: WebRoute[] = []
+    const allows = vi.fn(() => false)
+    ctx.provide('webServer', fakeHttpServer(routes) as WebServer)
+    ctx.provide('browserApiPolicy', { version: 1, allows })
+    const connectionFiber = ctx.plugin({ inject: [...connectionInject], apply: applyConnection })
+    await connectionFiber
+    await ctx.plugin(TypertRegistry)
+    const gatewayFiber = ctx.plugin(TypertGatewayService)
+    await gatewayFiber
+    const server = await serveRoute(routes[0]!)
+
+    try {
+      const response = await fetch(`${server.origin}/api/future/denied`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          type: 'client-request',
+          rpcId: 'rpc-policy-denied',
+          method: 'future/denied',
+          payload: { args: {} },
+        }),
+      })
+
+      expect(response.status).toBe(200)
+      await expect(response.json()).resolves.toEqual({
+        type: 'server-response',
+        rpcId: 'rpc-policy-denied',
+        result: {
+          ok: false,
+          error: {
+            code: 'policy-denied',
+            message: 'typert gateway: future/denied: browser API policy denied this endpoint',
+            details: { endpoint: 'future/denied' },
+          },
+        },
+      })
+      expect(allows).toHaveBeenCalledWith('future/denied', {})
+    } finally {
+      await server.close()
+      await gatewayFiber.dispose()
+      await connectionFiber.dispose()
+    }
   })
 })
 
