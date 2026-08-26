@@ -815,18 +815,12 @@ describe('MCP credential-backed HTTP headers', () => {
     const privateReference = 'MCP_SSE_TAIL_KEY'
     const privateToken = 'mcp-sse-tail-token'
     const safeTail = ': harmless partial keepalive'
-    const originalFill = Uint8Array.prototype.fill
-    const wipedSecretBuffers: Uint8Array[] = []
+    const sensitiveTail = `: ${privateReference}\ndata: ${privateToken}`
+    const sensitiveTailBytes = new TextEncoder().encode(sensitiveTail).byteLength
     const fill = vi.spyOn(Uint8Array.prototype, 'fill')
-      .mockImplementation(function (value, start, end) {
-        if (new TextDecoder().decode(this).includes(privateToken)) {
-          wipedSecretBuffers.push(this)
-        }
-        return originalFill.call(this, value, start, end)
-      })
     const dispatch = vi.fn<typeof globalThis.fetch>()
       .mockResolvedValueOnce(new Response(
-        `: ${privateReference}\ndata: ${privateToken}`,
+        sensitiveTail,
         { status: 200, headers: { 'content-type': 'text/event-stream' } },
       ))
       .mockResolvedValueOnce(new Response(
@@ -851,8 +845,71 @@ describe('MCP credential-backed HTTP headers', () => {
 
       await expect(sensitive.text()).resolves.toBe('')
       await expect(safe.text()).resolves.toBe(safeTail)
-      expect(wipedSecretBuffers).toHaveLength(2)
-      for (const buffer of wipedSecretBuffers) {
+      for (const expectedLength of [sensitiveTailBytes, 1024 * 1024]) {
+        const buffer = fill.mock.contexts.find(
+          (value): value is Uint8Array =>
+            value instanceof Uint8Array && value.byteLength === expectedLength,
+        )
+        if (buffer === undefined) throw new Error(`missing ${expectedLength}-byte zeroization`)
+        expect([...buffer]).toEqual(new Array(buffer.byteLength).fill(0))
+      }
+    } finally {
+      fill.mockRestore()
+    }
+  })
+
+  it.each([
+    [
+      'sanitized',
+      (token: string) => `data: {"jsonrpc":"2.0","id":23,"result":{"value":"${token}"}}\n\n`,
+      false,
+    ],
+    [
+      'malformed',
+      (token: string) => `data: {"jsonrpc":"2.0","id":23,"result":"${token}"\n\n`,
+      true,
+    ],
+  ] as const)('zeroizes every copied buffer for a %s complete SSE event', async (
+    _label,
+    eventFor,
+    rejects,
+  ) => {
+    const privateToken = 'mcp-complete-event-token'
+    const event = eventFor(privateToken)
+    const eventBytes = new TextEncoder().encode(event).byteLength
+    const dataBytes = new TextEncoder().encode(
+      event.slice(event.indexOf('data: ') + 6, -2),
+    ).byteLength
+    const fill = vi.spyOn(Uint8Array.prototype, 'fill')
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef('MCP_COMPLETE_EVENT_KEY'), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(new Response(event, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      }))),
+    })
+
+    try {
+      const response = await credentialFetch('https://mcp.example.test')
+      if (rejects) {
+        await expect(response.text())
+          .rejects.toThrow('mcp-client: credential-backed SSE response was rejected')
+      } else {
+        await expect(response.text()).resolves.not.toContain(privateToken)
+      }
+      for (const expectedLength of [eventBytes, dataBytes, 1024 * 1024]) {
+        const buffer = fill.mock.contexts.find(
+          (value): value is Uint8Array =>
+            value instanceof Uint8Array && value.byteLength === expectedLength,
+        )
+        if (buffer === undefined) throw new Error(`missing ${expectedLength}-byte zeroization`)
         expect([...buffer]).toEqual(new Array(buffer.byteLength).fill(0))
       }
     } finally {

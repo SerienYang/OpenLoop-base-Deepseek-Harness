@@ -536,49 +536,56 @@ class CredentialSseSanitizer {
 
   #emitEvent(controller: TransformStreamDefaultController<Uint8Array>): void {
     const event = this.#copyEvent()
-    const eventContainsSensitiveValue = containsSensitiveText(
-      new TextDecoder().decode(event),
-      this.sensitiveValues,
-    )
-    if (this.#dataRanges.length === 0) {
-      if (!eventContainsSensitiveValue) controller.enqueue(event)
-      this.clear()
-      return
-    }
-
-    const dataLength = this.#dataRanges.reduce(
-      (total, range) => total + range.end - range.start,
-      Math.max(0, this.#dataRanges.length - 1),
-    )
-    const data = new Uint8Array(dataLength)
-    let offset = 0
-    for (const [index, range] of this.#dataRanges.entries()) {
-      if (index > 0) data[offset++] = LF
-      const part = this.#event.subarray(range.start, range.end)
-      data.set(part, offset)
-      offset += part.byteLength
-    }
-
-    let payload: unknown
+    let forwarded = false
     try {
-      payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(data)) as unknown
+      const eventContainsSensitiveValue = containsSensitiveText(
+        new TextDecoder().decode(event),
+        this.sensitiveValues,
+      )
+      if (this.#dataRanges.length === 0) {
+        if (!eventContainsSensitiveValue) {
+          controller.enqueue(event)
+          forwarded = true
+        }
+        return
+      }
+
+      const dataLength = this.#dataRanges.reduce(
+        (total, range) => total + range.end - range.start,
+        Math.max(0, this.#dataRanges.length - 1),
+      )
+      const data = new Uint8Array(dataLength)
+      let offset = 0
+      for (const [index, range] of this.#dataRanges.entries()) {
+        if (index > 0) data[offset++] = LF
+        const part = this.#event.subarray(range.start, range.end)
+        data.set(part, offset)
+        offset += part.byteLength
+      }
+
+      let payload: unknown
+      try {
+        payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(data)) as unknown
+      } finally {
+        data.fill(0)
+      }
+      const sanitized = sanitizeJsonRpcFailures(
+        payload,
+        this.requestIds,
+        this.sensitiveValues,
+      )
+      if (!sanitized.changed && !eventContainsSensitiveValue) {
+        controller.enqueue(event)
+        forwarded = true
+        return
+      }
+      controller.enqueue(sanitizedSseEvent(
+        sanitized.changed ? sanitized.payload : payload,
+      ))
     } finally {
-      data.fill(0)
-    }
-    const sanitized = sanitizeJsonRpcFailures(
-      payload,
-      this.requestIds,
-      this.sensitiveValues,
-    )
-    if (!sanitized.changed && !eventContainsSensitiveValue) {
-      controller.enqueue(event)
+      if (!forwarded) event.fill(0)
       this.clear()
-      return
     }
-    controller.enqueue(sanitizedSseEvent(
-      sanitized.changed ? sanitized.payload : payload,
-    ))
-    this.clear()
   }
 
   #copyEvent(): Uint8Array {
