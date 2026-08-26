@@ -640,7 +640,9 @@ function sanitizeJsonRpcFailure(value: unknown): Record<string, unknown> | undef
   }
   const message = value as Record<string, unknown>
   const id = message['id']
-  const safeId = typeof id === 'number' && Number.isSafeInteger(id) ? id : null
+  const safeId = typeof id === 'string'
+    ? id
+    : typeof id === 'number' && Number.isSafeInteger(id) ? id : null
   if (Object.hasOwn(message, 'error')) {
     return {
       jsonrpc: '2.0',

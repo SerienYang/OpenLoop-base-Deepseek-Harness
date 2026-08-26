@@ -5,6 +5,7 @@ import {
 } from 'node:http'
 import { inspect } from 'node:util'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { JSONRPCMessageSchema } from '@modelcontextprotocol/sdk/types.js'
 import {
   createCredentialResolvingFetch,
   validateCredentialHeaders,
@@ -328,7 +329,7 @@ describe('MCP credential-backed HTTP headers', () => {
       })),
       fetch: vi.fn(() => Promise.resolve(new Response(JSON.stringify({
         jsonrpc: '2.0',
-        id: 9,
+        id: 'request-9',
         result: {
           content: [{ type: 'text', text: `Authorization: Bearer ${privateToken}` }],
           structuredContent: { reflected: privateToken },
@@ -342,13 +343,13 @@ describe('MCP credential-backed HTTP headers', () => {
 
     const response = await credentialFetch('https://mcp.example.test', {
       method: 'POST',
-      body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/call' }),
+      body: JSON.stringify({ jsonrpc: '2.0', id: 'request-9', method: 'tools/call' }),
     })
     const body = await response.json() as unknown
 
     expect(body).toEqual({
       jsonrpc: '2.0',
-      id: 9,
+      id: 'request-9',
       result: {
         content: [{
           type: 'text',
@@ -358,6 +359,7 @@ describe('MCP credential-backed HTTP headers', () => {
       },
     })
     expect(JSON.stringify(body)).not.toContain(privateToken)
+    expect(JSONRPCMessageSchema.safeParse(body).success).toBe(true)
   })
 
   it.each([
@@ -567,7 +569,7 @@ describe('MCP credential-backed HTTP headers', () => {
     const privateToken = 'mcp-sse-tool-error-token'
     const payload = JSON.stringify({
       jsonrpc: '2.0',
-      id: 20,
+      id: 'request-20',
       result: {
         content: [{ type: 'text', text: `Authorization: Bearer ${privateToken}` }],
         isError: true,
@@ -589,16 +591,18 @@ describe('MCP credential-backed HTTP headers', () => {
 
     const response = await credentialFetch('https://mcp.example.test', {
       method: 'POST',
-      body: JSON.stringify({ jsonrpc: '2.0', id: 20, method: 'tools/call' }),
+      body: JSON.stringify({ jsonrpc: '2.0', id: 'request-20', method: 'tools/call' }),
     })
     const body = await response.text()
 
     expect(body).toBe(
       'event: message\n'
-      + 'data: {"jsonrpc":"2.0","id":20,"result":{"content":[{"type":"text",'
+      + 'data: {"jsonrpc":"2.0","id":"request-20","result":{"content":[{"type":"text",'
       + '"text":"mcp-client: credential-backed tool request failed"}],"isError":true}}\n\n',
     )
     expect(body).not.toContain(privateToken)
+    const eventPayload = JSON.parse(body.slice(body.indexOf('data: ') + 6)) as unknown
+    expect(JSONRPCMessageSchema.safeParse(eventPayload).success).toBe(true)
   })
 
   it.each([
