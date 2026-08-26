@@ -589,7 +589,7 @@ describe('streamable-http — in-process MCP server', () => {
 })
 
 describe('streamable-http credential failure redaction', () => {
-  it('keeps an HTTP 200 JSON-RPC credential echo out of logs and the fatal error graph', async () => {
+  it('keeps a split-chunk HTTP 200 SSE credential echo out of logs and the fatal error graph', async () => {
     const privateReference = 'MCP_ECHO_REFERENCE'
     const privateToken = 'mcp-echo-token'
     const diagnostics: string[] = []
@@ -600,12 +600,12 @@ describe('streamable-http credential failure redaction', () => {
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { id?: unknown }
         const authorization = request.headers.authorization ?? ''
         response.writeHead(200, {
-          'content-type': 'application/json',
+          'content-type': 'text/event-stream',
           'mcp-session-id': privateToken,
           'x-echo-authorization': authorization,
           'x-echo-reference': privateReference,
         })
-        response.end(JSON.stringify({
+        const payload = JSON.stringify({
           jsonrpc: '2.0',
           id: body.id ?? null,
           error: {
@@ -616,7 +616,13 @@ describe('streamable-http credential failure redaction', () => {
               cause: { message: privateToken },
             },
           },
-        }))
+        })
+        const event = `: ${privateReference}\r\nevent: message\r\ndata: ${payload}\r\n\r\n`
+        const tokenOffset = event.indexOf(privateToken, event.indexOf('data:'))
+        response.write(event.slice(0, tokenOffset + 4))
+        setImmediate(() => {
+          response.end(event.slice(tokenOffset + 4))
+        })
       })
     })
     const listening: PromiseWithResolvers<void> = Promise.withResolvers()
@@ -666,6 +672,10 @@ describe('streamable-http credential failure redaction', () => {
       expect(observable).not.toContain(privateToken)
       expect(observable).not.toContain(`Bearer ${privateToken}`)
       expect((failure as Error).cause).toBeInstanceOf(Error)
+      expect((failure as Error).cause).toMatchObject({
+        message: 'MCP error -32000: mcp-client: credential-backed JSON-RPC request failed',
+        data: undefined,
+      })
       expect((failure as Error).cause).not.toHaveProperty('cause')
     } finally {
       await ctx.fiber.dispose()

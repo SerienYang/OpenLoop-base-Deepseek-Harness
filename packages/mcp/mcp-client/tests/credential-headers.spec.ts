@@ -32,6 +32,24 @@ async function listen(
   }
 }
 
+function chunkedSseResponse(
+  chunks: readonly Uint8Array[],
+  cancel?: () => void | Promise<void>,
+): Response {
+  let index = 0
+  return new Response(new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const chunk = chunks[index++]
+      if (chunk === undefined) controller.close()
+      else controller.enqueue(chunk)
+    },
+    ...(cancel === undefined ? {} : { cancel }),
+  }), {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+  })
+}
+
 describe('MCP credential-backed HTTP headers', () => {
   it('resolves a credential for every HTTP request and preserves literal headers', async () => {
     const resolve = vi.fn()
@@ -231,7 +249,7 @@ describe('MCP credential-backed HTTP headers', () => {
     }
   })
 
-  it('replaces HTTP 200 JSON-RPC errors while preserving successful JSON and streaming responses', async () => {
+  it('replaces HTTP 200 JSON-RPC errors while preserving successful JSON responses', async () => {
     const privateToken = 'mcp-json-rpc-echo-token'
     const reflected = new Response(JSON.stringify({
       jsonrpc: '2.0',
@@ -256,14 +274,9 @@ describe('MCP credential-backed HTTP headers', () => {
       JSON.stringify({ jsonrpc: '2.0', id: 8, result: { ok: true } }),
       { status: 200, headers: { 'content-type': 'application/json' } },
     )
-    const streaming = new Response('event: message\ndata: {}\n\n', {
-      status: 200,
-      headers: { 'content-type': 'text/event-stream' },
-    })
     const dispatch = vi.fn<typeof globalThis.fetch>()
       .mockResolvedValueOnce(reflected)
       .mockResolvedValueOnce(successful)
-      .mockResolvedValueOnce(streaming)
     const credentialFetch = createCredentialResolvingFetch({
       headers: {},
       credentialHeaders: {
@@ -299,9 +312,295 @@ describe('MCP credential-backed HTTP headers', () => {
       id: 8,
       result: { ok: true },
     })
-    const streamingResult = await credentialFetch('https://mcp.example.test')
-    expect(streamingResult).toBe(streaming)
-    await expect(streamingResult.text()).resolves.toBe('event: message\ndata: {}\n\n')
+  })
+
+  it('propagates request abort during JSON inspection instead of synthesizing an HTTP 200 error', async () => {
+    const controller = new AbortController()
+    const inspectionStarted: PromiseWithResolvers<void> = Promise.withResolvers()
+    const cancel = vi.fn()
+    let pulls = 0
+    const response = new Response(new ReadableStream<Uint8Array>({
+      pull(stream) {
+        pulls += 1
+        if (pulls === 1) {
+          stream.enqueue(new TextEncoder().encode('{"jsonrpc":"2.0",'))
+          return
+        }
+        inspectionStarted.resolve()
+      },
+      cancel,
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef('MCP_API_KEY'), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: 'json-abort-token',
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(response)),
+    })
+
+    const pending = credentialFetch('https://mcp.example.test', {
+      signal: controller.signal,
+    }).then(() => 'resolved' as const, (error: unknown) => error)
+    await inspectionStarted.promise
+    controller.abort()
+    const outcome = await Promise.race([
+      pending,
+      new Promise<'timed-out'>(resolve => setTimeout(() => { resolve('timed-out') }, 100)),
+    ])
+
+    expect(outcome).toBe(controller.signal.reason)
+    expect(outcome).toMatchObject({ name: 'AbortError' })
+    await vi.waitFor(() => {
+      expect(cancel).toHaveBeenCalledOnce()
+    })
+  })
+
+  it('normalizes an AbortError from JSON body inspection and sanitizes non-abort read failures', async () => {
+    const privateToken = 'json-read-failure-token'
+    const aborting = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new DOMException(
+          `Authorization: Bearer ${privateToken}`,
+          'AbortError',
+        ))
+      },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+    const failing = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error(`Authorization: Bearer ${privateToken}`))
+      },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+    const dispatch = vi.fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(aborting)
+      .mockResolvedValueOnce(failing)
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef('MCP_API_KEY'), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: dispatch,
+    })
+
+    const abortFailure = await credentialFetch('https://mcp.example.test')
+      .then(() => undefined, (error: unknown) => error)
+    expect(abortFailure).toBeInstanceOf(DOMException)
+    expect(abortFailure).toMatchObject({
+      name: 'AbortError',
+      message: 'This operation was aborted',
+    })
+    expect(Object.hasOwn(abortFailure as object, 'cause')).toBe(false)
+    expect(inspect(abortFailure, { depth: null, showHidden: true })).not.toContain(privateToken)
+
+    const sanitized = await credentialFetch('https://mcp.example.test')
+    await expect(sanitized.json()).resolves.toEqual({
+      jsonrpc: '2.0',
+      id: null,
+      error: {
+        code: -32_000,
+        message: 'mcp-client: credential-backed JSON-RPC request failed',
+      },
+    })
+  })
+
+  it('sanitizes a split-chunk multi-line SSE JSON-RPC error and preserves framing safety', async () => {
+    const privateReference = 'MCP_SSE_ECHO_REFERENCE'
+    const privateToken = 'mcp-sse-echo-token'
+    const authorization = `Authorization: Bearer ${privateToken}`
+    const payload = [
+      '{"jsonrpc":"2.0",',
+      `"id":17,"error":{"code":-32099,"message":${JSON.stringify(authorization)},`,
+      `"data":{"reference":${JSON.stringify(privateReference)},"token":${JSON.stringify(privateToken)}},`,
+      `"unsafe":${JSON.stringify(authorization)}}}`,
+    ]
+    const event = [
+      `\ufeffdata: ${payload[0]}\r\n`,
+      `: ${privateReference}\r\n`,
+      `id: ${privateToken}\r\n`,
+      'event: message\r\n',
+      ...payload.slice(1).map(line => `data: ${line}\r\n`),
+      '\r\n',
+    ].join('')
+    const bytes = new TextEncoder().encode(event)
+    const tokenOffset = event.indexOf(privateToken)
+    const crlfOffset = event.indexOf('\r\n')
+    const chunks = [
+      bytes.slice(0, crlfOffset + 1),
+      bytes.slice(crlfOffset + 1, tokenOffset + 4),
+      bytes.slice(tokenOffset + 4, tokenOffset + privateToken.length - 2),
+      bytes.slice(tokenOffset + privateToken.length - 2),
+    ]
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef(privateReference), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(chunkedSseResponse(chunks))),
+    })
+
+    const response = await credentialFetch('https://mcp.example.test')
+    const sanitized = await response.text()
+
+    expect(sanitized).toBe(
+      'event: message\n'
+      + 'data: {"jsonrpc":"2.0","id":17,"error":{"code":-32000,'
+      + '"message":"mcp-client: credential-backed JSON-RPC request failed"}}\n\n',
+    )
+    expect(sanitized).not.toContain(privateReference)
+    expect(sanitized).not.toContain(privateToken)
+    expect(sanitized).not.toContain(authorization)
+  })
+
+  it('preserves a normal split-byte SSE progress and result stream exactly', async () => {
+    const stream = [
+      ': keep-alive\r\n',
+      'event: message\r\n',
+      'data: {"jsonrpc":"2.0",\r\n',
+      'data: "method":"notifications/progress","params":{"progress":1}}\r\n',
+      '\r\n',
+      'data: {"jsonrpc":"2.0","id":18,"result":{"ok":"caf\u00e9"}}\n',
+      '\n',
+    ].join('')
+    const bytes = new TextEncoder().encode(stream)
+    const chunks = Array.from(bytes, byte => Uint8Array.of(byte))
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef('MCP_API_KEY'), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: 'normal-stream-token',
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(chunkedSseResponse(chunks))),
+    })
+
+    const response = await credentialFetch('https://mcp.example.test')
+    const actual = new Uint8Array(await response.arrayBuffer())
+
+    expect(actual).toEqual(bytes)
+    const text = new TextDecoder().decode(actual)
+    const payloads = text
+      .split(/\r?\n\r?\n/u)
+      .flatMap(frame => frame.split(/\r?\n/u)
+        .filter(line => line.startsWith('data:'))
+        .map(line => line.slice(5).replace(/^ /u, ''))
+        .join('\n'))
+      .filter(Boolean)
+      .map(payload => JSON.parse(payload) as unknown)
+    expect(payloads).toEqual([
+      {
+        jsonrpc: '2.0',
+        method: 'notifications/progress',
+        params: { progress: 1 },
+      },
+      { jsonrpc: '2.0', id: 18, result: { ok: 'caf\u00e9' } },
+    ])
+  })
+
+  it('fails with a fixed cause-free error and contains cleanup failures when an SSE line is oversized', async () => {
+    const privateReference = 'MCP_OVERSIZED_SSE_REFERENCE'
+    const privateToken = 'mcp-oversized-sse-token'
+    const authorization = `Authorization: Bearer ${privateToken}`
+    const cancel = vi.fn(() => Promise.reject(new Error(
+      `${privateReference} ${authorization}`,
+    )))
+    let sent = false
+    const response = new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent) return
+        sent = true
+        controller.enqueue(new TextEncoder().encode(
+          `data: ${'x'.repeat(1024 * 1024 + 1)}${privateToken}\n\n`,
+        ))
+      },
+      cancel,
+    }), {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    })
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef(privateReference), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(response)),
+    })
+
+    const sanitized = await credentialFetch('https://mcp.example.test')
+    const failure = await sanitized.text().then(() => undefined, (error: unknown) => error)
+    const evidence = inspect(failure, { depth: null, showHidden: true })
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message)
+      .toBe('mcp-client: credential-backed SSE response was rejected')
+    expect(Object.hasOwn(failure as object, 'cause')).toBe(false)
+    expect(evidence).not.toContain(privateReference)
+    expect(evidence).not.toContain(privateToken)
+    expect(evidence).not.toContain(authorization)
+    expect(cancel).toHaveBeenCalledOnce()
+  })
+
+  it('contains upstream SSE cancellation failures', async () => {
+    const privateToken = 'mcp-cancel-sse-token'
+    let sent = false
+    const cancel = vi.fn(() => Promise.reject(new Error(
+      `Authorization: Bearer ${privateToken}`,
+    )))
+    const response = new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent) return
+        sent = true
+        controller.enqueue(new TextEncoder().encode(
+          'data: {"jsonrpc":"2.0","id":19,"result":{"ok":true}}\n\n',
+        ))
+      },
+      cancel,
+    }), {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    })
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef('MCP_API_KEY'), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(response)),
+    })
+
+    const sanitized = await credentialFetch('https://mcp.example.test')
+    const reader = sanitized.body!.getReader()
+    await expect(reader.read()).resolves.toMatchObject({ done: false })
+    await expect(reader.cancel()).resolves.toBeUndefined()
+    expect(cancel).toHaveBeenCalledOnce()
   })
 
   it('fails closed when an application/json response exceeds the inspection bound', async () => {
