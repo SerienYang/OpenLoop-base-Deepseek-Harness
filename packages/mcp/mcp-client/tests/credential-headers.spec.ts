@@ -318,6 +318,7 @@ describe('MCP credential-backed HTTP headers', () => {
   it.each([
     'application/json-rpc',
     'application/json; charset=utf-8; vendor=acme',
+    'application/json; CHARSET=UTF-8; VENDOR=ACME',
   ])('sanitizes SDK-accepted JSON content type %s', async (contentType) => {
     const privateReference = 'MCP_VARIANT_JSON_REFERENCE'
     const privateToken = 'mcp-variant-json-token'
@@ -520,6 +521,7 @@ describe('MCP credential-backed HTTP headers', () => {
   it.each([
     'text/event-stream-x',
     'text/event-stream; charset=utf-8; vendor=acme',
+    'text/event-stream; CHARSET=UTF-8; VENDOR=ACME',
   ])('sanitizes SDK-accepted SSE content type %s', async (contentType) => {
     const privateReference = 'MCP_VARIANT_SSE_REFERENCE'
     const privateToken = 'mcp-variant-sse-token'
@@ -556,6 +558,46 @@ describe('MCP credential-backed HTTP headers', () => {
     expect(body).not.toContain(privateReference)
     expect(body).not.toContain(privateToken)
     expect(response.headers.get('content-type')).toBe('text/event-stream')
+  })
+
+  it.each([
+    'APPLICATION/JSON; token=mcp-case-token; ref=MCP_CASE_REFERENCE',
+    'Application/Json; token=mcp-case-token; ref=MCP_CASE_REFERENCE',
+    'TEXT/EVENT-STREAM; token=mcp-case-token; ref=MCP_CASE_REFERENCE',
+    'Text/Event-Stream; token=mcp-case-token; ref=MCP_CASE_REFERENCE',
+  ])('rejects SDK-incompatible case-variant content type without retaining it: %s', async (rawContentType) => {
+    const privateReference = 'MCP_CASE_REFERENCE'
+    const privateToken = 'mcp-case-token'
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef(privateReference), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(new Response(JSON.stringify({
+        jsonrpc: '2.0',
+        id: 72,
+        result: { reflected: privateToken },
+      }), {
+        status: 200,
+        headers: { 'content-type': rawContentType },
+      }))),
+    })
+
+    const failure = await credentialFetch('https://mcp.example.test')
+      .then(() => undefined, (error: unknown) => error)
+    const evidence = inspect(failure, { depth: null, showHidden: true })
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message)
+      .toBe('mcp-client: credential-backed response content type was rejected')
+    expect(Object.hasOwn(failure as object, 'cause')).toBe(false)
+    expect(evidence).not.toContain(rawContentType)
+    expect(evidence).not.toContain(privateReference)
+    expect(evidence).not.toContain(privateToken)
   })
 
   it('rejects an unsupported successful content type without retaining header or cleanup secrets', async () => {

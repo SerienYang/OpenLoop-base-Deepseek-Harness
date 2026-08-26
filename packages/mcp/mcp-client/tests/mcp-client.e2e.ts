@@ -593,8 +593,20 @@ describe('streamable-http credential failure redaction', () => {
     ['application/json', 'json', 'MCP error -32000: mcp-client: credential-backed JSON-RPC request failed'],
     ['application/json-rpc', 'json', 'MCP error -32000: mcp-client: credential-backed JSON-RPC request failed'],
     ['application/json; charset=utf-8; vendor=acme', 'json', 'MCP error -32000: mcp-client: credential-backed JSON-RPC request failed'],
+    ['application/json; CHARSET=UTF-8; VENDOR=ACME', 'json', 'MCP error -32000: mcp-client: credential-backed JSON-RPC request failed'],
     ['text/event-stream', 'sse', 'MCP error -32000: mcp-client: credential-backed JSON-RPC request failed'],
     ['text/event-stream-x', 'sse', 'MCP error -32000: mcp-client: credential-backed JSON-RPC request failed'],
+    ['text/event-stream; CHARSET=UTF-8; VENDOR=ACME', 'sse', 'MCP error -32000: mcp-client: credential-backed JSON-RPC request failed'],
+    [
+      'APPLICATION/JSON; token=mcp-echo-token; ref=MCP_ECHO_REFERENCE',
+      'unsupported',
+      'mcp-client: credential-backed response content type was rejected',
+    ],
+    [
+      'TEXT/EVENT-STREAM; token=mcp-echo-token; ref=MCP_ECHO_REFERENCE',
+      'unsupported',
+      'mcp-client: credential-backed response content type was rejected',
+    ],
     [
       'text/plain; token=mcp-echo-token; ref=MCP_ECHO_REFERENCE',
       'unsupported',

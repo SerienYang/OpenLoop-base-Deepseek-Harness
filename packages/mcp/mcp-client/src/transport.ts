@@ -203,8 +203,7 @@ async function sanitizeJsonRpcResponse(
   signal: AbortSignal | null | undefined,
 ): Promise<Response> {
   const contentType = response.headers.get('content-type')
-    ?.toLowerCase()
-  // Match the pinned SDK's SSE-before-JSON substring classification.
+  // Match the pinned SDK's case-sensitive, SSE-before-JSON substring classification.
   if (contentType?.includes('text/event-stream')) {
     return sanitizeSseResponse(response, sensitiveValues)
   }
