@@ -15,9 +15,12 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { credentialRef, type CredentialRef, type ResolvedCredential } from '@deepseek-ai/dsh-credentials'
+import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from './connection.ts'
 import type { ReconnectConfig } from './connection.ts'
+import { validateCredentialHeaders } from './transport.ts'
 // Side-effect type import: declaration-merges `ctx.tools` onto Context.
 import type {} from '@deepseek-ai/dsh-tools'
 
@@ -86,6 +89,8 @@ export interface StreamableHttpConfig {
   url: string
   /** Additional headers attached to MCP requests. */
   headers: Record<string, string>
+  /** Per-request credential references mapped to HTTP headers. */
+  credentialHeaders?: Record<string, CredentialHeaderConfig>
   /** Per-tool-call timeout in milliseconds. */
   toolCallTimeoutMs: number
   /** Fail plugin activation when the initial connection or tool synchronization fails. */
@@ -97,11 +102,28 @@ export interface StreamableHttpConfig {
 /** Configuration for one stdio or Streamable HTTP MCP server. */
 export type Config = StdioConfig | StreamableHttpConfig
 
+/** One credential-backed header declaration for Streamable HTTP. */
+export interface CredentialHeaderConfig {
+  /** Credential reference resolved immediately before each HTTP request. */
+  ref: string
+  /** Non-secret prefix such as `Bearer `. */
+  prefix?: string
+}
+
+interface CredentialConsumerRegistry {
+  registerMcpServer(serverName: string, reference: CredentialRef): () => void
+}
+
 const Reconnect: z<ReconnectConfig> = z.object({
   enabled: z.boolean().default(RECONNECT_DEFAULTS.enabled),
   initialDelayMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).default(RECONNECT_DEFAULTS.initialDelayMs),
   maxDelayMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).default(RECONNECT_DEFAULTS.maxDelayMs),
   maxAttempts: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(RECONNECT_DEFAULTS.maxAttempts),
+})
+
+const CredentialHeader: z<CredentialHeaderConfig> = z.object({
+  ref: z.string().role('credential-ref').required(),
+  prefix: z.string(),
 })
 
 export const Config = z.union([
@@ -121,6 +143,7 @@ export const Config = z.union([
     serverName: z.string().required().pattern(SERVER_NAME_PATTERN),
     url: z.string().required(),
     headers: z.dict(String).default({}),
+    credentialHeaders: z.dict(CredentialHeader).default({}),
     toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
     failOnStartupError: z.boolean().default(false),
     reconnect: Reconnect,
@@ -142,6 +165,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // construction that bypassed Schemastery) rejects THIS instance before any
   // effect registers.
   const reconnect = resolveReconnectPolicy(config.reconnect, `mcp-client(${config.serverName}): reconnect`)
+  if (config.transport === 'streamable-http') {
+    validateCredentialHeaders(config.headers, config.credentialHeaders ?? {})
+  }
 
   // Reserve the namespace next: a duplicate `serverName` fails THIS instance
   // at load with an actionable error and leaves the earlier instance intact.
@@ -160,10 +186,37 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     return () => void names.delete(config.serverName)
   }, 'mcp-client.serverName')
 
+  if (config.transport === 'streamable-http') {
+    const consumers = ctx.get('credentialConsumers') as CredentialConsumerRegistry | undefined
+    const references = new Set(
+      Object.values(config.credentialHeaders ?? {}).map(source => credentialRef(source.ref)),
+    )
+    if (references.size > 1) {
+      throw new Error('mcp-client: one server may reference only one credential across its HTTP headers')
+    }
+    if (consumers !== undefined && references.size > 0) {
+      ctx.effect(() => {
+        const disposers = [...references].map(reference =>
+          consumers.registerMcpServer(config.serverName, reference))
+        return () => {
+          for (const dispose of disposers) dispose()
+        }
+      }, 'mcp-client.credentialConsumers')
+    }
+  }
+
   // The supervisor owns the client/transport generations, the reconnect
   // loop, and the live tool registrations; disposal stops reconnection,
   // quiesces in-flight work, and unregisters the current generation.
-  const connection = startConnection(ctx, config, reconnect)
+  const resolveCredential = async (reference: CredentialRef): Promise<ResolvedCredential | undefined> => {
+    const credentials = ctx.get('credentials')
+    if (credentials !== undefined) return credentials.resolve(reference)
+    const ambient = launchEnvironmentOf(ctx).get(reference)
+    return ambient === undefined || ambient.value.length === 0
+      ? undefined
+      : { value: ambient.value, source: ambient.source }
+  }
+  const connection = startConnection(ctx, config, reconnect, resolveCredential)
 
   ctx.effect(() => {
     return () => connection.dispose()

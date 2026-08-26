@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { AttachmentId, AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type {
   ImageAttachmentLimits,
   ImageAttachmentRef,
@@ -349,6 +350,33 @@ describe('PiAiAdapter provider routing', () => {
 
     expect(server.paths).toEqual(['/chat/completions'])
     expect(server.closedResponses).toBe(1)
+  })
+})
+
+describe('Openloop credential consumer wiring', () => {
+  it('registers and releases each credential-bearing pi-ai model route', async () => {
+    const disposers = [vi.fn(), vi.fn()]
+    const registerPiAiModel = vi.fn()
+      .mockReturnValueOnce(disposers[0])
+      .mockReturnValueOnce(disposers[1])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.provide('credentialConsumers', { registerPiAiModel } as never)
+
+    const fiber = ctx.plugin(LlmPiAi, {
+      providers: {
+        openai: { apiKeyEnv: 'OPENAI_API_KEY' },
+        deepseek: { apiKeyEnv: 'DEEPSEEK_API_KEY' },
+      },
+    })
+    await fiber
+
+    expect(registerPiAiModel.mock.calls).toEqual([
+      ['openai', credentialRef('OPENAI_API_KEY')],
+      ['deepseek', credentialRef('DEEPSEEK_API_KEY')],
+    ])
+    await fiber.dispose()
+    expect(disposers.every(dispose => dispose.mock.calls.length === 1)).toBe(true)
   })
 })
 

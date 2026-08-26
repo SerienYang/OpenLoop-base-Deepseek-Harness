@@ -114,6 +114,10 @@ const BASE_URL_ENV = 'DEEPSEEK_BASE_URL'
  */
 export type ResolvedDeepSeekOptions = DeepSeekConnectionOptions
 
+interface CredentialConsumerRegistry {
+  registerDeepSeekModel(reference: ReturnType<typeof credentialRef>): () => void
+}
+
 /** Resolve, validate, and detach the advisory model catalog. */
 function resolveModels(models: readonly DeepSeekCatalogModel[] | undefined): DeepSeekCatalogModel[] {
   const seen = new Set<string>()
@@ -222,6 +226,23 @@ export function apply(ctx: Context, config: Config): void {
   }
   options()
 
+  const consumers = ctx.get('credentialConsumers') as CredentialConsumerRegistry | undefined
+  let consumerReference: ReturnType<typeof credentialRef> | undefined
+  let removeConsumer: (() => void) | undefined
+  const ensureCredentialConsumer = (): void => {
+    if (consumers === undefined) return
+    const reference = options().apiKeyEnv
+    if (reference === consumerReference) return
+    removeConsumer?.()
+    removeConsumer = undefined
+    removeConsumer = consumers.registerDeepSeekModel(reference)
+    consumerReference = reference
+  }
+  ensureCredentialConsumer()
+  ctx.effect(() => () => {
+    removeConsumer?.()
+  }, 'llm-deepseek: credential consumer')
+
   const resolveApiKey = async (connection: ResolvedDeepSeekOptions): Promise<string> => {
     // Every credential fact comes from the caller's snapshot, so a rejected
     // settings generation cannot leak its key onto the previous endpoint.
@@ -271,6 +292,9 @@ export function apply(ctx: Context, config: Config): void {
     setSource: (source) => {
       current = source
     },
-    onChange: ensureRegistrationFacts,
+    onChange: () => {
+      ensureRegistrationFacts()
+      ensureCredentialConsumer()
+    },
   })
 }

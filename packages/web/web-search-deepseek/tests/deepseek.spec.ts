@@ -400,6 +400,21 @@ describe('DeepSeekSearchProvider error handling', () => {
 })
 
 describe('web-search-deepseek plugin registration', () => {
+  it('registers and releases its exact built-in credential consumer', async () => {
+    const disposeConsumer = vi.fn()
+    const registerDeepSeekWebSearch = vi.fn(() => disposeConsumer)
+    const ctx = new Context()
+    await ctx.plugin(WebRuntime, { searchProvider: DEEPSEEK_PROVIDER_ID })
+    ctx.provide('credentialConsumers', { registerDeepSeekWebSearch } as never)
+
+    const fiber = ctx.plugin(deepseekPlugin, { apiKeyEnv: 'SEARCH_API_KEY' })
+    await fiber
+
+    expect(registerDeepSeekWebSearch).toHaveBeenCalledWith(credentialRef('SEARCH_API_KEY'))
+    await fiber.dispose()
+    expect(disposeConsumer).toHaveBeenCalledTimes(1)
+  })
+
   it('registers the provider into ctx.web (HMR-safe)', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(searchResponse())))
     const ctx = new Context()

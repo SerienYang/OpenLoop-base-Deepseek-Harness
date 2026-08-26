@@ -22,6 +22,11 @@ OpenLoop 业务包只能通过包根或已声明的公开子路径导出来使�
 `@openloop/adapters` 所有；该包以带版本、无副作用的契约转换公开的 Shell、
 Workspace、设置与桌面数据，但不负责持久化或工作流状态。
 
+`@openloop/credentials-keychain` 是 Openloop profile 的 Host 凭据 provider。
+它依次解析继承的进程环境变量、按发布通道隔离的 macOS Keychain item，以及可选的
+只读旧来源。它的 Host-only consumer registry 负责生成原生删除确认所需的展示信息；
+浏览器调用方既不能解析明文，也不能提供这些展示信息。
+
 通过根命令创建包：
 
 ```sh

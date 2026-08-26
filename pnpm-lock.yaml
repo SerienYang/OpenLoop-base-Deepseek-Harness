@@ -5558,9 +5558,15 @@ importers:
       '@deepseek-ai/dsh-attachment-local':
         specifier: workspace:^
         version: link:../../attachment/attachment-local
+      '@deepseek-ai/dsh-credentials':
+        specifier: workspace:^
+        version: link:../../credentials/credentials
       '@deepseek-ai/dsh-invariants':
         specifier: workspace:^
         version: link:../../runtime-diagnostics/invariants
+      '@deepseek-ai/dsh-launch-environment':
+        specifier: workspace:^
+        version: link:../../util/launch-environment
       '@deepseek-ai/dsh-llm':
         specifier: workspace:^
         version: link:../../llm/llm
@@ -5616,6 +5622,9 @@ importers:
       '@deepseek-ai/dsh-web-app':
         specifier: workspace:^
         version: link:../../bundle/web-app
+      '@openloop/credentials-keychain':
+        specifier: workspace:*
+        version: link:../credentials-keychain
       '@openloop/desktop-bridge-host':
         specifier: workspace:*
         version: link:../desktop-bridge-host
@@ -5641,6 +5650,27 @@ importers:
       zod:
         specifier: ^4.4.3
         version: 4.4.3
+
+  packages/openloop/credentials-keychain:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-credentials':
+        specifier: workspace:^
+        version: link:../../credentials/credentials
+      '@deepseek-ai/dsh-invariants':
+        specifier: workspace:^
+        version: link:../../runtime-diagnostics/invariants
+      '@deepseek-ai/dsh-launch-environment':
+        specifier: workspace:^
+        version: link:../../util/launch-environment
+      '@deepseek-ai/dsh-typert-protocol':
+        specifier: workspace:^
+        version: link:../../typert/protocol
+      '@openloop/desktop-bridge-host':
+        specifier: workspace:*
+        version: link:../desktop-bridge-host
 
   packages/openloop/desktop-bridge-host:
     dependencies:
@@ -9403,6 +9433,9 @@ importers:
       '@openloop/bundle':
         specifier: workspace:^
         version: link:../../packages/openloop/bundle
+      '@openloop/credentials-keychain':
+        specifier: workspace:^
+        version: link:../../packages/openloop/credentials-keychain
       '@openloop/desktop-bridge-host':
         specifier: workspace:^
         version: link:../../packages/openloop/desktop-bridge-host

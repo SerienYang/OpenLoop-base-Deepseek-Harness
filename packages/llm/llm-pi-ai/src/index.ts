@@ -57,6 +57,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
+import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { assertUsableApiKey, LlmError } from '@deepseek-ai/dsh-llm'
 import type { AdapterRegistrationHandle, DirectoryRegistrationHandle, LlmConfigurableProvider } from '@deepseek-ai/dsh-llm'
 import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
@@ -85,6 +86,10 @@ export const name = 'llm-pi-ai'
 export const inject = ['llm']
 
 const NS = settingsNamespace('llm-pi-ai')
+
+interface CredentialConsumerRegistry {
+  registerPiAiModel(routeId: string, reference: CredentialRef): () => void
+}
 
 /**
  * The registry captures these per route; a change here must re-register.
@@ -171,6 +176,39 @@ export function apply(ctx: Context, config: Config): void {
     return next
   }
   profiles()
+
+  const consumers = ctx.get('credentialConsumers') as CredentialConsumerRegistry | undefined
+  const credentialRegistrations = new Map<string, {
+    readonly reference: CredentialRef
+    readonly dispose: () => void
+  }>()
+  const ensureCredentialConsumers = (): void => {
+    if (consumers === undefined) return
+    const desired = new Map(
+      [...profiles()]
+        .filter((entry): entry is [string, ResolvedPiAiProviderProfile & { apiKeyEnv: CredentialRef }] =>
+          entry[1].apiKeyEnv !== undefined)
+        .map(([route, profile]) => [route, profile.apiKeyEnv]),
+    )
+    for (const [route, registration] of credentialRegistrations) {
+      if (desired.get(route) !== registration.reference) {
+        registration.dispose()
+        credentialRegistrations.delete(route)
+      }
+    }
+    for (const [route, reference] of desired) {
+      if (credentialRegistrations.has(route)) continue
+      credentialRegistrations.set(route, {
+        reference,
+        dispose: consumers.registerPiAiModel(route, reference),
+      })
+    }
+  }
+  ensureCredentialConsumers()
+  ctx.effect(() => () => {
+    for (const registration of credentialRegistrations.values()) registration.dispose()
+    credentialRegistrations.clear()
+  }, 'llm-pi-ai: credential consumers')
 
   const resolveApiKey = async (
     provider: string,
@@ -311,6 +349,12 @@ export function apply(ctx: Context, config: Config): void {
         ensureDirectory()
       } catch (error) {
         ctx.logger.error('llm-pi-ai: keeping the previous configurable-provider directory after a refused update')
+        ctx.logger.error(error)
+      }
+      try {
+        ensureCredentialConsumers()
+      } catch (error) {
+        ctx.logger.error('llm-pi-ai: keeping the previous credential consumers after a refused update')
         ctx.logger.error(error)
       }
     },

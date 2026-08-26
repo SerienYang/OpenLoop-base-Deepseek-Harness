@@ -11,11 +11,13 @@ use tauri_plugin_updater::UpdaterExt;
 #[cfg(target_os = "macos")]
 use zeroize::Zeroizing;
 
-use crate::bridge::{
-    AuthenticatedBridgeDispatcher, BridgeDispatchTables, BridgeListener, BridgeServer,
-};
+#[cfg(not(target_os = "macos"))]
+use crate::bridge::BridgeDispatchTables;
+use crate::bridge::{AuthenticatedBridgeDispatcher, BridgeListener, BridgeServer};
 #[cfg(target_os = "macos")]
-use crate::credentials::{KeychainStore, SecurePromptState};
+use crate::credentials::{
+    credential_bridge_dispatch_tables, CancelCredentialDeletion, KeychainStore, SecurePromptState,
+};
 use crate::launcher::{
     InstanceAction, LaunchReadinessExpectation, LaunchSecrets, SingleInstance, SupervisedChild,
 };
@@ -308,13 +310,21 @@ fn start_runtime(
     };
     let mut child = SupervisedChild::spawn_with_dsh_home(&executable, &secrets, &dsh_home)
         .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    let dispatch_tables = credential_bridge_dispatch_tables(
+        KeychainStore::new(updater_config.channel()),
+        std::sync::Arc::new(CancelCredentialDeletion),
+    )
+    .map_err(|error| format!("credential bridge setup failed: {error}"))?;
+    #[cfg(not(target_os = "macos"))]
+    let dispatch_tables = BridgeDispatchTables::unavailable();
     let bridge_dispatcher = AuthenticatedBridgeDispatcher::new(
         unsafe { libc::geteuid() },
         child.identity().clone(),
         executable,
         secrets.launch_id,
         secrets.bridge_secret.to_vec(),
-        BridgeDispatchTables::unavailable(),
+        dispatch_tables,
     )
     .map_err(|error| format!("desktop bridge authentication setup failed: {error}"))?;
     let bridge = bridge_listener

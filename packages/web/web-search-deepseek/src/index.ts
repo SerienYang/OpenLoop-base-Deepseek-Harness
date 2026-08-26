@@ -42,6 +42,10 @@ export const inject = ['web']
 
 const DEFAULT_API_KEY_ENV = 'DEEPSEEK_API_KEY'
 
+interface CredentialConsumerRegistry {
+  registerDeepSeekWebSearch(reference: ReturnType<typeof credentialRef>): () => void
+}
+
 /** Plugin config (all optional — `apply` fills env-var and constant defaults). */
 export interface Config {
   /** Literal DeepSeek API key; prefer {@link apiKeyEnv} so no secret enters configuration files. */
@@ -126,13 +130,29 @@ function resolveOptions(ctx: Context, config: Config): DeepSeekSearchProviderOpt
 /** Register the DeepSeek search provider with `ctx.web`. */
 export function apply(ctx: Context, config: Config): void {
   let current: () => Config = () => config
+  const consumers = ctx.get('credentialConsumers') as CredentialConsumerRegistry | undefined
+  let consumerReference: ReturnType<typeof credentialRef> | undefined
+  let removeConsumer: (() => void) | undefined
+  const ensureCredentialConsumer = (): void => {
+    if (consumers === undefined) return
+    const reference = credentialRef(current().apiKeyEnv ?? DEFAULT_API_KEY_ENV)
+    if (reference === consumerReference) return
+    removeConsumer?.()
+    removeConsumer = undefined
+    removeConsumer = consumers.registerDeepSeekWebSearch(reference)
+    consumerReference = reference
+  }
   installSettingsSection(ctx, WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, Config, config, {
     setSource: (source) => {
       current = source
     },
     // The registration carries no resolved value: the provider projects the
     // section per search, so a committed change needs no re-registration.
-    onChange: () => {},
+    onChange: ensureCredentialConsumer,
   })
+  ensureCredentialConsumer()
+  ctx.effect(() => () => {
+    removeConsumer?.()
+  }, 'web-search-deepseek: credential consumer')
   ctx.web.registerSearchProvider(new DeepSeekSearchProvider(() => resolveOptions(ctx, current())))
 }

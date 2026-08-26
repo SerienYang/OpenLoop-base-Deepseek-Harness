@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import LlmRuntime, { createUserMessage,
   CONTEXT_WINDOW_EXCEEDED_CODE,
@@ -597,6 +598,26 @@ describe('DeepSeekAdapter against a mock server', () => {
     } finally {
       fetchSpy.mockRestore()
     }
+  })
+})
+
+describe('Openloop credential consumer wiring', () => {
+  it('registers the exact DeepSeek model-route owner for its live credential reference', async () => {
+    const disposeConsumer = vi.fn()
+    const registerDeepSeekModel = vi.fn(() => disposeConsumer)
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.provide('credentialConsumers', { registerDeepSeekModel } as never)
+
+    const fiber = ctx.plugin(LlmDeepSeek, {
+      apiKeyEnv: 'DEEPSEEK_CUSTOM_KEY',
+      baseURL: 'http://127.0.0.1:1',
+    })
+    await fiber
+
+    expect(registerDeepSeekModel).toHaveBeenCalledWith(credentialRef('DEEPSEEK_CUSTOM_KEY'))
+    await fiber.dispose()
+    expect(disposeConsumer).toHaveBeenCalledTimes(1)
   })
 })
 

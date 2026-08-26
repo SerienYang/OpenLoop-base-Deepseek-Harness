@@ -116,6 +116,20 @@ impl BridgeHandlerError {
             message: "desktop capability is not implemented in this release",
         }
     }
+
+    pub fn invalid_request() -> Self {
+        Self {
+            code: "invalid_request",
+            message: "desktop bridge request payload is invalid",
+        }
+    }
+
+    pub fn credential_failure() -> Self {
+        Self {
+            code: "credential_failure",
+            message: "desktop credential operation failed",
+        }
+    }
 }
 
 pub type BridgeHandler = Arc<
@@ -165,6 +179,25 @@ impl BridgeDispatchTables {
             browser_safe,
             host_only,
         }
+    }
+
+    pub fn unavailable_with(
+        browser_overrides: HashMap<String, BridgeHandler>,
+        host_overrides: HashMap<String, BridgeHandler>,
+    ) -> io::Result<Self> {
+        if browser_overrides
+            .keys()
+            .any(|method| !BROWSER_SAFE_METHODS.contains(&method.as_str()))
+            || host_overrides
+                .keys()
+                .any(|method| !HOST_ONLY_METHODS.contains(&method.as_str()))
+        {
+            return Err(invalid("bridge dispatch table contains an invalid method"));
+        }
+        let mut tables = Self::unavailable();
+        tables.browser_safe.extend(browser_overrides);
+        tables.host_only.extend(host_overrides);
+        Ok(tables)
     }
 
     fn handler(&self, method: &str) -> Option<BridgeHandler> {

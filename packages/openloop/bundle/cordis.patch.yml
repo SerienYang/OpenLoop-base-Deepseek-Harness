@@ -7,6 +7,14 @@
   inject: [webRuntime, browserApiPolicy]
 - id: typert-gateway
   inject: [browserApiPolicy]
+- id: credentials
+  disabled: true
+- id: llm-deepseek
+  inject: [llm, credentialConsumers]
+- id: llm-pi-ai
+  inject: [llm, credentialConsumers]
+- id: web-search-deepseek
+  inject: [web, credentialConsumers]
 - id: cordis-client-runner
   disabled: true
 - id: ui-cordis
@@ -31,6 +39,9 @@
     - id: desktop-bridge-host
       name: '@openloop/desktop-bridge-host'
       inject: [runtimeBootstrap]
+    - id: credentials-keychain
+      name: '@openloop/credentials-keychain'
+      inject: [desktopBridge]
     - id: openloop-bootstrap
       name: '@openloop/bundle/bootstrap-host'
       inject: [webServer, runtimeBootstrap]

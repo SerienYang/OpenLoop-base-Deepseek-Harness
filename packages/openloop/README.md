@@ -25,6 +25,12 @@ with supported DSH revisions belongs in `@openloop/adapters`, whose versioned,
 side-effect-free contracts translate public Shell, Workspace, settings, and
 desktop data without owning persistence or workflow state.
 
+`@openloop/credentials-keychain` is the Openloop profile's Host credential
+provider. It resolves inherited process environment values before channel-
+isolated macOS Keychain items and an optional read-only legacy source. Its
+Host-only consumer registry derives native deletion-confirmation labels;
+browser callers can neither resolve plaintext nor supply those labels.
+
 Create packages through the root command:
 
 ```sh

@@ -1,20 +1,33 @@
 #![cfg(target_os = "macos")]
 
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
+    process,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use openloop_desktop_lib::{
-    credentials::{
-        credentials_navigation_allowed, parse_keychain_spike_action, CredentialAccount,
-        KeychainSpikeAction, KeychainSpikeReport, KeychainStore, SecurePromptState,
-        CREDENTIALS_PAGE, CREDENTIALS_WINDOW_HEIGHT, CREDENTIALS_WINDOW_LABEL,
-        CREDENTIALS_WINDOW_WIDTH, MAX_SECRET_BYTES,
+    bridge::{
+        protocol::{sign_request, BridgeRequest, BRIDGE_PROTOCOL_VERSION},
+        server::{AuthenticatedBridgeDispatcher, PeerIdentity},
     },
+    credentials::{
+        credential_bridge_dispatch_tables, credentials_navigation_allowed,
+        delete_credential_with_confirmation, parse_keychain_spike_action, CancelCredentialDeletion,
+        CredentialAccount, CredentialConsumerDisplay, CredentialConsumerLabel,
+        CredentialDeletionConfirmation, CredentialDeletionOutcome, CredentialDeletionPlan,
+        CredentialDeletionStore, CredentialError, KeychainSpikeAction, KeychainSpikeReport,
+        KeychainStore, SecurePromptState, CREDENTIALS_PAGE, CREDENTIALS_WINDOW_HEIGHT,
+        CREDENTIALS_WINDOW_LABEL, CREDENTIALS_WINDOW_WIDTH, MAX_SECRET_BYTES,
+    },
+    launcher::capture_process_identity,
     update::channel::ReleaseChannel,
 };
+use serde_json::json;
 use tauri::Url;
+use uuid::Uuid;
 
 fn unique_account(label: &str) -> CredentialAccount {
     let nonce = SystemTime::now()
@@ -22,11 +35,8 @@ fn unique_account(label: &str) -> CredentialAccount {
         .expect("clock follows Unix epoch")
         .as_nanos();
     let label = label.replace('-', "_").to_ascii_uppercase();
-    CredentialAccount::new(
-        "foundation-task",
-        &format!("{label}_{}_{nonce}", std::process::id()),
-    )
-    .expect("unique account is valid")
+    CredentialAccount::new(&format!("{label}_{}_{nonce}", std::process::id()))
+        .expect("unique account is valid")
 }
 
 struct KeychainCleanup {
@@ -58,38 +68,63 @@ fn services_are_exact_and_derived_only_from_release_channel() {
     );
 }
 
+fn dispatch_credential(method: &str, payload: serde_json::Value) -> serde_json::Value {
+    let executable = std::env::current_exe().expect("test executable");
+    let launch_id = Uuid::new_v4();
+    let secret: Vec<u8> = (0..32).collect();
+    let dispatcher = AuthenticatedBridgeDispatcher::new(
+        unsafe { libc::geteuid() },
+        capture_process_identity(process::id(), &executable).expect("process identity"),
+        executable,
+        launch_id,
+        secret.clone(),
+        credential_bridge_dispatch_tables(
+            KeychainStore::new(ReleaseChannel::Test),
+            Arc::new(CancelCredentialDeletion),
+        )
+        .expect("credential tables"),
+    )
+    .expect("credential dispatcher");
+    let request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "credential-request".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: method.to_owned(),
+        payload,
+    };
+    let response = dispatcher
+        .dispatch(
+            PeerIdentity {
+                uid: unsafe { libc::geteuid() },
+                pid: process::id(),
+            },
+            sign_request(request, [7; 32], &secret).expect("signed credential request"),
+        )
+        .expect("authenticated credential response");
+    serde_json::to_value(response).expect("response JSON")
+}
+
+#[test]
+fn credential_bridge_dispatch_is_strict_and_keeps_resolution_host_only() {
+    let missing = dispatch_credential(
+        "resolveCredential",
+        json!({ "ref": "OPENLOOP_TASK_13_MISSING" }),
+    );
+    assert_eq!(missing["ok"], true);
+    assert!(missing["result"].is_null());
+
+    let malformed = dispatch_credential(
+        "openCredentialReplacement",
+        json!({ "ref": "OPENLOOP_TASK_13_MISSING", "consumerNames": ["spoof"] }),
+    );
+    assert_eq!(malformed["ok"], false);
+    assert_eq!(malformed["error"]["code"], "invalid_request");
+}
+
 #[test]
 fn account_is_exact_and_rejects_ambiguous_or_non_ascii_identifiers() {
-    let account =
-        CredentialAccount::new("anthropic-api", "DEEPSEEK_API_KEY").expect("valid account");
-    assert_eq!(account.as_str(), "anthropic-api:DEEPSEEK_API_KEY");
-
-    for invalid_provider in [
-        "",
-        "Uppercase",
-        " leading",
-        "trailing ",
-        "-leading",
-        "trailing-",
-        "_leading",
-        "trailing_",
-        ".leading",
-        "trailing.",
-        "has:colon",
-        "has/slash",
-        "has%percent",
-        "has space",
-        "has\tcontrol",
-        "unicodé",
-        "double..separator",
-        "double--separator",
-        "double__separator",
-    ] {
-        assert!(
-            CredentialAccount::new(invalid_provider, "VALID_REFERENCE").is_err(),
-            "accepted invalid provider {invalid_provider:?}"
-        );
-    }
+    let account = CredentialAccount::new("DEEPSEEK_API_KEY").expect("valid account");
+    assert_eq!(account.as_str(), "credential:DEEPSEEK_API_KEY");
 
     for invalid_reference in [
         "",
@@ -108,14 +143,133 @@ fn account_is_exact_and_rejects_ambiguous_or_non_ascii_identifiers() {
         "unicodé",
     ] {
         assert!(
-            CredentialAccount::new("provider", invalid_reference).is_err(),
+            CredentialAccount::new(invalid_reference).is_err(),
             "accepted invalid reference {invalid_reference:?}"
         );
     }
 
-    assert!(CredentialAccount::new(&"a".repeat(64), &format!("A{}", "b".repeat(127))).is_ok());
-    assert!(CredentialAccount::new(&"a".repeat(65), "VALID_REFERENCE").is_err());
-    assert!(CredentialAccount::new("provider", &format!("A{}", "b".repeat(128))).is_err());
+    assert!(CredentialAccount::new(&format!("A{}", "b".repeat(127))).is_ok());
+    assert!(CredentialAccount::new(&format!("A{}", "b".repeat(128))).is_err());
+}
+
+#[derive(Default)]
+struct RecordingDeletionStore {
+    deleted: Mutex<Vec<String>>,
+}
+
+impl CredentialDeletionStore for RecordingDeletionStore {
+    fn delete_credential(&self, account: &CredentialAccount) -> Result<(), CredentialError> {
+        self.deleted
+            .lock()
+            .expect("recording store lock")
+            .push(account.as_str().to_owned());
+        Ok(())
+    }
+}
+
+struct FixedConfirmation {
+    confirmed: bool,
+    observed: Mutex<Vec<CredentialDeletionPlan>>,
+}
+
+impl FixedConfirmation {
+    fn new(confirmed: bool) -> Self {
+        Self {
+            confirmed,
+            observed: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl CredentialDeletionConfirmation for FixedConfirmation {
+    fn confirm_deletion(&self, plan: &CredentialDeletionPlan) -> Result<bool, CredentialError> {
+        self.observed
+            .lock()
+            .expect("confirmation lock")
+            .push(plan.clone());
+        Ok(self.confirmed)
+    }
+}
+
+fn deletion_plan() -> CredentialDeletionPlan {
+    CredentialDeletionPlan {
+        reference: "SHARED_API_KEY".to_owned(),
+        consumers: vec![
+            CredentialConsumerLabel {
+                owner_id: "model-route:deepseek-official".to_owned(),
+                kind: "model-route".to_owned(),
+                display: CredentialConsumerDisplay {
+                    key: "openloop.credentials.consumer.model-route".to_owned(),
+                    values: BTreeMap::from([(
+                        "routeId".to_owned(),
+                        "deepseek-official".to_owned(),
+                    )]),
+                },
+            },
+            CredentialConsumerLabel {
+                owner_id: "plugin:web-search-deepseek".to_owned(),
+                kind: "plugin".to_owned(),
+                display: CredentialConsumerDisplay {
+                    key: "openloop.credentials.consumer.web-search-deepseek".to_owned(),
+                    values: BTreeMap::new(),
+                },
+            },
+        ],
+    }
+}
+
+#[test]
+fn native_deletion_confirmation_cancel_retains_the_keychain_item() {
+    let store = RecordingDeletionStore::default();
+    let confirmation = FixedConfirmation::new(false);
+    let plan = deletion_plan();
+
+    assert_eq!(
+        delete_credential_with_confirmation(&store, &confirmation, plan.clone())
+            .expect("cancel deletion"),
+        CredentialDeletionOutcome::Cancelled
+    );
+    assert!(store.deleted.lock().expect("store lock").is_empty());
+    assert_eq!(
+        confirmation
+            .observed
+            .lock()
+            .expect("confirmation lock")
+            .as_slice(),
+        &[plan]
+    );
+}
+
+#[test]
+fn native_deletion_confirmation_deletes_only_after_confirmation() {
+    let store = RecordingDeletionStore::default();
+    let confirmation = FixedConfirmation::new(true);
+
+    assert_eq!(
+        delete_credential_with_confirmation(&store, &confirmation, deletion_plan())
+            .expect("confirmed deletion"),
+        CredentialDeletionOutcome::Deleted
+    );
+    assert_eq!(
+        store.deleted.lock().expect("store lock").as_slice(),
+        &["credential:SHARED_API_KEY"]
+    );
+}
+
+#[test]
+fn native_deletion_rejects_unrecognized_display_keys_before_confirmation() {
+    let store = RecordingDeletionStore::default();
+    let confirmation = FixedConfirmation::new(true);
+    let mut plan = deletion_plan();
+    plan.consumers[0].display.key = "browser.controls.this".to_owned();
+
+    assert!(delete_credential_with_confirmation(&store, &confirmation, plan).is_err());
+    assert!(confirmation
+        .observed
+        .lock()
+        .expect("confirmation lock")
+        .is_empty());
+    assert!(store.deleted.lock().expect("store lock").is_empty());
 }
 
 #[test]

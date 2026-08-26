@@ -1,4 +1,11 @@
-use std::{error::Error, ffi::OsString, fmt, os::unix::ffi::OsStrExt};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    error::Error,
+    ffi::OsString,
+    fmt,
+    os::unix::ffi::OsStrExt,
+    sync::Arc,
+};
 
 use security_framework::{
     item::{ItemClass, ItemSearchOptions},
@@ -8,9 +15,11 @@ use security_framework::{
     },
 };
 use security_framework_sys::base::errSecItemNotFound;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
+use crate::bridge::{server::BridgeHandler, BridgeDispatchTables};
 use crate::update::channel::ReleaseChannel;
 
 mod secure_prompt;
@@ -28,7 +37,6 @@ const KEYCHAIN_SPIKE_PREFIX: &[u8] = b"--openloop-keychain";
 const KEYCHAIN_SPIKE_SET: &str = "--openloop-keychain-spike=set";
 const KEYCHAIN_SPIKE_VERIFY: &str = "--openloop-keychain-spike=verify";
 const KEYCHAIN_SPIKE_CLEANUP: &str = "--openloop-keychain-spike=cleanup";
-const SPIKE_PROVIDER: &str = "openloop";
 const SPIKE_REFERENCE: &str = "OPENLOOP_FOUNDATION_TASK_15_SPIKE";
 const SPIKE_SECRET: &[u8] = b"openloop-keychain-spike-v1";
 
@@ -36,10 +44,9 @@ const SPIKE_SECRET: &[u8] = b"openloop-keychain-spike-v1";
 pub struct CredentialAccount(String);
 
 impl CredentialAccount {
-    pub fn new(provider_id: &str, credential_reference: &str) -> Result<Self, CredentialError> {
-        validate_provider_id(provider_id)?;
+    pub fn new(credential_reference: &str) -> Result<Self, CredentialError> {
         validate_credential_reference(credential_reference)?;
-        Ok(Self(format!("{provider_id}:{credential_reference}")))
+        Ok(Self(format!("credential:{credential_reference}")))
     }
 
     pub fn as_str(&self) -> &str {
@@ -51,27 +58,6 @@ impl fmt::Debug for CredentialAccount {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("CredentialAccount([redacted])")
     }
-}
-
-fn validate_provider_id(value: &str) -> Result<(), CredentialError> {
-    if value.is_empty() || value.len() > 64 || !value.is_ascii() {
-        return Err(CredentialError::invalid_identifier());
-    }
-    let bytes = value.as_bytes();
-    if is_separator(bytes[0]) || is_separator(bytes[bytes.len() - 1]) {
-        return Err(CredentialError::invalid_identifier());
-    }
-    let mut previous_was_separator = false;
-    for byte in bytes {
-        let separator = is_separator(*byte);
-        if !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || separator)
-            || (separator && previous_was_separator)
-        {
-            return Err(CredentialError::invalid_identifier());
-        }
-        previous_was_separator = separator;
-    }
-    Ok(())
 }
 
 fn validate_credential_reference(value: &str) -> Result<(), CredentialError> {
@@ -87,10 +73,6 @@ fn validate_credential_reference(value: &str) -> Result<(), CredentialError> {
         return Err(CredentialError::invalid_identifier());
     }
     Ok(())
-}
-
-fn is_separator(byte: u8) -> bool {
-    matches!(byte, b'-' | b'_' | b'.')
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -127,6 +109,17 @@ impl KeychainStore {
             .map_err(|error| CredentialError::keychain("resolve", error.code()))
     }
 
+    pub fn resolve_optional(
+        &self,
+        account: &CredentialAccount,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, CredentialError> {
+        match self.resolve(account) {
+            Ok(secret) => Ok(Some(secret)),
+            Err(error) if error.status == Some(errSecItemNotFound) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn status(&self, account: &CredentialAccount) -> Result<bool, CredentialError> {
         let mut options = ItemSearchOptions::new();
         options
@@ -159,6 +152,186 @@ impl KeychainStore {
         options.set_access_synchronized(Some(false));
         options
     }
+}
+
+pub trait CredentialDeletionStore {
+    fn delete_credential(&self, account: &CredentialAccount) -> Result<(), CredentialError>;
+}
+
+impl CredentialDeletionStore for KeychainStore {
+    fn delete_credential(&self, account: &CredentialAccount) -> Result<(), CredentialError> {
+        self.delete(account)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CredentialConsumerDisplay {
+    pub key: String,
+    pub values: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CredentialConsumerLabel {
+    pub owner_id: String,
+    pub kind: String,
+    pub display: CredentialConsumerDisplay,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CredentialDeletionPlan {
+    pub reference: String,
+    pub consumers: Vec<CredentialConsumerLabel>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialDeletionOutcome {
+    Deleted,
+    Cancelled,
+}
+
+pub trait CredentialDeletionConfirmation: Send + Sync {
+    fn confirm_deletion(&self, plan: &CredentialDeletionPlan) -> Result<bool, CredentialError>;
+}
+
+pub struct CancelCredentialDeletion;
+
+impl CredentialDeletionConfirmation for CancelCredentialDeletion {
+    fn confirm_deletion(&self, _plan: &CredentialDeletionPlan) -> Result<bool, CredentialError> {
+        Ok(false)
+    }
+}
+
+pub fn delete_credential_with_confirmation(
+    store: &impl CredentialDeletionStore,
+    confirmation: &(impl CredentialDeletionConfirmation + ?Sized),
+    plan: CredentialDeletionPlan,
+) -> Result<CredentialDeletionOutcome, CredentialError> {
+    validate_deletion_plan(&plan)?;
+    if !confirmation.confirm_deletion(&plan)? {
+        return Ok(CredentialDeletionOutcome::Cancelled);
+    }
+    let account = CredentialAccount::new(&plan.reference)?;
+    store.delete_credential(&account)?;
+    Ok(CredentialDeletionOutcome::Deleted)
+}
+
+fn validate_deletion_plan(plan: &CredentialDeletionPlan) -> Result<(), CredentialError> {
+    validate_credential_reference(&plan.reference)?;
+    if plan.consumers.is_empty() || plan.consumers.len() > 256 {
+        return Err(CredentialError::invalid_deletion_plan());
+    }
+    let mut owners = HashSet::new();
+    for consumer in &plan.consumers {
+        if consumer.owner_id.is_empty()
+            || consumer.owner_id.len() > 256
+            || !consumer.owner_id.is_ascii()
+            || consumer
+                .owner_id
+                .bytes()
+                .any(|byte| byte.is_ascii_control())
+            || !owners.insert(&consumer.owner_id)
+            || !matches!(consumer.kind.as_str(), "model-route" | "plugin")
+        {
+            return Err(CredentialError::invalid_deletion_plan());
+        }
+        match consumer.display.key.as_str() {
+            "openloop.credentials.consumer.model-route"
+                if consumer.display.values.len() == 1
+                    && consumer.display.values.contains_key("routeId") => {}
+            "openloop.credentials.consumer.web-search-deepseek"
+                if consumer.display.values.is_empty() => {}
+            "openloop.credentials.consumer.mcp-server"
+                if consumer.display.values.len() == 1
+                    && consumer.display.values.contains_key("serverName") => {}
+            _ => return Err(CredentialError::invalid_deletion_plan()),
+        }
+        if consumer.display.values.values().any(|value| {
+            value.is_empty() || value.len() > 256 || value.chars().any(char::is_control)
+        }) {
+            return Err(CredentialError::invalid_deletion_plan());
+        }
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CredentialReferencePayload {
+    #[serde(rename = "ref")]
+    reference: String,
+}
+
+pub fn credential_bridge_dispatch_tables(
+    store: KeychainStore,
+    confirmation: Arc<dyn CredentialDeletionConfirmation>,
+) -> Result<BridgeDispatchTables, CredentialError> {
+    let mut browser_safe = HashMap::new();
+    let describe: BridgeHandler = Arc::new(move |payload, _cancellation| {
+        let request: CredentialReferencePayload = serde_json::from_value(payload)
+            .map_err(|_| crate::bridge::server::BridgeHandlerError::invalid_request())?;
+        let account = CredentialAccount::new(&request.reference)
+            .map_err(|_| crate::bridge::server::BridgeHandlerError::invalid_request())?;
+        let configured = store
+            .status(&account)
+            .map_err(|_| crate::bridge::server::BridgeHandlerError::credential_failure())?;
+        Ok(if configured {
+            json!({ "configured": true, "source": "keychain", "writable": true })
+        } else {
+            json!({ "configured": false, "writable": true })
+        })
+    });
+    browser_safe.insert("describeCredential".to_owned(), describe);
+    let replacement: BridgeHandler = Arc::new(|payload, _cancellation| {
+        let request: CredentialReferencePayload = serde_json::from_value(payload)
+            .map_err(|_| crate::bridge::server::BridgeHandlerError::invalid_request())?;
+        CredentialAccount::new(&request.reference)
+            .map_err(|_| crate::bridge::server::BridgeHandlerError::invalid_request())?;
+        Ok(Value::String("cancelled".to_owned()))
+    });
+    browser_safe.insert("openCredentialReplacement".to_owned(), replacement);
+    let deletion_store = store;
+    let deletion_confirmation = confirmation;
+    let delete: BridgeHandler = Arc::new(move |payload, _cancellation| {
+        let plan: CredentialDeletionPlan = serde_json::from_value(payload)
+            .map_err(|_| crate::bridge::server::BridgeHandlerError::invalid_request())?;
+        validate_deletion_plan(&plan)
+            .map_err(|_| crate::bridge::server::BridgeHandlerError::invalid_request())?;
+        let outcome = delete_credential_with_confirmation(
+            &deletion_store,
+            deletion_confirmation.as_ref(),
+            plan,
+        )
+        .map_err(|_| crate::bridge::server::BridgeHandlerError::credential_failure())?;
+        Ok(Value::String(
+            match outcome {
+                CredentialDeletionOutcome::Deleted => "deleted",
+                CredentialDeletionOutcome::Cancelled => "cancelled",
+            }
+            .to_owned(),
+        ))
+    });
+    browser_safe.insert("unsetCredential".to_owned(), delete);
+
+    let mut host_only = HashMap::new();
+    let resolve_store = store;
+    let resolve: BridgeHandler = Arc::new(move |payload, _cancellation| {
+        let request: CredentialReferencePayload = serde_json::from_value(payload)
+            .map_err(|_| crate::bridge::server::BridgeHandlerError::invalid_request())?;
+        let account = CredentialAccount::new(&request.reference)
+            .map_err(|_| crate::bridge::server::BridgeHandlerError::invalid_request())?;
+        let secret = resolve_store
+            .resolve_optional(&account)
+            .map_err(|_| crate::bridge::server::BridgeHandlerError::credential_failure())?;
+        Ok(secret
+            .map(|bytes| Value::Array(bytes.iter().map(|byte| Value::from(*byte)).collect()))
+            .unwrap_or(Value::Null))
+    });
+    host_only.insert("resolveCredential".to_owned(), resolve);
+    BridgeDispatchTables::unavailable_with(browser_safe, host_only)
+        .map_err(|_| CredentialError::bridge_failed())
 }
 
 pub fn validate_secret(secret: &[u8]) -> Result<(), CredentialError> {
@@ -226,7 +399,7 @@ pub fn run_keychain_spike(
     action: KeychainSpikeAction,
 ) -> Result<KeychainSpikeReport, CredentialError> {
     let store = KeychainStore::new(ReleaseChannel::Test);
-    let account = CredentialAccount::new(SPIKE_PROVIDER, SPIKE_REFERENCE)?;
+    let account = CredentialAccount::new(SPIKE_REFERENCE)?;
     match action {
         KeychainSpikeAction::Set => {
             store.set(&account, SPIKE_SECRET)?;
@@ -259,6 +432,7 @@ pub fn run_keychain_spike(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialError {
     message: String,
+    status: Option<i32>,
 }
 
 impl CredentialError {
@@ -291,12 +465,24 @@ impl CredentialError {
     }
 
     fn keychain(operation: &str, code: i32) -> Self {
-        Self::new(format!("Keychain {operation} failed with status {code}"))
+        Self {
+            message: format!("Keychain {operation} failed with status {code}"),
+            status: Some(code),
+        }
+    }
+
+    fn invalid_deletion_plan() -> Self {
+        Self::new("credential deletion plan is invalid")
+    }
+
+    fn bridge_failed() -> Self {
+        Self::new("credential bridge dispatch setup failed")
     }
 
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            status: None,
         }
     }
 }

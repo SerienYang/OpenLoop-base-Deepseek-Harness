@@ -181,6 +181,41 @@ describe('apply (plugin lifecycle)', () => {
     expect(ctx.tools.get('remote')).toBeUndefined()
   })
 
+  it('registers only explicit HTTP credential references as MCP consumers', async () => {
+    const disposeConsumer = vi.fn()
+    const registerMcpServer = vi.fn(() => disposeConsumer)
+    ctx.provide('credentialConsumers', { registerMcpServer } as never)
+
+    const fiber = ctx.plugin({ name: 'mcp-client-credential-owner', inject, apply }, {
+      transport: 'streamable-http',
+      serverName: 'github',
+      url: 'https://mcp.example.test',
+      headers: { 'x-tenant': 'literal' },
+      credentialHeaders: {
+        Authorization: { ref: 'GITHUB_MCP_TOKEN', prefix: 'Bearer ' },
+      },
+      toolCallTimeoutMs: 60_000,
+      failOnStartupError: false,
+    })
+    await fiber
+
+    expect(registerMcpServer).toHaveBeenCalledWith('github', 'GITHUB_MCP_TOKEN')
+    await fiber.dispose()
+    expect(disposeConsumer).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps stdio env values literal and out of the credential registry', async () => {
+    const registerMcpServer = vi.fn()
+    ctx.provide('credentialConsumers', { registerMcpServer } as never)
+
+    await apply(ctx, {
+      ...stdioConfig,
+      env: { API_TOKEN: 'literal-child-value' },
+    })
+
+    expect(registerMcpServer).not.toHaveBeenCalled()
+  })
+
   it('keeps the Cordis plugin loading until initial discovery publishes its tools', async () => {
     const connection: PromiseWithResolvers<void> = Promise.withResolvers()
     mockConnect.mockImplementation(async () => {

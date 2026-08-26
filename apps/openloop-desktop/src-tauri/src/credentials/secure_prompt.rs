@@ -134,10 +134,9 @@ pub fn credentials_navigation_allowed(url: &Url) -> bool {
 
 pub fn open_secure_prompt(
     app: &AppHandle,
-    provider_id: &str,
     credential_reference: &str,
 ) -> Result<(), CredentialError> {
-    let account = CredentialAccount::new(provider_id, credential_reference)?;
+    let account = CredentialAccount::new(credential_reference)?;
     let state = app
         .try_state::<SecurePromptState>()
         .ok_or_else(CredentialError::prompt_unavailable)?;

@@ -4,19 +4,12 @@
     "rootDir": "src",
     "outDir": "lib/types"
   },
-  "include": ["src"],
+  "include": [
+    "src"
+  ],
   "references": [
     {
-      "path": "../../../vendor/cosmokit"
-    },
-    {
       "path": "../../../vendor/cordis"
-    },
-    {
-      "path": "../../../vendor/schemastery"
-    },
-    {
-      "path": "../../llm/llm"
     },
     {
       "path": "../../credentials/credentials"
@@ -25,16 +18,10 @@
       "path": "../../util/launch-environment"
     },
     {
-      "path": "../../core/tools"
-    },
-    {
-      "path": "../../subprocess/subprocess"
-    },
-    {
       "path": "../../runtime-diagnostics/invariants"
     },
     {
-      "path": "../../util/timeout"
+      "path": "../desktop-bridge-host"
     }
   ]
 }

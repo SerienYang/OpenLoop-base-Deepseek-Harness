@@ -162,6 +162,27 @@ describe('OpenLoop profile', () => {
       .toEqual(['browserApiPolicy'])
   })
 
+  it('replaces only the Openloop credential provider and wires built-in consumers to its registry', () => {
+    const entries = openloopEntries()
+
+    expect(entries.find(entry => entry.id === 'credentials')).toMatchObject({
+      id: 'credentials',
+      name: '@deepseek-ai/dsh-credentials-local',
+      disabled: true,
+    })
+    expect(entries.find(entry => entry.id === 'credentials-keychain')).toEqual({
+      id: 'credentials-keychain',
+      name: '@openloop/credentials-keychain',
+      inject: ['desktopBridge'],
+    })
+    expect(entries.find(entry => entry.id === 'llm-deepseek')?.inject)
+      .toContain('credentialConsumers')
+    expect(entries.find(entry => entry.id === 'llm-pi-ai')?.inject)
+      .toContain('credentialConsumers')
+    expect(entries.find(entry => entry.id === 'web-search-deepseek')?.inject)
+      .toContain('credentialConsumers')
+  })
+
   it('disables Client owners whose calls are intentionally absent from the first policy', () => {
     const entries = openloopEntries()
     const disabled = [
@@ -237,6 +258,8 @@ describe('OpenLoop profile', () => {
     expect(entries.find(entry => entry.id === 'desktop-bridge-host')).toBeUndefined()
     expect(entries.find(entry => entry.id === 'connection')?.inject).toEqual(['webRuntime'])
     expect(entries.find(entry => entry.id === 'typert-gateway')?.inject).toBeUndefined()
+    expect(entries.find(entry => entry.id === 'credentials')?.name)
+      .toBe('@deepseek-ai/dsh-credentials-local')
   })
 
   it('initializes the OpenLoop profile once with the official bundle order', () => {

@@ -47,6 +47,16 @@ type BrowserSafeBridgeMethod = typeof BROWSER_SAFE_METHODS[number]
 type HostOnlyBridgeMethod = typeof HOST_ONLY_METHODS[number]
 type BridgeHandler = (payload: unknown, signal: AbortSignal) => unknown
 const remoteBridgeClients = new WeakMap<object, DesktopBridgeClient>()
+const remoteContexts = new WeakMap<object, Context>()
+
+interface CredentialBrowserOperations {
+  describeCredential(reference: string, signal?: AbortSignal): Promise<CredentialStatus>
+  openCredentialReplacement(
+    reference: string,
+    signal?: AbortSignal,
+  ): Promise<'saved' | 'cancelled'>
+  deleteCredential(reference: string, signal?: AbortSignal): Promise<'deleted' | 'cancelled'>
+}
 
 function remoteBridgeClient(service: object): DesktopBridgeClient {
   const original = Reflect.get(service, symbols.original) as unknown
@@ -54,6 +64,18 @@ function remoteBridgeClient(service: object): DesktopBridgeClient {
   const client = remoteBridgeClients.get(owner)
   if (client === undefined) throw new Error('desktop bridge Remote client is unavailable')
   return client
+}
+
+function credentialOperations(service: object): CredentialBrowserOperations {
+  const original = Reflect.get(service, symbols.original) as unknown
+  const owner = typeof original === 'object' && original !== null ? original : service
+  const operations = remoteContexts.get(owner)?.get('openloopCredentialOperations') as
+    | CredentialBrowserOperations
+    | undefined
+  if (operations === undefined) {
+    throw new Error('Openloop credential operations are unavailable')
+  }
+  return operations
 }
 
 export interface BridgeDispatchTables {
@@ -91,6 +113,7 @@ export class OpenloopDesktopRemoteService extends TypertRemoteService {
   constructor(ctx: Context, client: DesktopBridgeClient) {
     super(ctx, 'openloopDesktop')
     remoteBridgeClients.set(this, client)
+    remoteContexts.set(this, ctx)
   }
 
   @Remote
@@ -118,7 +141,7 @@ export class OpenloopDesktopRemoteService extends TypertRemoteService {
 
   @Remote
   describeCredential(ref: string, signal: AbortSignal): Promise<CredentialStatus> {
-    return remoteBridgeClient(this).call<CredentialStatus>('describeCredential', { ref }, signal)
+    return credentialOperations(this).describeCredential(ref, signal)
   }
 
   @Remote
@@ -126,12 +149,12 @@ export class OpenloopDesktopRemoteService extends TypertRemoteService {
     ref: string,
     signal: AbortSignal,
   ): Promise<'saved' | 'cancelled'> {
-    return remoteBridgeClient(this).call('openCredentialReplacement', { ref }, signal)
+    return credentialOperations(this).openCredentialReplacement(ref, signal)
   }
 
   @Remote
   unsetCredential(ref: string, signal: AbortSignal): Promise<'deleted' | 'cancelled'> {
-    return remoteBridgeClient(this).call('unsetCredential', { ref }, signal)
+    return credentialOperations(this).deleteCredential(ref, signal)
   }
 
   @Remote
@@ -187,6 +210,52 @@ export class OpenloopDesktopHostClient {
       signal,
     )
     return result ?? undefined
+  }
+
+  /**
+   * Read value-free native Keychain status for one reference.
+   * @param ref - Credential reference.
+   * @param signal - Optional request cancellation signal.
+   * @returns Native Keychain status.
+   */
+  describeCredential(ref: string, signal?: AbortSignal): Promise<CredentialStatus> {
+    return this.#client.call<CredentialStatus>('describeCredential', { ref }, signal)
+  }
+
+  /**
+   * Request the native credential replacement flow.
+   * @param ref - Credential reference.
+   * @param signal - Optional request cancellation signal.
+   * @returns Native replacement outcome.
+   */
+  openCredentialReplacement(
+    ref: string,
+    signal?: AbortSignal,
+  ): Promise<'saved' | 'cancelled'> {
+    return this.#client.call('openCredentialReplacement', { ref }, signal)
+  }
+
+  /**
+   * Forward a Host-derived deletion plan to native confirmation.
+   * @param plan - Registry-derived reference and consumer labels.
+   * @param signal - Optional request cancellation signal.
+   * @returns Native confirmation outcome.
+   */
+  deleteCredentialWithConfirmation(
+    plan: {
+      readonly reference: string
+      readonly consumers: readonly {
+        readonly ownerId: string
+        readonly kind: 'model-route' | 'plugin'
+        readonly display: {
+          readonly key: string
+          readonly values: Readonly<Record<string, string>>
+        }
+      }[]
+    },
+    signal?: AbortSignal,
+  ): Promise<'deleted' | 'cancelled'> {
+    return this.#client.call('unsetCredential', plan, signal)
   }
 
   beginWorkspaceAuthorization(signal?: AbortSignal): Promise<PendingWorkspaceGrant> {

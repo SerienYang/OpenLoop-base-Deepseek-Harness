@@ -26,7 +26,11 @@ MCP 客户端桥接插件：连接外部 [Model Context Protocol](https://modelc
     transport: streamable-http
     url: http://localhost:3000/mcp
     headers:
-      Authorization: !!js '`Bearer ${process.env.MCP_TOKEN}`'
+      x-tenant: example
+    credentialHeaders:
+      Authorization:
+        ref: MCP_TOKEN
+        prefix: 'Bearer '
 ```
 
 模型会看到 `mcp__github__create_issue`、`mcp__web__search` 等工具，这与 Claude Code 和 Codex 使用的服务器限定形状相同。HMR（热模块替换）支持热替换：编辑配置项会触发断开 + 重新连接，无需重启进程；`serverName` 不变时会生成完全相同的工具名称。
@@ -43,6 +47,7 @@ MCP 客户端桥接插件：连接外部 [Model Context Protocol](https://modelc
 | `cwd` | stdio | 否 | 子进程工作目录 |
 | `url` | http | 是 | MCP 服务器 URL |
 | `headers` | http | 否 | 额外标头（例如认证 token） |
+| `credentialHeaders` | http | 否 | 将 header 名映射到 `{ ref, prefix? }`；每次请求都重新解析凭据 |
 | `toolCallTimeoutMs` | 两者 | 否 | 每次 `callTool` 调用的超时（默认 60000） |
 | `failOnStartupError` | 两者 | 否 | 初始连接或工具同步失败时拒绝插件激活（默认 `false`） |
 | `reconnect.enabled` | 两者 | 否 | 连接丢失后自动重新连接（默认 `true`） |
@@ -64,6 +69,8 @@ MCP 客户端桥接插件：连接外部 [Model Context Protocol](https://modelc
 - 连接时：插件激活会等待 `listTools()`，并在组合开始首个轮次前通过 `ctx.tools.register()` 以公开名称注册每个工具。初始连接、发现或注册失败始终会记录日志；`failOnStartupError` 为 true 时拒绝激活，否则插件仍会激活但不注册工具。
 - 监听 `notifications/tools/list_changed` → 重新同步；获取阶段失败时保留上一世代的注册，注册冲突则会回滚本次尝试的世代，并且不保留该服务器的任何工具。
 - 工具执行：`client.callTool({ name: rawName, arguments }, { signal })`，支持超时 + 中止；公开名称绝不会发给服务器。
+- Streamable HTTP 凭据 header 会在每次请求时通过 `ctx.credentials` 解析；没有该服务时读取启动环境。网络发送前会校验 header 名称、前缀和解析值；凭据 header 不能与字面量 header 或 MCP 协议保留 header 冲突。同一服务器可在多个 header 中使用同一个 credential reference。
+- Stdio `env` 项保持字面量，不会被解释为 credential reference。
 - 规范成功值是 `{ content: JsonValue[], structuredContent? }`；完整的 JSON MCP 块会保留给编程调用方。受支持且已声明的 `outputSchema` 会验证 `structuredContent`；不受支持的 schema 词汇会回退为不受约束的 `JsonValue`。
 - Native／模型渲染会保留 MCP 块顺序。文本类连续块以换行连接；资源链接以文本保留名称和 URI；只有挂载 `ctx.attachments` 且确切调用模型路由明确声明支持图片输入时，受支持的图片才会成为持久核心图片块。整个图片批次会先完成解码与准入，再保存任一成员。格式错误或被拒绝的图片批次、音频、嵌入资源和不受支持的块会成为明确诊断文本，而不会消失。
 - 断开／崩溃时：supervisor 以指数退避（`reconnect.initialDelayMs` 逐次翻倍，上限 `reconnect.maxDelayMs`）重启原始服务器配置，成功后重新执行发现——恢复的世代会替换前一个，因此工具既不会重复也不会泄漏。中断期间最后一个正常世代保持注册；针对它的调用在恢复前会失败。
