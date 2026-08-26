@@ -246,19 +246,28 @@ pub fn verify_request<'a>(
 }
 
 pub fn sign_response(
-    response: BridgeResponse,
+    mut response: BridgeResponse,
     nonce: [u8; BRIDGE_NONCE_BYTES],
     secret: &[u8],
 ) -> io::Result<AuthenticatedBridgeResponse> {
-    validate_response(&response)?;
-    require_secret(secret)?;
-    let canonical = canonical_response_bytes(&response, &nonce)?;
-    let mac = hmac_sha256(secret, &canonical)?;
-    Ok(AuthenticatedBridgeResponse {
-        response,
-        nonce: encode_hex(&nonce),
-        mac: encode_hex(&mac),
-    })
+    let authentication = (|| {
+        validate_response(&response)?;
+        require_secret(secret)?;
+        let canonical = canonical_response_bytes(&response, &nonce)?;
+        let mac = hmac_sha256(secret, &canonical)?;
+        Ok((encode_hex(&nonce), encode_hex(&mac)))
+    })();
+    match authentication {
+        Ok((nonce, mac)) => Ok(AuthenticatedBridgeResponse {
+            response,
+            nonce,
+            mac,
+        }),
+        Err(error) => {
+            response.zeroize();
+            Err(error)
+        }
+    }
 }
 
 pub fn encode_frame<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {

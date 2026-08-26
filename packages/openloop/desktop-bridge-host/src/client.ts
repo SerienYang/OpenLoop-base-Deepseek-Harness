@@ -100,6 +100,7 @@ export class DesktopBridgeClient {
       }
       throw error
     } finally {
+      frame.fill(0)
       responseFrame?.fill(0)
       signal?.removeEventListener('abort', onAbort)
     }
@@ -124,14 +125,16 @@ export class DesktopBridgeClient {
     }
     const nonce = this.#nonce()
     const frame = encodeBridgeFrame(authenticateBridgeRequest(cancellation, nonce, state.bytes))
-    const responseFrame = await this.#transport.exchange(frame)
+    let responseFrame: Uint8Array | undefined
     try {
+      responseFrame = await this.#transport.exchange(frame)
       verifyBridgeResponse(
         decodeBridgeFrame(responseFrame),
         { requestId: cancellation.requestId, nonce, secret: state.bytes },
       )
     } finally {
-      responseFrame.fill(0)
+      frame.fill(0)
+      responseFrame?.fill(0)
     }
   }
 
@@ -181,6 +184,8 @@ class UnixBridgeTransport implements BridgeWireTransport {
         this.#pending.delete(finish)
         socket.destroy()
         socket.removeAllListeners()
+        for (const chunk of chunks) chunk.fill(0)
+        chunks.length = 0
         if (error === undefined && value !== undefined) resolve(value)
         else reject(error instanceof Error ? error : new Error('desktop bridge transport failed'))
       }
@@ -197,21 +202,31 @@ class UnixBridgeTransport implements BridgeWireTransport {
         socket.end(frame)
       })
       socket.on('data', (chunk: Buffer) => {
-        if (settled) return
+        if (settled) {
+          chunk.fill(0)
+          return
+        }
+        chunks.push(chunk)
         received += chunk.length
         if (received > MAX_BRIDGE_FRAME_BYTES + 4) {
           finish(new Error('bridge response frame is oversized'))
           return
         }
-        chunks.push(chunk)
         if (expected === undefined && received >= 4) {
           const prefix = Buffer.concat(chunks, Math.min(received, 4))
-          const bodyLength = prefix.readUInt32BE(0)
-          if (bodyLength === 0 || bodyLength > MAX_BRIDGE_FRAME_BYTES) {
-            finish(new Error('bridge response frame is oversized or empty'))
+          try {
+            const bodyLength = prefix.readUInt32BE(0)
+            if (bodyLength === 0 || bodyLength > MAX_BRIDGE_FRAME_BYTES) {
+              finish(new Error('bridge response frame is oversized or empty'))
+              return
+            }
+            expected = bodyLength + 4
+          } catch (error) {
+            finish(error)
             return
+          } finally {
+            prefix.fill(0)
           }
-          expected = bodyLength + 4
         }
         if (expected !== undefined && received > expected) {
           finish(new Error('bridge response has trailing bytes'))
@@ -222,7 +237,11 @@ class UnixBridgeTransport implements BridgeWireTransport {
           finish(new Error('bridge response frame is truncated'))
           return
         }
-        finish(undefined, Buffer.concat(chunks, received))
+        try {
+          finish(undefined, Buffer.concat(chunks, received))
+        } catch (error) {
+          finish(error)
+        }
       })
       socket.once('error', finish)
       socket.once('close', () => {

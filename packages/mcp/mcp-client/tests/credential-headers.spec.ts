@@ -161,12 +161,16 @@ describe('MCP credential-backed HTTP headers', () => {
     expect(() => {
       validateCredentialHeaders({}, { 'content-type': { ref: 'MCP_API_KEY' } })
     }).toThrow(/reserved MCP header/)
-    expect(() => {
+    let invalidReferenceError: unknown
+    try {
       validateCredentialHeaders({}, { Authorization: { ref: 'not-a-reference' } })
-    }).toThrow(/invalid credential reference/)
-    expect(() => {
-      validateCredentialHeaders({}, { Authorization: { ref: 'not-a-reference' } })
-    }).not.toThrow(/not-a-reference/)
+    } catch (error) {
+      invalidReferenceError = error
+    }
+    expect(invalidReferenceError).toBeInstanceOf(TypeError)
+    expect((invalidReferenceError as Error).message)
+      .toBe('mcp-client: invalid credential reference')
+    expect(JSON.stringify(invalidReferenceError)).not.toContain('not-a-reference')
   })
 
   it('fails closed for an absent or unsafe credential value without dispatching', async () => {

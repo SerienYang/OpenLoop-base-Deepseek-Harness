@@ -90,7 +90,7 @@ export interface DeepSeekSearchProviderOptions {
   apiKey?: string
   /** Resolve the current DeepSeek API key for one search operation. */
   resolveApiKey?: () => Promise<string | undefined>
-  /** Credential reference named by missing-credential diagnostics. */
+  /** Credential reference resolved when no literal key is configured. */
   apiKeyEnv?: CredentialRef
   /** Endpoint base; `/messages` is appended. */
   baseURL: string
@@ -284,16 +284,14 @@ export class DeepSeekSearchProvider implements WebSearchProvider {
     } catch (error: unknown) {
       if (signal?.aborted === true || isAbortError(error)) throw searchAborted(signal, error)
       throw new WebError(
-        `DeepSeek search credential resolution failed: ${String(error)}`,
+        'DeepSeek search credential resolution failed',
         'WEB_PROVIDER_ERROR',
-        { cause: error },
       )
     }
     if (resolved !== undefined && resolved.length > 0) return resolved
-    const ref = options.apiKeyEnv ?? 'DEEPSEEK_API_KEY'
     throw new WebError(
-      `DeepSeek search has no API key for "${ref}"; store it through the credentials service`
-      + ' (the web Models page writes it), export it in the launching environment, or set a literal'
+      'DeepSeek search has no API key; store it through the credentials service'
+      + ' (the web Models page writes it), configure it in the launching environment, or set a literal'
       + ' "apiKey" in the web-search-deepseek config',
       'WEB_PROVIDER_CREDENTIAL_MISSING',
     )
@@ -318,7 +316,7 @@ function abortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
       },
       (error: unknown) => {
         signal.removeEventListener('abort', onAbort)
-        reject(new Error(String(error).replace(/^Error: /u, ''), { cause: error }))
+        reject(error instanceof Error ? error : new Error('credential resolver failed'))
       },
     )
   })

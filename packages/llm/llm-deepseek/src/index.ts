@@ -15,7 +15,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { assertUsableApiKey, LlmError, resolveRetryPolicy, RetryPolicySchema } from '@deepseek-ai/dsh-llm'
 import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { credentialRef, type ResolvedCredential } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf, type LaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
@@ -253,19 +253,30 @@ export function apply(ctx: Context, config: Config): void {
     const ref = connection.apiKeyEnv
     const credentials = ctx.get('credentials')
     if (credentials !== undefined) {
-      const hit = await credentials.resolve(ref)
-      if (hit !== undefined) return assertUsableApiKey(hit.value, 'llm-deepseek', ref)
+      let hit: ResolvedCredential | undefined
+      try {
+        hit = await credentials.resolve(ref)
+      } catch {
+        throw new LlmError(
+          `llm-deepseek: credential resolution failed for provider route "${PROVIDER}"`,
+          'CREDENTIAL_RESOLUTION_FAILED',
+        )
+      }
+      if (hit !== undefined) {
+        return assertUsableApiKey(hit.value, 'llm-deepseek', 'the configured credential')
+      }
     } else {
       // Without the seam there is no managed store to rank against, so the
       // environment is the whole credential plane.
       const ambient = launchEnvironmentOf(ctx).get(ref)
       if (ambient !== undefined && ambient.value.length > 0) {
-        return assertUsableApiKey(ambient.value, 'llm-deepseek', ref)
+        return assertUsableApiKey(ambient.value, 'llm-deepseek', 'the configured credential')
       }
     }
     throw new LlmError(
-      `llm-deepseek: no API key for provider route "${PROVIDER}"; store ${ref} through the credentials`
-      + ` service (the web Models page writes it), or export ${ref} in the launching environment`,
+      `llm-deepseek: no API key is available for provider route "${PROVIDER}";`
+      + ' store it through the credentials service (the web Models page writes it)'
+      + ' or configure it in the launching environment',
       'MISSING_CREDENTIAL',
     )
   }

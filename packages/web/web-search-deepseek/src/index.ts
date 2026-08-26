@@ -136,11 +136,16 @@ export function apply(ctx: Context, config: Config): void {
     let consumerReference: ReturnType<typeof credentialRef> | undefined
     let removeConsumer: (() => void) | undefined
     const synchronize = (): void => {
-      const reference = credentialRef(current().apiKeyEnv ?? DEFAULT_API_KEY_ENV)
+      const source = current()
+      const reference = source.apiKey !== undefined && source.apiKey.length > 0
+        ? undefined
+        : credentialRef(source.apiKeyEnv ?? DEFAULT_API_KEY_ENV)
       if (reference === consumerReference) return
       removeConsumer?.()
       removeConsumer = undefined
-      removeConsumer = consumers.registerDeepSeekWebSearch(reference)
+      if (reference !== undefined) {
+        removeConsumer = consumers.registerDeepSeekWebSearch(reference)
+      }
       consumerReference = reference
     }
     ensureCredentialConsumer = synchronize
@@ -154,9 +159,9 @@ export function apply(ctx: Context, config: Config): void {
     setSource: (source) => {
       current = source
     },
-    // The registration carries no resolved value: the provider projects the
-    // section per search, so a committed change needs no re-registration.
-    onChange: ensureCredentialConsumer,
+    // The provider projects the section per search. Registry ownership still
+    // follows the winning credential source as settings switch literal/ref.
+    onChange: () => { ensureCredentialConsumer() },
   })
   ensureCredentialConsumer()
   ctx.web.registerSearchProvider(new DeepSeekSearchProvider(() => resolveOptions(ctx, current())))

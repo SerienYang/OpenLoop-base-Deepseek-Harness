@@ -68,7 +68,7 @@ pub struct CancellationToken {
 }
 
 impl CancellationToken {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: Arc::new((Mutex::new(false), Condvar::new())),
         }
@@ -88,6 +88,15 @@ impl CancellationToken {
             .lock()
             .map(|cancelled| *cancelled)
             .unwrap_or(true)
+    }
+
+    /// Run a commit only while cancellation is excluded from the same state lock.
+    pub fn commit_if_active<T>(&self, commit: impl FnOnce() -> T) -> Option<T> {
+        let cancelled = self.state.0.lock().ok()?;
+        if *cancelled {
+            return None;
+        }
+        Some(commit())
     }
 
     pub fn wait(&self) {
@@ -650,10 +659,17 @@ fn serve_connection(
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let envelope: AuthenticatedBridgeRequest = read_json_frame(&mut stream)?;
     let mut response = dispatcher.dispatch_signed(peer, envelope)?;
-    let write_result = write_frame(&mut stream, &response);
-    response.zeroize();
-    write_result?;
+    write_and_scrub_response(&mut stream, &mut response)?;
     stream.flush()
+}
+
+fn write_and_scrub_response<W: Write>(
+    writer: &mut W,
+    response: &mut AuthenticatedBridgeResponse,
+) -> io::Result<()> {
+    let write_result = write_frame(writer, response);
+    response.zeroize();
+    write_result
 }
 
 #[derive(Clone)]
@@ -747,7 +763,7 @@ fn permission_denied(message: impl Into<String>) -> io::Error {
 mod tests {
     use std::{
         fs,
-        io::Read,
+        io::{self, Read, Write},
         os::unix::fs::PermissionsExt,
         os::unix::net::UnixStream,
         path::Path,
@@ -759,9 +775,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        capture_process_identity, AuthenticatedBridgeDispatcher, BridgeDispatchTables,
-        BridgeListener, ProcessIdentity,
+        capture_process_identity, write_and_scrub_response, AuthenticatedBridgeDispatcher,
+        BridgeDispatchTables, BridgeListener, CancellationToken, ProcessIdentity,
     };
+    use crate::bridge::protocol::{sign_response, BridgeResponse};
 
     fn current_process() -> (ProcessIdentity, std::path::PathBuf) {
         let executable = std::env::current_exe().expect("current test executable");
@@ -802,6 +819,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cancellation_waits_until_an_active_commit_finishes() {
+        let cancellation = CancellationToken::new();
+        let commit_cancellation = cancellation.clone();
+        let (entered_commit, commit_entered) = std::sync::mpsc::channel();
+        let (release_commit, commit_released) = std::sync::mpsc::channel();
+        let commit = thread::spawn(move || {
+            commit_cancellation.commit_if_active(|| {
+                entered_commit.send(()).expect("report commit entry");
+                commit_released.recv().expect("release commit");
+                7
+            })
+        });
+        commit_entered.recv().expect("commit entered");
+        let cancel_cancellation = cancellation.clone();
+        let (cancelled, cancel_returned) = std::sync::mpsc::channel();
+        let cancel = thread::spawn(move || {
+            cancel_cancellation.cancel();
+            cancelled.send(()).expect("report cancellation return");
+        });
+
+        assert!(
+            cancel_returned
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "cancellation interleaved with an active destructive commit"
+        );
+        release_commit.send(()).expect("finish commit");
+
+        assert_eq!(commit.join().expect("commit thread"), Some(7));
+        cancel.join().expect("cancellation thread");
+        assert!(cancellation.is_cancelled());
+    }
+
     fn assert_closed_promptly(mut stream: UnixStream) {
         stream.set_nonblocking(true).expect("nonblocking client");
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -828,6 +879,66 @@ mod tests {
                 result => panic!("rejected bridge socket remained open: {result:?}"),
             }
         }
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "test write failure",
+            ))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn response_write_scrubs_success_values_before_returning() {
+        let mut response = sign_response(
+            BridgeResponse::success(
+                "request",
+                serde_json::json!({
+                    "credential": "response-secret",
+                }),
+            ),
+            [3; 32],
+            &[7; 32],
+        )
+        .expect("signed response");
+        let mut writer = Vec::new();
+
+        write_and_scrub_response(&mut writer, &mut response).expect("response write");
+
+        assert!(!writer.is_empty());
+        assert_eq!(response.response.version, 0);
+        assert!(response.response.request_id.is_empty());
+        assert!(response.response.result.is_none());
+        assert!(response.nonce.is_empty());
+        assert!(response.mac.is_empty());
+    }
+
+    #[test]
+    fn response_write_scrubs_error_fields_when_writing_fails() {
+        let mut response = sign_response(
+            BridgeResponse::failure("request", "credential_failure", "sensitive error"),
+            [4; 32],
+            &[7; 32],
+        )
+        .expect("signed response");
+
+        let error = write_and_scrub_response(&mut FailingWriter, &mut response)
+            .expect_err("writer must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(response.response.version, 0);
+        assert!(response.response.request_id.is_empty());
+        assert!(response.response.error.is_none());
+        assert!(response.nonce.is_empty());
+        assert!(response.mac.is_empty());
     }
 
     #[test]

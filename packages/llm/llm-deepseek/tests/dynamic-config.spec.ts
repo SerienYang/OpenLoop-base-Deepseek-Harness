@@ -111,6 +111,7 @@ describe('request-level dynamic configuration', () => {
     expect(result.finish.failure.message).not.toContain(secret)
     expect(result.finish.failure.message).not.toContain('supersecret')
     expect(result.finish.failure.message).not.toContain('ByteString')
+    expect(result.finish.failure.message).not.toContain(String(KEY_REF))
   })
 
   it('advertises a live settings catalog without re-registration', async () => {

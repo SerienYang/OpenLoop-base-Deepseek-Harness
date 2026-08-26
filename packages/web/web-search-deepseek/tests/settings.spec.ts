@@ -6,6 +6,7 @@ import type { Fiber } from '@deepseek-ai/cordis'
 import { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import WebRuntime from '@deepseek-ai/dsh-web'
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import * as deepseekPlugin from '@deepseek-ai/dsh-web-search-deepseek'
 import { WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE } from '@deepseek-ai/dsh-web-search-deepseek'
 
@@ -75,6 +76,60 @@ async function searchOnce(ctx: Context): Promise<string> {
 }
 
 describe('web-search-deepseek settings section', () => {
+  it('registers only the credential reference that actually wins after settings changes', async () => {
+    const firstDispose = vi.fn()
+    const secondDispose = vi.fn()
+    const thirdDispose = vi.fn()
+    const registerDeepSeekWebSearch = vi.fn()
+      .mockReturnValueOnce(firstDispose)
+      .mockReturnValueOnce(secondDispose)
+      .mockReturnValueOnce(thirdDispose)
+    const ctx = new Context()
+    await ctx.plugin(WebRuntime, {})
+    await ctx.plugin(MemorySettings)
+    ctx.provide('credentialConsumers', { registerDeepSeekWebSearch } as never)
+    const pluginFiber = ctx.plugin(deepseekPlugin, {
+      apiKeyEnv: 'ACTIVE_REFERENCE',
+    })
+    await pluginFiber.await()
+
+    expect(registerDeepSeekWebSearch).toHaveBeenCalledTimes(1)
+    expect(registerDeepSeekWebSearch)
+      .toHaveBeenLastCalledWith(credentialRef('ACTIVE_REFERENCE'))
+
+    await ctx.settings.update(WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, {
+      apiKey: 'literal-first',
+      apiKeyEnv: 'IGNORED_REFERENCE',
+    })
+    await vi.waitFor(() => {
+      expect(firstDispose).toHaveBeenCalledTimes(1)
+    })
+    expect(registerDeepSeekWebSearch).toHaveBeenCalledTimes(1)
+
+    await ctx.settings.replace(WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, {
+      apiKeyEnv: 'ACTIVE_REFERENCE',
+    })
+    await vi.waitFor(() => {
+      expect(registerDeepSeekWebSearch).toHaveBeenCalledTimes(2)
+    })
+    expect(registerDeepSeekWebSearch)
+      .toHaveBeenLastCalledWith(credentialRef('ACTIVE_REFERENCE'))
+
+    await ctx.settings.update(WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, {
+      apiKeyEnv: 'ROTATED_REFERENCE',
+    })
+    await vi.waitFor(() => {
+      expect(secondDispose).toHaveBeenCalledTimes(1)
+      expect(registerDeepSeekWebSearch).toHaveBeenCalledTimes(3)
+    })
+    expect(registerDeepSeekWebSearch)
+      .toHaveBeenLastCalledWith(credentialRef('ROTATED_REFERENCE'))
+
+    await pluginFiber.dispose()
+    expect(thirdDispose).toHaveBeenCalledTimes(1)
+    await ctx.fiber.dispose()
+  })
+
   it('serves a stored endpoint to the next search without re-registering the provider', async () => {
     const bench = await boot()
     expect(await searchOnce(bench.ctx)).toContain('https://search.entry.test/v1')

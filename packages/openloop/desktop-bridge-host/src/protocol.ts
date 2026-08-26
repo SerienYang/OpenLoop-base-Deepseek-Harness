@@ -164,10 +164,8 @@ export function authenticateBridgeRequest(
   requireSecret(secret)
   return {
     request,
-    nonce: Buffer.from(nonce).toString('hex'),
-    mac: createHmac('sha256', secret)
-      .update(canonicalRequestBytes(request, nonce))
-      .digest('hex'),
+    nonce: bufferView(nonce).toString('hex'),
+    mac: requestMac(request, nonce, secret),
   }
 }
 
@@ -180,9 +178,13 @@ export function verifyBridgeRequest(
     throw new Error('bridge launch is not current')
   }
   const nonce = Buffer.from(envelope.nonce, 'hex')
-  const signed = authenticateBridgeRequest(envelope.request, nonce, expected.secret)
-  if (!constantTimeHexEqual(envelope.mac, signed.mac)) {
-    throw new Error('bridge request authentication failed')
+  try {
+    const expectedMac = requestMac(envelope.request, nonce, expected.secret)
+    if (!constantTimeHexEqual(envelope.mac, expectedMac)) {
+      throw new Error('bridge request authentication failed')
+    }
+  } finally {
+    nonce.fill(0)
   }
   expected.nonces.claim(envelope.nonce)
   return envelope.request
@@ -200,10 +202,8 @@ export function authenticateBridgeResponse(
   }
   return {
     response,
-    nonce: Buffer.from(nonce).toString('hex'),
-    mac: createHmac('sha256', secret)
-      .update(canonicalResponseBytes(response, nonce))
-      .digest('hex'),
+    nonce: bufferView(nonce).toString('hex'),
+    mac: responseMac(response, nonce, secret),
   }
 }
 
@@ -219,12 +219,12 @@ export function verifyBridgeResponse(
   if (envelope.response.requestId !== expected.requestId) {
     throw new Error('bridge response request id does not match')
   }
-  const expectedNonce = Buffer.from(expected.nonce).toString('hex')
+  const expectedNonce = bufferView(expected.nonce).toString('hex')
   if (!constantTimeHexEqual(envelope.nonce, expectedNonce)) {
     throw new Error('bridge response nonce does not match')
   }
-  const signed = authenticateBridgeResponse(envelope.response, expected.nonce, expected.secret)
-  if (!constantTimeHexEqual(envelope.mac, signed.mac)) {
+  const expectedMac = responseMac(envelope.response, expected.nonce, expected.secret)
+  if (!constantTimeHexEqual(envelope.mac, expectedMac)) {
     throw new Error('bridge response authentication failed')
   }
   return envelope.response
@@ -232,12 +232,17 @@ export function verifyBridgeResponse(
 
 export function encodeBridgeFrame(value: unknown): Uint8Array {
   const body = Buffer.from(canonicalJson(value))
-  if (body.length === 0 || body.length > MAX_BRIDGE_FRAME_BYTES) {
-    throw new Error('bridge frame is oversized or empty')
-  }
   const header = Buffer.allocUnsafe(4)
-  header.writeUInt32BE(body.length)
-  return Buffer.concat([header, body])
+  try {
+    if (body.length === 0 || body.length > MAX_BRIDGE_FRAME_BYTES) {
+      throw new Error('bridge frame is oversized or empty')
+    }
+    header.writeUInt32BE(body.length)
+    return Buffer.concat([header, body])
+  } finally {
+    header.fill(0)
+    body.fill(0)
+  }
 }
 
 export function decodeBridgeFrame(frame: Uint8Array): unknown {
@@ -264,6 +269,32 @@ function canonicalResponseBytes(response: BridgeResponse, nonce: Uint8Array): Ui
     field(response.requestId),
     field(canonicalJson(body)),
   ])
+}
+
+function requestMac(
+  request: BridgeRequest,
+  nonce: Uint8Array,
+  secret: Uint8Array,
+): string {
+  const canonical = canonicalRequestBytes(request, nonce)
+  try {
+    return createHmac('sha256', secret).update(canonical).digest('hex')
+  } finally {
+    canonical.fill(0)
+  }
+}
+
+function responseMac(
+  response: BridgeResponse,
+  nonce: Uint8Array,
+  secret: Uint8Array,
+): string {
+  const canonical = canonicalResponseBytes(response, nonce)
+  try {
+    return createHmac('sha256', secret).update(canonical).digest('hex')
+  } finally {
+    canonical.fill(0)
+  }
 }
 
 function parseAuthenticatedRequest(value: unknown): AuthenticatedBridgeRequest {
@@ -399,5 +430,16 @@ function requireSecret(secret: Uint8Array): void {
 
 function constantTimeHexEqual(actual: string, expected: string): boolean {
   if (!LOWER_HEX_32_BYTES.test(actual) || !LOWER_HEX_32_BYTES.test(expected)) return false
-  return timingSafeEqual(Buffer.from(actual, 'hex'), Buffer.from(expected, 'hex'))
+  const actualBytes = Buffer.from(actual, 'hex')
+  const expectedBytes = Buffer.from(expected, 'hex')
+  try {
+    return timingSafeEqual(actualBytes, expectedBytes)
+  } finally {
+    actualBytes.fill(0)
+    expectedBytes.fill(0)
+  }
+}
+
+function bufferView(bytes: Uint8Array): Buffer {
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
 }

@@ -20,6 +20,7 @@ import {
   encodeBridgeFrame,
   NonceReplayGuard,
   verifyBridgeRequest,
+  verifyBridgeResponse,
 } from '../src/protocol.ts'
 import * as bridgeProtocol from '../src/protocol.ts'
 import {
@@ -78,6 +79,79 @@ describe('authenticated desktop bridge protocol', () => {
     expect(authenticateBridgeRequest(unicodeOrderingRequest, nonce, secret).mac).toBe(
       '95f4c2f387f68c690a4afb58ae051e3372a2ea8142fbb4d0a0f505be3ee5351f',
     )
+  })
+
+  it('zeroizes canonical request bytes after HMAC signing', () => {
+    const sensitiveRequest = {
+      ...request,
+      payload: { credential: 'request-buffer-secret' },
+    }
+    const canonical = canonicalRequestBytes(sensitiveRequest, nonce)
+    const canonicalLength = canonical.length
+    canonical.fill(0)
+    const fill = vi.spyOn(Buffer.prototype, 'fill')
+    let wipedCanonical: Buffer | undefined
+    try {
+      authenticateBridgeRequest(sensitiveRequest, nonce, secret)
+      wipedCanonical = fill.mock.contexts.find(
+        (value): value is Buffer => Buffer.isBuffer(value) && value.length === canonicalLength,
+      )
+    } finally {
+      fill.mockRestore()
+    }
+
+    expect(wipedCanonical).toBeDefined()
+    expect([...wipedCanonical!]).toEqual(new Array(canonicalLength).fill(0))
+  })
+
+  it('zeroizes canonical response bytes after failed HMAC verification', () => {
+    const response = authenticateBridgeResponse({
+      version: 1,
+      requestId: 'response-hmac-failure',
+      ok: true,
+      result: 'response-buffer-secret',
+    }, nonce, secret)
+    const fill = vi.spyOn(Buffer.prototype, 'fill')
+    let wipedCanonical: Buffer | undefined
+    try {
+      expect(() => verifyBridgeResponse(
+        { ...response, mac: '00'.repeat(32) },
+        { requestId: response.response.requestId, nonce, secret },
+      )).toThrow(/authentication/)
+      wipedCanonical = fill.mock.contexts.find(
+        (value): value is Buffer => Buffer.isBuffer(value) && value.length > 64,
+      )
+    } finally {
+      fill.mockRestore()
+    }
+
+    expect(wipedCanonical).toBeDefined()
+    expect([...wipedCanonical!]).toEqual(new Array(wipedCanonical!.length).fill(0))
+  })
+
+  it('zeroizes temporary body and header buffers after frame encoding', () => {
+    const inputs: Array<readonly Uint8Array[]> = []
+    const originalConcat = Buffer.concat.bind(Buffer)
+    const concat = vi.spyOn(Buffer, 'concat').mockImplementation((
+      list: readonly Uint8Array[],
+      totalLength?: number,
+    ) => {
+      inputs.push([...list])
+      return originalConcat(list, totalLength)
+    })
+    let frame: Uint8Array
+    try {
+      frame = encodeBridgeFrame({ credential: 'encoded-frame-secret' })
+    } finally {
+      concat.mockRestore()
+    }
+
+    const encodedParts = inputs.at(-1)
+    expect(Buffer.from(frame!).includes(Buffer.from('encoded-frame-secret'))).toBe(true)
+    expect(encodedParts).toHaveLength(2)
+    for (const part of encodedParts ?? []) {
+      expect([...part]).toEqual(new Array(part.length).fill(0))
+    }
   })
 
   it('rejects a wrong version before dispatch', () => {
@@ -230,6 +304,7 @@ describe('authenticated desktop bridge protocol', () => {
 
   it('sends an authenticated cancellation request for an aborted call', async () => {
     const seen: string[] = []
+    const outboundFrames: Uint8Array[] = []
     const ids = ['request-1', 'cancel-1'][Symbol.iterator]()
     const nonces = [
       Uint8Array.from({ length: 32 }, () => 1),
@@ -237,6 +312,7 @@ describe('authenticated desktop bridge protocol', () => {
     ][Symbol.iterator]()
     const transport: BridgeWireTransport = {
       async exchange(frame, signal) {
+        outboundFrames.push(frame)
         const envelope = decodeBridgeFrame(frame) as AuthenticatedBridgeRequest
         const parsed = verifyBridgeRequest(envelope, {
           launchId,
@@ -275,6 +351,9 @@ describe('authenticated desktop bridge protocol', () => {
     await vi.waitFor(() => {
       expect(seen).toEqual(['getAppInfo', '$cancel'])
     })
+    for (const frame of outboundFrames) {
+      expect([...frame]).toEqual(new Array(frame.length).fill(0))
+    }
   })
 
   it('zeroizes a received response frame after successful verification', async () => {
@@ -284,8 +363,12 @@ describe('authenticated desktop bridge protocol', () => {
       ok: true,
       result: [115, 101, 99, 114, 101, 116],
     }, nonce, secret))
+    let outboundFrame: Uint8Array | undefined
     const transport: BridgeWireTransport = {
-      exchange: vi.fn(() => Promise.resolve(responseFrame)),
+      exchange: vi.fn((frame: Uint8Array) => {
+        outboundFrame = frame
+        return Promise.resolve(responseFrame)
+      }),
       close() {},
     }
     const client = new DesktopBridgeClient({
@@ -299,6 +382,7 @@ describe('authenticated desktop bridge protocol', () => {
     await expect(client.call('resolveCredential', { ref: 'TEST_KEY' }))
       .resolves.toEqual([115, 101, 99, 114, 101, 116])
     expect([...responseFrame]).toEqual(new Array(responseFrame.length).fill(0))
+    expect([...outboundFrame!]).toEqual(new Array(outboundFrame!.length).fill(0))
   })
 
   it('zeroizes a received response frame when parsing fails', async () => {
@@ -318,6 +402,161 @@ describe('authenticated desktop bridge protocol', () => {
     await expect(client.call('resolveCredential', { ref: 'TEST_KEY' })).rejects.toThrow()
     expect([...responseFrame]).toEqual(new Array(responseFrame.length).fill(0))
   })
+
+  it('zeroizes an outbound frame when the transport rejects', async () => {
+    let outboundFrame: Uint8Array | undefined
+    const transport: BridgeWireTransport = {
+      exchange: vi.fn((frame: Uint8Array) => {
+        outboundFrame = frame
+        return Promise.reject(new Error('transport rejected'))
+      }),
+      close() {},
+    }
+    const client = new DesktopBridgeClient({
+      launchId,
+      secret,
+      transport,
+      requestId: () => 'outbound-failure',
+      nonce: () => nonce,
+    })
+
+    await expect(client.call('resolveCredential', { ref: 'TEST_KEY' }))
+      .rejects.toThrow('transport rejected')
+    expect([...outboundFrame!]).toEqual(new Array(outboundFrame!.length).fill(0))
+  })
+
+  it.runIf(process.platform !== 'win32')(
+    'zeroizes Unix response chunks, prefix, and aggregate after success',
+    async () => {
+      const directory = mkdtempSync(join(tmpdir(), 'ol-wipe-'))
+      const socketPath = join(directory, 'bridge.sock')
+      const responseFrame = Buffer.from(encodeBridgeFrame(authenticateBridgeResponse({
+        version: 1,
+        requestId: 'unix-response-wipe',
+        ok: true,
+        result: 'unix-response-secret',
+      }, nonce, secret)))
+      const captured: Array<{ inputs: readonly Uint8Array[]; output: Uint8Array }> = []
+      const originalConcat = Buffer.concat.bind(Buffer)
+      const concat = vi.spyOn(Buffer, 'concat').mockImplementation((
+        list: readonly Uint8Array[],
+        totalLength?: number,
+      ) => {
+        const output = originalConcat(list, totalLength)
+        if (output.equals(responseFrame)
+          || (output.length === 4 && output.equals(responseFrame.subarray(0, 4)))) {
+          captured.push({ inputs: [...list], output })
+        }
+        return output
+      })
+      const server = createServer({ allowHalfOpen: true }, (socket) => {
+        socket.on('data', () => {})
+        socket.once('end', () => {
+          socket.write(responseFrame.subarray(0, 4))
+          setImmediate(() => { socket.end(responseFrame.subarray(4)) })
+        })
+      })
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject)
+        server.listen(socketPath, resolve)
+      })
+      const client = new DesktopBridgeClient({
+        launchId,
+        secret,
+        socketPath,
+        requestId: () => 'unix-response-wipe',
+        nonce: () => nonce,
+      })
+
+      try {
+        await expect(client.call('resolveCredential', { ref: 'TEST_KEY' }))
+          .resolves.toBe('unix-response-secret')
+        expect(captured.some(call => call.output.length === 4)).toBe(true)
+        expect(captured.some(call => call.output.length === responseFrame.length)).toBe(true)
+        for (const call of captured) {
+          expect([...call.output]).toEqual(new Array(call.output.length).fill(0))
+          for (const input of call.inputs) {
+            expect([...input]).toEqual(new Array(input.length).fill(0))
+          }
+        }
+      } finally {
+        concat.mockRestore()
+        client.close()
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => {
+            if (error === undefined) resolve()
+            else reject(error)
+          })
+        })
+        responseFrame.fill(0)
+        rmSync(directory, { recursive: true, force: true })
+      }
+    },
+  )
+
+  it.runIf(process.platform !== 'win32')(
+    'zeroizes Unix response chunks and prefix after a truncated response',
+    async () => {
+      const directory = mkdtempSync(join(tmpdir(), 'ol-fail-wipe-'))
+      const socketPath = join(directory, 'bridge.sock')
+      const responseFrame = Buffer.from(encodeBridgeFrame(authenticateBridgeResponse({
+        version: 1,
+        requestId: 'unix-response-failure-wipe',
+        ok: true,
+        result: 'truncated-response-secret',
+      }, nonce, secret)))
+      const captured: Array<{ inputs: readonly Uint8Array[]; output: Uint8Array }> = []
+      const originalConcat = Buffer.concat.bind(Buffer)
+      const concat = vi.spyOn(Buffer, 'concat').mockImplementation((
+        list: readonly Uint8Array[],
+        totalLength?: number,
+      ) => {
+        const output = originalConcat(list, totalLength)
+        if (output.length === 4 && output.equals(responseFrame.subarray(0, 4))) {
+          captured.push({ inputs: [...list], output })
+        }
+        return output
+      })
+      const server = createServer({ allowHalfOpen: true }, (socket) => {
+        socket.on('data', () => {})
+        socket.once('end', () => {
+          socket.end(responseFrame.subarray(0, responseFrame.length - 1))
+        })
+      })
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject)
+        server.listen(socketPath, resolve)
+      })
+      const client = new DesktopBridgeClient({
+        launchId,
+        secret,
+        socketPath,
+        requestId: () => 'unix-response-failure-wipe',
+        nonce: () => nonce,
+      })
+
+      try {
+        await expect(client.call('resolveCredential', { ref: 'TEST_KEY' }))
+          .rejects.toThrow(/truncated/)
+        expect(captured).toHaveLength(1)
+        expect([...captured[0]!.output]).toEqual(new Array(4).fill(0))
+        for (const input of captured[0]!.inputs) {
+          expect([...input]).toEqual(new Array(input.length).fill(0))
+        }
+      } finally {
+        concat.mockRestore()
+        client.close()
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => {
+            if (error === undefined) resolve()
+            else reject(error)
+          })
+        })
+        responseFrame.fill(0)
+        rmSync(directory, { recursive: true, force: true })
+      }
+    },
+  )
 
   it.runIf(process.platform !== 'win32')(
     'rejects an in-flight socket exchange promptly when the client closes',

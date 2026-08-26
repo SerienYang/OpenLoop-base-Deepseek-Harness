@@ -982,10 +982,14 @@ describe('plugin registration and config', () => {
   })
 
   it('loads keyless, keeps the catalog browsable, and fails the request actionably', async () => {
-    vi.stubEnv('DEEPSEEK_API_KEY', '')
+    const privateReference = 'PRIVATE_DEEPSEEK_REFERENCE'
+    vi.stubEnv(privateReference, '')
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
-    await ctx.plugin(LlmDeepSeek, { baseURL: 'http://127.0.0.1:1' })
+    await ctx.plugin(LlmDeepSeek, {
+      apiKeyEnv: privateReference,
+      baseURL: 'http://127.0.0.1:1',
+    })
     // First-boot onboarding: the route registers so models stay discoverable;
     // only the request itself needs a key.
     expect(ctx.llm.listProviders()).toEqual([{ id: 'deepseek-official', name: 'DeepSeek' }])
@@ -996,10 +1000,38 @@ describe('plugin registration and config', () => {
     const second = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
     expect(second.finish.kind).toBe('error')
     if (second.finish.kind !== 'error') throw new Error('expected an error finish')
-    // The guidance names both places a credential can come from, and nothing
-    // else: configuration carries the reference, never a literal key.
-    expect(second.finish.failure.message)
-      .toMatch(/store DEEPSEEK_API_KEY through the credentials service.*export DEEPSEEK_API_KEY/s)
+    expect(second.finish.failure.message).toBe(
+      'llm-deepseek: no API key is available for provider route "deepseek-official";'
+      + ' store it through the credentials service (the web Models page writes it)'
+      + ' or configure it in the launching environment',
+    )
+    expect(second.finish.failure.message).not.toContain(privateReference)
+  })
+
+  it('redacts credential resolver errors from serialized failures', async () => {
+    const privateReference = 'PRIVATE_DEEPSEEK_RESOLVER_REFERENCE'
+    const privateDetail = `${privateReference}: resolver exposed sk-private-deepseek`
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.provide('credentials', {
+      resolve: vi.fn(() => Promise.reject(new Error(privateDetail))),
+    } as never)
+    await ctx.plugin(LlmDeepSeek, {
+      apiKeyEnv: privateReference,
+      baseURL: 'http://127.0.0.1:1',
+    })
+
+    const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+
+    expect(result.finish).toEqual({
+      kind: 'error',
+      failure: {
+        code: 'CREDENTIAL_RESOLUTION_FAILED',
+        message: 'llm-deepseek: credential resolution failed for provider route "deepseek-official"',
+      },
+    })
+    expect(JSON.stringify(result.finish)).not.toContain(privateReference)
+    expect(JSON.stringify(result.finish)).not.toContain('sk-private-deepseek')
   })
 
   it('reads the ambient variable when no credentials seam is mounted', async () => {

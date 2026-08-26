@@ -228,11 +228,16 @@ fn delete_credential_with_confirmation_cancellable(
     if !confirmation.confirm_deletion(&plan)? {
         return Ok(CredentialDeletionOutcome::Cancelled);
     }
-    if cancellation.is_some_and(CancellationToken::is_cancelled) {
-        return Ok(CredentialDeletionOutcome::Cancelled);
-    }
     let account = CredentialAccount::new(&plan.reference)?;
-    store.delete_credential(&account)?;
+    if let Some(cancellation) = cancellation {
+        let Some(result) = cancellation.commit_if_active(|| store.delete_credential(&account))
+        else {
+            return Ok(CredentialDeletionOutcome::Cancelled);
+        };
+        result?;
+    } else {
+        store.delete_credential(&account)?;
+    }
     Ok(CredentialDeletionOutcome::Deleted)
 }
 
@@ -513,3 +518,109 @@ impl fmt::Display for CredentialError {
 }
 
 impl Error for CredentialError {}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{mpsc, Arc, Mutex},
+        thread,
+        time::Duration,
+    };
+
+    use super::{
+        delete_credential_with_confirmation_cancellable, CredentialAccount,
+        CredentialConsumerDisplay, CredentialConsumerLabel, CredentialDeletionConfirmation,
+        CredentialDeletionOutcome, CredentialDeletionPlan, CredentialDeletionStore,
+        CredentialError,
+    };
+    use crate::bridge::server::CancellationToken;
+
+    struct Approved;
+
+    impl CredentialDeletionConfirmation for Approved {
+        fn confirm_deletion(
+            &self,
+            _plan: &CredentialDeletionPlan,
+        ) -> Result<bool, CredentialError> {
+            Ok(true)
+        }
+    }
+
+    struct BlockingDeletionStore {
+        entered: Mutex<Option<mpsc::Sender<()>>>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl CredentialDeletionStore for BlockingDeletionStore {
+        fn delete_credential(&self, _account: &CredentialAccount) -> Result<(), CredentialError> {
+            if let Some(entered) = self.entered.lock().expect("entered lock").take() {
+                entered.send(()).expect("report deletion entry");
+            }
+            self.release
+                .lock()
+                .expect("release lock")
+                .recv()
+                .expect("release deletion");
+            Ok(())
+        }
+    }
+
+    fn deletion_plan() -> CredentialDeletionPlan {
+        CredentialDeletionPlan {
+            reference: "LINEARIZABLE_DELETE_KEY".to_owned(),
+            consumers: vec![CredentialConsumerLabel {
+                owner_id: "plugin:web-search-deepseek".to_owned(),
+                kind: "plugin".to_owned(),
+                display: CredentialConsumerDisplay {
+                    key: "openloop.credentials.consumer.web-search-deepseek".to_owned(),
+                    values: Default::default(),
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn cancellation_cannot_land_between_the_final_check_and_deletion_commit() {
+        let (entered, deletion_entered) = mpsc::channel();
+        let (release, deletion_released) = mpsc::channel();
+        let store = Arc::new(BlockingDeletionStore {
+            entered: Mutex::new(Some(entered)),
+            release: Mutex::new(deletion_released),
+        });
+        let cancellation = CancellationToken::new();
+        let delete_store = store.clone();
+        let delete_cancellation = cancellation.clone();
+        let deletion = thread::spawn(move || {
+            delete_credential_with_confirmation_cancellable(
+                delete_store.as_ref(),
+                &Approved,
+                deletion_plan(),
+                Some(&delete_cancellation),
+            )
+        });
+        deletion_entered.recv().expect("deletion commit entered");
+        let cancel_cancellation = cancellation.clone();
+        let (cancelled, cancel_returned) = mpsc::channel();
+        let cancel = thread::spawn(move || {
+            cancel_cancellation.cancel();
+            cancelled.send(()).expect("report cancellation return");
+        });
+
+        let cancellation_interleaved = cancel_returned
+            .recv_timeout(Duration::from_millis(50))
+            .is_ok();
+        release.send(()).expect("release deletion");
+        let outcome = deletion
+            .join()
+            .expect("deletion thread")
+            .expect("deletion outcome");
+        cancel.join().expect("cancellation thread");
+
+        assert!(
+            !cancellation_interleaved,
+            "cancellation returned between the final check and destructive commit"
+        );
+        assert_eq!(outcome, CredentialDeletionOutcome::Deleted);
+        assert!(cancellation.is_cancelled());
+    }
+}

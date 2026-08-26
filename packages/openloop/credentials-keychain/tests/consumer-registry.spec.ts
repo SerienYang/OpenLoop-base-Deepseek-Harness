@@ -277,8 +277,16 @@ describe('CredentialConsumerRegistry', () => {
     )
     const invalidReference = 'SECRET-REFERENCE'
 
-    await expect(operations.describeCredential(invalidReference)).rejects.toThrow(/invalid/)
-    await expect(operations.describeCredential(invalidReference)).rejects.not.toThrow(invalidReference)
+    for (const operation of [
+      operations.describeCredential(invalidReference),
+      operations.openCredentialReplacement(invalidReference),
+      operations.deleteCredential(invalidReference),
+    ]) {
+      const error = await operation.catch((failure: unknown) => failure)
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toBe('credential reference is invalid')
+      expect((error as Error).message).not.toContain(invalidReference)
+    }
   })
 
   it('rejects native mutation while the process environment shadows Keychain', async () => {

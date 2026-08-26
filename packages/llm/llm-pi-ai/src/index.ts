@@ -208,15 +208,28 @@ export function apply(ctx: Context, config: Config): void {
     // deployment meant to authenticate differently.
     if (ref === undefined) return undefined
     const credentials = ctx.get('credentials')
-    const hit = credentials !== undefined
-      ? (await credentials.resolve(ref))?.value
+    let hit: string | undefined
+    if (credentials !== undefined) {
+      try {
+        hit = (await credentials.resolve(ref))?.value
+      } catch {
+        throw new LlmError(
+          `llm-pi-ai: credential resolution failed for provider route "${provider}"`,
+          'CREDENTIAL_RESOLUTION_FAILED',
+        )
+      }
+    } else {
       // Without the seam the environment is the whole credential plane.
-      : launchEnvironmentOf(ctx).get(ref)?.value
-    if (hit !== undefined && hit.length > 0) return assertUsableApiKey(hit, 'llm-pi-ai', ref)
+      hit = launchEnvironmentOf(ctx).get(ref)?.value
+    }
+    if (hit !== undefined && hit.length > 0) {
+      return assertUsableApiKey(hit, 'llm-pi-ai', 'the configured credential')
+    }
     throw new LlmError(
-      `llm-pi-ai: no credential for provider route "${provider}"; its profile resolves ${ref}, which is not`
-      + ` set — store ${ref} through the credentials service (the web Models page writes it) or export it,`
-      + ' and remove apiKeyEnv only if this provider should authenticate from pi-ai\'s own environment discovery',
+      `llm-pi-ai: no credential is available for provider route "${provider}";`
+      + ' store it through the credentials service (the web Models page writes it),'
+      + ' configure it in the launching environment, or remove apiKeyEnv to use'
+      + ' provider-native credential discovery',
       'MISSING_CREDENTIAL',
     )
   }
