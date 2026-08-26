@@ -10,8 +10,9 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'
-import { credentialRef, type CredentialRef, type ResolvedCredential } from '@deepseek-ai/dsh-credentials'
+import type { CredentialRef, ResolvedCredential } from '@deepseek-ai/dsh-credentials'
 import type { Config, CredentialHeaderConfig } from './index.ts'
+import { safeCredentialRef } from './credential-ref.ts'
 
 const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u
 const HEADER_VALUE = /^[\x21-\x7e]+$/u
@@ -335,14 +336,6 @@ function abortReason(signal: AbortSignal): Error {
   return signal.reason instanceof Error
     ? signal.reason
     : new DOMException('This operation was aborted', 'AbortError')
-}
-
-function safeCredentialRef(reference: string): CredentialRef {
-  try {
-    return credentialRef(reference)
-  } catch {
-    throw new TypeError('mcp-client: invalid credential reference')
-  }
 }
 
 function missingCredentialResolver(reference: CredentialRef): Promise<undefined> {

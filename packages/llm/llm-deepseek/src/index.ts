@@ -121,6 +121,15 @@ interface CredentialConsumerRegistry {
   }
 }
 
+/** Validate an untrusted reference without retaining its value in the failure. */
+function safeCredentialRef(reference: string): ReturnType<typeof credentialRef> {
+  try {
+    return credentialRef(reference)
+  } catch {
+    throw new TypeError('llm-deepseek: invalid credential reference')
+  }
+}
+
 /** Resolve, validate, and detach the advisory model catalog. */
 function resolveModels(models: readonly DeepSeekCatalogModel[] | undefined): DeepSeekCatalogModel[] {
   const seen = new Set<string>()
@@ -188,7 +197,7 @@ export function resolveAdapterOptions(config: Config, environment?: LaunchEnviro
     )
   }
   return {
-    apiKeyEnv: credentialRef(config.apiKeyEnv ?? DEFAULT_API_KEY_ENV),
+    apiKeyEnv: safeCredentialRef(config.apiKeyEnv ?? DEFAULT_API_KEY_ENV),
     baseURL: config.baseURL
       ?? environment?.get(BASE_URL_ENV)?.value
       ?? PUBLIC_BASE_URL,

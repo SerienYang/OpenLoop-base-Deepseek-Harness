@@ -49,6 +49,15 @@ interface CredentialConsumerRegistry {
   }
 }
 
+/** Validate an untrusted reference without retaining its value in the failure. */
+function safeCredentialRef(reference: string): ReturnType<typeof credentialRef> {
+  try {
+    return credentialRef(reference)
+  } catch {
+    throw new TypeError('web-search-deepseek: invalid credential reference')
+  }
+}
+
 /** Plugin config (all optional — `apply` fills env-var and constant defaults). */
 export interface Config {
   /** Literal DeepSeek API key; prefer {@link apiKeyEnv} so no secret enters configuration files. */
@@ -100,7 +109,7 @@ export const WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE = settingsNamespace('web-sea
  * @returns options for one search.
  */
 function resolveOptions(ctx: Context, config: Config): DeepSeekSearchProviderOptions {
-  const apiKeyEnv = credentialRef(config.apiKeyEnv ?? DEFAULT_API_KEY_ENV)
+  const apiKeyEnv = safeCredentialRef(config.apiKeyEnv ?? DEFAULT_API_KEY_ENV)
   const literalApiKey = config.apiKey !== undefined && config.apiKey.length > 0
     ? config.apiKey
     : undefined
@@ -135,9 +144,10 @@ export function apply(ctx: Context, config: Config): void {
   let current: () => Config = () => config
   let accepted = config
   const credentialReference = (source: Config): ReturnType<typeof credentialRef> | undefined => {
+    const reference = safeCredentialRef(source.apiKeyEnv ?? DEFAULT_API_KEY_ENV)
     return source.apiKey !== undefined && source.apiKey.length > 0
       ? undefined
-      : credentialRef(source.apiKeyEnv ?? DEFAULT_API_KEY_ENV)
+      : reference
   }
   let consumerRegistry: CredentialConsumerRegistry | undefined
   let consumerRegistration: ReturnType<CredentialConsumerRegistry['registerDeepSeekWebSearch']>
@@ -156,8 +166,8 @@ export function apply(ctx: Context, config: Config): void {
     previous?.dispose()
   }
   const stageCredentialConsumer = (candidate: Config): void => {
-    if (consumerRegistry === undefined) return
     const reference = credentialReference(candidate)
+    if (consumerRegistry === undefined) return
     if (reference === consumerReference) return
     if (reference === undefined) {
       consumerRegistration?.dispose()

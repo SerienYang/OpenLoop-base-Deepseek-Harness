@@ -4,6 +4,7 @@
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { inspect } from 'node:util'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { Config } from '@deepseek-ai/dsh-mcp-client'
@@ -224,6 +225,37 @@ describe('apply (plugin lifecycle)', () => {
     expect(registerMcpServer).toHaveBeenCalledWith('github', 'GITHUB_MCP_TOKEN')
     await fiber.dispose()
     expect(disposeConsumer).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses the fixed cause-free credential-reference failure at the consumer boundary', async () => {
+    const privateReference = 'sk-live-mcp-consumer-P1/secret'
+    let reads = 0
+    const source = {
+      get ref() {
+        reads += 1
+        return reads === 1 ? 'MCP_VALIDATED_REFERENCE' : privateReference
+      },
+    }
+    const logged: unknown[][] = []
+    ctx.logger.error = ((...args: unknown[]) => { logged.push(args) }) as typeof ctx.logger.error
+
+    const failure = await apply(ctx, {
+      transport: 'streamable-http',
+      serverName: 'private-reference',
+      url: 'https://mcp.example.test',
+      headers: {},
+      credentialHeaders: { Authorization: source },
+      toolCallTimeoutMs: 60_000,
+      failOnStartupError: false,
+    }).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(TypeError)
+    expect((failure as Error).message).toBe('mcp-client: invalid credential reference')
+    expect(Object.hasOwn(failure as object, 'cause')).toBe(false)
+    const evidence = inspect([failure, logged], { depth: null, showHidden: true })
+    expect(evidence).not.toContain(privateReference)
+    expect(evidence).not.toContain('sk-live-mcp-consumer-P1')
+    expect(mockConnect).not.toHaveBeenCalled()
   })
 
   it('aborts activation before connecting or publishing tools when initial consumer registration fails', async () => {

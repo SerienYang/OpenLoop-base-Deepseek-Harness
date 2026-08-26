@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { inspect } from 'node:util'
 import { AttachmentId, AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type {
@@ -354,6 +355,30 @@ describe('PiAiAdapter provider routing', () => {
 })
 
 describe('Openloop credential consumer wiring', () => {
+  it('redacts malformed credential references at startup without retaining a cause', async () => {
+    const privateReference = 'sk-live-pi-startup-P1/secret'
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const logged: unknown[][] = []
+    ctx.logger.error = ((...args: unknown[]) => { logged.push(args) }) as typeof ctx.logger.error
+
+    const failure = await ctx.plugin(LlmPiAi, {
+      providers: {
+        openai: { apiKeyEnv: privateReference },
+      },
+    }).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(TypeError)
+    expect((failure as Error).message).toBe('llm-pi-ai: invalid credential reference')
+    expect(Object.hasOwn(failure as object, 'cause')).toBe(false)
+    const evidence = inspect([failure, logged], { depth: null, showHidden: true })
+    expect(evidence).not.toContain(privateReference)
+    expect(evidence).not.toContain('sk-live-pi-startup-P1')
+    expect(ctx.llm.listProviders()).toEqual([])
+    expect(ctx.llm.listConfigurableProviders()).toEqual([])
+    await ctx.fiber.dispose()
+  })
+
   it('registers and releases each credential-bearing pi-ai model route', async () => {
     const dispose = vi.fn()
     const registerPiAiModels = vi.fn(() => ({
@@ -826,7 +851,8 @@ describe('provider profile lifecycle', () => {
     expect(() => resolveProfiles([{ provider: 'openai' }] as never)).toThrow(/dict keyed by provider/)
     expect(() => resolveProfiles({ openai: { provider: 'openai' } as never })).toThrow(/moved to the providers dict key/)
     expect(() => resolveProfiles({ openai: { baseURL: '' } })).toThrow(/empty baseURL/)
-    expect(() => resolveProfiles({ openai: { apiKeyEnv: 'not-a-var!' } })).toThrow(/must match/)
+    expect(() => resolveProfiles({ openai: { apiKeyEnv: 'not-a-var!' } }))
+      .toThrow('llm-pi-ai: invalid credential reference')
   })
 
   it.each(['maxRetries', 'maxRetryDelayMs'] as const)(

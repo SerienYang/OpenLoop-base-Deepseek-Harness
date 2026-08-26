@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Fiber } from '@deepseek-ai/cordis'
+import { inspect } from 'node:util'
 import { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import WebRuntime from '@deepseek-ai/dsh-web'
@@ -76,6 +77,85 @@ async function searchOnce(ctx: Context): Promise<string> {
 }
 
 describe('web-search-deepseek settings section', () => {
+  it('redacts malformed credential references at startup without retaining a cause', async () => {
+    const privateReference = 'sk-live-search-startup-P1/secret'
+    const ctx = new Context()
+    await ctx.plugin(WebRuntime, {})
+    const logged: unknown[][] = []
+    ctx.logger.error = ((...args: unknown[]) => { logged.push(args) }) as typeof ctx.logger.error
+
+    const failure = await ctx.plugin(deepseekPlugin, {
+      apiKeyEnv: privateReference,
+    }).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(TypeError)
+    expect((failure as Error).message).toBe('web-search-deepseek: invalid credential reference')
+    expect(Object.hasOwn(failure as object, 'cause')).toBe(false)
+    const evidence = inspect([failure, logged], { depth: null, showHidden: true })
+    expect(evidence).not.toContain(privateReference)
+    expect(evidence).not.toContain('sk-live-search-startup-P1')
+    await expect(ctx.web.search({ query: 'q' })).rejects.toThrow()
+    await ctx.fiber.dispose()
+  })
+
+  it('redacts a malformed dynamic reference and retains the accepted generation and consumer', async () => {
+    const privateReference = 'sk-live-search-dynamic-P1/secret'
+    let activeReference = credentialRef('SEARCH_ACTIVE_KEY')
+    const replace = vi.fn((reference: ReturnType<typeof credentialRef>) => {
+      activeReference = reference
+    })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockImplementation(() => Promise.resolve(jsonResponse(ONE_RESULT)))
+    const ctx = new Context()
+    await ctx.plugin(WebRuntime, {})
+    await ctx.plugin(MemorySettings)
+    ctx.provide('credentials', {
+      resolve: vi.fn((reference: ReturnType<typeof credentialRef>) => Promise.resolve({
+        value: reference === 'SEARCH_ACTIVE_KEY' ? 'accepted-key' : 'rotated-key',
+        source: 'keychain',
+      })),
+    } as never)
+    ctx.provide('credentialConsumers', {
+      registerDeepSeekWebSearch: vi.fn((reference: ReturnType<typeof credentialRef>) => {
+        activeReference = reference
+        return { replace, dispose: vi.fn() }
+      }),
+    } as never)
+    await ctx.plugin(deepseekPlugin, {
+      apiKeyEnv: 'SEARCH_ACTIVE_KEY',
+      baseURL: 'https://accepted.search.test/v1',
+    })
+    const logged = vi.spyOn(ctx.logger, 'error').mockImplementation(() => undefined)
+
+    await ctx.settings.update(WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, {
+      apiKeyEnv: privateReference,
+      baseURL: 'https://rejected.search.test/v1',
+    })
+    await vi.waitFor(() => {
+      expect(logged).toHaveBeenCalled()
+    })
+
+    expect(activeReference).toBe(credentialRef('SEARCH_ACTIVE_KEY'))
+    expect(replace).not.toHaveBeenCalled()
+    await ctx.web.search({ query: 'accepted' })
+    const acceptedUrl = fetchSpy.mock.calls.at(-1)?.[0] as URL | string | undefined
+    expect(String(acceptedUrl)).toBe('https://accepted.search.test/v1/messages')
+    const evidence = inspect(logged.mock.calls, { depth: null, showHidden: true })
+    expect(evidence).not.toContain(privateReference)
+    expect(evidence).not.toContain('sk-live-search-dynamic-P1')
+    expect(evidence).not.toContain('cause')
+
+    await ctx.settings.replace(WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, {
+      apiKeyEnv: 'SEARCH_ROTATED_KEY',
+      baseURL: 'https://rotated.search.test/v1',
+    })
+    expect(activeReference).toBe(credentialRef('SEARCH_ROTATED_KEY'))
+    await ctx.web.search({ query: 'rotated' })
+    const rotatedUrl = fetchSpy.mock.calls.at(-1)?.[0] as URL | string | undefined
+    expect(String(rotatedUrl)).toBe('https://rotated.search.test/v1/messages')
+    await ctx.fiber.dispose()
+  })
+
   it('registers only the credential reference that actually wins after settings changes', async () => {
     const firstDispose = vi.fn()
     const secondDispose = vi.fn()

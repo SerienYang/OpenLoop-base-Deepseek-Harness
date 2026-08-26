@@ -5,6 +5,7 @@ import type { IncomingMessage } from 'node:http'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { inspect } from 'node:util'
 import LlmRuntime, { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { LocalCredentialProvider } from '@deepseek-ai/dsh-credentials-local'
@@ -217,6 +218,51 @@ describe('request-level dynamic profiles', () => {
         { routeId: 'openai', reference: credentialRef('PI_OTHER_KEY') },
       ])
     })
+    expect(replace).toHaveBeenCalledTimes(1)
+  })
+
+  it('redacts a malformed dynamic reference and retains the accepted routes and consumers', async () => {
+    const privateReference = 'sk-live-pi-dynamic-P1/secret'
+    const dir = await home()
+    let consumerRoutes: Array<{ routeId: string; reference: string }> = []
+    const replace = vi.fn((routes: typeof consumerRoutes) => {
+      consumerRoutes = routes.map(route => ({ ...route }))
+    })
+    const ctx = await boot(
+      dir,
+      { providers: { openai: { apiKeyEnv: 'PI_LIVE_KEY' } } },
+      {
+        registerPiAiModels(routes: typeof consumerRoutes) {
+          consumerRoutes = routes.map(route => ({ ...route }))
+          return { replace, dispose: vi.fn() }
+        },
+      },
+    )
+    replace.mockClear()
+    const logged = vi.spyOn(ctx.logger, 'error').mockImplementation(() => undefined)
+
+    const failure = await ctx.settings.update(NS, {
+      providers: { openai: { apiKeyEnv: privateReference } },
+    }).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(TypeError)
+    expect((failure as Error).message).toBe('llm-pi-ai: invalid credential reference')
+    expect(Object.hasOwn(failure as object, 'cause')).toBe(false)
+    expect(consumerRoutes).toEqual([
+      { routeId: 'openai', reference: credentialRef('PI_LIVE_KEY') },
+    ])
+    expect(replace).not.toHaveBeenCalled()
+    expect(ctx.llm.listProviders().map(provider => provider.id)).toEqual(['openai'])
+    const evidence = inspect([failure, logged.mock.calls], { depth: null, showHidden: true })
+    expect(evidence).not.toContain(privateReference)
+    expect(evidence).not.toContain('sk-live-pi-dynamic-P1')
+
+    await ctx.settings.update(NS, {
+      providers: { openai: { apiKeyEnv: 'PI_OTHER_KEY' } },
+    })
+    expect(consumerRoutes).toEqual([
+      { routeId: 'openai', reference: credentialRef('PI_OTHER_KEY') },
+    ])
     expect(replace).toHaveBeenCalledTimes(1)
   })
 

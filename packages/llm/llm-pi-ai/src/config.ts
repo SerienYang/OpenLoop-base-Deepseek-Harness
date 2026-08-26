@@ -256,6 +256,15 @@ export const Config: z<Config> = z.object({
   providers: z.dict(profile).default({}),
 })
 
+/** Validate an untrusted reference without retaining its value in the failure. */
+function safeCredentialRef(reference: string): CredentialRef {
+  try {
+    return credentialRef(reference)
+  } catch {
+    throw new TypeError('llm-pi-ai: invalid credential reference')
+  }
+}
+
 /**
  * Reject a section this adapter could not serve. Registered as the settings
  * namespace's validator, so an unserviceable profile is refused where it is
@@ -352,7 +361,7 @@ export function resolveProfiles(
       ...rest,
       provider,
       displayName,
-      ...apiKeyEnv === undefined ? {} : { apiKeyEnv: credentialRef(apiKeyEnv) },
+      ...apiKeyEnv === undefined ? {} : { apiKeyEnv: safeCredentialRef(apiKeyEnv) },
       streamIdleTimeoutMs,
       retryPolicy: resolveRetryPolicy(retryPolicy, `llm-pi-ai: provider "${provider}" retryPolicy`),
       ...rest.headers === undefined ? {} : { headers: { ...rest.headers } },

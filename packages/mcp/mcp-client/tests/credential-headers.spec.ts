@@ -3,6 +3,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from 'node:http'
+import { inspect } from 'node:util'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import {
   createCredentialResolvingFetch,
@@ -444,16 +445,20 @@ describe('MCP credential-backed HTTP headers', () => {
     expect(() => {
       validateCredentialHeaders({}, { 'content-type': { ref: 'MCP_API_KEY' } })
     }).toThrow(/reserved MCP header/)
+    const privateReference = 'sk-live-mcp-header-P1/secret'
     let invalidReferenceError: unknown
     try {
-      validateCredentialHeaders({}, { Authorization: { ref: 'not-a-reference' } })
+      validateCredentialHeaders({}, { Authorization: { ref: privateReference } })
     } catch (error) {
       invalidReferenceError = error
     }
     expect(invalidReferenceError).toBeInstanceOf(TypeError)
     expect((invalidReferenceError as Error).message)
       .toBe('mcp-client: invalid credential reference')
-    expect(JSON.stringify(invalidReferenceError)).not.toContain('not-a-reference')
+    expect(Object.hasOwn(invalidReferenceError as object, 'cause')).toBe(false)
+    const evidence = inspect(invalidReferenceError, { depth: null, showHidden: true })
+    expect(evidence).not.toContain(privateReference)
+    expect(evidence).not.toContain('sk-live-mcp-header-P1')
   })
 
   it('fails closed for an absent or unsafe credential value without dispatching', async () => {

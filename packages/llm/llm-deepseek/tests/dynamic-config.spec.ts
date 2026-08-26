@@ -3,6 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { access, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { inspect } from 'node:util'
 import LlmRuntime, { INVALID_CREDENTIAL_CODE } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { LocalCredentialProvider } from '@deepseek-ai/dsh-credentials-local'
@@ -66,6 +67,86 @@ function prompt(ctx: Context, model = 'deepseek-v4-flash') {
 }
 
 describe('request-level dynamic configuration', () => {
+  it('redacts malformed credential references at startup without retaining a cause', async () => {
+    const privateReference = 'sk-live-deepseek-startup-P1/secret'
+    const ctx = new Context()
+    cleanups.push(async () => {
+      await ctx.fiber.dispose()
+    })
+    await ctx.plugin(LlmRuntime)
+    const logged: unknown[][] = []
+    ctx.logger.error = ((...args: unknown[]) => { logged.push(args) }) as typeof ctx.logger.error
+
+    const failure = await ctx.plugin(LlmDeepSeek, {
+      apiKeyEnv: privateReference,
+      baseURL: 'http://127.0.0.1:1',
+    }).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(TypeError)
+    expect((failure as Error).message).toBe('llm-deepseek: invalid credential reference')
+    expect(Object.hasOwn(failure as object, 'cause')).toBe(false)
+    const evidence = inspect([failure, logged], { depth: null, showHidden: true })
+    expect(evidence).not.toContain(privateReference)
+    expect(evidence).not.toContain('sk-live-deepseek-startup-P1')
+    expect(ctx.llm.listProviders()).toEqual([])
+  })
+
+  it('redacts a malformed dynamic reference and retains the accepted generation and consumer', async () => {
+    const privateReference = 'sk-live-deepseek-dynamic-P1/secret'
+    const dir = await home()
+    const accepted = await mockServer([
+      { kind: 'sse', events: textEvents },
+      { kind: 'sse', events: textEvents },
+    ])
+    const rotated = await mockServer([{ kind: 'sse', events: textEvents }])
+    await writeFile(
+      join(dir, '.credentials.yaml'),
+      'DEEPSEEK_ACTIVE_KEY: old-key\nDEEPSEEK_ROTATED_KEY: rotated-key\n',
+      { mode: 0o600 },
+    )
+    let activeReference = credentialRef('DEEPSEEK_ACTIVE_KEY')
+    const replace = vi.fn((reference: ReturnType<typeof credentialRef>) => {
+      activeReference = reference
+    })
+    const { ctx } = await boot(
+      dir,
+      { apiKeyEnv: 'DEEPSEEK_ACTIVE_KEY', baseURL: accepted.url },
+      {
+        registerDeepSeekModel(reference: ReturnType<typeof credentialRef>) {
+          activeReference = reference
+          return { replace, dispose: vi.fn() }
+        },
+      },
+    )
+    const logged = vi.spyOn(ctx.logger, 'error').mockImplementation(() => undefined)
+
+    await ctx.settings.update(NS, {
+      apiKeyEnv: privateReference,
+      baseURL: rotated.url,
+    })
+    await vi.waitFor(() => {
+      expect(logged).toHaveBeenCalled()
+    })
+
+    expect(activeReference).toBe(credentialRef('DEEPSEEK_ACTIVE_KEY'))
+    expect(replace).not.toHaveBeenCalled()
+    await prompt(ctx)
+    expect(accepted.requests).toHaveLength(1)
+    expect(rotated.requests).toHaveLength(0)
+    const evidence = inspect(logged.mock.calls, { depth: null, showHidden: true })
+    expect(evidence).not.toContain(privateReference)
+    expect(evidence).not.toContain('sk-live-deepseek-dynamic-P1')
+    expect(evidence).not.toContain('cause')
+
+    await ctx.settings.replace(NS, {
+      apiKeyEnv: 'DEEPSEEK_ROTATED_KEY',
+      baseURL: rotated.url,
+    })
+    expect(activeReference).toBe(credentialRef('DEEPSEEK_ROTATED_KEY'))
+    await prompt(ctx)
+    expect(rotated.headers[0]?.authorization).toBe('Bearer rotated-key')
+  })
+
   it('routes the next request with the freshly resolved base URL and credential', async () => {
     vi.stubEnv('DEEPSEEK_API_KEY', '')
     const dir = await home()

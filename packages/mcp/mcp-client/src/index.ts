@@ -15,11 +15,12 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { credentialRef, type CredentialRef, type ResolvedCredential } from '@deepseek-ai/dsh-credentials'
+import type { CredentialRef, ResolvedCredential } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from './connection.ts'
 import type { ReconnectConfig } from './connection.ts'
+import { safeCredentialRef } from './credential-ref.ts'
 import { validateCredentialHeaders } from './transport.ts'
 // Side-effect type import: declaration-merges `ctx.tools` onto Context.
 import type {} from '@deepseek-ai/dsh-tools'
@@ -171,7 +172,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
 
   if (config.transport === 'streamable-http') {
     const references = new Set(
-      Object.values(config.credentialHeaders ?? {}).map(source => credentialRef(source.ref)),
+      Object.values(config.credentialHeaders ?? {}).map(source => safeCredentialRef(source.ref)),
     )
     if (references.size > 1) {
       throw new Error('mcp-client: one server may reference only one credential across its HTTP headers')
