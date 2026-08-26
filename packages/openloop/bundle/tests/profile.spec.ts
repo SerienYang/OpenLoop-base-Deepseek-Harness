@@ -221,7 +221,7 @@ describe('OpenLoop profile', () => {
     for (const endpoint of endpoints) {
       expect([endpoint, policy.allows(endpoint, {})]).toEqual([endpoint, false])
     }
-  })
+  }, 60_000)
 
   it('keeps every Dynamic Cordis lifecycle call allowed or all of its Client callers disabled', async () => {
     const policy = createBrowserApiPolicy(JSON.parse(

@@ -24,6 +24,9 @@ const RESERVED_MCP_HEADERS = new Set([
   'mcp-session-id',
 ])
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+/** Maximum JSON body cloned for credential-safe JSON-RPC error inspection. */
+const MAX_CREDENTIAL_JSON_RESPONSE_BYTES = 1024 * 1024
+const CREDENTIAL_JSON_RPC_ERROR_MESSAGE = 'mcp-client: credential-backed JSON-RPC request failed'
 
 /** Resolve one credential reference for the current HTTP request. */
 export type CredentialResolver =
@@ -167,8 +170,119 @@ export function createCredentialResolvingFetch(
       }
       return new Response(null, { status: response.status })
     }
-    return response
+    return sanitizeJsonRpcResponse(response)
   }
+}
+
+async function sanitizeJsonRpcResponse(response: Response): Promise<Response> {
+  const contentType = response.headers.get('content-type')
+    ?.split(';', 1)[0]
+    ?.trim()
+    .toLowerCase()
+  if (contentType !== 'application/json') return response
+
+  let payload: unknown
+  try {
+    payload = await readBoundedJson(response.clone())
+  } catch {
+    await discardResponseBody(response)
+    return sanitizedJsonRpcError(null)
+  }
+  const sanitized = sanitizeJsonRpcErrors(payload)
+  if (!sanitized.changed) return response
+  await discardResponseBody(response)
+  return new Response(JSON.stringify(sanitized.payload), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
+async function readBoundedJson(response: Response): Promise<unknown> {
+  const reader = response.body?.getReader()
+  if (reader === undefined) throw new Error('response body is missing')
+  const chunks: Uint8Array[] = []
+  let bytes: Uint8Array | undefined
+  let length = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      length += value.byteLength
+      if (length > MAX_CREDENTIAL_JSON_RESPONSE_BYTES) {
+        void reader.cancel().catch(() => {
+          // The caller cancels the original tee branch; ignore server errors
+          // while this clone branch settles.
+        })
+        throw new Error('response body exceeds the credential JSON inspection limit')
+      }
+      chunks.push(value.slice())
+    }
+    bytes = new Uint8Array(length)
+    let offset = 0
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown
+  } finally {
+    reader.releaseLock()
+    bytes?.fill(0)
+    for (const chunk of chunks) chunk.fill(0)
+  }
+}
+
+type JsonRpcSanitization =
+  | { readonly changed: false }
+  | { readonly changed: true; readonly payload: unknown }
+
+function sanitizeJsonRpcErrors(payload: unknown): JsonRpcSanitization {
+  if (Array.isArray(payload)) {
+    let changed = false
+    const messages: unknown[] = []
+    for (const message of payload as unknown[]) {
+      const sanitized = sanitizeJsonRpcError(message)
+      if (sanitized !== undefined) changed = true
+      messages.push(sanitized ?? message)
+    }
+    return changed ? { changed: true, payload: messages } : { changed: false }
+  }
+  const sanitized = sanitizeJsonRpcError(payload)
+  return sanitized === undefined
+    ? { changed: false }
+    : { changed: true, payload: sanitized }
+}
+
+function sanitizeJsonRpcError(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== 'object'
+    || value === null
+    || Array.isArray(value)
+    || (value as Record<string, unknown>)['jsonrpc'] !== '2.0'
+    || !Object.hasOwn(value, 'error')) {
+    return undefined
+  }
+  const id = (value as Record<string, unknown>)['id']
+  return {
+    jsonrpc: '2.0',
+    id: typeof id === 'number' && Number.isSafeInteger(id) ? id : null,
+    error: {
+      code: -32_000,
+      message: CREDENTIAL_JSON_RPC_ERROR_MESSAGE,
+    },
+  }
+}
+
+function sanitizedJsonRpcError(id: number | null): Response {
+  return new Response(JSON.stringify({
+    jsonrpc: '2.0',
+    id,
+    error: {
+      code: -32_000,
+      message: CREDENTIAL_JSON_RPC_ERROR_MESSAGE,
+    },
+  }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
 }
 
 async function discardResponseBody(response: Response): Promise<void> {

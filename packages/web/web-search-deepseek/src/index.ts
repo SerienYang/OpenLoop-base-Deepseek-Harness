@@ -133,8 +133,8 @@ function resolveOptions(ctx: Context, config: Config): DeepSeekSearchProviderOpt
 /** Register the DeepSeek search provider with `ctx.web`. */
 export function apply(ctx: Context, config: Config): void {
   let current: () => Config = () => config
-  const desiredCredentialReference = (): ReturnType<typeof credentialRef> | undefined => {
-    const source = current()
+  let accepted = config
+  const credentialReference = (source: Config): ReturnType<typeof credentialRef> | undefined => {
     return source.apiKey !== undefined && source.apiKey.length > 0
       ? undefined
       : credentialRef(source.apiKeyEnv ?? DEFAULT_API_KEY_ENV)
@@ -145,7 +145,7 @@ export function apply(ctx: Context, config: Config): void {
   let consumerReference: ReturnType<typeof credentialRef> | undefined
   const bindCredentialConsumers = (consumers: CredentialConsumerRegistry): void => {
     if (consumers === consumerRegistry) return
-    const reference = desiredCredentialReference()
+    const reference = credentialReference(accepted)
     const next = reference === undefined
       ? undefined
       : consumers.registerDeepSeekWebSearch(reference)
@@ -155,9 +155,9 @@ export function apply(ctx: Context, config: Config): void {
     consumerReference = reference
     previous?.dispose()
   }
-  const ensureCredentialConsumer = (): void => {
+  const stageCredentialConsumer = (candidate: Config): void => {
     if (consumerRegistry === undefined) return
-    const reference = desiredCredentialReference()
+    const reference = credentialReference(candidate)
     if (reference === consumerReference) return
     if (reference === undefined) {
       consumerRegistration?.dispose()
@@ -194,8 +194,17 @@ export function apply(ctx: Context, config: Config): void {
     },
     // The provider projects the section per search. Registry ownership still
     // follows the winning credential source as settings switch literal/ref.
-    onChange: () => { ensureCredentialConsumer() },
+    onChange: () => {
+      const desired = current()
+      try {
+        stageCredentialConsumer(desired)
+        accepted = desired
+      } catch (error) {
+        ctx.logger.error('web-search-deepseek: keeping the previous serving generation after a refused update')
+        ctx.logger.error(error)
+      }
+    },
   })
-  ensureCredentialConsumer()
-  ctx.web.registerSearchProvider(new DeepSeekSearchProvider(() => resolveOptions(ctx, current())))
+  stageCredentialConsumer(accepted)
+  ctx.web.registerSearchProvider(new DeepSeekSearchProvider(() => resolveOptions(ctx, accepted)))
 }

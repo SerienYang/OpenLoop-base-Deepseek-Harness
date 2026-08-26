@@ -61,8 +61,8 @@ async function boot(
   return { ctx, settingsFiber }
 }
 
-function prompt(ctx: Context) {
-  return assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+function prompt(ctx: Context, model = 'deepseek-v4-flash') {
+  return assemble(ctx, { model, messages: [] })
 }
 
 describe('request-level dynamic configuration', () => {
@@ -157,16 +157,35 @@ describe('request-level dynamic configuration', () => {
     expect(observed).toEqual([['deepseek-official']])
   })
 
-  it('keeps the prior consumer after a refused reference replacement and survives a revert', async () => {
+  it('keeps the accepted serving generation after a refused consumer replacement and advances after revert', async () => {
     const dir = await home()
+    const accepted = await mockServer([
+      { kind: 'sse', events: textEvents },
+    ])
+    const desired = await mockServer([
+      { kind: 'sse', events: textEvents },
+    ])
+    await writeFile(
+      join(dir, '.credentials.yaml'),
+      'DEEPSEEK_ACTIVE_KEY: old-key\nDEEPSEEK_REJECTED_KEY: new-key\n',
+      { mode: 0o600 },
+    )
     let activeReference = credentialRef('DEEPSEEK_ACTIVE_KEY')
+    let rejectReplacement = true
     const replace = vi.fn((reference: ReturnType<typeof credentialRef>) => {
-      if (reference === 'DEEPSEEK_REJECTED_KEY') throw new Error('consumer capacity exceeded')
+      if (reference === 'DEEPSEEK_REJECTED_KEY' && rejectReplacement) {
+        throw new Error('consumer capacity exceeded')
+      }
       activeReference = reference
     })
     const { ctx } = await boot(
       dir,
-      { apiKeyEnv: 'DEEPSEEK_ACTIVE_KEY', baseURL: 'http://127.0.0.1:1' },
+      {
+        apiKeyEnv: 'DEEPSEEK_ACTIVE_KEY',
+        baseURL: accepted.url,
+        models: [{ id: 'served-model', name: 'Accepted', maxTokens: 111 }],
+        retryPolicy: { mode: 'normal', maxRetries: 0 },
+      },
       {
         registerDeepSeekModel(reference: ReturnType<typeof credentialRef>) {
           activeReference = reference
@@ -175,12 +194,52 @@ describe('request-level dynamic configuration', () => {
       },
     )
 
-    await ctx.settings.update(NS, { apiKeyEnv: 'DEEPSEEK_REJECTED_KEY' })
+    const desiredConfig = {
+      apiKeyEnv: 'DEEPSEEK_REJECTED_KEY',
+      baseURL: desired.url,
+      models: [{ id: 'served-model', name: 'Desired', maxTokens: 222 }],
+      retryPolicy: { mode: 'normal' as const, maxRetries: 4 },
+    }
+    await ctx.settings.replace(NS, desiredConfig)
+    await vi.waitFor(() => {
+      expect(replace).toHaveBeenCalledTimes(1)
+    })
+
     expect(activeReference).toBe(credentialRef('DEEPSEEK_ACTIVE_KEY'))
+    expect(ctx.llm.providerRetryPolicy('deepseek-official')).toMatchObject({
+      mode: 'normal',
+      maxRetries: 0,
+    })
+    await expect(ctx.llm.listModels('deepseek-official')).resolves.toMatchObject([
+      { id: 'served-model', name: 'Accepted' },
+    ])
+    await prompt(ctx, 'served-model')
+    expect(accepted.headers[0]?.authorization).toBe('Bearer old-key')
+    expect(accepted.requests[0]).toMatchObject({ model: 'served-model', max_tokens: 111 })
+    expect(desired.requests).toHaveLength(0)
 
     await ctx.settings.replace(NS, {})
     expect(activeReference).toBe(credentialRef('DEEPSEEK_ACTIVE_KEY'))
     expect(replace).toHaveBeenCalledTimes(1)
+
+    rejectReplacement = false
+    await ctx.settings.replace(NS, desiredConfig)
+    await vi.waitFor(() => {
+      expect(replace).toHaveBeenCalledTimes(2)
+    })
+
+    expect(activeReference).toBe(credentialRef('DEEPSEEK_REJECTED_KEY'))
+    expect(ctx.llm.providerRetryPolicy('deepseek-official')).toMatchObject({
+      mode: 'normal',
+      maxRetries: 4,
+    })
+    await expect(ctx.llm.listModels('deepseek-official')).resolves.toMatchObject([
+      { id: 'served-model', name: 'Desired' },
+    ])
+    await prompt(ctx, 'served-model')
+    expect(desired.headers[0]?.authorization).toBe('Bearer new-key')
+    expect(desired.requests[0]).toMatchObject({ model: 'served-model', max_tokens: 222 })
+    expect(replace).toHaveBeenCalledTimes(2)
   })
 
   it('keeps the last good options when a settings snapshot fails beyond-schema validation', async () => {

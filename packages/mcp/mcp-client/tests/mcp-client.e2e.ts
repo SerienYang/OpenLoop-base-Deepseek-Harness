@@ -589,17 +589,35 @@ describe('streamable-http — in-process MCP server', () => {
 })
 
 describe('streamable-http credential failure redaction', () => {
-  it('keeps an echoing server response out of logs and the fatal error graph', async () => {
+  it('keeps an HTTP 200 JSON-RPC credential echo out of logs and the fatal error graph', async () => {
     const privateReference = 'MCP_ECHO_REFERENCE'
     const privateToken = 'mcp-echo-token'
     const diagnostics: string[] = []
     const server = createServer((request, response) => {
-      const authorization = request.headers.authorization ?? ''
-      response.writeHead(500, `${privateReference}-${privateToken}`, {
-        'x-echo-authorization': authorization,
-        'x-echo-reference': privateReference,
+      const chunks: Buffer[] = []
+      request.on('data', (chunk: Buffer) => { chunks.push(chunk) })
+      request.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { id?: unknown }
+        const authorization = request.headers.authorization ?? ''
+        response.writeHead(200, {
+          'content-type': 'application/json',
+          'mcp-session-id': privateToken,
+          'x-echo-authorization': authorization,
+          'x-echo-reference': privateReference,
+        })
+        response.end(JSON.stringify({
+          jsonrpc: '2.0',
+          id: body.id ?? null,
+          error: {
+            code: -32_000,
+            message: `${privateReference} ${authorization}`,
+            data: {
+              authorization,
+              cause: { message: privateToken },
+            },
+          },
+        }))
       })
-      response.end(`${privateReference} ${authorization}`)
     })
     const listening: PromiseWithResolvers<void> = Promise.withResolvers()
     server.listen(0, '127.0.0.1', listening.resolve)

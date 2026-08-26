@@ -230,6 +230,117 @@ describe('MCP credential-backed HTTP headers', () => {
     }
   })
 
+  it('replaces HTTP 200 JSON-RPC errors while preserving successful JSON and streaming responses', async () => {
+    const privateToken = 'mcp-json-rpc-echo-token'
+    const reflected = new Response(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 7,
+      error: {
+        code: -32_000,
+        message: `Authorization: Bearer ${privateToken}`,
+        data: {
+          authorization: `Bearer ${privateToken}`,
+          cause: new Error(privateToken),
+        },
+      },
+    }), {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+        'mcp-session-id': privateToken,
+        'x-echo-authorization': `Bearer ${privateToken}`,
+      },
+    })
+    const successful = new Response(
+      JSON.stringify({ jsonrpc: '2.0', id: 8, result: { ok: true } }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    )
+    const streaming = new Response('event: message\ndata: {}\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    })
+    const dispatch = vi.fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(reflected)
+      .mockResolvedValueOnce(successful)
+      .mockResolvedValueOnce(streaming)
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef('MCP_API_KEY'), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: dispatch,
+    })
+
+    const sanitized = await credentialFetch('https://mcp.example.test', {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'initialize' }),
+    })
+    const body = await sanitized.json() as unknown
+    expect(body).toEqual({
+      jsonrpc: '2.0',
+      id: 7,
+      error: {
+        code: -32_000,
+        message: 'mcp-client: credential-backed JSON-RPC request failed',
+      },
+    })
+    expect([...sanitized.headers]).toEqual([['content-type', 'application/json']])
+    expect(JSON.stringify(body)).not.toContain(privateToken)
+
+    const successfulResult = await credentialFetch('https://mcp.example.test')
+    expect(successfulResult).toBe(successful)
+    await expect(successfulResult.json()).resolves.toEqual({
+      jsonrpc: '2.0',
+      id: 8,
+      result: { ok: true },
+    })
+    const streamingResult = await credentialFetch('https://mcp.example.test')
+    expect(streamingResult).toBe(streaming)
+    await expect(streamingResult.text()).resolves.toBe('event: message\ndata: {}\n\n')
+  })
+
+  it('fails closed when an application/json response exceeds the inspection bound', async () => {
+    const privateToken = 'mcp-oversized-error-token'
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef('MCP_API_KEY'), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(new Response(JSON.stringify({
+        jsonrpc: '2.0',
+        id: 9,
+        error: {
+          code: -32_000,
+          message: privateToken,
+          data: 'x'.repeat(1024 * 1024),
+        },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))),
+    })
+
+    const response = await credentialFetch('https://mcp.example.test')
+    const body = await response.json() as unknown
+    expect(body).toEqual({
+      jsonrpc: '2.0',
+      id: null,
+      error: {
+        code: -32_000,
+        message: 'mcp-client: credential-backed JSON-RPC request failed',
+      },
+    })
+    expect(JSON.stringify(body)).not.toContain(privateToken)
+  })
+
   it.each([
     ['rejects', () => Promise.reject(new Error('response-secret cleanup failure'))],
     ['throws', () => {

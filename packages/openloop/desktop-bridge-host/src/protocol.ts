@@ -146,14 +146,11 @@ export function canonicalRequestBytes(
   if (nonce.length !== BRIDGE_NONCE_BYTES) {
     throw new TypeError('bridge nonce must contain exactly 32 bytes')
   }
-  return Buffer.concat([
-    REQUEST_DOMAIN,
-    nonce,
-    uint32(request.version),
-    field(request.requestId),
-    field(request.launchId),
-    field(request.method),
-    field(canonicalJson(request.payload)),
+  return canonicalBytes([REQUEST_DOMAIN, nonce], request.version, [
+    request.requestId,
+    request.launchId,
+    request.method,
+    canonicalJson(request.payload),
   ])
 }
 
@@ -263,12 +260,9 @@ function canonicalResponseBytes(response: BridgeResponse, nonce: Uint8Array): Ui
   const body = response.ok
     ? { ok: true, result: response.result }
     : { error: response.error, ok: false }
-  return Buffer.concat([
-    RESPONSE_DOMAIN,
-    nonce,
-    uint32(response.version),
-    field(response.requestId),
-    field(canonicalJson(body)),
+  return canonicalBytes([RESPONSE_DOMAIN, nonce], response.version, [
+    response.requestId,
+    canonicalJson(body),
   ])
 }
 
@@ -412,17 +406,40 @@ function canonicalJson(value: unknown, ancestors = new Set<object>()): string {
 }
 
 function field(value: string): Buffer {
-  const bytes = Buffer.from(value)
-  return Buffer.concat([uint32(bytes.length), bytes])
+  const length = Buffer.byteLength(value)
+  requireUint32(length)
+  const bytes = Buffer.allocUnsafe(4 + length)
+  bytes.writeUInt32BE(length)
+  bytes.write(value, 4, length, 'utf8')
+  return bytes
 }
 
 function uint32(value: number): Buffer {
-  if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) {
-    throw new TypeError('bridge canonical field length is out of bounds')
-  }
+  requireUint32(value)
   const bytes = Buffer.allocUnsafe(4)
   bytes.writeUInt32BE(value)
   return bytes
+}
+
+function canonicalBytes(
+  stable: readonly Uint8Array[],
+  version: number,
+  values: readonly string[],
+): Buffer {
+  const mutable: Buffer[] = []
+  try {
+    mutable.push(uint32(version))
+    for (const value of values) mutable.push(field(value))
+    return Buffer.concat([...stable, ...mutable])
+  } finally {
+    for (const bytes of mutable) bytes.fill(0)
+  }
+}
+
+function requireUint32(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) {
+    throw new TypeError('bridge canonical field length is out of bounds')
+  }
 }
 
 function requireSecret(secret: Uint8Array): void {

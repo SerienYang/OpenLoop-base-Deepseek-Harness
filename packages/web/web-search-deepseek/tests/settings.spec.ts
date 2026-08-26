@@ -127,31 +127,88 @@ describe('web-search-deepseek settings section', () => {
     await ctx.fiber.dispose()
   })
 
-  it('keeps the prior consumer after a refused reference replacement and survives a revert', async () => {
+  it('keeps the accepted search generation after a refused consumer replacement and advances after revert', async () => {
     let activeReference = credentialRef('ACTIVE_REFERENCE')
+    let rejectReplacement = true
     const replace = vi.fn((reference: ReturnType<typeof credentialRef>) => {
-      if (reference === 'REJECTED_REFERENCE') throw new Error('consumer capacity exceeded')
+      if (reference === 'REJECTED_REFERENCE' && rejectReplacement) {
+        throw new Error('consumer capacity exceeded')
+      }
       activeReference = reference
     })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockImplementation(() => Promise.resolve(jsonResponse(ONE_RESULT)))
     const ctx = new Context()
     await ctx.plugin(WebRuntime, {})
     await ctx.plugin(MemorySettings)
+    ctx.provide('credentials', {
+      resolve: vi.fn((reference: ReturnType<typeof credentialRef>) => Promise.resolve({
+        value: reference === 'ACTIVE_REFERENCE' ? 'accepted-key' : 'desired-key',
+        source: 'keychain',
+      })),
+    } as never)
     ctx.provide('credentialConsumers', {
       registerDeepSeekWebSearch: vi.fn((reference: ReturnType<typeof credentialRef>) => {
         activeReference = reference
         return { replace, dispose: vi.fn() }
       }),
     } as never)
-    await ctx.plugin(deepseekPlugin, { apiKeyEnv: 'ACTIVE_REFERENCE' })
-
-    await ctx.settings.update(WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, {
-      apiKeyEnv: 'REJECTED_REFERENCE',
+    await ctx.plugin(deepseekPlugin, {
+      apiKeyEnv: 'ACTIVE_REFERENCE',
+      baseURL: 'https://accepted.search.test/v1',
+      model: 'accepted-model',
+      maxTokens: 111,
+      maxUses: 2,
     })
+
+    const desiredConfig = {
+      apiKeyEnv: 'REJECTED_REFERENCE',
+      baseURL: 'https://desired.search.test/v1',
+      model: 'desired-model',
+      maxTokens: 222,
+      maxUses: 4,
+    }
+    await ctx.settings.replace(WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, desiredConfig)
+    await vi.waitFor(() => {
+      expect(replace).toHaveBeenCalledTimes(1)
+    })
+
     expect(activeReference).toBe(credentialRef('ACTIVE_REFERENCE'))
+    await ctx.web.search({ query: 'accepted' })
+    const [acceptedUrl, acceptedInit] = fetchSpy.mock.calls.at(-1) as [string, RequestInit]
+    expect(acceptedUrl).toBe('https://accepted.search.test/v1/messages')
+    expect(acceptedInit.headers).toMatchObject({
+      'x-api-key': 'accepted-key',
+      'authorization': 'Bearer accepted-key',
+    })
+    expect(JSON.parse(acceptedInit.body as string)).toMatchObject({
+      model: 'accepted-model',
+      max_tokens: 111,
+      tools: [{ max_uses: 2 }],
+    })
 
     await ctx.settings.replace(WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, {})
     expect(activeReference).toBe(credentialRef('ACTIVE_REFERENCE'))
     expect(replace).toHaveBeenCalledTimes(1)
+
+    rejectReplacement = false
+    await ctx.settings.replace(WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, desiredConfig)
+    await vi.waitFor(() => {
+      expect(replace).toHaveBeenCalledTimes(2)
+    })
+
+    await ctx.web.search({ query: 'desired' })
+    const [desiredUrl, desiredInit] = fetchSpy.mock.calls.at(-1) as [string, RequestInit]
+    expect(desiredUrl).toBe('https://desired.search.test/v1/messages')
+    expect(desiredInit.headers).toMatchObject({
+      'x-api-key': 'desired-key',
+      'authorization': 'Bearer desired-key',
+    })
+    expect(JSON.parse(desiredInit.body as string)).toMatchObject({
+      model: 'desired-model',
+      max_tokens: 222,
+      tools: [{ max_uses: 4 }],
+    })
     await ctx.fiber.dispose()
   })
 

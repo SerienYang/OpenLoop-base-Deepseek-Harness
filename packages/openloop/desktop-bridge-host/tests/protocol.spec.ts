@@ -129,6 +129,70 @@ describe('authenticated desktop bridge protocol', () => {
     expect([...wipedCanonical!]).toEqual(new Array(wipedCanonical!.length).fill(0))
   })
 
+  it('zeroizes every response field buffer after successful HMAC signing', () => {
+    const inputs: Array<readonly Uint8Array[]> = []
+    const originalConcat = Buffer.concat.bind(Buffer)
+    const concat = vi.spyOn(Buffer, 'concat').mockImplementation((
+      list: readonly Uint8Array[],
+      totalLength?: number,
+    ) => {
+      inputs.push([...list])
+      return originalConcat(list, totalLength)
+    })
+    try {
+      authenticateBridgeResponse({
+        version: 1,
+        requestId: 'response-field-success',
+        ok: true,
+        result: 'response-field-secret',
+      }, nonce, secret)
+    } finally {
+      concat.mockRestore()
+    }
+
+    const canonicalParts = inputs.find(parts =>
+      parts.length === 5
+      && Buffer.from(parts[0]!).toString('utf8') === 'openloop.bridge.response.v1\0')
+    expect(canonicalParts).toBeDefined()
+    for (const part of canonicalParts?.slice(2) ?? []) {
+      expect([...part]).toEqual(new Array(part.length).fill(0))
+    }
+  })
+
+  it('zeroizes every response field buffer after failed HMAC verification', () => {
+    const response = authenticateBridgeResponse({
+      version: 1,
+      requestId: 'response-field-failure',
+      ok: true,
+      result: 'response-field-secret',
+    }, nonce, secret)
+    const inputs: Array<readonly Uint8Array[]> = []
+    const originalConcat = Buffer.concat.bind(Buffer)
+    const concat = vi.spyOn(Buffer, 'concat').mockImplementation((
+      list: readonly Uint8Array[],
+      totalLength?: number,
+    ) => {
+      inputs.push([...list])
+      return originalConcat(list, totalLength)
+    })
+    try {
+      expect(() => verifyBridgeResponse(
+        { ...response, mac: '00'.repeat(32) },
+        { requestId: response.response.requestId, nonce, secret },
+      )).toThrow(/authentication/)
+    } finally {
+      concat.mockRestore()
+    }
+
+    const canonicalParts = inputs.find(parts =>
+      parts.length === 5
+      && Buffer.from(parts[0]!).toString('utf8') === 'openloop.bridge.response.v1\0')
+    expect(canonicalParts).toBeDefined()
+    for (const part of canonicalParts?.slice(2) ?? []) {
+      expect([...part]).toEqual(new Array(part.length).fill(0))
+    }
+  })
+
   it('zeroizes temporary body and header buffers after frame encoding', () => {
     const inputs: Array<readonly Uint8Array[]> = []
     const originalConcat = Buffer.concat.bind(Buffer)
