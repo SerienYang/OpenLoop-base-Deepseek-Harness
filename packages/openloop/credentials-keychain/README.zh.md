@@ -17,9 +17,9 @@ inherited process environment (read-only)
 provider 不缓存或记录凭据值与引用。Bridge 返回值只解码一次，随后立即清空可变字节
 数组和解码时的临时副本。由于直接调用 `CredentialProvider.set()` 或 `unset()` 会
 失败，`CredentialProvider.describe()` 始终报告 `writable: false`。Openloop 的
-浏览器安全 facade 单独报告可写状态。由于 Task 1.4 的原生替换 sheet 与删除确认尚未
-安装，Keychain 和未配置 reference 当前均报告 `writable: false`；mutation preflight
-会在两个占位 action 运行前拒绝请求。
+浏览器安全 facade 单独报告可写状态。macOS Host 只有在同窗口原生替换 sheet 与原生
+删除确认均已安装时，才会把 Keychain 和未配置 reference 报告为可写。崩溃安全的旧
+凭据迁移仍属于后续独立任务。
 
 Keychain item 使用 Tauri Host 按发布通道选择的 service，account 固定为
 `credential:<CREDENTIAL_REFERENCE>`。provider id 不参与存储身份，因此多个模型

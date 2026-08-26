@@ -25,11 +25,14 @@ use crate::bridge::{
 };
 use crate::update::channel::ReleaseChannel;
 
-mod secure_prompt;
+mod secure_sheet;
 
-pub use secure_prompt::{
-    credentials_navigation_allowed, open_secure_prompt, SecurePromptState, CREDENTIALS_PAGE,
-    CREDENTIALS_WINDOW_HEIGHT, CREDENTIALS_WINDOW_LABEL, CREDENTIALS_WINDOW_WIDTH,
+pub use secure_sheet::{
+    deletion_consumer_labels, AppKitCredentialDeletionConfirmation, AppKitCredentialSheet,
+    CredentialReplacement, CredentialReplacementStore, CredentialSheetAction,
+    CredentialSheetCoordinator, CredentialSheetGate, CredentialSheetOutcome,
+    CredentialSheetPresentation, CredentialSheetPresenter, CredentialSheetRequest,
+    CredentialSheetSecret, CredentialSheetZeroizationProbe, NativeTextFieldKind, MAIN_WINDOW_LABEL,
 };
 
 pub const MAX_SECRET_BYTES: usize = 8 * 1024;
@@ -37,10 +40,6 @@ pub const MAX_CREDENTIAL_REFERENCE_BYTES: usize = 128;
 pub const MAX_CREDENTIAL_CONSUMERS: usize = 255;
 pub const MAX_CREDENTIAL_CONSUMER_FIELD_BYTES: usize = 256;
 pub const MAX_CREDENTIAL_DELETION_PLAN_BYTES: usize = 56 * 1024;
-
-// Task 1.4 flips this only when both native replacement and deletion
-// confirmation can complete successfully.
-const NATIVE_CREDENTIAL_MUTATION_AVAILABLE: bool = false;
 
 const TEST_KEYCHAIN_SERVICE: &str = "ai.openloop.credentials.test.v1";
 const STABLE_KEYCHAIN_SERVICE: &str = "ai.openloop.credentials.v1";
@@ -206,14 +205,6 @@ pub trait CredentialDeletionConfirmation: Send + Sync {
     fn confirm_deletion(&self, plan: &CredentialDeletionPlan) -> Result<bool, CredentialError>;
 }
 
-pub struct CancelCredentialDeletion;
-
-impl CredentialDeletionConfirmation for CancelCredentialDeletion {
-    fn confirm_deletion(&self, _plan: &CredentialDeletionPlan) -> Result<bool, CredentialError> {
-        Ok(false)
-    }
-}
-
 pub fn delete_credential_with_confirmation(
     store: &impl CredentialDeletionStore,
     confirmation: &(impl CredentialDeletionConfirmation + ?Sized),
@@ -305,8 +296,11 @@ struct CredentialReferencePayload {
 
 pub fn credential_bridge_dispatch_tables(
     store: KeychainStore,
-    confirmation: Arc<dyn CredentialDeletionConfirmation>,
+    replacement: Option<Arc<dyn CredentialReplacement>>,
+    confirmation: Option<Arc<dyn CredentialDeletionConfirmation>>,
 ) -> Result<BridgeDispatchTables, CredentialError> {
+    let writable = replacement.is_some() && confirmation.is_some();
+    let mutation_gate = writable.then(|| Arc::new(CredentialSheetGate::default()));
     let mut browser_safe = HashMap::new();
     let describe: BridgeHandler = Arc::new(move |payload, _cancellation| {
         let request: CredentialReferencePayload = serde_json::from_value(payload)
@@ -320,31 +314,59 @@ pub fn credential_bridge_dispatch_tables(
             json!({
                 "configured": true,
                 "source": "keychain",
-                "writable": NATIVE_CREDENTIAL_MUTATION_AVAILABLE,
+                "writable": writable,
             })
         } else {
             json!({
                 "configured": false,
-                "writable": NATIVE_CREDENTIAL_MUTATION_AVAILABLE,
+                "writable": writable,
             })
         })
     });
     browser_safe.insert("describeCredential".to_owned(), describe);
-    let replacement: BridgeHandler = Arc::new(|payload, _cancellation| {
+    let replacement_ui = replacement;
+    let replacement_gate = mutation_gate.clone();
+    let replacement: BridgeHandler = Arc::new(move |payload, cancellation| {
         let request: CredentialReferencePayload = serde_json::from_value(payload)
             .map_err(|_| crate::bridge::server::BridgeHandlerError::invalid_request())?;
-        CredentialAccount::new(&request.reference)
+        let account = CredentialAccount::new(&request.reference)
             .map_err(|_| crate::bridge::server::BridgeHandlerError::invalid_request())?;
-        Ok(Value::String("cancelled".to_owned()))
+        let Some(replacement) = replacement_ui.as_ref() else {
+            return Ok(Value::String("cancelled".to_owned()));
+        };
+        let _active = replacement_gate
+            .as_ref()
+            .map(|gate| gate.try_acquire())
+            .transpose()
+            .map_err(|_| crate::bridge::server::BridgeHandlerError::credential_failure())?;
+        let outcome = replacement
+            .replace(account, &cancellation)
+            .map_err(|_| crate::bridge::server::BridgeHandlerError::credential_failure())?;
+        Ok(Value::String(
+            match outcome {
+                CredentialSheetOutcome::Saved => "saved",
+                CredentialSheetOutcome::Cancelled => "cancelled",
+            }
+            .to_owned(),
+        ))
     });
     browser_safe.insert("openCredentialReplacement".to_owned(), replacement);
     let deletion_store = store;
     let deletion_confirmation = confirmation;
+    let deletion_gate = mutation_gate;
     let delete: BridgeHandler = Arc::new(move |payload, cancellation| {
         let plan: CredentialDeletionPlan = serde_json::from_value(payload)
             .map_err(|_| crate::bridge::server::BridgeHandlerError::invalid_request())?;
         validate_deletion_plan(&plan)
             .map_err(|_| crate::bridge::server::BridgeHandlerError::invalid_request())?;
+        let Some(deletion_confirmation) = deletion_confirmation.as_ref() else {
+            return Ok(Value::String("cancelled".to_owned()));
+        };
+        let _active = deletion_gate
+            .as_ref()
+            .map(|gate| gate.try_acquire())
+            .transpose()
+            .map_err(|_| crate::bridge::server::BridgeHandlerError::credential_failure())?;
         let outcome = delete_credential_with_confirmation_cancellable(
             &deletion_store,
             deletion_confirmation.as_ref(),
@@ -495,16 +517,8 @@ impl CredentialError {
         Self::new("credential secret size is invalid")
     }
 
-    fn invalid_prompt() -> Self {
-        Self::new("credential prompt context is invalid")
-    }
-
     fn prompt_unavailable() -> Self {
         Self::new("credential prompt is unavailable")
-    }
-
-    fn prompt(message: String) -> Self {
-        Self::new(message)
     }
 
     fn invalid_spike() -> Self {

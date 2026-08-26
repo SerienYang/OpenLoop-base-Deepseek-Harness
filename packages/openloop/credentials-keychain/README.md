@@ -18,10 +18,10 @@ The provider never caches or logs a credential value or reference. A bridge
 result is decoded once and both its mutable byte array and temporary decode
 copy are cleared immediately. `CredentialProvider.describe()` reports
 `writable: false` because direct `set()` and `unset()` calls fail closed.
-Openloop's browser-safe facade reports writability separately. It currently
-reports `writable: false` for Keychain and unconfigured references because the
-Task 1.4 native replacement sheet and deletion confirmation are not installed;
-mutation preflight rejects before either placeholder action runs.
+Openloop's browser-safe facade reports writability separately. The macOS Host
+reports Keychain and unconfigured references as writable only when both the
+same-window native replacement sheet and native deletion confirmation are
+installed. Crash-safe legacy credential migration remains a separate task.
 
 Keychain items use the release-channel service selected by the Tauri Host and
 the account `credential:<CREDENTIAL_REFERENCE>`. Provider ids are not part of

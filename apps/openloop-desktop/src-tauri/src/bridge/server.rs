@@ -112,6 +112,12 @@ impl CancellationToken {
     }
 }
 
+impl Default for CancellationToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug)]
 pub struct BridgeHandlerError {
     code: &'static str,

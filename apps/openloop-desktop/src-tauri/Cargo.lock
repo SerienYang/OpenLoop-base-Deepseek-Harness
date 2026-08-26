@@ -2200,11 +2200,15 @@ name = "openloop-desktop"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "block2",
  "flate2",
  "getrandom 0.3.4",
  "hmac",
  "libc",
  "minisign-verify",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "security-framework",
  "security-framework-sys",
  "serde",

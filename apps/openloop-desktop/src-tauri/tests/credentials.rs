@@ -16,23 +16,21 @@ use openloop_desktop_lib::{
             AuthenticatedBridgeResponse, BridgeRequest, BRIDGE_PROTOCOL_VERSION,
             MAX_BRIDGE_FRAME_BYTES,
         },
-        server::{AuthenticatedBridgeDispatcher, PeerIdentity},
+        server::{AuthenticatedBridgeDispatcher, CancellationToken, PeerIdentity},
     },
     credentials::{
-        credential_bridge_dispatch_tables, credentials_navigation_allowed,
-        delete_credential_with_confirmation, parse_keychain_spike_action, CancelCredentialDeletion,
-        CredentialAccount, CredentialConsumerDisplay, CredentialConsumerLabel,
-        CredentialDeletionConfirmation, CredentialDeletionOutcome, CredentialDeletionPlan,
-        CredentialDeletionStore, CredentialError, KeychainSpikeAction, KeychainSpikeReport,
-        KeychainStore, SecurePromptState, CREDENTIALS_PAGE, CREDENTIALS_WINDOW_HEIGHT,
-        CREDENTIALS_WINDOW_LABEL, CREDENTIALS_WINDOW_WIDTH, MAX_SECRET_BYTES,
+        credential_bridge_dispatch_tables, delete_credential_with_confirmation,
+        parse_keychain_spike_action, CredentialAccount, CredentialConsumerDisplay,
+        CredentialConsumerLabel, CredentialDeletionConfirmation, CredentialDeletionOutcome,
+        CredentialDeletionPlan, CredentialDeletionStore, CredentialError, CredentialReplacement,
+        CredentialSheetOutcome, KeychainSpikeAction, KeychainSpikeReport, KeychainStore,
+        MAX_SECRET_BYTES,
     },
     launcher::capture_process_identity,
     update::channel::ReleaseChannel,
 };
 use security_framework::passwords::{set_generic_password_options, PasswordOptions};
 use serde_json::json;
-use tauri::Url;
 use uuid::Uuid;
 
 fn unique_account(label: &str) -> CredentialAccount {
@@ -77,6 +75,13 @@ fn services_are_exact_and_derived_only_from_release_channel() {
 fn credential_dispatcher(
     confirmation: Arc<dyn CredentialDeletionConfirmation>,
 ) -> (AuthenticatedBridgeDispatcher, Uuid, Vec<u8>, PeerIdentity) {
+    credential_dispatcher_with_ui(None, Some(confirmation))
+}
+
+fn credential_dispatcher_with_ui(
+    replacement: Option<Arc<dyn CredentialReplacement>>,
+    confirmation: Option<Arc<dyn CredentialDeletionConfirmation>>,
+) -> (AuthenticatedBridgeDispatcher, Uuid, Vec<u8>, PeerIdentity) {
     let executable = std::env::current_exe().expect("test executable");
     let launch_id = Uuid::new_v4();
     let secret: Vec<u8> = (0..32).collect();
@@ -90,8 +95,12 @@ fn credential_dispatcher(
         executable,
         launch_id,
         secret.clone(),
-        credential_bridge_dispatch_tables(KeychainStore::new(ReleaseChannel::Test), confirmation)
-            .expect("credential tables"),
+        credential_bridge_dispatch_tables(
+            KeychainStore::new(ReleaseChannel::Test),
+            replacement,
+            confirmation,
+        )
+        .expect("credential tables"),
     )
     .expect("credential dispatcher");
     (dispatcher, launch_id, secret, peer)
@@ -99,7 +108,7 @@ fn credential_dispatcher(
 
 fn dispatch_credential(method: &str, payload: serde_json::Value) -> serde_json::Value {
     let (dispatcher, launch_id, secret, peer) =
-        credential_dispatcher(Arc::new(CancelCredentialDeletion));
+        credential_dispatcher(Arc::new(FixedConfirmation::new(false)));
     let request = BridgeRequest {
         version: BRIDGE_PROTOCOL_VERSION,
         request_id: "credential-request".to_owned(),
@@ -134,7 +143,7 @@ fn credential_bridge_dispatch_is_strict_and_keeps_resolution_host_only() {
 }
 
 #[test]
-fn native_credential_status_is_read_only_until_task_1_4_installs_mutation_ui() {
+fn native_credential_status_is_read_only_without_both_mutation_presenters() {
     let account = unique_account("native_read_only");
     let _cleanup = KeychainCleanup::new(account.clone());
     let reference = account
@@ -157,6 +166,77 @@ fn native_credential_status_is_read_only_until_task_1_4_installs_mutation_ui() {
     assert_eq!(
         configured["result"],
         json!({ "configured": true, "source": "keychain", "writable": false })
+    );
+}
+
+#[derive(Default)]
+struct RecordingReplacement {
+    accounts: Mutex<Vec<String>>,
+}
+
+impl CredentialReplacement for RecordingReplacement {
+    fn replace(
+        &self,
+        account: CredentialAccount,
+        _cancellation: &CancellationToken,
+    ) -> Result<CredentialSheetOutcome, CredentialError> {
+        self.accounts
+            .lock()
+            .expect("replacement account lock")
+            .push(account.as_str().to_owned());
+        Ok(CredentialSheetOutcome::Saved)
+    }
+}
+
+#[test]
+fn bridge_is_writable_and_replaces_only_when_both_native_presenters_are_installed() {
+    let replacement = Arc::new(RecordingReplacement::default());
+    let (dispatcher, launch_id, secret, peer) = credential_dispatcher_with_ui(
+        Some(replacement.clone()),
+        Some(Arc::new(FixedConfirmation::new(false))),
+    );
+    let status_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "native-status".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "describeCredential".to_owned(),
+        payload: json!({ "ref": "NATIVE_WRITABLE" }),
+    };
+    let status = dispatcher
+        .dispatch(
+            peer,
+            sign_request(status_request, [4; 32], &secret).expect("signed status request"),
+        )
+        .expect("status response");
+    let status = serde_json::to_value(status).expect("status JSON");
+    assert_eq!(
+        status["result"],
+        json!({ "configured": false, "writable": true })
+    );
+
+    let replacement_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "native-replacement".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "openCredentialReplacement".to_owned(),
+        payload: json!({ "ref": "NATIVE_WRITABLE" }),
+    };
+    let outcome = dispatcher
+        .dispatch(
+            peer,
+            sign_request(replacement_request, [5; 32], &secret)
+                .expect("signed replacement request"),
+        )
+        .expect("replacement response");
+    let outcome = serde_json::to_value(outcome).expect("replacement JSON");
+    assert_eq!(outcome["result"], "saved");
+    assert_eq!(
+        replacement
+            .accounts
+            .lock()
+            .expect("replacement account lock")
+            .as_slice(),
+        &["credential:NATIVE_WRITABLE"]
     );
 }
 
@@ -399,6 +479,74 @@ fn bridge_cancellation_while_confirmation_is_pending_prevents_deletion() {
 }
 
 #[test]
+fn bridge_serializes_replacement_against_confirmed_deletion_commit() {
+    let reference = format!(
+        "MUTATION_SERIALIZATION_{}_{}",
+        process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock follows Unix epoch")
+            .as_nanos()
+    );
+    let replacement = Arc::new(RecordingReplacement::default());
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let confirmation = Arc::new(BlockingApproval {
+        entered: Mutex::new(Some(entered_tx)),
+        release: Mutex::new(release_rx),
+    });
+    let (dispatcher, launch_id, secret, peer) =
+        credential_dispatcher_with_ui(Some(replacement.clone()), Some(confirmation));
+    let delete_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "serialized-delete".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "unsetCredential".to_owned(),
+        payload: deletion_plan_payload(&reference),
+    };
+    let delete_dispatcher = dispatcher.clone();
+    let delete_secret = secret.clone();
+    let pending = thread::spawn(move || {
+        delete_dispatcher
+            .dispatch(
+                peer,
+                sign_request(delete_request, [12; 32], &delete_secret)
+                    .expect("signed deletion request"),
+            )
+            .expect("deletion response")
+    });
+    entered_rx.recv().expect("confirmation opened");
+
+    let replace_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "overlapping-replacement".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "openCredentialReplacement".to_owned(),
+        payload: json!({ "ref": reference }),
+    };
+    let replacement_response = dispatcher
+        .dispatch(
+            peer,
+            sign_request(replace_request, [13; 32], &secret).expect("signed replacement request"),
+        )
+        .expect("replacement response");
+    let replacement_response =
+        serde_json::to_value(replacement_response).expect("replacement JSON");
+    assert_eq!(replacement_response["ok"], false);
+    assert_eq!(replacement_response["error"]["code"], "credential_failure");
+    assert!(replacement
+        .accounts
+        .lock()
+        .expect("replacement account lock")
+        .is_empty());
+
+    release_tx.send(()).expect("release confirmation");
+    let deletion_response =
+        serde_json::to_value(pending.join().expect("deletion thread")).expect("deletion JSON");
+    assert_eq!(deletion_response["result"], "deleted");
+}
+
+#[test]
 fn bridge_pre_cancellation_skips_confirmation_and_deletion() {
     let reference = format!(
         "CANCEL_BEFORE_{}_{}",
@@ -566,7 +714,7 @@ fn maximum_secret_resolves_through_a_bounded_bridge_response_frame() {
         .strip_prefix("credential:")
         .expect("credential account prefix");
     let (dispatcher, launch_id, secret, peer) =
-        credential_dispatcher(Arc::new(CancelCredentialDeletion));
+        credential_dispatcher(Arc::new(FixedConfirmation::new(false)));
     let request = BridgeRequest {
         version: BRIDGE_PROTOCOL_VERSION,
         request_id: "maximum-secret".to_owned(),
@@ -611,98 +759,6 @@ fn oversized_existing_keychain_value_fails_before_bridge_serialization() {
     assert_eq!(response["ok"], false);
     assert_eq!(response["error"]["code"], "credential_failure");
     assert!(serde_json::to_vec(&response).expect("response JSON").len() < 1024);
-}
-
-#[test]
-fn prompt_context_rejects_stale_tokens_and_wrong_window_labels() {
-    let state = SecurePromptState::default();
-    let account = unique_account("prompt");
-    let prompt_token = "11".repeat(32);
-    let stale_token = "22".repeat(32);
-
-    state
-        .activate(account.clone(), prompt_token.clone())
-        .expect("first prompt activation");
-    assert!(state.activate(account.clone(), "33".repeat(32)).is_err());
-    assert!(state.account_for_prompt("main", &prompt_token).is_err());
-    assert!(state
-        .account_for_prompt(CREDENTIALS_WINDOW_LABEL, &stale_token)
-        .is_err());
-    assert_eq!(
-        state
-            .account_for_prompt(CREDENTIALS_WINDOW_LABEL, &prompt_token)
-            .expect("credentials context"),
-        account
-    );
-}
-
-#[test]
-fn stale_prompt_clear_is_a_no_op_for_a_newer_session() {
-    let state = SecurePromptState::default();
-    let first_account = unique_account("first-prompt");
-    let second_account = unique_account("second-prompt");
-    let first_token = "44".repeat(32);
-    let second_token = "55".repeat(32);
-
-    state
-        .activate(first_account, first_token.clone())
-        .expect("first prompt activation");
-    assert!(state
-        .clear_for_prompt(CREDENTIALS_WINDOW_LABEL, &first_token)
-        .expect("clear first prompt"));
-    state
-        .activate(second_account.clone(), second_token.clone())
-        .expect("second prompt activation");
-    assert!(!state
-        .clear_for_prompt(CREDENTIALS_WINDOW_LABEL, &first_token)
-        .expect("stale clear"));
-    assert_eq!(
-        state
-            .account_for_prompt(CREDENTIALS_WINDOW_LABEL, &second_token)
-            .expect("new prompt remains active"),
-        second_account
-    );
-    state
-        .clear_for_prompt(CREDENTIALS_WINDOW_LABEL, &second_token)
-        .expect("clear second prompt");
-    assert!(state
-        .account_for_prompt(CREDENTIALS_WINDOW_LABEL, &second_token)
-        .is_err());
-}
-
-#[test]
-fn prompt_navigation_allows_only_the_exact_local_app_page() {
-    assert_eq!(CREDENTIALS_WINDOW_LABEL, "credentials");
-    assert_eq!(CREDENTIALS_PAGE, "src/credentials.html");
-    assert_eq!(
-        (CREDENTIALS_WINDOW_WIDTH, CREDENTIALS_WINDOW_HEIGHT),
-        (420.0, 300.0)
-    );
-
-    for allowed in [
-        "tauri://localhost/src/credentials.html",
-        "http://localhost:1420/src/credentials.html",
-    ] {
-        assert!(
-            credentials_navigation_allowed(&Url::parse(allowed).expect("valid URL")),
-            "rejected prompt page {allowed}"
-        );
-    }
-    for denied in [
-        "tauri://localhost/",
-        "tauri://localhost/src/credentials.html?query=1",
-        "tauri://localhost/src/credentials.html#fragment",
-        "tauri://localhost/src%2fcredentials.html",
-        "https://localhost/src/credentials.html",
-        "http://localhost:1420/src/other.html",
-        "http://127.0.0.1:1420/src/credentials.html",
-        "https://example.com/src/credentials.html",
-    ] {
-        assert!(
-            !credentials_navigation_allowed(&Url::parse(denied).expect("valid URL")),
-            "accepted prompt navigation {denied}"
-        );
-    }
 }
 
 #[test]

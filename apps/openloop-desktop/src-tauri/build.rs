@@ -419,12 +419,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     tauri_build::try_build(
-        Attributes::new().app_manifest(AppManifest::new().commands(&[
-            "build_manifest",
-            "credentials_set",
-            "credentials_unset",
-            "credentials_status",
-        ])),
+        Attributes::new().app_manifest(AppManifest::new().commands(&["build_manifest"])),
     )?;
     Ok(())
 }
