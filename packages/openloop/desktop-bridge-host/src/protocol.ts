@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 
 export const BRIDGE_PROTOCOL_VERSION = 1 as const
+/** Maximum JSON body size accepted by one desktop bridge frame. */
 export const MAX_BRIDGE_FRAME_BYTES = 64 * 1024
 const BRIDGE_NONCE_BYTES = 32
 const BRIDGE_NONCE_SEQUENCE_BYTES = 8

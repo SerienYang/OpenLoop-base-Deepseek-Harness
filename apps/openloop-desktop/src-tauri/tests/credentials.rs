@@ -11,7 +11,11 @@ use std::{
 
 use openloop_desktop_lib::{
     bridge::{
-        protocol::{sign_request, BridgeRequest, BRIDGE_PROTOCOL_VERSION},
+        protocol::{
+            encode_frame, read_json_frame, sign_request, sign_response,
+            AuthenticatedBridgeResponse, BridgeRequest, BRIDGE_PROTOCOL_VERSION,
+            MAX_BRIDGE_FRAME_BYTES,
+        },
         server::{AuthenticatedBridgeDispatcher, PeerIdentity},
     },
     credentials::{
@@ -515,6 +519,49 @@ fn secret_size_bounds_are_enforced_before_keychain_access() {
     assert!(store
         .set(&account, &vec![b'x'; MAX_SECRET_BYTES + 1])
         .is_err());
+    assert!(!store
+        .status(&account)
+        .expect("oversized write was not attempted"));
+}
+
+#[test]
+fn maximum_secret_resolves_through_a_bounded_bridge_response_frame() {
+    let account = unique_account("bridge_maximum");
+    let _cleanup = KeychainCleanup::new(account.clone());
+    let store = KeychainStore::new(ReleaseChannel::Test);
+    let maximum = vec![u8::MAX; MAX_SECRET_BYTES];
+    store
+        .set(&account, &maximum)
+        .expect("store maximum credential");
+    let reference = account
+        .as_str()
+        .strip_prefix("credential:")
+        .expect("credential account prefix");
+    let (dispatcher, launch_id, secret, peer) =
+        credential_dispatcher(Arc::new(CancelCredentialDeletion));
+    let request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "maximum-secret".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "resolveCredential".to_owned(),
+        payload: json!({ "ref": reference }),
+    };
+    let response = dispatcher
+        .dispatch(
+            peer,
+            sign_request(request, [10; 32], &secret).expect("signed resolve request"),
+        )
+        .expect("maximum credential response");
+    let response = sign_response(response, [10; 32], &secret).expect("signed credential response");
+    let frame = encode_frame(&response).expect("maximum credential frame");
+
+    assert!(frame.len() - 4 <= MAX_BRIDGE_FRAME_BYTES);
+    let decoded: AuthenticatedBridgeResponse =
+        read_json_frame(&mut frame.as_slice()).expect("maximum credential round trip");
+    assert_eq!(
+        decoded.response.result.expect("credential result"),
+        serde_json::to_value(maximum).expect("maximum credential JSON")
+    );
 }
 
 #[test]

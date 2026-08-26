@@ -4,12 +4,17 @@ import {
   createLaunchEnvironmentSnapshot,
   DSH_LAUNCH_ENVIRONMENT_KEY,
 } from '@deepseek-ai/dsh-launch-environment'
+import { MAX_BRIDGE_FRAME_BYTES } from '@openloop/desktop-bridge-host'
 import {
   CREDENTIAL_CONSUMER_DISPLAY_KEYS,
   CredentialConsumerRegistry,
   DEEPSEEK_MODEL_OWNER_ID,
   DEEPSEEK_WEB_SEARCH_OWNER_ID,
   KeychainCredentialProvider,
+  MAX_CREDENTIAL_CONSUMERS,
+  MAX_CREDENTIAL_DELETION_PLAN_BYTES,
+  MAX_OPENLOOP_CREDENTIAL_REFERENCE_BYTES,
+  openloopCredentialRef,
   OpenloopCredentialOperations,
   piAiModelOwnerId,
   type KeychainCredentialBridge,
@@ -189,6 +194,91 @@ describe('CredentialConsumerRegistry', () => {
     ].sort()
     expect(registry.planDeletion(REF).consumers.map(consumer => consumer.ownerId))
       .toEqual(expectedOwners)
+  })
+
+  it('rejects 257 short consumers and an over-limit single registration atomically', () => {
+    const registry = new CredentialConsumerRegistry()
+    const tooMany = Array.from({ length: 257 }, (_, index) => ({
+      routeId: `route-${index}`,
+      reference: REF,
+    }))
+
+    expect(() => registry.registerPiAiModels(tooMany)).toThrow(/capacity/)
+    expect(registry.planDeletion(REF).consumers).toEqual([])
+
+    const accepted = Array.from({ length: MAX_CREDENTIAL_CONSUMERS }, (_, index) => ({
+      routeId: `r${index}`,
+      reference: REF,
+    }))
+    registry.registerPiAiModels(accepted)
+    expect(registry.planDeletion(REF).consumers).toHaveLength(MAX_CREDENTIAL_CONSUMERS)
+    expect(() => registry.registerDeepSeekModel(REF)).toThrow(/capacity/)
+    expect(registry.planDeletion(REF).consumers).toHaveLength(MAX_CREDENTIAL_CONSUMERS)
+  })
+
+  it('rejects an oversized Unicode-label replacement before publishing it', () => {
+    const registry = new CredentialConsumerRegistry()
+    const registration = registry.registerPiAiModels([
+      { routeId: 'retained', reference: REF },
+    ])
+    const oversized = Array.from({ length: MAX_CREDENTIAL_CONSUMERS }, (_, index) => ({
+      routeId: `${'\u754c'.repeat(250)}${String(index).padStart(6, '0')}`,
+      reference: REF,
+    }))
+    const labels = new CredentialConsumerRegistry()
+    const consumers = oversized.map(({ routeId }) => {
+      const dispose = labels.registerPiAiModel(routeId, REF)
+      const consumer = labels.planDeletion(REF).consumers[0]!
+      dispose()
+      return consumer
+    })
+    expect(Buffer.byteLength(JSON.stringify({ reference: REF, consumers }), 'utf8'))
+      .toBeGreaterThan(MAX_BRIDGE_FRAME_BYTES)
+
+    expect(() => {
+      registration.replace(oversized)
+    }).toThrow(/capacity/)
+    expect(registry.planDeletion(REF).consumers.map(consumer => consumer.display.values.routeId))
+      .toEqual(['retained'])
+  })
+
+  it('keeps the largest accepted short-label plan within the shared JSON byte budget', () => {
+    const registry = new CredentialConsumerRegistry()
+    registry.registerPiAiModels(
+      Array.from({ length: MAX_CREDENTIAL_CONSUMERS }, (_, index) => ({
+        routeId: `r${index}`,
+        reference: REF,
+      })),
+    )
+
+    const plan = registry.planDeletion(REF)
+    expect(plan.consumers).toHaveLength(MAX_CREDENTIAL_CONSUMERS)
+    expect(Buffer.byteLength(JSON.stringify(plan), 'utf8'))
+      .toBeLessThanOrEqual(MAX_CREDENTIAL_DELETION_PLAN_BYTES)
+  })
+
+  it('enforces the Openloop 128-byte ASCII reference boundary before registry state changes', () => {
+    const registry = new CredentialConsumerRegistry()
+    const boundaryText = `A${'b'.repeat(MAX_OPENLOOP_CREDENTIAL_REFERENCE_BYTES - 1)}`
+    const boundary = openloopCredentialRef(boundaryText)
+    const overlongText = `${boundaryText}c`
+    const overlong = credentialRef(overlongText)
+    const nonAscii = 'UNICOD\u00c9_KEY'
+
+    registry.registerPiAiModel('accepted', boundary)
+    expect(registry.planDeletion(boundary).consumers).toHaveLength(1)
+    for (const invalid of [overlong, nonAscii as typeof REF]) {
+      let failure: unknown
+      try {
+        registry.registerPiAiModel('rejected', invalid)
+      } catch (error) {
+        failure = error
+      }
+      expect(failure).toBeInstanceOf(TypeError)
+      expect((failure as Error).message).toBe('credential reference is invalid')
+      expect((failure as Error).message).not.toContain(String(invalid))
+    }
+    expect(registry.planDeletion(boundary).consumers).toHaveLength(1)
   })
 
   it('removing a provider registration never deletes its shared credential', async () => {

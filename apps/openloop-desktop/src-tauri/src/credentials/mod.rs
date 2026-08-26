@@ -32,7 +32,11 @@ pub use secure_prompt::{
     CREDENTIALS_WINDOW_HEIGHT, CREDENTIALS_WINDOW_LABEL, CREDENTIALS_WINDOW_WIDTH,
 };
 
-pub const MAX_SECRET_BYTES: usize = 16 * 1024;
+pub const MAX_SECRET_BYTES: usize = 8 * 1024;
+pub const MAX_CREDENTIAL_REFERENCE_BYTES: usize = 128;
+pub const MAX_CREDENTIAL_CONSUMERS: usize = 255;
+pub const MAX_CREDENTIAL_CONSUMER_FIELD_BYTES: usize = 256;
+pub const MAX_CREDENTIAL_DELETION_PLAN_BYTES: usize = 56 * 1024;
 
 const TEST_KEYCHAIN_SERVICE: &str = "ai.openloop.credentials.test.v1";
 const STABLE_KEYCHAIN_SERVICE: &str = "ai.openloop.credentials.v1";
@@ -42,9 +46,6 @@ const KEYCHAIN_SPIKE_VERIFY: &str = "--openloop-keychain-spike=verify";
 const KEYCHAIN_SPIKE_CLEANUP: &str = "--openloop-keychain-spike=cleanup";
 const SPIKE_REFERENCE: &str = "OPENLOOP_FOUNDATION_TASK_15_SPIKE";
 const SPIKE_SECRET: &[u8] = b"openloop-keychain-spike-v1";
-const MAX_CREDENTIAL_CONSUMERS: usize = 256;
-const MAX_CREDENTIAL_CONSUMER_FIELD_BYTES: usize = 256;
-
 #[derive(Clone, PartialEq, Eq)]
 pub struct CredentialAccount(String);
 
@@ -66,7 +67,7 @@ impl fmt::Debug for CredentialAccount {
 }
 
 fn validate_credential_reference(value: &str) -> Result<(), CredentialError> {
-    if value.is_empty() || value.len() > 128 || !value.is_ascii() {
+    if value.is_empty() || value.len() > MAX_CREDENTIAL_REFERENCE_BYTES || !value.is_ascii() {
         return Err(CredentialError::invalid_identifier());
     }
     let mut bytes = value.bytes();
@@ -169,14 +170,14 @@ impl CredentialDeletionStore for KeychainStore {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CredentialConsumerDisplay {
     pub key: String,
     pub values: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CredentialConsumerLabel {
     pub owner_id: String,
@@ -184,7 +185,7 @@ pub struct CredentialConsumerLabel {
     pub display: CredentialConsumerDisplay,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CredentialDeletionPlan {
     pub reference: String,
@@ -246,6 +247,13 @@ fn delete_credential_with_confirmation_cancellable(
 fn validate_deletion_plan(plan: &CredentialDeletionPlan) -> Result<(), CredentialError> {
     validate_credential_reference(&plan.reference)?;
     if plan.consumers.is_empty() || plan.consumers.len() > MAX_CREDENTIAL_CONSUMERS {
+        return Err(CredentialError::invalid_deletion_plan());
+    }
+    if serde_json::to_vec(plan)
+        .map_err(|_| CredentialError::invalid_deletion_plan())?
+        .len()
+        > MAX_CREDENTIAL_DELETION_PLAN_BYTES
+    {
         return Err(CredentialError::invalid_deletion_plan());
     }
     let mut owners = HashSet::new();
@@ -536,9 +544,15 @@ mod tests {
         delete_credential_with_confirmation_cancellable, validate_deletion_plan, CredentialAccount,
         CredentialConsumerDisplay, CredentialConsumerLabel, CredentialDeletionConfirmation,
         CredentialDeletionOutcome, CredentialDeletionPlan, CredentialDeletionStore,
-        CredentialError,
+        CredentialError, MAX_CREDENTIAL_CONSUMERS, MAX_CREDENTIAL_DELETION_PLAN_BYTES,
     };
-    use crate::bridge::server::CancellationToken;
+    use crate::bridge::{
+        protocol::{
+            encode_frame, read_json_frame, sign_request, AuthenticatedBridgeRequest, BridgeRequest,
+            BRIDGE_PROTOCOL_VERSION, MAX_BRIDGE_FRAME_BYTES,
+        },
+        server::CancellationToken,
+    };
 
     struct Approved;
 
@@ -604,6 +618,42 @@ mod tests {
             .values
             .insert("routeId".to_owned(), "\u{1f600}".repeat(65));
         assert!(validate_deletion_plan(&oversized_display).is_err());
+    }
+
+    #[test]
+    fn largest_consumer_plan_round_trips_below_the_bridge_frame_limit() {
+        let plan = CredentialDeletionPlan {
+            reference: format!("A{}", "b".repeat(127)),
+            consumers: (0..MAX_CREDENTIAL_CONSUMERS)
+                .map(|index| CredentialConsumerLabel {
+                    owner_id: format!("model-route:pi-ai:sha256:{index:064x}"),
+                    kind: "model-route".to_owned(),
+                    display: CredentialConsumerDisplay {
+                        key: "openloop.credentials.consumer.model-route".to_owned(),
+                        values: BTreeMap::from([("routeId".to_owned(), format!("r{index}"))]),
+                    },
+                })
+                .collect(),
+        };
+
+        validate_deletion_plan(&plan).expect("largest plan is accepted");
+        assert!(
+            serde_json::to_vec(&plan).expect("plan JSON").len()
+                <= MAX_CREDENTIAL_DELETION_PLAN_BYTES
+        );
+        let request = BridgeRequest {
+            version: BRIDGE_PROTOCOL_VERSION,
+            request_id: "deletion-plan-boundary".to_owned(),
+            launch_id: "8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90".to_owned(),
+            method: "unsetCredential".to_owned(),
+            payload: serde_json::to_value(&plan).expect("plan payload"),
+        };
+        let envelope = sign_request(request, [7; 32], &[9; 32]).expect("signed plan");
+        let frame = encode_frame(&envelope).expect("framed plan");
+        assert!(frame.len() - 4 <= MAX_BRIDGE_FRAME_BYTES);
+        let decoded: AuthenticatedBridgeRequest =
+            read_json_frame(&mut frame.as_slice()).expect("round-trip plan");
+        assert_eq!(decoded.request.payload, serde_json::to_value(plan).unwrap());
     }
 
     #[test]

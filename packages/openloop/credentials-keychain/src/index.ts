@@ -22,8 +22,13 @@ import {
   type CredentialBrowserOperations,
   type KeychainCredentialBridge,
 } from './remote.ts'
+import {
+  MAX_OPENLOOP_SECRET_BYTES,
+  openloopCredentialRef,
+} from './limits.ts'
 
 export * from './consumer-registry.ts'
+export * from './limits.ts'
 export * from './remote.ts'
 
 /** Cordis service key for the Host-only consumer registry. */
@@ -83,12 +88,13 @@ export class KeychainCredentialProvider extends CredentialProvider {
    * @returns Value and source, or `undefined` when absent.
    */
   override async resolve(reference: CredentialRef): Promise<ResolvedCredential | undefined> {
-    const inherited = this.#inherited(reference)
+    const ref = openloopCredentialRef(reference)
+    const inherited = this.#inherited(ref)
     if (inherited !== undefined) {
       return { value: inherited, source: 'environment' }
     }
 
-    const bytes = await this.#bridge.resolveCredential(reference)
+    const bytes = await this.#bridge.resolveCredential(ref)
     if (bytes !== undefined) {
       try {
         const value = decodeSecret(bytes)
@@ -98,7 +104,7 @@ export class KeychainCredentialProvider extends CredentialProvider {
       }
     }
 
-    const legacy = await this.#legacy?.resolve(reference)
+    const legacy = await this.#legacy?.resolve(ref)
     const value = typeof legacy === 'string' ? legacy : legacy?.value
     return value === undefined || value.length === 0
       ? undefined
@@ -111,14 +117,15 @@ export class KeychainCredentialProvider extends CredentialProvider {
    * @returns Value-free source and writability facts.
    */
   override async describe(reference: CredentialRef): Promise<CredentialInfo> {
-    if (this.#inherited(reference) !== undefined) {
+    const ref = openloopCredentialRef(reference)
+    if (this.#inherited(ref) !== undefined) {
       return { configured: true, source: 'environment', writable: false }
     }
-    const keychain = await this.#bridge.describeCredential(reference)
+    const keychain = await this.#bridge.describeCredential(ref)
     if (keychain.configured) {
       return { configured: true, source: 'keychain', writable: false }
     }
-    const legacy = await this.#legacy?.describe(reference)
+    const legacy = await this.#legacy?.describe(ref)
     if (legacy?.configured === true) {
       return { configured: true, source: 'legacy-file', writable: false }
     }
@@ -132,7 +139,7 @@ export class KeychainCredentialProvider extends CredentialProvider {
    * @returns Rejected promise.
    */
   override set(reference: CredentialRef, _value: string): Promise<void> {
-    return Promise.reject(this.#mutationError(reference))
+    return this.#rejectMutation(reference)
   }
 
   /**
@@ -141,7 +148,7 @@ export class KeychainCredentialProvider extends CredentialProvider {
    * @returns Rejected promise.
    */
   override unset(reference: CredentialRef): Promise<void> {
-    return Promise.reject(this.#mutationError(reference))
+    return this.#rejectMutation(reference)
   }
 
   #inherited(reference: CredentialRef): string | undefined {
@@ -155,11 +162,19 @@ export class KeychainCredentialProvider extends CredentialProvider {
     }
     return new Error('credential mutation requires the native-confirmed Openloop facade')
   }
+
+  #rejectMutation(reference: CredentialRef): Promise<never> {
+    try {
+      return Promise.reject(this.#mutationError(openloopCredentialRef(reference)))
+    } catch {
+      return Promise.reject(new TypeError('credential reference is invalid'))
+    }
+  }
 }
 
 function decodeSecret(bytes: readonly number[]): string {
   if (bytes.length === 0
-    || bytes.length > 16 * 1024
+    || bytes.length > MAX_OPENLOOP_SECRET_BYTES
     || bytes.some(byte => !Number.isInteger(byte) || byte < 0 || byte > 255)) {
     throw new Error('Keychain returned an invalid credential payload')
   }

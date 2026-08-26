@@ -22,13 +22,20 @@ provider 不缓存或记录凭据值与引用。Bridge 返回值只解码一次�
 
 Keychain item 使用 Tauri Host 按发布通道选择的 service，account 固定为
 `credential:<CREDENTIAL_REFERENCE>`。provider id 不参与存储身份，因此多个模型
-路线和插件可以共享同一引用。
+路线和插件可以共享同一引用。Openloop reference 必须是最长 128 字节的 ASCII shell
+标识符；该产品级限制会在读取环境、registry 或 Bridge 前检查，且不改变基础 DSH 的
+校验规则。存储和解析出的 secret 上限为 8 KiB，确保其十进制 JSON 字节数组表示始终
+能装入经过认证的 64 KiB Bridge 响应帧。
 
 Host-only consumer registry 为 DeepSeek、pi-ai 模型路线、DeepSeek Web Search 和
 MCP server 提供固定注册方法，并检查 owner id 冲突。删除计划是每次新建、冻结且顺序
 确定的快照，其中本地化 key 由 Host 指定。浏览器删除请求只携带 credential
-reference，不能提供消费者名称或确认文案。移除 consumer 注册不会修改 Keychain。
+reference，不能提供消费者名称或确认文案。每次单项注册和批量替换都会在发布前以原子
+方式校验：一份计划最多包含 255 个 consumer，UTF-8 JSON 最多为 56 KiB，为经过认证的
+Bridge 信封预留 8 KiB。移除 consumer 注册不会修改 Keychain。
 
 MCP stdio 的 `env` 保持字面量配置。Streamable HTTP 可以显式配置
-`credentialHeaders`；每次请求都会重新解析引用，并在网络发送前校验 header 名称和值，
-同时拒绝与字面量 header 或 MCP 协议保留 header 冲突。
+`credentialHeaders`；每次请求会对每个不同的 reference 解析一次，并将同一快照复用于
+对应 header，同时响应请求取消。网络发送前会校验 header 名称和值，并拒绝与字面量
+header 或 MCP 协议保留 header 冲突。带凭据请求的非成功响应会先剥离为仅含状态码的
+响应，再交给 MCP SDK。

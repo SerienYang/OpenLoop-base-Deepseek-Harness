@@ -24,6 +24,10 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { CallId, LlmAdapter, LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import {
+  resolveReconnectPolicy,
+  startConnection,
+} from '@deepseek-ai/dsh-mcp-client/src/connection.ts'
 import { apply } from '@deepseek-ai/dsh-mcp-client/src/index.ts'
 import { publicToolName } from '@deepseek-ai/dsh-mcp-client/src/tools.ts'
 import type { Config } from '@deepseek-ai/dsh-mcp-client'
@@ -76,6 +80,28 @@ function sleep(ms: number): Promise<void> {
   const gate: PromiseWithResolvers<void> = Promise.withResolvers()
   setTimeout(gate.resolve, ms)
   return gate.promise
+}
+
+function serializedFailureGraph(value: unknown, seen = new Set<object>()): unknown {
+  if (typeof value !== 'object' || value === null) return String(value)
+  if (seen.has(value)) return '[circular]'
+  seen.add(value)
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      stack: value.stack,
+      cause: value.cause === undefined
+        ? undefined
+        : serializedFailureGraph(value.cause, seen),
+      ...Object.fromEntries(
+        Object.entries(value).map(([key, entry]) => [key, serializedFailureGraph(entry, seen)]),
+      ),
+    }
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, serializedFailureGraph(entry, seen)]),
+  )
 }
 
 /** Narrow a result content block to its text, failing the test on any other shape. */
@@ -559,5 +585,121 @@ describe('streamable-http — in-process MCP server', () => {
   it('sends configured headers on every HTTP request', () => {
     expect(seenAuth.length).toBeGreaterThan(0)
     for (const auth of seenAuth) expect(auth).toBe('Bearer e2e-test-token')
+  })
+})
+
+describe('streamable-http credential failure redaction', () => {
+  it('keeps an echoing server response out of logs and the fatal error graph', async () => {
+    const privateReference = 'MCP_ECHO_REFERENCE'
+    const privateToken = 'mcp-echo-token'
+    const diagnostics: string[] = []
+    const server = createServer((request, response) => {
+      const authorization = request.headers.authorization ?? ''
+      response.writeHead(500, `${privateReference}-${privateToken}`, {
+        'x-echo-authorization': authorization,
+        'x-echo-reference': privateReference,
+      })
+      response.end(`${privateReference} ${authorization}`)
+    })
+    const listening: PromiseWithResolvers<void> = Promise.withResolvers()
+    server.listen(0, '127.0.0.1', listening.resolve)
+    await listening.promise
+    const address = server.address()
+    if (address === null || typeof address === 'string') {
+      throw new Error(`expected a TCP AddressInfo, got ${String(address)}`)
+    }
+    const ctx = await mountRegistry()
+    ctx.logger.warn = ((...args: unknown[]) => {
+      diagnostics.push(args.map(String).join(' '))
+    }) as typeof ctx.logger.warn
+    ctx.logger.error = ((...args: unknown[]) => {
+      diagnostics.push(args.map(String).join(' '))
+    }) as typeof ctx.logger.error
+    ctx.provide('credentials', {
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+    } as never)
+
+    try {
+      const failure = await apply(ctx, {
+        transport: 'streamable-http',
+        serverName: 'echoing-error',
+        url: `http://127.0.0.1:${address.port}/mcp`,
+        headers: {},
+        credentialHeaders: {
+          Authorization: { ref: privateReference, prefix: 'Bearer ' },
+        },
+        toolCallTimeoutMs: 15_000,
+        failOnStartupError: true,
+        reconnect: { enabled: false },
+      }).then(() => undefined, (error: unknown) => error)
+
+      expect(failure).toBeInstanceOf(Error)
+      const serialized = JSON.stringify(serializedFailureGraph(failure))
+      const observable = [
+        diagnostics.join('\n'),
+        String(failure),
+        (failure as Error).stack ?? '',
+        serialized,
+      ].join('\n')
+      expect(observable).not.toContain(privateReference)
+      expect(observable).not.toContain(privateToken)
+      expect(observable).not.toContain(`Bearer ${privateToken}`)
+      expect((failure as Error).cause).toBeInstanceOf(Error)
+      expect((failure as Error).cause).not.toHaveProperty('cause')
+    } finally {
+      await ctx.fiber.dispose()
+      const closed: PromiseWithResolvers<void> = Promise.withResolvers()
+      server.close((error) => {
+        if (error === undefined) closed.resolve()
+        else closed.reject(error)
+      })
+      server.closeAllConnections()
+      await closed.promise
+    }
+  })
+
+  it('tears down promptly while credential resolution stalls and contains its late rejection', async () => {
+    const ctx = await mountRegistry()
+    const stalled: PromiseWithResolvers<never> = Promise.withResolvers()
+    const resolve = vi.fn(() => stalled.promise)
+    const unhandled: unknown[] = []
+    const onUnhandled = (error: unknown): void => {
+      unhandled.push(error)
+    }
+    process.on('unhandledRejection', onUnhandled)
+    const connection = startConnection(ctx, {
+      transport: 'streamable-http',
+      serverName: 'stalled-credential',
+      url: 'http://127.0.0.1:9/mcp',
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: 'STALLED_MCP_KEY', prefix: 'Bearer ' },
+      },
+      toolCallTimeoutMs: 15_000,
+      failOnStartupError: false,
+      reconnect: { enabled: false },
+    }, resolveReconnectPolicy({ enabled: false }, 'mcp-client.reconnect'), resolve)
+
+    try {
+      await vi.waitFor(() => {
+        expect(resolve).toHaveBeenCalledTimes(1)
+      })
+      const disposal = connection.dispose().then(() => 'disposed' as const)
+      const timeout = new Promise<'timed-out'>(resolveTimeout => setTimeout(() => {
+        resolveTimeout('timed-out')
+      }, 100))
+      const outcome = await Promise.race([disposal, timeout])
+      stalled.reject(new Error('late teardown credential failure'))
+      if (outcome === 'timed-out') await disposal
+      expect(outcome).toBe('disposed')
+      await new Promise<void>(resolveImmediate => setImmediate(resolveImmediate))
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+      await ctx.fiber.dispose()
+    }
   })
 })

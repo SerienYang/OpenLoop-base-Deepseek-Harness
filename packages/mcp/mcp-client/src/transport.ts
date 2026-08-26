@@ -135,12 +135,21 @@ export function createCredentialResolvingFetch(
   const dispatch = options.fetch ?? globalThis.fetch
   return async (input, init) => {
     const headers = new Headers(options.headers)
-    const callerHeaders = init?.headers
-      ?? (input instanceof Request ? input.headers : undefined)
-    for (const [name, value] of new Headers(callerHeaders)) headers.set(name, value)
+    if (input instanceof Request) {
+      for (const [name, value] of input.headers) headers.set(name, value)
+    }
+    for (const [name, value] of new Headers(init?.headers)) headers.set(name, value)
+    const signal = init?.signal
+      ?? (input instanceof Request ? input.signal : undefined)
+    const resolvedByReference = new Map<CredentialRef, Promise<ResolvedCredential | undefined>>()
     for (const [name, source] of Object.entries(options.credentialHeaders)) {
       const ref = safeCredentialRef(source.ref)
-      const resolved = await options.resolve(ref)
+      let pending = resolvedByReference.get(ref)
+      if (pending === undefined) {
+        pending = resolveCredentialForRequest(options.resolve, ref, signal)
+        resolvedByReference.set(ref, pending)
+      }
+      const resolved = await pending
       if (resolved === undefined || resolved.value.length === 0) {
         throw new Error('mcp-client: configured credential is not available')
       }
@@ -151,12 +160,67 @@ export function createCredentialResolvingFetch(
       headers.set(name, `${source.prefix ?? ''}${value}`)
     }
     const response = await dispatch(input, { ...init, headers, redirect: 'manual' })
-    if (REDIRECT_STATUSES.has(response.status)) {
-      await response.body?.cancel().catch(() => {})
-      throw new Error('mcp-client: credential-backed request redirect was blocked')
+    if (!response.ok) {
+      await discardResponseBody(response)
+      if (REDIRECT_STATUSES.has(response.status)) {
+        throw new Error(`mcp-client: credential-backed request redirect was blocked (status ${response.status})`)
+      }
+      return new Response(null, { status: response.status })
     }
     return response
   }
+}
+
+async function discardResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel()
+  } catch {
+    // Cleanup diagnostics are server-controlled and may echo credential data.
+  }
+}
+
+function resolveCredentialForRequest(
+  resolve: CredentialResolver,
+  reference: CredentialRef,
+  signal: AbortSignal | null | undefined,
+): Promise<ResolvedCredential | undefined> {
+  if (signal?.aborted === true) return Promise.reject(abortReason(signal))
+  const resolution = Promise.resolve().then(() => resolve(reference))
+  if (signal === undefined || signal === null) return resolution
+  return new Promise((resolveRequest, rejectRequest) => {
+    let settled = false
+    const finish = (
+      settle: (value: ResolvedCredential | undefined) => void,
+      value: ResolvedCredential | undefined,
+    ): void => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', onAbort)
+      settle(value)
+    }
+    const fail = (error: unknown): void => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', onAbort)
+      rejectRequest(error instanceof Error
+        ? error
+        : new Error('mcp-client: credential resolution failed'))
+    }
+    const onAbort = (): void => {
+      fail(abortReason(signal))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    resolution.then(
+      (value) => { finish(resolveRequest, value) },
+      (error: unknown) => { fail(error) },
+    )
+  })
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException('This operation was aborted', 'AbortError')
 }
 
 function safeCredentialRef(reference: string): CredentialRef {

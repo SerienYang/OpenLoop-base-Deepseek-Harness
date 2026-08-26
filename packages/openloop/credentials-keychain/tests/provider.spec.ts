@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
 import {
   createLaunchEnvironmentSnapshot,
   DSH_LAUNCH_ENVIRONMENT_KEY,
@@ -8,6 +8,9 @@ import { remoteMethods } from '@deepseek-ai/dsh-typert-protocol'
 import { OpenloopDesktopRemoteService } from '@openloop/desktop-bridge-host'
 import {
   KeychainCredentialProvider,
+  MAX_OPENLOOP_SECRET_BYTES,
+  MAX_OPENLOOP_CREDENTIAL_REFERENCE_BYTES,
+  openloopCredentialRef,
   type KeychainCredentialBridge,
   type LegacyCredentialSource,
 } from '@openloop/credentials-keychain'
@@ -149,6 +152,31 @@ describe('Keychain credential provider', () => {
     expect(Object.keys(credentials)).not.toContain('value')
   })
 
+  it('rejects invalid Openloop references before environment or bridge access without echoing them', async () => {
+    const boundaryText = `A${'b'.repeat(MAX_OPENLOOP_CREDENTIAL_REFERENCE_BYTES - 1)}`
+    const boundary = openloopCredentialRef(boundaryText)
+    const overlongText = `${boundaryText}c`
+    const overlong = credentialRef(overlongText)
+    const nonAscii = 'UNICOD\u00c9_KEY' as CredentialRef
+    const resolveCredential = vi.fn(() => Promise.resolve(secret('keychain-value')))
+    const credentials = provider({
+      process: { [overlongText]: 'environment-value' },
+      keychain: bridge({ resolveCredential }),
+    })
+
+    await expect(credentials.resolve(boundary)).resolves.toMatchObject({
+      value: 'keychain-value',
+    })
+    for (const invalid of [overlong, nonAscii]) {
+      const failure = await credentials.resolve(invalid)
+        .then(() => undefined, (error: unknown) => error)
+      expect(failure).toBeInstanceOf(TypeError)
+      expect((failure as Error).message).toBe('credential reference is invalid')
+      expect((failure as Error).message).not.toContain(String(invalid))
+    }
+    expect(resolveCredential).toHaveBeenCalledTimes(1)
+  })
+
   it('zeroizes both bridge bytes and the temporary typed-array decode copy', async () => {
     const originalTextDecoder = globalThis.TextDecoder
     const bytes = secret('temporary-value')
@@ -178,6 +206,22 @@ describe('Keychain credential provider', () => {
     expect(bytes).toEqual(new Array(bytes.length).fill(0))
     expect(decodedCopy).toBeDefined()
     expect([...decodedCopy!]).toEqual(new Array(decodedCopy!.length).fill(0))
+  })
+
+  it('accepts only bridge-safe Keychain payload sizes', async () => {
+    const maximum = new Array<number>(MAX_OPENLOOP_SECRET_BYTES).fill(65)
+    const oversized = new Array<number>(MAX_OPENLOOP_SECRET_BYTES + 1).fill(65)
+    const resolveCredential = vi.fn()
+      .mockResolvedValueOnce(maximum)
+      .mockResolvedValueOnce(oversized)
+    const credentials = provider({ keychain: bridge({ resolveCredential }) })
+
+    await expect(credentials.resolve(REF)).resolves.toMatchObject({
+      value: 'A'.repeat(MAX_OPENLOOP_SECRET_BYTES),
+    })
+    await expect(credentials.resolve(REF)).rejects.toThrow(/invalid credential payload/)
+    expect(maximum).toEqual(new Array(maximum.length).fill(0))
+    expect(oversized).toEqual(new Array(oversized.length).fill(0))
   })
 
   it('keeps resolve absent from the Browser Remote surface', () => {

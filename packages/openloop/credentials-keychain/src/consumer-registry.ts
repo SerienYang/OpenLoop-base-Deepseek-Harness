@@ -1,5 +1,17 @@
-import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
+import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { createHash } from 'node:crypto'
+import {
+  MAX_CREDENTIAL_CONSUMERS,
+  MAX_CREDENTIAL_CONSUMER_FIELD_BYTES,
+  MAX_CREDENTIAL_DELETION_PLAN_BYTES,
+  openloopCredentialRef,
+} from './limits.ts'
+
+export {
+  MAX_CREDENTIAL_CONSUMERS,
+  MAX_CREDENTIAL_CONSUMER_FIELD_BYTES,
+  MAX_CREDENTIAL_DELETION_PLAN_BYTES,
+} from './limits.ts'
 
 /** Localization keys owned by the Host credential confirmation UI. */
 export const CREDENTIAL_CONSUMER_DISPLAY_KEYS = Object.freeze({
@@ -13,7 +25,6 @@ export const DEEPSEEK_MODEL_OWNER_ID = 'model-route:deepseek-official'
 /** Stable owner id for the built-in DeepSeek Web Search plugin. */
 export const DEEPSEEK_WEB_SEARCH_OWNER_ID = 'plugin:web-search-deepseek'
 
-const MAX_CREDENTIAL_CONSUMER_FIELD_BYTES = 256
 const PI_AI_OWNER_PREFIX = 'model-route:pi-ai:sha256:'
 const DISPLAY_DIGEST_HEX_LENGTH = 12
 const utf8Encoder = new TextEncoder()
@@ -152,11 +163,19 @@ export class CredentialConsumerRegistry implements CredentialConsumerRegistryLik
           throw new Error(`credential consumer ${JSON.stringify(key)} is already registered`)
         }
         candidates.set(key, {
-          reference: credentialRef(reference),
+          reference: openloopCredentialRef(reference),
           consumer,
           token,
         })
       }
+      const candidateState = new Map(this.#registrations)
+      for (const key of keys) {
+        if (candidateState.get(key)?.token === token) candidateState.delete(key)
+      }
+      for (const [key, registration] of candidates) {
+        candidateState.set(key, registration)
+      }
+      validateRegistryState(candidateState)
       for (const key of keys) {
         if (this.#registrations.get(key)?.token === token) this.#registrations.delete(key)
       }
@@ -213,29 +232,25 @@ export class CredentialConsumerRegistry implements CredentialConsumerRegistryLik
    * @returns Frozen plan containing only Host-registered consumers.
    */
   planDeletion(reference: CredentialRef): CredentialDeletionPlan {
-    const ref = credentialRef(reference)
-    const consumers = [...this.#registrations.values()]
-      .filter(registration => registration.reference === ref)
-      .map(registration => detachedConsumer(registration.consumer))
-      .sort((left, right) => left.ownerId < right.ownerId ? -1 : left.ownerId > right.ownerId ? 1 : 0)
-    return Object.freeze({
-      reference: ref,
-      consumers: Object.freeze(consumers),
-    })
+    return deletionPlan(this.#registrations, openloopCredentialRef(reference))
   }
 
   #register(reference: CredentialRef, consumer: CredentialConsumer): () => void {
-    const ref = credentialRef(reference)
+    const ref = openloopCredentialRef(reference)
     const key = consumer.ownerId
     if (this.#registrations.has(key)) {
       throw new Error(`credential consumer ${JSON.stringify(consumer.ownerId)} is already registered`)
     }
     const token = {}
-    this.#registrations.set(key, {
+    const registration = {
       reference: ref,
       consumer: detachedConsumer(consumer),
       token,
-    })
+    }
+    const candidateState = new Map(this.#registrations)
+    candidateState.set(key, registration)
+    validateRegistryState(candidateState)
+    this.#registrations.set(key, registration)
     return () => {
       if (this.#registrations.get(key)?.token === token) this.#registrations.delete(key)
     }
@@ -255,6 +270,58 @@ function detachedConsumer(consumer: CredentialConsumer): CredentialConsumer {
     kind: consumer.kind,
     display: display(consumer.display.key, consumer.display.values),
   })
+}
+
+function deletionPlan(
+  registrations: ReadonlyMap<string, Registration>,
+  reference: CredentialRef,
+): CredentialDeletionPlan {
+  const consumers = [...registrations.values()]
+    .filter(registration => registration.reference === reference)
+    .map(registration => detachedConsumer(registration.consumer))
+    .sort((left, right) => left.ownerId < right.ownerId ? -1 : left.ownerId > right.ownerId ? 1 : 0)
+  return Object.freeze({
+    reference,
+    consumers: Object.freeze(consumers),
+  })
+}
+
+function validateRegistryState(registrations: ReadonlyMap<string, Registration>): void {
+  const references = new Set<CredentialRef>()
+  for (const registration of registrations.values()) references.add(registration.reference)
+  for (const reference of references) {
+    const plan = deletionPlan(registrations, reference)
+    if (plan.consumers.length > MAX_CREDENTIAL_CONSUMERS
+      || plan.consumers.some(consumer => !nativeCompatibleConsumer(consumer))
+      || utf8Encoder.encode(JSON.stringify(plan)).byteLength > MAX_CREDENTIAL_DELETION_PLAN_BYTES) {
+      throw new Error('credential consumer registry capacity exceeded')
+    }
+  }
+}
+
+function nativeCompatibleConsumer(consumer: CredentialConsumer): boolean {
+  if (!boundedField(consumer.ownerId) || !/^[\x20-\x7e]+$/u.test(consumer.ownerId)) return false
+  const entries = Object.entries(consumer.display.values)
+  switch (consumer.display.key) {
+    case CREDENTIAL_CONSUMER_DISPLAY_KEYS.modelRoute:
+      if (entries.length !== 1 || entries[0]?.[0] !== 'routeId') return false
+      break
+    case CREDENTIAL_CONSUMER_DISPLAY_KEYS.deepseekWebSearch:
+      if (entries.length !== 0) return false
+      break
+    case CREDENTIAL_CONSUMER_DISPLAY_KEYS.mcpServer:
+      if (entries.length !== 1 || entries[0]?.[0] !== 'serverName') return false
+      break
+    default:
+      return false
+  }
+  return entries.every(([, value]) => boundedField(value) && !/\p{Cc}/u.test(value))
+}
+
+function boundedField(value: string): boolean {
+  return value.length > 0
+    && value.isWellFormed()
+    && utf8Encoder.encode(value).byteLength <= MAX_CREDENTIAL_CONSUMER_FIELD_BYTES
 }
 
 function requiredIdentity(value: string, label: string): string {

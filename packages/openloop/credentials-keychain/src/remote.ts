@@ -1,9 +1,10 @@
-import { credentialRef, type CredentialInfo, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
+import type { CredentialInfo, CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import type { CredentialStatus } from '@openloop/desktop-bridge-host/types'
 import type {
   CredentialDeletionPlan,
   CredentialConsumerRegistry,
 } from './consumer-registry.ts'
+import { openloopCredentialRef } from './limits.ts'
 
 /** Authenticated Host-only bridge methods required by this package. */
 export interface KeychainCredentialBridge {
@@ -88,12 +89,7 @@ export class OpenloopCredentialOperations implements CredentialBrowserOperations
   }
 
   #requiredPlan(reference: string): CredentialDeletionPlan {
-    let ref: ReturnType<typeof credentialRef>
-    try {
-      ref = credentialRef(reference)
-    } catch {
-      throw new Error('credential reference is invalid')
-    }
+    const ref = openloopCredentialRef(reference)
     const plan = this.consumers.planDeletion(ref)
     if (plan.consumers.length === 0) {
       throw new Error('credential reference is not registered by a built-in Host consumer')

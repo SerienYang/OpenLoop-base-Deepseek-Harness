@@ -25,15 +25,25 @@ legacy source is shadowing it.
 Keychain items use the release-channel service selected by the Tauri Host and
 the account `credential:<CREDENTIAL_REFERENCE>`. Provider ids are not part of
 the stored identity, so model routes and plugins may share one reference.
+Openloop references are ASCII shell identifiers of at most 128 bytes, and this
+stricter product boundary is checked before environment, registry, or bridge
+access without changing base DSH validation. Stored and resolved secrets are
+limited to 8 KiB so their decimal JSON byte-array representation always fits
+inside the authenticated 64 KiB bridge response frame.
 
 The Host-only consumer registry has fixed registration methods for DeepSeek,
 pi-ai model routes, DeepSeek Web Search, and MCP servers. Owner ids are
 collision-checked. Deletion plans are fresh, frozen, deterministic snapshots
 whose localization keys are chosen by the Host. A browser deletion call sends
 only a credential reference; it cannot provide consumer names or confirmation
-copy. Removing a consumer registration never mutates Keychain.
+copy. Every registration and batch replacement is validated atomically before
+publication: a plan may contain at most 255 consumers and at most 56 KiB of
+UTF-8 JSON, leaving 8 KiB for the authenticated bridge envelope. Removing a
+consumer registration never mutates Keychain.
 
 MCP stdio `env` remains literal configuration. Streamable HTTP may opt into
-`credentialHeaders`; each request resolves the referenced credential anew,
+`credentialHeaders`; each request resolves every distinct reference once,
+reuses that snapshot across mapped headers, honors request cancellation,
 validates the header name and value, and rejects collisions with literal or
-protocol-owned headers before network dispatch.
+protocol-owned headers before network dispatch. Credential-backed non-success
+responses are stripped to status only before the MCP SDK receives them.

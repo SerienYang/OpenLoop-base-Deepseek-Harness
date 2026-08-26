@@ -25,7 +25,7 @@ export {
   type BrowserApiPolicy,
   type BrowserApiPolicyManifest,
 }
-export type { BridgeRequest } from './protocol.ts'
+export { MAX_BRIDGE_FRAME_BYTES, type BridgeRequest } from './protocol.ts'
 export type * from './types.ts'
 export {
   BROWSER_SAFE_METHODS,
