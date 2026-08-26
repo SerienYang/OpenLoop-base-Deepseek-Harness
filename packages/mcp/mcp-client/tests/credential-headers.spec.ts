@@ -815,6 +815,15 @@ describe('MCP credential-backed HTTP headers', () => {
     const privateReference = 'MCP_SSE_TAIL_KEY'
     const privateToken = 'mcp-sse-tail-token'
     const safeTail = ': harmless partial keepalive'
+    const originalFill = Uint8Array.prototype.fill
+    const wipedSecretBuffers: Uint8Array[] = []
+    const fill = vi.spyOn(Uint8Array.prototype, 'fill')
+      .mockImplementation(function (value, start, end) {
+        if (new TextDecoder().decode(this).includes(privateToken)) {
+          wipedSecretBuffers.push(this)
+        }
+        return originalFill.call(this, value, start, end)
+      })
     const dispatch = vi.fn<typeof globalThis.fetch>()
       .mockResolvedValueOnce(new Response(
         `: ${privateReference}\ndata: ${privateToken}`,
@@ -836,11 +845,19 @@ describe('MCP credential-backed HTTP headers', () => {
       fetch: dispatch,
     })
 
-    const sensitive = await credentialFetch('https://mcp.example.test', { method: 'GET' })
-    const safe = await credentialFetch('https://mcp.example.test', { method: 'GET' })
+    try {
+      const sensitive = await credentialFetch('https://mcp.example.test', { method: 'GET' })
+      const safe = await credentialFetch('https://mcp.example.test', { method: 'GET' })
 
-    await expect(sensitive.text()).resolves.toBe('')
-    await expect(safe.text()).resolves.toBe(safeTail)
+      await expect(sensitive.text()).resolves.toBe('')
+      await expect(safe.text()).resolves.toBe(safeTail)
+      expect(wipedSecretBuffers).toHaveLength(2)
+      for (const buffer of wipedSecretBuffers) {
+        expect([...buffer]).toEqual(new Array(buffer.byteLength).fill(0))
+      }
+    } finally {
+      fill.mockRestore()
+    }
   })
 
   it.each([
