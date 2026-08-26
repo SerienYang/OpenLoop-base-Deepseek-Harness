@@ -811,6 +811,38 @@ describe('MCP credential-backed HTTP headers', () => {
     expect(observable).not.toContain(privateToken)
   })
 
+  it('drops a sensitive unterminated SSE tail while preserving a safe tail', async () => {
+    const privateReference = 'MCP_SSE_TAIL_KEY'
+    const privateToken = 'mcp-sse-tail-token'
+    const safeTail = ': harmless partial keepalive'
+    const dispatch = vi.fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(new Response(
+        `: ${privateReference}\ndata: ${privateToken}`,
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      ))
+      .mockResolvedValueOnce(new Response(
+        safeTail,
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      ))
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef(privateReference), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: dispatch,
+    })
+
+    const sensitive = await credentialFetch('https://mcp.example.test', { method: 'GET' })
+    const safe = await credentialFetch('https://mcp.example.test', { method: 'GET' })
+
+    await expect(sensitive.text()).resolves.toBe('')
+    await expect(safe.text()).resolves.toBe(safeTail)
+  })
+
   it.each([
     'text/event-stream-x',
     'text/event-stream; charset=utf-8; vendor=acme',

@@ -443,8 +443,18 @@ class CredentialSseSanitizer {
 
   finish(controller: TransformStreamDefaultController<Uint8Array>): void {
     // eventsource-parser does not consume an unterminated final line. Preserve
-    // the bounded tail exactly so successful streams keep the same semantics.
-    if (this.#eventLength > 0) controller.enqueue(this.#copyEvent())
+    // safe tails exactly, but never forward credential material.
+    if (this.#eventLength > 0) {
+      const tail = this.#copyEvent()
+      if (containsSensitiveText(
+        new TextDecoder().decode(tail),
+        this.sensitiveValues,
+      )) {
+        tail.fill(0)
+      } else {
+        controller.enqueue(tail)
+      }
+    }
     this.clear()
   }
 
