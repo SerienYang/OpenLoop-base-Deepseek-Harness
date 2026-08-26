@@ -96,6 +96,38 @@ describe('CredentialConsumerRegistry', () => {
     second()
   })
 
+  it('bounds pi-ai owner ids and Unicode display labels at the native 256-byte limit', () => {
+    const registry = new CredentialConsumerRegistry()
+    const asciiBoundary = 'a'.repeat(256)
+    const unicodeBoundary = '\u754c'.repeat(256)
+    const otherUnicodeBoundary = `${'\u754c'.repeat(255)}\u8a9e`
+
+    registry.registerPiAiModel(otherUnicodeBoundary, REF)
+    registry.registerPiAiModel(asciiBoundary, REF)
+    registry.registerPiAiModel(unicodeBoundary, REF)
+    expect(() => registry.registerPiAiModel('route\u0085control', REF))
+      .toThrow('pi-ai route id is invalid')
+    expect(() => registry.registerPiAiModel('route\uD800surrogate', REF))
+      .toThrow('pi-ai route id is invalid')
+
+    const plan = registry.planDeletion(REF)
+    const ownerIds = plan.consumers.map(consumer => consumer.ownerId)
+    expect(new Set(ownerIds).size).toBe(3)
+    expect(ownerIds).toEqual([...ownerIds].sort())
+    for (const ownerId of ownerIds) {
+      expect(ownerId).toMatch(/^model-route:pi-ai:sha256:[0-9a-f]{64}$/u)
+      expect(Buffer.byteLength(ownerId, 'utf8')).toBeLessThanOrEqual(256)
+    }
+    expect(piAiModelOwnerId(unicodeBoundary)).toBe(piAiModelOwnerId(unicodeBoundary))
+    expect(piAiModelOwnerId(unicodeBoundary)).not.toBe(piAiModelOwnerId(otherUnicodeBoundary))
+
+    const displays = plan.consumers.map(consumer => consumer.display.values.routeId)
+    expect(displays).toContain(asciiBoundary)
+    for (const routeId of displays) {
+      expect(Buffer.byteLength(routeId!, 'utf8')).toBeLessThanOrEqual(256)
+    }
+  })
+
   it('registers and replaces pi-ai route consumers as one atomic batch', () => {
     const registry = new CredentialConsumerRegistry()
     const registration = registry.registerPiAiModels([
@@ -110,10 +142,12 @@ describe('CredentialConsumerRegistry', () => {
     ])
 
     expect(registry.planDeletion(REF).consumers).toEqual([])
-    expect(registry.planDeletion(other).consumers.map(consumer => consumer.ownerId)).toEqual([
+    const expectedOwners = [
       piAiModelOwnerId('anthropic'),
       piAiModelOwnerId('openai'),
-    ])
+    ].sort()
+    expect(registry.planDeletion(other).consumers.map(consumer => consumer.ownerId))
+      .toEqual(expectedOwners)
     registration.dispose()
     expect(registry.planDeletion(other).consumers).toEqual([])
   })
@@ -149,10 +183,12 @@ describe('CredentialConsumerRegistry', () => {
     }).toThrow(/already registered/)
 
     expect(registry.planDeletion(other).consumers).toEqual([])
-    expect(registry.planDeletion(REF).consumers.map(consumer => consumer.ownerId)).toEqual([
+    const expectedOwners = [
       piAiModelOwnerId('openai'),
       piAiModelOwnerId('taken'),
-    ])
+    ].sort()
+    expect(registry.planDeletion(REF).consumers.map(consumer => consumer.ownerId))
+      .toEqual(expectedOwners)
   })
 
   it('removing a provider registration never deletes its shared credential', async () => {

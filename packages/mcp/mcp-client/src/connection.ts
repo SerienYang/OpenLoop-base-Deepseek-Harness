@@ -50,6 +50,8 @@ export const RECONNECT_DEFAULTS: Required<ReconnectConfig> = Object.freeze({
 // generation is gone; timing out fails closed instead of overlapping children.
 const GENERATION_CLOSE_TIMEOUT_MS = 5_000
 
+const CREDENTIAL_RESOLUTION_FAILURE_MESSAGE = 'mcp-client: configured credential could not be resolved'
+
 /** Fully resolved reconnect policy captured at plugin load. */
 export type ResolvedReconnectPolicy = Readonly<Required<ReconnectConfig>>
 
@@ -129,6 +131,19 @@ export function startConnection(
   resolveCredential?: CredentialResolver,
 ): ConnectionHandle {
   const label = `mcp-client(${config.serverName})`
+  const safeResolveCredential: CredentialResolver | undefined = resolveCredential === undefined
+    ? undefined
+    : async (reference) => {
+      try {
+        return await resolveCredential(reference)
+      } catch {
+        // Resolver diagnostics are untrusted and may contain the reference,
+        // secret, or a rendered Authorization header. Do not retain the
+        // original exception as a cause: this error reaches logs and strict
+        // startup failures.
+        throw new Error(CREDENTIAL_RESOLUTION_FAILURE_MESSAGE)
+      }
+    }
   const opts: ToolBridgeOptions = {
     registrationFailure: 'contain',
     serverName: config.serverName,
@@ -276,7 +291,7 @@ export function startConnection(
       },
     )
     try {
-      await generation.connect(createTransport(config, resolveCredential))
+      await generation.connect(createTransport(config, safeResolveCredential))
       if (hasClosed()) {
         attemptSettled = true
         generationDown(generation)

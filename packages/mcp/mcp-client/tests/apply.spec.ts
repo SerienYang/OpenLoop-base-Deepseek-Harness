@@ -12,8 +12,16 @@ import type { Config } from '@deepseek-ai/dsh-mcp-client'
 
 // vi.mock factories are hoisted above every import/const, so the mock fns and
 // class must be created inside vi.hoisted to exist when the factories run.
-const { mockConnect, mockClose, mockListTools, mockCallTool, mockSetNotificationHandler, MockClient } = vi.hoisted(() => {
-  const mockConnect = vi.fn<() => Promise<void>>()
+const {
+  mockConnect,
+  mockClose,
+  mockListTools,
+  mockCallTool,
+  mockSetNotificationHandler,
+  MockClient,
+  MockStreamableHTTPClientTransport,
+} = vi.hoisted(() => {
+  const mockConnect = vi.fn<(_transport?: unknown) => Promise<void>>()
   const mockClose = vi.fn<() => Promise<void>>()
   const mockListTools = vi.fn<(_params?: Record<string, unknown>) => Promise<unknown>>()
   const mockCallTool = vi.fn<(
@@ -37,7 +45,21 @@ const { mockConnect, mockClose, mockListTools, mockCallTool, mockSetNotification
     request = mockRequest
     setNotificationHandler = mockSetNotificationHandler
   }
-  return { mockConnect, mockClose, mockListTools, mockCallTool, mockSetNotificationHandler, MockClient }
+  class MockStreamableHTTPClientTransport {
+    constructor(
+      readonly _url: URL,
+      readonly options: { fetch?: typeof globalThis.fetch },
+    ) {}
+  }
+  return {
+    mockConnect,
+    mockClose,
+    mockListTools,
+    mockCallTool,
+    mockSetNotificationHandler,
+    MockClient,
+    MockStreamableHTTPClientTransport,
+  }
 })
 
 vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
@@ -49,7 +71,7 @@ vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
 }))
 
 vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
-  StreamableHTTPClientTransport: vi.fn(),
+  StreamableHTTPClientTransport: MockStreamableHTTPClientTransport,
 }))
 
 // vi.mock is hoisted above static imports, so the module under test sees the
@@ -342,6 +364,50 @@ describe('apply (plugin lifecycle)', () => {
     expect(mockClose).toHaveBeenCalled()
   })
 
+  it('redacts credential resolver failures from startup and reconnect logs', async () => {
+    const privateReference = 'PRIVATE_MCP_RESOLVER_REFERENCE'
+    const privateSecret = 'mcp-private-secret'
+    const authorization = `Authorization: Bearer ${privateSecret}`
+    const diagnostics: string[] = []
+    ctx.logger.warn = ((message: unknown) => {
+      diagnostics.push(String(message))
+    }) as typeof ctx.logger.warn
+    ctx.logger.error = ((message: unknown) => {
+      diagnostics.push(String(message))
+    }) as typeof ctx.logger.error
+    ctx.provide('credentials', {
+      resolve: vi.fn(() => Promise.reject(
+        new Error(`${privateReference} ${authorization}`),
+      )),
+    } as never)
+    mockConnect.mockImplementation(async (transport: unknown) => {
+      const http = transport as InstanceType<typeof MockStreamableHTTPClientTransport>
+      await http.options.fetch!('https://mcp.example.test')
+    })
+
+    await apply(ctx, {
+      transport: 'streamable-http',
+      serverName: 'secret-log',
+      url: 'https://mcp.example.test',
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: privateReference, prefix: 'Bearer ' },
+      },
+      toolCallTimeoutMs: 60_000,
+      failOnStartupError: false,
+      reconnect: { enabled: true, initialDelayMs: 1, maxDelayMs: 1, maxAttempts: 1 },
+    })
+    await vi.waitFor(() => {
+      expect(mockConnect).toHaveBeenCalledTimes(2)
+    })
+
+    const serialized = diagnostics.join('\n')
+    expect(serialized).toContain('mcp-client: configured credential could not be resolved')
+    expect(serialized).not.toContain(privateReference)
+    expect(serialized).not.toContain(privateSecret)
+    expect(serialized).not.toContain(authorization)
+  })
+
   it('rejects activation and still closes the client when startup failure is configured as fatal', async () => {
     const cause = new Error('connection refused')
     mockConnect.mockRejectedValue(cause)
@@ -357,6 +423,48 @@ describe('apply (plugin lifecycle)', () => {
     expect(ctx.tools.get('mcp__srv__remote')).toBeUndefined()
     await ctx.fiber.dispose()
     expect(mockClose).toHaveBeenCalled()
+  })
+
+  it('retains only a cause-free generic credential failure on fatal startup', async () => {
+    const privateReference = 'PRIVATE_MCP_FATAL_REFERENCE'
+    const privateSecret = 'mcp-fatal-private-secret'
+    const authorization = `Authorization: Bearer ${privateSecret}`
+    ctx.provide('credentials', {
+      resolve: vi.fn(() => Promise.reject(
+        new Error(`${privateReference} ${authorization}`),
+      )),
+    } as never)
+    mockConnect.mockImplementation(async (transport: unknown) => {
+      const http = transport as InstanceType<typeof MockStreamableHTTPClientTransport>
+      await http.options.fetch!('https://mcp.example.test')
+    })
+
+    const failure = await apply(ctx, {
+      transport: 'streamable-http',
+      serverName: 'secret-fatal',
+      url: 'https://mcp.example.test',
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: privateReference, prefix: 'Bearer ' },
+      },
+      toolCallTimeoutMs: 60_000,
+      failOnStartupError: true,
+      reconnect: { enabled: false },
+    }).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(Error)
+    const startup = failure as Error
+    expect(startup.message).toBe(
+      'mcp-client(secret-fatal): initial connection or tool synchronization failed',
+    )
+    expect(startup.cause).toBeInstanceOf(Error)
+    expect((startup.cause as Error).message)
+      .toBe('mcp-client: configured credential could not be resolved')
+    expect((startup.cause as Error).cause).toBeUndefined()
+    const serialized = `${startup.stack}\n${String(startup.cause)}`
+    expect(serialized).not.toContain(privateReference)
+    expect(serialized).not.toContain(privateSecret)
+    expect(serialized).not.toContain(authorization)
   })
 
   it('rejects strict startup when the initial tool generation cannot be registered', async () => {

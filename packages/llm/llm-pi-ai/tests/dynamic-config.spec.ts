@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { createServer } from 'node:http'
+import type { IncomingMessage } from 'node:http'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -34,6 +36,32 @@ async function home(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-pi-dynamic-'))
   cleanups.push(() => rm(dir, { recursive: true, force: true }))
   return dir
+}
+
+async function listingServer(): Promise<{
+  readonly url: string
+  readonly headers: IncomingMessage['headers'][]
+}> {
+  const headers: IncomingMessage['headers'][] = []
+  const server = createServer((request, response) => {
+    headers.push(request.headers)
+    const body = JSON.stringify({ data: [{ id: 'listed-model' }] })
+    response.writeHead(200, {
+      'content-type': 'application/json',
+      'content-length': String(Buffer.byteLength(body)),
+    })
+    response.end(body)
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  cleanups.push(() => new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error === undefined) resolve()
+      else reject(error)
+    })
+  }))
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('no port')
+  return { url: `http://127.0.0.1:${address.port}`, headers }
 }
 
 /** Real dynamic composition mirroring the deepseek twin's harness. */
@@ -212,7 +240,9 @@ describe('request-level dynamic profiles', () => {
       'PI_LIVE_KEY: live-key\nPI_OTHER_KEY: other\n',
       { mode: 0o600 },
     )
-    const server = await mockServer([{ events: textEvents }, { events: textEvents }])
+    const acceptedServer = await mockServer([{ events: textEvents }, { events: textEvents }])
+    const rejectedServer = await mockServer([{ events: textEvents }])
+    const discovery = await listingServer()
     let consumerRoutes: Array<{ routeId: string; reference: string }> = []
     const replaceConsumers = vi.fn((routes: typeof consumerRoutes) => {
       consumerRoutes = routes.map(route => ({ ...route }))
@@ -226,11 +256,21 @@ describe('request-level dynamic profiles', () => {
     })
     const ctx = await boot(
       dir,
-      { providers: { openai: { apiKeyEnv: 'PI_LIVE_KEY', baseURL: `${server.url}/v1` } } },
+      {
+        providers: {
+          'acme-gateway': {
+            displayName: 'Accepted Gateway',
+            apiKeyEnv: 'PI_LIVE_KEY',
+            api: 'openai-completions',
+            baseURL: `${acceptedServer.url}/v1`,
+            models: [{ id: 'accepted-model', contextWindow: 8192, maxTokens: 1024 }],
+          },
+        },
+      },
       { registerPiAiModels },
     )
     expect(consumerRoutes).toEqual([
-      { routeId: 'openai', reference: credentialRef('PI_LIVE_KEY') },
+      { routeId: 'acme-gateway', reference: credentialRef('PI_LIVE_KEY') },
     ])
     replaceConsumers.mockClear()
     // Another adapter owns `anthropic`; the registry must refuse to hand it over.
@@ -238,37 +278,57 @@ describe('request-level dynamic profiles', () => {
 
     await ctx.settings.update(NS, {
       providers: {
-        openai: { apiKeyEnv: 'PI_LIVE_KEY', baseURL: `${server.url}/v1` },
+        'acme-gateway': {
+          displayName: 'Rejected Gateway',
+          apiKeyEnv: 'PI_OTHER_KEY',
+          api: 'openai-completions',
+          baseURL: `${rejectedServer.url}/v1`,
+          models: [{ id: 'rejected-model', contextWindow: 16_384, maxTokens: 2048 }],
+        },
         anthropic: { apiKeyEnv: 'PI_OTHER_KEY' },
       },
     })
 
     // The conflicting swap was refused whole: the previous route set still
-    // owns openai (an eager dispose would have dropped it), and anthropic
-    // still belongs to its original adapter.
-    expect(ctx.llm.listProviders().map(provider => provider.id).sort()).toEqual(['anthropic', 'openai'])
+    // owns acme-gateway (an eager dispose would have dropped it), and
+    // anthropic still belongs to its original adapter.
+    expect(ctx.llm.listProviders().map(provider => provider.id).sort()).toEqual(['acme-gateway', 'anthropic'])
     expect(consumerRoutes).toEqual([
-      { routeId: 'openai', reference: credentialRef('PI_LIVE_KEY') },
+      { routeId: 'acme-gateway', reference: credentialRef('PI_LIVE_KEY') },
     ])
     expect(replaceConsumers.mock.calls).toEqual([
       [[
+        { routeId: 'acme-gateway', reference: credentialRef('PI_OTHER_KEY') },
         { routeId: 'anthropic', reference: credentialRef('PI_OTHER_KEY') },
-        { routeId: 'openai', reference: credentialRef('PI_LIVE_KEY') },
       ]],
       [[
-        { routeId: 'openai', reference: credentialRef('PI_LIVE_KEY') },
+        { routeId: 'acme-gateway', reference: credentialRef('PI_LIVE_KEY') },
       ]],
     ])
-    const result = await assemble(ctx, { provider: 'openai', model: 'gpt-4.1', messages: [] })
-    expect(result.finish.kind).toBe('error')
-    expect(server.paths).toEqual(['/v1/responses'])
+    expect(ctx.llm.listConfigurableProviders().find(entry => entry.provider === 'acme-gateway')?.displayName)
+      .toBe('Accepted Gateway')
+    await expect(ctx.llm.listModels('acme-gateway')).resolves.toMatchObject([
+      { id: 'accepted-model' },
+    ])
+
+    const result = await assemble(ctx, { provider: 'acme-gateway', model: 'accepted-model', messages: [] })
+    expect(result.message.content).toEqual([{ type: 'text', text: 'hello' }])
+    expect(acceptedServer.paths).toEqual(['/v1/chat/completions'])
+    expect(acceptedServer.headers[0]?.authorization).toBe('Bearer live-key')
+    expect(rejectedServer.paths).toEqual([])
+
+    await ctx.llm.discoverModels('llm-pi-ai', {
+      provider: 'acme-gateway',
+      baseURL: discovery.url,
+    })
+    expect(discovery.headers[0]?.authorization).toBe('Bearer live-key')
 
     // Reverting to the working configuration re-applies, even though its
     // facts equal the ones the registry already holds.
     await ctx.settings.replace(NS, {})
-    expect(ctx.llm.listProviders().map(provider => provider.id).sort()).toEqual(['anthropic', 'openai'])
-    await assemble(ctx, { provider: 'openai', model: 'gpt-4.1', messages: [] })
-    expect(server.paths).toEqual(['/v1/responses', '/v1/responses'])
+    expect(ctx.llm.listProviders().map(provider => provider.id).sort()).toEqual(['acme-gateway', 'anthropic'])
+    await assemble(ctx, { provider: 'acme-gateway', model: 'accepted-model', messages: [] })
+    expect(acceptedServer.paths).toEqual(['/v1/chat/completions', '/v1/chat/completions'])
   })
 
   it('ignores a settings document that merely reorders its provider keys', async () => {

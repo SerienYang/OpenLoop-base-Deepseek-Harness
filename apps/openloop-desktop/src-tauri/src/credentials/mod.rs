@@ -42,6 +42,8 @@ const KEYCHAIN_SPIKE_VERIFY: &str = "--openloop-keychain-spike=verify";
 const KEYCHAIN_SPIKE_CLEANUP: &str = "--openloop-keychain-spike=cleanup";
 const SPIKE_REFERENCE: &str = "OPENLOOP_FOUNDATION_TASK_15_SPIKE";
 const SPIKE_SECRET: &[u8] = b"openloop-keychain-spike-v1";
+const MAX_CREDENTIAL_CONSUMERS: usize = 256;
+const MAX_CREDENTIAL_CONSUMER_FIELD_BYTES: usize = 256;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct CredentialAccount(String);
@@ -243,13 +245,13 @@ fn delete_credential_with_confirmation_cancellable(
 
 fn validate_deletion_plan(plan: &CredentialDeletionPlan) -> Result<(), CredentialError> {
     validate_credential_reference(&plan.reference)?;
-    if plan.consumers.is_empty() || plan.consumers.len() > 256 {
+    if plan.consumers.is_empty() || plan.consumers.len() > MAX_CREDENTIAL_CONSUMERS {
         return Err(CredentialError::invalid_deletion_plan());
     }
     let mut owners = HashSet::new();
     for consumer in &plan.consumers {
         if consumer.owner_id.is_empty()
-            || consumer.owner_id.len() > 256
+            || consumer.owner_id.len() > MAX_CREDENTIAL_CONSUMER_FIELD_BYTES
             || !consumer.owner_id.is_ascii()
             || consumer
                 .owner_id
@@ -272,7 +274,9 @@ fn validate_deletion_plan(plan: &CredentialDeletionPlan) -> Result<(), Credentia
             _ => return Err(CredentialError::invalid_deletion_plan()),
         }
         if consumer.display.values.values().any(|value| {
-            value.is_empty() || value.len() > 256 || value.chars().any(char::is_control)
+            value.is_empty()
+                || value.len() > MAX_CREDENTIAL_CONSUMER_FIELD_BYTES
+                || value.chars().any(char::is_control)
         }) {
             return Err(CredentialError::invalid_deletion_plan());
         }
@@ -522,13 +526,14 @@ impl Error for CredentialError {}
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
         sync::{mpsc, Arc, Mutex},
         thread,
         time::Duration,
     };
 
     use super::{
-        delete_credential_with_confirmation_cancellable, CredentialAccount,
+        delete_credential_with_confirmation_cancellable, validate_deletion_plan, CredentialAccount,
         CredentialConsumerDisplay, CredentialConsumerLabel, CredentialDeletionConfirmation,
         CredentialDeletionOutcome, CredentialDeletionPlan, CredentialDeletionStore,
         CredentialError,
@@ -577,6 +582,28 @@ mod tests {
                 },
             }],
         }
+    }
+
+    #[test]
+    fn deletion_plan_text_fields_use_a_256_byte_utf8_limit() {
+        let mut boundary = deletion_plan();
+        let consumer = &mut boundary.consumers[0];
+        consumer.owner_id = "o".repeat(256);
+        consumer.kind = "model-route".to_owned();
+        consumer.display.key = "openloop.credentials.consumer.model-route".to_owned();
+        consumer.display.values = BTreeMap::from([("routeId".to_owned(), "\u{1f600}".repeat(64))]);
+        assert!(validate_deletion_plan(&boundary).is_ok());
+
+        let mut oversized_owner = boundary.clone();
+        oversized_owner.consumers[0].owner_id.push('o');
+        assert!(validate_deletion_plan(&oversized_owner).is_err());
+
+        let mut oversized_display = boundary;
+        oversized_display.consumers[0]
+            .display
+            .values
+            .insert("routeId".to_owned(), "\u{1f600}".repeat(65));
+        assert!(validate_deletion_plan(&oversized_display).is_err());
     }
 
     #[test]

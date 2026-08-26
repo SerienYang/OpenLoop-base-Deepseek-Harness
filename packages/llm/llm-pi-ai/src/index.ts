@@ -173,12 +173,12 @@ function credentialConsumerEntries(
 /** Register one generic pi-ai adapter for all configured provider routes. */
 export function apply(ctx: Context, config: Config): void {
   let current: () => Config = () => config
-  let lastRaw: Config | undefined
-  let memoized: ReadonlyMap<string, ResolvedPiAiProviderProfile> | undefined
+  let lastCandidateRaw: Config | undefined
+  let memoizedCandidate: ReadonlyMap<string, ResolvedPiAiProviderProfile> | undefined
   /**
-   * The resolved profiles for the current configuration, memoized by the raw
-   * snapshot's identity — which is also what makes the adapter's own snapshot
-   * stable across operations that observe no change.
+   * Resolve the current settings candidate, memoized by the raw snapshot's
+   * identity. This does not advance the profiles serving requests: a candidate
+   * becomes visible only after every registration accepts it below.
    *
    * No fallback for an unserviceable snapshot lives here: the section schema
    * resolves the whole profile set, so a write that could not be served is
@@ -186,15 +186,18 @@ export function apply(ctx: Context, config: Config): void {
    * last good value for a stored section that fails. Anything reaching this
    * point has already resolved once.
    */
-  const profiles = (): ReadonlyMap<string, ResolvedPiAiProviderProfile> => {
+  const candidateProfiles = (): ReadonlyMap<string, ResolvedPiAiProviderProfile> => {
     const raw = current()
-    if (raw === lastRaw && memoized !== undefined) return memoized
+    if (raw === lastCandidateRaw && memoizedCandidate !== undefined) return memoizedCandidate
     const next = resolveProfiles(raw.providers)
-    lastRaw = raw
-    memoized = next
+    lastCandidateRaw = raw
+    memoizedCandidate = next
     return next
   }
-  profiles()
+  let acceptedProfiles = candidateProfiles()
+  let registrationProfiles: ReadonlyMap<string, ResolvedPiAiProviderProfile> | undefined
+  const profiles = (): ReadonlyMap<string, ResolvedPiAiProviderProfile> =>
+    registrationProfiles ?? acceptedProfiles
 
   const resolveApiKey = async (
     provider: string,
@@ -320,9 +323,18 @@ export function apply(ctx: Context, config: Config): void {
     }
     registeredFacts = facts
   }
+  const stageRegistrationFacts = (
+    candidate: ReadonlyMap<string, ResolvedPiAiProviderProfile>,
+  ): void => {
+    registrationProfiles = candidate
+    try {
+      ensureRegistrationFacts(candidate)
+    } finally {
+      registrationProfiles = undefined
+    }
+  }
   const initialProfiles = profiles()
-  ensureRegistrationFacts(initialProfiles)
-  let acceptedProfiles = initialProfiles
+  stageRegistrationFacts(initialProfiles)
   let credentialRegistration: ReturnType<CredentialConsumerRegistry['registerPiAiModels']>
     | undefined
   ctx.inject(['credentialConsumers'], (consumerCtx) => {
@@ -346,9 +358,10 @@ export function apply(ctx: Context, config: Config): void {
       current = source
     },
     onChange: () => {
-      const desiredProfiles = profiles()
+      const desiredProfiles = candidateProfiles()
       const previousProfiles = acceptedProfiles
       let consumersPrepared = false
+      let routesPrepared = false
       // Named here rather than left to the settings watcher: `assertServiceable`
       // cannot see the llm registry, so a profile claiming a route another
       // adapter family owns is stored successfully and only fails at this swap.
@@ -360,26 +373,30 @@ export function apply(ctx: Context, config: Config): void {
           credentialRegistration.replace(credentialConsumerEntries(desiredProfiles))
           consumersPrepared = true
         }
-        ensureRegistrationFacts(desiredProfiles)
+        stageRegistrationFacts(desiredProfiles)
+        routesPrepared = true
+        ensureDirectory(desiredProfiles)
         acceptedProfiles = desiredProfiles
       } catch (error) {
-        if (consumersPrepared) {
-          credentialRegistration?.replace(credentialConsumerEntries(previousProfiles))
+        if (routesPrepared) {
+          try {
+            stageRegistrationFacts(previousProfiles)
+          } catch (rollbackError) {
+            ctx.logger.error('llm-pi-ai: failed to restore the previous route registration')
+            ctx.logger.error(rollbackError)
+          }
         }
-        ctx.logger.error('llm-pi-ai: keeping the previously registered routes after a refused update')
+        if (consumersPrepared) {
+          try {
+            credentialRegistration?.replace(credentialConsumerEntries(previousProfiles))
+          } catch (rollbackError) {
+            ctx.logger.error('llm-pi-ai: failed to restore the previous credential consumers')
+            ctx.logger.error(rollbackError)
+          }
+        }
+        ctx.logger.error('llm-pi-ai: keeping the previous serving profile generation after a refused update')
         ctx.logger.error(error)
         return
-      }
-      // The directory follows the profiles the registry accepted, so a route
-      // that failed to register is not advertised as configurable. A refused
-      // directory swap is contained here for the same reason the registry's
-      // is: the previous entries keep serving, and `directoryFacts` stays put
-      // so returning to a working configuration re-applies.
-      try {
-        ensureDirectory(acceptedProfiles)
-      } catch (error) {
-        ctx.logger.error('llm-pi-ai: keeping the previous configurable-provider directory after a refused update')
-        ctx.logger.error(error)
       }
     },
   })

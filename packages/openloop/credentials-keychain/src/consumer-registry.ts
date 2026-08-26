@@ -1,4 +1,5 @@
 import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
+import { createHash } from 'node:crypto'
 
 /** Localization keys owned by the Host credential confirmation UI. */
 export const CREDENTIAL_CONSUMER_DISPLAY_KEYS = Object.freeze({
@@ -12,13 +13,19 @@ export const DEEPSEEK_MODEL_OWNER_ID = 'model-route:deepseek-official'
 /** Stable owner id for the built-in DeepSeek Web Search plugin. */
 export const DEEPSEEK_WEB_SEARCH_OWNER_ID = 'plugin:web-search-deepseek'
 
+const MAX_CREDENTIAL_CONSUMER_FIELD_BYTES = 256
+const PI_AI_OWNER_PREFIX = 'model-route:pi-ai:sha256:'
+const DISPLAY_DIGEST_HEX_LENGTH = 12
+const utf8Encoder = new TextEncoder()
+
 /**
  * Return the collision-safe owner id for one pi-ai route.
  * @param routeId - Built-in model route id.
  * @returns Stable registry owner id.
  */
 export function piAiModelOwnerId(routeId: string): string {
-  return `model-route:pi-ai:${encodeURIComponent(requiredIdentity(routeId, 'pi-ai route id'))}`
+  const route = requiredIdentity(routeId, 'pi-ai route id')
+  return `${PI_AI_OWNER_PREFIX}${createHash('sha256').update(route, 'utf8').digest('hex')}`
 }
 
 /**
@@ -106,7 +113,9 @@ export class CredentialConsumerRegistry implements CredentialConsumerRegistryLik
     return this.#register(reference, {
       ownerId: piAiModelOwnerId(route),
       kind: 'model-route',
-      display: display(CREDENTIAL_CONSUMER_DISPLAY_KEYS.modelRoute, { routeId: route }),
+      display: display(CREDENTIAL_CONSUMER_DISPLAY_KEYS.modelRoute, {
+        routeId: boundedDisplayIdentity(route),
+      }),
     })
   }
 
@@ -130,7 +139,9 @@ export class CredentialConsumerRegistry implements CredentialConsumerRegistryLik
         const consumer = detachedConsumer({
           ownerId: piAiModelOwnerId(route),
           kind: 'model-route',
-          display: display(CREDENTIAL_CONSUMER_DISPLAY_KEYS.modelRoute, { routeId: route }),
+          display: display(CREDENTIAL_CONSUMER_DISPLAY_KEYS.modelRoute, {
+            routeId: boundedDisplayIdentity(route),
+          }),
         })
         const key = consumer.ownerId
         if (candidates.has(key)) {
@@ -247,8 +258,28 @@ function detachedConsumer(consumer: CredentialConsumer): CredentialConsumer {
 }
 
 function requiredIdentity(value: string, label: string): string {
-  if (value.length === 0 || value.length > 256 || /[\u0000-\u001f\u007f]/u.test(value)) {
+  if (value.length === 0 || value.length > 256 || !value.isWellFormed() || /\p{Cc}/u.test(value)) {
     throw new TypeError(`${label} is invalid`)
   }
   return value
+}
+
+/**
+ * Preserve a Host display identity exactly when it fits the native deletion
+ * plan, or retain a readable prefix plus a route-specific digest when UTF-8
+ * expansion would exceed the shared byte limit.
+ */
+function boundedDisplayIdentity(value: string): string {
+  if (utf8Encoder.encode(value).byteLength <= MAX_CREDENTIAL_CONSUMER_FIELD_BYTES) return value
+  const suffix = `...#${createHash('sha256').update(value, 'utf8').digest('hex').slice(0, DISPLAY_DIGEST_HEX_LENGTH)}`
+  const prefixBudget = MAX_CREDENTIAL_CONSUMER_FIELD_BYTES - suffix.length
+  let prefix = ''
+  let prefixBytes = 0
+  for (const character of value) {
+    const characterBytes = utf8Encoder.encode(character).byteLength
+    if (prefixBytes + characterBytes > prefixBudget) break
+    prefix += character
+    prefixBytes += characterBytes
+  }
+  return `${prefix}${suffix}`
 }
