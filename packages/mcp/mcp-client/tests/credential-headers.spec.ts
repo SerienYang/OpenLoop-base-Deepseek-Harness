@@ -315,6 +315,51 @@ describe('MCP credential-backed HTTP headers', () => {
     })
   })
 
+  it('replaces a credential-reflecting JSON-RPC tool error result', async () => {
+    const privateToken = 'mcp-tool-error-token'
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef('MCP_TOOL_ERROR_KEY'), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(new Response(JSON.stringify({
+        jsonrpc: '2.0',
+        id: 9,
+        result: {
+          content: [{ type: 'text', text: `Authorization: Bearer ${privateToken}` }],
+          structuredContent: { reflected: privateToken },
+          isError: true,
+        },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))),
+    })
+
+    const response = await credentialFetch('https://mcp.example.test', {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/call' }),
+    })
+    const body = await response.json() as unknown
+
+    expect(body).toEqual({
+      jsonrpc: '2.0',
+      id: 9,
+      result: {
+        content: [{
+          type: 'text',
+          text: 'mcp-client: credential-backed tool request failed',
+        }],
+        isError: true,
+      },
+    })
+    expect(JSON.stringify(body)).not.toContain(privateToken)
+  })
+
   it.each([
     'application/json-rpc',
     'application/json; charset=utf-8; vendor=acme',
@@ -518,6 +563,44 @@ describe('MCP credential-backed HTTP headers', () => {
     expect(sanitized).not.toContain(authorization)
   })
 
+  it('replaces a credential-reflecting SSE tool error result', async () => {
+    const privateToken = 'mcp-sse-tool-error-token'
+    const payload = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 20,
+      result: {
+        content: [{ type: 'text', text: `Authorization: Bearer ${privateToken}` }],
+        isError: true,
+      },
+    })
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef('MCP_SSE_TOOL_ERROR_KEY'), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(chunkedSseResponse([
+        new TextEncoder().encode(`data: ${payload}\n\n`),
+      ]))),
+    })
+
+    const response = await credentialFetch('https://mcp.example.test', {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 20, method: 'tools/call' }),
+    })
+    const body = await response.text()
+
+    expect(body).toBe(
+      'event: message\n'
+      + 'data: {"jsonrpc":"2.0","id":20,"result":{"content":[{"type":"text",'
+      + '"text":"mcp-client: credential-backed tool request failed"}],"isError":true}}\n\n',
+    )
+    expect(body).not.toContain(privateToken)
+  })
+
   it.each([
     'text/event-stream-x',
     'text/event-stream; charset=utf-8; vendor=acme',
@@ -598,6 +681,64 @@ describe('MCP credential-backed HTTP headers', () => {
     expect(evidence).not.toContain(rawContentType)
     expect(evidence).not.toContain(privateReference)
     expect(evidence).not.toContain(privateToken)
+  })
+
+  it('treats an explicit GET response as SSE without applying POST content-type classification', async () => {
+    const privateToken = 'mcp-get-token'
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef('MCP_GET_KEY'), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(chunkedSseResponse([
+        new TextEncoder().encode(
+          'data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":1}}\n\n',
+        ),
+      ], undefined, 'Text/Event-Stream; charset=utf-8'))),
+    })
+
+    const response = await credentialFetch('https://mcp.example.test', { method: 'GET' })
+
+    expect(response.headers.get('content-type')).toBe('text/event-stream')
+    expect(await response.text()).toContain('"method":"notifications/progress"')
+  })
+
+  it.each([
+    ['POST', JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })],
+    ['DELETE', undefined],
+  ] as const)('discards a successful %s response that the SDK does not parse', async (method, body) => {
+    const cancel = vi.fn()
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef('MCP_DISCARD_KEY'), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: 'mcp-discard-token',
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(new Response(
+        new ReadableStream<Uint8Array>({ cancel }),
+        {
+          status: 200,
+          headers: { 'content-type': 'Application/Json' },
+        },
+      ))),
+    })
+
+    const response = await credentialFetch('https://mcp.example.test', {
+      method,
+      ...(body === undefined ? {} : { body }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(response.body).toBeNull()
+    expect([...response.headers]).toEqual([])
+    expect(cancel).toHaveBeenCalledOnce()
   })
 
   it('rejects an unsupported successful content type without retaining header or cleanup secrets', async () => {

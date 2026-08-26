@@ -513,6 +513,14 @@ describe('streamable-http — in-process MCP server', () => {
     }, async args => ({
       content: [{ type: 'text', text: args.message.toUpperCase() }],
     }))
+    server.registerTool('fail-auth', {
+      description: 'Returns a server-side tool error.',
+      inputSchema: {},
+    }, async () => ({
+      content: [{ type: 'text', text: `request failed with ${req.headers.authorization ?? ''}` }],
+      structuredContent: { reflected: req.headers.authorization ?? '' },
+      isError: true,
+    }))
     // Stateless mode: sessionIdGenerator ABSENT (the runtime treats absent and
     // explicit-undefined identically; exactOptionalPropertyTypes forbids the
     // SDK-documented explicit `sessionIdGenerator: undefined` spelling).
@@ -539,11 +547,20 @@ describe('streamable-http — in-process MCP server', () => {
     baseUrl = `http://127.0.0.1:${address.port}/mcp`
 
     ctx = await mountRegistry()
+    ctx.provide('credentials', {
+      resolve: vi.fn(() => Promise.resolve({
+        value: 'e2e-test-token',
+        source: 'keychain',
+      })),
+    } as never)
     const config: Config = {
       transport: 'streamable-http',
       serverName: 'web',
       url: baseUrl,
-      headers: { Authorization: 'Bearer e2e-test-token' },
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: 'MCP_HTTP_E2E_KEY', prefix: 'Bearer ' },
+      },
       toolCallTimeoutMs: 15_000,
       failOnStartupError: false,
     }
@@ -582,7 +599,24 @@ describe('streamable-http — in-process MCP server', () => {
     expect(result.content[0]).toEqual({ type: 'text', text: 'QUIET' })
   })
 
-  it('sends configured headers on every HTTP request', () => {
+  it('contains a credential-reflecting MCP tool error before it reaches the model', async () => {
+    const result = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: nextCallId(), name: 'mcp__web__fail-auth', arguments: {},
+    })
+    const observable = JSON.stringify(result)
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0]).toEqual({
+      type: 'text',
+      text: 'Error: mcp-client: credential-backed tool request failed',
+    })
+    expect(observable).not.toContain('MCP_HTTP_E2E_KEY')
+    expect(observable).not.toContain('e2e-test-token')
+    expect(observable).not.toContain('Bearer')
+  })
+
+  it('sends credential-backed headers on every HTTP request', () => {
     expect(seenAuth.length).toBeGreaterThan(0)
     for (const auth of seenAuth) expect(auth).toBe('Bearer e2e-test-token')
   })

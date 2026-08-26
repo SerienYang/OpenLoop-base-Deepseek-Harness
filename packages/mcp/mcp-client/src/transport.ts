@@ -31,6 +31,7 @@ const MAX_CREDENTIAL_JSON_RESPONSE_BYTES = 1024 * 1024
 const MAX_CREDENTIAL_SSE_EVENT_BYTES = 1024 * 1024
 const MAX_CREDENTIAL_SSE_LINE_BYTES = 256 * 1024
 const CREDENTIAL_JSON_RPC_ERROR_MESSAGE = 'mcp-client: credential-backed JSON-RPC request failed'
+const CREDENTIAL_TOOL_ERROR_MESSAGE = 'mcp-client: credential-backed tool request failed'
 const CREDENTIAL_SSE_FAILURE_MESSAGE = 'mcp-client: credential-backed SSE response was rejected'
 const CREDENTIAL_CONTENT_TYPE_FAILURE_MESSAGE = 'mcp-client: credential-backed response content type was rejected'
 const LF = 0x0a
@@ -158,6 +159,7 @@ export function createCredentialResolvingFetch(
     for (const [name, value] of new Headers(init?.headers)) headers.set(name, value)
     const signal = init?.signal
       ?? (input instanceof Request ? input.signal : undefined)
+    const responseMode = credentialResponseMode(input, init)
     const resolvedByReference = new Map<CredentialRef, Promise<ResolvedCredential | undefined>>()
     for (const [name, source] of Object.entries(options.credentialHeaders)) {
       const ref = safeCredentialRef(source.ref)
@@ -193,8 +195,44 @@ export function createCredentialResolvingFetch(
       await discardResponseBody(response)
       return new Response(null, { status: 202 })
     }
+    if (responseMode === 'discard') {
+      await discardResponseBody(response)
+      return new Response(null, { status: response.status })
+    }
+    if (responseMode === 'sse') {
+      return sanitizeSseResponse(response, sensitiveValues)
+    }
     return sanitizeJsonRpcResponse(response, sensitiveValues, signal)
   }
+}
+
+type CredentialResponseMode = 'classified' | 'discard' | 'sse'
+
+function credentialResponseMode(
+  input: URL | RequestInfo,
+  init: RequestInit | undefined,
+): CredentialResponseMode {
+  const rawMethod = init?.method
+    ?? (input instanceof Request ? input.method : undefined)
+  if (rawMethod === undefined) return 'classified'
+  const method = rawMethod.toUpperCase()
+  if (method === 'GET') return 'sse'
+  if (method === 'DELETE') return 'discard'
+  if (method !== 'POST' || typeof init?.body !== 'string') return 'classified'
+
+  let payload: unknown
+  try {
+    payload = JSON.parse(init.body) as unknown
+  } catch {
+    return 'classified'
+  }
+  const messages = Array.isArray(payload) ? payload : [payload]
+  const hasRequest = messages.some(message => typeof message === 'object'
+    && message !== null
+    && 'method' in message
+    && 'id' in message
+    && (message as Record<string, unknown>)['id'] !== undefined)
+  return hasRequest ? 'classified' : 'discard'
 }
 
 async function sanitizeJsonRpcResponse(
@@ -227,7 +265,7 @@ async function sanitizeJsonRpcResponse(
     await discardResponseBody(response)
     return sanitizedJsonRpcError(null)
   }
-  const sanitized = sanitizeJsonRpcErrors(payload)
+  const sanitized = sanitizeJsonRpcFailures(payload)
   if (!sanitized.changed) return response
   await discardResponseBody(response)
   return new Response(JSON.stringify(sanitized.payload), {
@@ -455,7 +493,7 @@ class CredentialSseSanitizer {
     } finally {
       data.fill(0)
     }
-    const sanitized = sanitizeJsonRpcErrors(payload)
+    const sanitized = sanitizeJsonRpcFailures(payload)
     if (!sanitized.changed) {
       controller.enqueue(event)
       this.clear()
@@ -576,38 +614,56 @@ type JsonRpcSanitization =
   | { readonly changed: false }
   | { readonly changed: true; readonly payload: unknown }
 
-function sanitizeJsonRpcErrors(payload: unknown): JsonRpcSanitization {
+function sanitizeJsonRpcFailures(payload: unknown): JsonRpcSanitization {
   if (Array.isArray(payload)) {
     let changed = false
     const messages: unknown[] = []
     for (const message of payload as unknown[]) {
-      const sanitized = sanitizeJsonRpcError(message)
+      const sanitized = sanitizeJsonRpcFailure(message)
       if (sanitized !== undefined) changed = true
       messages.push(sanitized ?? message)
     }
     return changed ? { changed: true, payload: messages } : { changed: false }
   }
-  const sanitized = sanitizeJsonRpcError(payload)
+  const sanitized = sanitizeJsonRpcFailure(payload)
   return sanitized === undefined
     ? { changed: false }
     : { changed: true, payload: sanitized }
 }
 
-function sanitizeJsonRpcError(value: unknown): Record<string, unknown> | undefined {
+function sanitizeJsonRpcFailure(value: unknown): Record<string, unknown> | undefined {
   if (typeof value !== 'object'
     || value === null
     || Array.isArray(value)
-    || (value as Record<string, unknown>)['jsonrpc'] !== '2.0'
-    || !Object.hasOwn(value, 'error')) {
+    || (value as Record<string, unknown>)['jsonrpc'] !== '2.0') {
     return undefined
   }
-  const id = (value as Record<string, unknown>)['id']
+  const message = value as Record<string, unknown>
+  const id = message['id']
+  const safeId = typeof id === 'number' && Number.isSafeInteger(id) ? id : null
+  if (Object.hasOwn(message, 'error')) {
+    return {
+      jsonrpc: '2.0',
+      id: safeId,
+      error: {
+        code: -32_000,
+        message: CREDENTIAL_JSON_RPC_ERROR_MESSAGE,
+      },
+    }
+  }
+  const result = message['result']
+  if (typeof result !== 'object'
+    || result === null
+    || Array.isArray(result)
+    || (result as Record<string, unknown>)['isError'] !== true) {
+    return undefined
+  }
   return {
     jsonrpc: '2.0',
-    id: typeof id === 'number' && Number.isSafeInteger(id) ? id : null,
-    error: {
-      code: -32_000,
-      message: CREDENTIAL_JSON_RPC_ERROR_MESSAGE,
+    id: safeId,
+    result: {
+      content: [{ type: 'text', text: CREDENTIAL_TOOL_ERROR_MESSAGE }],
+      isError: true,
     },
   }
 }
