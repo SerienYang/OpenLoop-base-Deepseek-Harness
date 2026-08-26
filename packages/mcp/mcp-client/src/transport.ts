@@ -159,7 +159,7 @@ export function createCredentialResolvingFetch(
     for (const [name, value] of new Headers(init?.headers)) headers.set(name, value)
     const signal = init?.signal
       ?? (input instanceof Request ? input.signal : undefined)
-    const responseMode = credentialResponseMode(input, init)
+    const responsePolicy = credentialResponsePolicy(input, init)
     const resolvedByReference = new Map<CredentialRef, Promise<ResolvedCredential | undefined>>()
     for (const [name, source] of Object.entries(options.credentialHeaders)) {
       const ref = safeCredentialRef(source.ref)
@@ -195,55 +195,79 @@ export function createCredentialResolvingFetch(
       await discardResponseBody(response)
       return new Response(null, { status: 202 })
     }
-    if (responseMode === 'discard') {
+    if (responsePolicy.mode === 'discard') {
       await discardResponseBody(response)
       return new Response(null, { status: response.status })
     }
-    if (responseMode === 'sse') {
-      return sanitizeSseResponse(response, sensitiveValues)
+    if (responsePolicy.mode === 'sse') {
+      return sanitizeSseResponse(
+        response,
+        sensitiveValues,
+        responsePolicy.requestIds,
+      )
     }
-    return sanitizeJsonRpcResponse(response, sensitiveValues, signal)
+    return sanitizeJsonRpcResponse(
+      response,
+      sensitiveValues,
+      responsePolicy.requestIds,
+      signal,
+    )
   }
 }
 
 type CredentialResponseMode = 'classified' | 'discard' | 'sse'
+type JsonRpcId = number | string
 
-function credentialResponseMode(
+interface CredentialResponsePolicy {
+  readonly mode: CredentialResponseMode
+  readonly requestIds?: ReadonlySet<JsonRpcId>
+}
+
+function credentialResponsePolicy(
   input: URL | RequestInfo,
   init: RequestInit | undefined,
-): CredentialResponseMode {
+): CredentialResponsePolicy {
   const rawMethod = init?.method
     ?? (input instanceof Request ? input.method : undefined)
-  if (rawMethod === undefined) return 'classified'
+  if (rawMethod === undefined) return { mode: 'classified' }
   const method = rawMethod.toUpperCase()
-  if (method === 'GET') return 'sse'
-  if (method === 'DELETE') return 'discard'
-  if (method !== 'POST' || typeof init?.body !== 'string') return 'classified'
+  if (method === 'GET') return { mode: 'sse' }
+  if (method === 'DELETE') return { mode: 'discard' }
+  if (method !== 'POST' || typeof init?.body !== 'string') return { mode: 'classified' }
 
   let payload: unknown
   try {
     payload = JSON.parse(init.body) as unknown
   } catch {
-    return 'classified'
+    return { mode: 'classified' }
   }
   const messages = Array.isArray(payload) ? payload : [payload]
-  const hasRequest = messages.some(message => typeof message === 'object'
-    && message !== null
-    && 'method' in message
-    && 'id' in message
-    && (message as Record<string, unknown>)['id'] !== undefined)
-  return hasRequest ? 'classified' : 'discard'
+  const requestIds = new Set<JsonRpcId>()
+  let hasRequest = false
+  for (const value of messages) {
+    if (typeof value !== 'object' || value === null || !('method' in value) || !('id' in value)) continue
+    const id = (value as Record<string, unknown>)['id']
+    if (id === undefined) continue
+    hasRequest = true
+    if (typeof id === 'string' || (typeof id === 'number' && Number.isSafeInteger(id))) {
+      requestIds.add(id)
+    }
+  }
+  return hasRequest
+    ? { mode: 'classified', requestIds }
+    : { mode: 'discard' }
 }
 
 async function sanitizeJsonRpcResponse(
   response: Response,
   sensitiveValues: ReadonlySet<string>,
+  requestIds: ReadonlySet<JsonRpcId> | undefined,
   signal: AbortSignal | null | undefined,
 ): Promise<Response> {
   const contentType = response.headers.get('content-type')
   // Match the pinned SDK's case-sensitive, SSE-before-JSON substring classification.
   if (contentType?.includes('text/event-stream')) {
-    return sanitizeSseResponse(response, sensitiveValues)
+    return sanitizeSseResponse(response, sensitiveValues, requestIds)
   }
   if (!contentType?.includes('application/json')) {
     await discardResponseBody(response)
@@ -263,9 +287,13 @@ async function sanitizeJsonRpcResponse(
       throw new DOMException('This operation was aborted', 'AbortError')
     }
     await discardResponseBody(response)
-    return sanitizedJsonRpcError(null)
+    const requestId = soleRequestId(requestIds)
+    if (requestId === undefined) {
+      throw new Error(CREDENTIAL_CONTENT_TYPE_FAILURE_MESSAGE)
+    }
+    return sanitizedJsonRpcError(requestId)
   }
-  const sanitized = sanitizeJsonRpcFailures(payload)
+  const sanitized = sanitizeJsonRpcFailures(payload, requestIds, sensitiveValues)
   if (!sanitized.changed) return response
   await discardResponseBody(response)
   return new Response(JSON.stringify(sanitized.payload), {
@@ -277,6 +305,7 @@ async function sanitizeJsonRpcResponse(
 function sanitizeSseResponse(
   response: Response,
   sensitiveValues: ReadonlySet<string>,
+  requestIds?: ReadonlySet<JsonRpcId>,
 ): Response {
   const body = response.body
   if (body === null) {
@@ -285,7 +314,7 @@ function sanitizeSseResponse(
       headers: sanitizedSseHeaders(response.headers, sensitiveValues),
     })
   }
-  const sanitizer = new CredentialSseSanitizer()
+  const sanitizer = new CredentialSseSanitizer(requestIds, sensitiveValues)
   const transformed = body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       try {
@@ -378,6 +407,11 @@ class CredentialSseSanitizer {
   #pendingCr = false
   #pendingLineEnd = 0
   #streamStart = true
+
+  constructor(
+    private readonly requestIds: ReadonlySet<JsonRpcId> | undefined,
+    private readonly sensitiveValues: ReadonlySet<string>,
+  ) {}
 
   write(chunk: Uint8Array, controller: TransformStreamDefaultController<Uint8Array>): void {
     for (const byte of chunk) this.#writeByte(byte, controller)
@@ -493,7 +527,11 @@ class CredentialSseSanitizer {
     } finally {
       data.fill(0)
     }
-    const sanitized = sanitizeJsonRpcFailures(payload)
+    const sanitized = sanitizeJsonRpcFailures(
+      payload,
+      this.requestIds,
+      this.sensitiveValues,
+    )
     if (!sanitized.changed) {
       controller.enqueue(event)
       this.clear()
@@ -614,24 +652,32 @@ type JsonRpcSanitization =
   | { readonly changed: false }
   | { readonly changed: true; readonly payload: unknown }
 
-function sanitizeJsonRpcFailures(payload: unknown): JsonRpcSanitization {
+function sanitizeJsonRpcFailures(
+  payload: unknown,
+  requestIds: ReadonlySet<JsonRpcId> | undefined,
+  sensitiveValues: ReadonlySet<string>,
+): JsonRpcSanitization {
   if (Array.isArray(payload)) {
     let changed = false
     const messages: unknown[] = []
     for (const message of payload as unknown[]) {
-      const sanitized = sanitizeJsonRpcFailure(message)
+      const sanitized = sanitizeJsonRpcFailure(message, requestIds, sensitiveValues)
       if (sanitized !== undefined) changed = true
       messages.push(sanitized ?? message)
     }
     return changed ? { changed: true, payload: messages } : { changed: false }
   }
-  const sanitized = sanitizeJsonRpcFailure(payload)
+  const sanitized = sanitizeJsonRpcFailure(payload, requestIds, sensitiveValues)
   return sanitized === undefined
     ? { changed: false }
     : { changed: true, payload: sanitized }
 }
 
-function sanitizeJsonRpcFailure(value: unknown): Record<string, unknown> | undefined {
+function sanitizeJsonRpcFailure(
+  value: unknown,
+  requestIds: ReadonlySet<JsonRpcId> | undefined,
+  sensitiveValues: ReadonlySet<string>,
+): Record<string, unknown> | undefined {
   if (typeof value !== 'object'
     || value === null
     || Array.isArray(value)
@@ -640,10 +686,8 @@ function sanitizeJsonRpcFailure(value: unknown): Record<string, unknown> | undef
   }
   const message = value as Record<string, unknown>
   const id = message['id']
-  const safeId = typeof id === 'string'
-    ? id
-    : typeof id === 'number' && Number.isSafeInteger(id) ? id : null
   if (Object.hasOwn(message, 'error')) {
+    const safeId = safeJsonRpcResponseId(id, requestIds, sensitiveValues)
     return {
       jsonrpc: '2.0',
       id: safeId,
@@ -660,6 +704,7 @@ function sanitizeJsonRpcFailure(value: unknown): Record<string, unknown> | undef
     || (result as Record<string, unknown>)['isError'] !== true) {
     return undefined
   }
+  const safeId = safeJsonRpcResponseId(id, requestIds, sensitiveValues)
   return {
     jsonrpc: '2.0',
     id: safeId,
@@ -670,7 +715,33 @@ function sanitizeJsonRpcFailure(value: unknown): Record<string, unknown> | undef
   }
 }
 
-function sanitizedJsonRpcError(id: number | null): Response {
+function safeJsonRpcResponseId(
+  id: unknown,
+  requestIds: ReadonlySet<JsonRpcId> | undefined,
+  sensitiveValues: ReadonlySet<string>,
+): JsonRpcId {
+  const validId = typeof id === 'string'
+    || (typeof id === 'number' && Number.isSafeInteger(id))
+  if (requestIds !== undefined) {
+    if (validId && requestIds.has(id)) return id
+    const requestId = soleRequestId(requestIds)
+    if (requestId !== undefined) return requestId
+    throw new Error(CREDENTIAL_CONTENT_TYPE_FAILURE_MESSAGE)
+  }
+  if (!validId
+    || (typeof id === 'string'
+      && [...sensitiveValues].some(secret => secret.length > 0 && id.includes(secret)))) {
+    throw new Error(CREDENTIAL_CONTENT_TYPE_FAILURE_MESSAGE)
+  }
+  return id
+}
+
+function soleRequestId(requestIds: ReadonlySet<JsonRpcId> | undefined): JsonRpcId | undefined {
+  if (requestIds?.size !== 1) return undefined
+  return requestIds.values().next().value
+}
+
+function sanitizedJsonRpcError(id: JsonRpcId): Response {
   return new Response(JSON.stringify({
     jsonrpc: '2.0',
     id,

@@ -362,6 +362,51 @@ describe('MCP credential-backed HTTP headers', () => {
     expect(JSONRPCMessageSchema.safeParse(body).success).toBe(true)
   })
 
+  it('does not preserve a server-supplied JSON tool-error id that was not requested', async () => {
+    const privateToken = 'mcp-forged-json-id-token'
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef('MCP_FORGED_JSON_ID_KEY'), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(new Response(JSON.stringify({
+        jsonrpc: '2.0',
+        id: privateToken,
+        result: {
+          content: [{ type: 'text', text: privateToken }],
+          isError: true,
+        },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))),
+    })
+
+    const response = await credentialFetch('https://mcp.example.test', {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 'expected-json-id', method: 'tools/call' }),
+    })
+    const body = await response.json() as unknown
+
+    expect(body).toEqual({
+      jsonrpc: '2.0',
+      id: 'expected-json-id',
+      result: {
+        content: [{
+          type: 'text',
+          text: 'mcp-client: credential-backed tool request failed',
+        }],
+        isError: true,
+      },
+    })
+    expect(JSON.stringify(body)).not.toContain(privateToken)
+    expect(JSONRPCMessageSchema.safeParse(body).success).toBe(true)
+  })
+
   it.each([
     'application/json-rpc',
     'application/json; charset=utf-8; vendor=acme',
@@ -492,7 +537,10 @@ describe('MCP credential-backed HTTP headers', () => {
       fetch: dispatch,
     })
 
-    const abortFailure = await credentialFetch('https://mcp.example.test')
+    const abortFailure = await credentialFetch('https://mcp.example.test', {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 21, method: 'tools/call' }),
+    })
       .then(() => undefined, (error: unknown) => error)
     expect(abortFailure).toBeInstanceOf(DOMException)
     expect(abortFailure).toMatchObject({
@@ -502,10 +550,13 @@ describe('MCP credential-backed HTTP headers', () => {
     expect(Object.hasOwn(abortFailure as object, 'cause')).toBe(false)
     expect(inspect(abortFailure, { depth: null, showHidden: true })).not.toContain(privateToken)
 
-    const sanitized = await credentialFetch('https://mcp.example.test')
+    const sanitized = await credentialFetch('https://mcp.example.test', {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 22, method: 'tools/call' }),
+    })
     await expect(sanitized.json()).resolves.toEqual({
       jsonrpc: '2.0',
-      id: null,
+      id: 22,
       error: {
         code: -32_000,
         message: 'mcp-client: credential-backed JSON-RPC request failed',
@@ -602,6 +653,52 @@ describe('MCP credential-backed HTTP headers', () => {
     )
     expect(body).not.toContain(privateToken)
     const eventPayload = JSON.parse(body.slice(body.indexOf('data: ') + 6)) as unknown
+    expect(JSONRPCMessageSchema.safeParse(eventPayload).success).toBe(true)
+  })
+
+  it('does not preserve a server-supplied SSE tool-error id that was not requested', async () => {
+    const privateToken = 'mcp-forged-sse-id-token'
+    const payload = JSON.stringify({
+      jsonrpc: '2.0',
+      id: privateToken,
+      result: {
+        content: [{ type: 'text', text: privateToken }],
+        isError: true,
+      },
+    })
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef('MCP_FORGED_SSE_ID_KEY'), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(chunkedSseResponse([
+        new TextEncoder().encode(`data: ${payload}\n\n`),
+      ]))),
+    })
+
+    const response = await credentialFetch('https://mcp.example.test', {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 'expected-sse-id', method: 'tools/call' }),
+    })
+    const body = await response.text()
+    const eventPayload = JSON.parse(body.slice(body.indexOf('data: ') + 6)) as unknown
+
+    expect(eventPayload).toEqual({
+      jsonrpc: '2.0',
+      id: 'expected-sse-id',
+      result: {
+        content: [{
+          type: 'text',
+          text: 'mcp-client: credential-backed tool request failed',
+        }],
+        isError: true,
+      },
+    })
+    expect(body).not.toContain(privateToken)
     expect(JSONRPCMessageSchema.safeParse(eventPayload).success).toBe(true)
   })
 
@@ -975,11 +1072,14 @@ describe('MCP credential-backed HTTP headers', () => {
       }))),
     })
 
-    const response = await credentialFetch('https://mcp.example.test')
+    const response = await credentialFetch('https://mcp.example.test', {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/call' }),
+    })
     const body = await response.json() as unknown
     expect(body).toEqual({
       jsonrpc: '2.0',
-      id: null,
+      id: 9,
       error: {
         code: -32_000,
         message: 'mcp-client: credential-backed JSON-RPC request failed',
