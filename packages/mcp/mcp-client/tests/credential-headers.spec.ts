@@ -35,6 +35,7 @@ async function listen(
 function chunkedSseResponse(
   chunks: readonly Uint8Array[],
   cancel?: () => void | Promise<void>,
+  contentType = 'text/event-stream; charset=utf-8',
 ): Response {
   let index = 0
   return new Response(new ReadableStream<Uint8Array>({
@@ -46,7 +47,7 @@ function chunkedSseResponse(
     ...(cancel === undefined ? {} : { cancel }),
   }), {
     status: 200,
-    headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+    headers: { 'content-type': contentType },
   })
 }
 
@@ -314,6 +315,51 @@ describe('MCP credential-backed HTTP headers', () => {
     })
   })
 
+  it.each([
+    'application/json-rpc',
+    'application/json; charset=utf-8; vendor=acme',
+  ])('sanitizes SDK-accepted JSON content type %s', async (contentType) => {
+    const privateReference = 'MCP_VARIANT_JSON_REFERENCE'
+    const privateToken = 'mcp-variant-json-token'
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef(privateReference), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(new Response(JSON.stringify({
+        jsonrpc: '2.0',
+        id: 70,
+        error: {
+          code: -32_000,
+          message: `${privateReference} Authorization: Bearer ${privateToken}`,
+          data: { cause: privateToken },
+        },
+      }), {
+        status: 200,
+        headers: { 'content-type': contentType },
+      }))),
+    })
+
+    const response = await credentialFetch('https://mcp.example.test')
+    const body = await response.json() as unknown
+    const observable = `${inspect(body, { depth: null, showHidden: true })}\n${[...response.headers]}`
+
+    expect(body).toEqual({
+      jsonrpc: '2.0',
+      id: 70,
+      error: {
+        code: -32_000,
+        message: 'mcp-client: credential-backed JSON-RPC request failed',
+      },
+    })
+    expect(observable).not.toContain(privateReference)
+    expect(observable).not.toContain(privateToken)
+  })
+
   it('propagates request abort during JSON inspection instead of synthesizing an HTTP 200 error', async () => {
     const controller = new AbortController()
     const inspectionStarted: PromiseWithResolvers<void> = Promise.withResolvers()
@@ -469,6 +515,47 @@ describe('MCP credential-backed HTTP headers', () => {
     expect(sanitized).not.toContain(privateReference)
     expect(sanitized).not.toContain(privateToken)
     expect(sanitized).not.toContain(authorization)
+  })
+
+  it.each([
+    'text/event-stream-x',
+    'text/event-stream; charset=utf-8; vendor=acme',
+  ])('sanitizes SDK-accepted SSE content type %s', async (contentType) => {
+    const privateReference = 'MCP_VARIANT_SSE_REFERENCE'
+    const privateToken = 'mcp-variant-sse-token'
+    const payload = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 71,
+      error: {
+        code: -32_000,
+        message: `${privateReference} Authorization: Bearer ${privateToken}`,
+        data: { cause: privateToken },
+      },
+    })
+    const event = new TextEncoder().encode(`data: ${payload}\n\n`)
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef(privateReference), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(chunkedSseResponse(
+        [event.slice(0, 17), event.slice(17)],
+        undefined,
+        contentType,
+      ))),
+    })
+
+    const response = await credentialFetch('https://mcp.example.test')
+    const body = await response.text()
+
+    expect(body).toContain('mcp-client: credential-backed JSON-RPC request failed')
+    expect(body).not.toContain(privateReference)
+    expect(body).not.toContain(privateToken)
+    expect(response.headers.get('content-type')).toBe('text/event-stream')
   })
 
   it('preserves a normal split-byte SSE progress and result stream exactly', async () => {

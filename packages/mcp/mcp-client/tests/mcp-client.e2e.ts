@@ -589,105 +589,118 @@ describe('streamable-http — in-process MCP server', () => {
 })
 
 describe('streamable-http credential failure redaction', () => {
-  it('keeps a split-chunk HTTP 200 SSE credential echo out of logs and the fatal error graph', async () => {
-    const privateReference = 'MCP_ECHO_REFERENCE'
-    const privateToken = 'mcp-echo-token'
-    const diagnostics: string[] = []
-    const server = createServer((request, response) => {
-      const chunks: Buffer[] = []
-      request.on('data', (chunk: Buffer) => { chunks.push(chunk) })
-      request.on('end', () => {
-        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { id?: unknown }
-        const authorization = request.headers.authorization ?? ''
-        response.writeHead(200, {
-          'content-type': 'text/event-stream',
-          'mcp-session-id': privateToken,
-          'x-echo-authorization': authorization,
-          'x-echo-reference': privateReference,
-        })
-        const payload = JSON.stringify({
-          jsonrpc: '2.0',
-          id: body.id ?? null,
-          error: {
-            code: -32_000,
-            message: `${privateReference} ${authorization}`,
-            data: {
-              authorization,
-              cause: { message: privateToken },
+  it.each([
+    ['application/json', 'json'],
+    ['application/json-rpc', 'json'],
+    ['application/json; charset=utf-8; vendor=acme', 'json'],
+    ['text/event-stream', 'sse'],
+    ['text/event-stream-x', 'sse'],
+  ] as const)(
+    'keeps a credential echo in SDK-accepted %s out of logs and the fatal error graph',
+    async (contentType, responseKind) => {
+      const privateReference = 'MCP_ECHO_REFERENCE'
+      const privateToken = 'mcp-echo-token'
+      const diagnostics: string[] = []
+      const server = createServer((request, response) => {
+        const chunks: Buffer[] = []
+        request.on('data', (chunk: Buffer) => { chunks.push(chunk) })
+        request.on('end', () => {
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { id?: unknown }
+          const authorization = request.headers.authorization ?? ''
+          response.writeHead(200, {
+            'content-type': contentType,
+            'mcp-session-id': privateToken,
+            'x-echo-authorization': authorization,
+            'x-echo-reference': privateReference,
+          })
+          const payload = JSON.stringify({
+            jsonrpc: '2.0',
+            id: body.id ?? null,
+            error: {
+              code: -32_000,
+              message: `${privateReference} ${authorization}`,
+              data: {
+                authorization,
+                cause: { message: privateToken },
+              },
             },
+          })
+          if (responseKind === 'json') {
+            response.end(payload)
+            return
+          }
+          const event = `: ${privateReference}\r\nevent: message\r\ndata: ${payload}\r\n\r\n`
+          const tokenOffset = event.indexOf(privateToken, event.indexOf('data:'))
+          response.write(event.slice(0, tokenOffset + 4))
+          setImmediate(() => {
+            response.end(event.slice(tokenOffset + 4))
+          })
+        })
+      })
+      const listening: PromiseWithResolvers<void> = Promise.withResolvers()
+      server.listen(0, '127.0.0.1', listening.resolve)
+      await listening.promise
+      const address = server.address()
+      if (address === null || typeof address === 'string') {
+        throw new Error(`expected a TCP AddressInfo, got ${String(address)}`)
+      }
+      const ctx = await mountRegistry()
+      ctx.logger.warn = ((...args: unknown[]) => {
+        diagnostics.push(args.map(String).join(' '))
+      }) as typeof ctx.logger.warn
+      ctx.logger.error = ((...args: unknown[]) => {
+        diagnostics.push(args.map(String).join(' '))
+      }) as typeof ctx.logger.error
+      ctx.provide('credentials', {
+        resolve: vi.fn(() => Promise.resolve({
+          value: privateToken,
+          source: 'keychain',
+        })),
+      } as never)
+
+      try {
+        const failure = await apply(ctx, {
+          transport: 'streamable-http',
+          serverName: 'echoing-error',
+          url: `http://127.0.0.1:${address.port}/mcp`,
+          headers: {},
+          credentialHeaders: {
+            Authorization: { ref: privateReference, prefix: 'Bearer ' },
           },
-        })
-        const event = `: ${privateReference}\r\nevent: message\r\ndata: ${payload}\r\n\r\n`
-        const tokenOffset = event.indexOf(privateToken, event.indexOf('data:'))
-        response.write(event.slice(0, tokenOffset + 4))
-        setImmediate(() => {
-          response.end(event.slice(tokenOffset + 4))
-        })
-      })
-    })
-    const listening: PromiseWithResolvers<void> = Promise.withResolvers()
-    server.listen(0, '127.0.0.1', listening.resolve)
-    await listening.promise
-    const address = server.address()
-    if (address === null || typeof address === 'string') {
-      throw new Error(`expected a TCP AddressInfo, got ${String(address)}`)
-    }
-    const ctx = await mountRegistry()
-    ctx.logger.warn = ((...args: unknown[]) => {
-      diagnostics.push(args.map(String).join(' '))
-    }) as typeof ctx.logger.warn
-    ctx.logger.error = ((...args: unknown[]) => {
-      diagnostics.push(args.map(String).join(' '))
-    }) as typeof ctx.logger.error
-    ctx.provide('credentials', {
-      resolve: vi.fn(() => Promise.resolve({
-        value: privateToken,
-        source: 'keychain',
-      })),
-    } as never)
+          toolCallTimeoutMs: 15_000,
+          failOnStartupError: true,
+          reconnect: { enabled: false },
+        }).then(() => undefined, (error: unknown) => error)
 
-    try {
-      const failure = await apply(ctx, {
-        transport: 'streamable-http',
-        serverName: 'echoing-error',
-        url: `http://127.0.0.1:${address.port}/mcp`,
-        headers: {},
-        credentialHeaders: {
-          Authorization: { ref: privateReference, prefix: 'Bearer ' },
-        },
-        toolCallTimeoutMs: 15_000,
-        failOnStartupError: true,
-        reconnect: { enabled: false },
-      }).then(() => undefined, (error: unknown) => error)
-
-      expect(failure).toBeInstanceOf(Error)
-      const serialized = JSON.stringify(serializedFailureGraph(failure))
-      const observable = [
-        diagnostics.join('\n'),
-        String(failure),
-        (failure as Error).stack ?? '',
-        serialized,
-      ].join('\n')
-      expect(observable).not.toContain(privateReference)
-      expect(observable).not.toContain(privateToken)
-      expect(observable).not.toContain(`Bearer ${privateToken}`)
-      expect((failure as Error).cause).toBeInstanceOf(Error)
-      expect((failure as Error).cause).toMatchObject({
-        message: 'MCP error -32000: mcp-client: credential-backed JSON-RPC request failed',
-        data: undefined,
-      })
-      expect((failure as Error).cause).not.toHaveProperty('cause')
-    } finally {
-      await ctx.fiber.dispose()
-      const closed: PromiseWithResolvers<void> = Promise.withResolvers()
-      server.close((error) => {
-        if (error === undefined) closed.resolve()
-        else closed.reject(error)
-      })
-      server.closeAllConnections()
-      await closed.promise
-    }
-  })
+        expect(failure).toBeInstanceOf(Error)
+        const serialized = JSON.stringify(serializedFailureGraph(failure))
+        const observable = [
+          diagnostics.join('\n'),
+          String(failure),
+          (failure as Error).stack ?? '',
+          serialized,
+        ].join('\n')
+        expect(observable).not.toContain(privateReference)
+        expect(observable).not.toContain(privateToken)
+        expect(observable).not.toContain(`Bearer ${privateToken}`)
+        expect((failure as Error).cause).toBeInstanceOf(Error)
+        expect((failure as Error).cause).toMatchObject({
+          message: 'MCP error -32000: mcp-client: credential-backed JSON-RPC request failed',
+          data: undefined,
+        })
+        expect((failure as Error).cause).not.toHaveProperty('cause')
+      } finally {
+        await ctx.fiber.dispose()
+        const closed: PromiseWithResolvers<void> = Promise.withResolvers()
+        server.close((error) => {
+          if (error === undefined) closed.resolve()
+          else closed.reject(error)
+        })
+        server.closeAllConnections()
+        await closed.promise
+      }
+    },
+  )
 
   it('tears down promptly while credential resolution stalls and contains its late rejection', async () => {
     const ctx = await mountRegistry()

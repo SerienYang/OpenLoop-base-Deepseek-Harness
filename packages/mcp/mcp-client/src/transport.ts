@@ -198,13 +198,12 @@ async function sanitizeJsonRpcResponse(
   signal: AbortSignal | null | undefined,
 ): Promise<Response> {
   const contentType = response.headers.get('content-type')
-    ?.split(';', 1)[0]
-    ?.trim()
-    .toLowerCase()
-  if (contentType === 'text/event-stream') {
+    ?.toLowerCase()
+  // Match the pinned SDK's SSE-before-JSON substring classification.
+  if (contentType?.includes('text/event-stream')) {
     return sanitizeSseResponse(response, sensitiveValues)
   }
-  if (contentType !== 'application/json') return response
+  if (!contentType?.includes('application/json')) return response
 
   let payload: unknown
   try {
