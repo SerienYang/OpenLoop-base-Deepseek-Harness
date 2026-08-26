@@ -4,6 +4,7 @@ use std::{
     collections::BTreeMap,
     sync::{mpsc, Arc, Mutex},
     thread,
+    time::Duration,
 };
 
 use openloop_desktop_lib::{
@@ -20,6 +21,7 @@ use openloop_desktop_lib::{
 
 struct RecordingStore {
     current: Mutex<Vec<u8>>,
+    accounts: Mutex<Vec<CredentialAccount>>,
     fail_writes: bool,
 }
 
@@ -27,6 +29,7 @@ impl RecordingStore {
     fn new(current: &[u8], fail_writes: bool) -> Self {
         Self {
             current: Mutex::new(current.to_vec()),
+            accounts: Mutex::new(Vec::new()),
             fail_writes,
         }
     }
@@ -35,12 +38,16 @@ impl RecordingStore {
 impl CredentialReplacementStore for RecordingStore {
     fn replace_credential(
         &self,
-        _account: &CredentialAccount,
+        account: &CredentialAccount,
         secret: &[u8],
     ) -> Result<(), CredentialError> {
         if self.fail_writes {
             return Err(CredentialAccount::new("").expect_err("invalid account"));
         }
+        self.accounts
+            .lock()
+            .expect("recording account lock")
+            .push(account.clone());
         let mut current = self.current.lock().expect("recording store lock");
         current.clear();
         current.extend_from_slice(secret);
@@ -129,6 +136,8 @@ impl AppKitCredentialSheetBackend for RecordingAppKitSheetBackend {
         Ok(())
     }
 
+    fn cancel_sheet(&self) {}
+
     fn clear_secret_control(&self) {
         *self.clear_count.lock().expect("clear count lock") += 1;
     }
@@ -158,6 +167,9 @@ fn appkit_sheet_saves_through_main_window_secure_input_and_completes_callback() 
 
     let presentations = backend.presentations.lock().expect("presentation lock");
     let presentation = presentations.first().expect("native sheet presentation");
+    let written_accounts = store.accounts.lock().expect("recording account lock");
+    let written_account = written_accounts.first().expect("written account");
+    assert_eq!(presentation.target_identity, written_account.as_str());
     assert_eq!(presentation.parent_window_label, MAIN_WINDOW_LABEL);
     assert_eq!(
         presentation.text_field_kind,
@@ -170,6 +182,114 @@ fn appkit_sheet_saves_through_main_window_secure_input_and_completes_callback() 
         1
     );
     assert_eq!(*backend.clear_count.lock().expect("clear count lock"), 1);
+}
+
+struct BlockingAppKitSheetBackend {
+    entered: Mutex<Option<mpsc::Sender<()>>>,
+    active_completion: Mutex<Option<CredentialSheetCompletion>>,
+    presentations: Mutex<usize>,
+    cancellations: Mutex<usize>,
+}
+
+impl AppKitCredentialSheetBackend for BlockingAppKitSheetBackend {
+    fn begin_sheet(
+        &self,
+        _presentation: CredentialSheetPresentation,
+        completion: CredentialSheetCompletion,
+    ) -> Result<(), CredentialError> {
+        let mut presentations = self.presentations.lock().expect("presentation count lock");
+        *presentations += 1;
+        if *presentations == 1 {
+            *self
+                .active_completion
+                .lock()
+                .expect("active completion lock") = Some(completion);
+            if let Some(entered) = self.entered.lock().expect("entered lock").take() {
+                entered.send(()).expect("report native sheet entry");
+            }
+        } else {
+            completion(Ok(CredentialSheetAction::Cancelled));
+        }
+        Ok(())
+    }
+
+    fn cancel_sheet(&self) {
+        *self.cancellations.lock().expect("cancellation count lock") += 1;
+        if let Some(completion) = self
+            .active_completion
+            .lock()
+            .expect("active completion lock")
+            .take()
+        {
+            completion(Ok(CredentialSheetAction::Cancelled));
+        }
+    }
+
+    fn clear_secret_control(&self) {}
+}
+
+#[test]
+fn cancellation_dismisses_blocking_appkit_sheet_and_releases_gate() {
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let backend = Arc::new(BlockingAppKitSheetBackend {
+        entered: Mutex::new(Some(entered_tx)),
+        active_completion: Mutex::new(None),
+        presentations: Mutex::new(0),
+        cancellations: Mutex::new(0),
+    });
+    let presenter = Arc::new(AppKitCredentialSheet::with_backend(backend.clone()));
+    let store = Arc::new(RecordingStore::new(b"old", false));
+    let coordinator = Arc::new(CredentialSheetCoordinator::new(presenter, store.clone()));
+    let cancellation = CancellationToken::default();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    {
+        let coordinator = coordinator.clone();
+        let cancellation = cancellation.clone();
+        thread::spawn(move || {
+            finished_tx
+                .send(coordinator.replace_cancellable(account(), &cancellation))
+                .expect("report replacement outcome");
+        });
+    }
+    entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("native sheet opened");
+
+    cancellation.cancel();
+
+    assert_eq!(
+        finished_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("cancellation must dismiss the native sheet")
+            .expect("cancelled replacement outcome"),
+        CredentialSheetOutcome::Cancelled
+    );
+    assert_eq!(
+        coordinator.replace(account()).expect("gate was released"),
+        CredentialSheetOutcome::Cancelled
+    );
+    assert_eq!(
+        store
+            .current
+            .lock()
+            .expect("recording store lock")
+            .as_slice(),
+        b"old"
+    );
+    assert_eq!(
+        *backend
+            .presentations
+            .lock()
+            .expect("presentation count lock"),
+        2
+    );
+    assert_eq!(
+        *backend
+            .cancellations
+            .lock()
+            .expect("cancellation count lock"),
+        1
+    );
 }
 
 #[test]
@@ -432,6 +552,7 @@ fn production_backend_uses_appkit_sheet_without_a_second_webview() {
     assert!(source.contains("MainThreadMarker"));
     assert!(source.contains("NSSecureTextField"));
     assert!(source.contains("beginSheet"));
+    assert!(source.contains("endSheet"));
     assert!(!source.contains("WebviewWindowBuilder"));
     assert!(!source.contains("WebviewUrl"));
     assert!(!source.contains("NSApplication::sharedApplication"));

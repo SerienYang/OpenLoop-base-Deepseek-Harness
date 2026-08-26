@@ -1,13 +1,16 @@
 use std::{
-    fmt,
+    fmt, ptr,
     sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
+        atomic::{AtomicBool, AtomicPtr, Ordering},
+        mpsc, Arc, Mutex, Weak,
     },
 };
 
 use block2::RcBlock;
-use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSSecureTextField, NSWindow};
+use objc2_app_kit::{
+    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSModalResponseCancel, NSSecureTextField,
+    NSWindow,
+};
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString, NSThread};
 use tauri::{AppHandle, Manager};
 use zeroize::Zeroize;
@@ -27,15 +30,17 @@ pub enum NativeTextFieldKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialSheetPresentation {
+    pub target_identity: String,
     pub parent_window_label: &'static str,
     pub text_field_kind: NativeTextFieldKind,
     pub initial_value: &'static str,
     pub creates_independent_window_identity: bool,
 }
 
-impl Default for CredentialSheetPresentation {
-    fn default() -> Self {
+impl CredentialSheetPresentation {
+    fn for_account(account: &CredentialAccount) -> Self {
         Self {
+            target_identity: account.as_str().to_owned(),
             parent_window_label: MAIN_WINDOW_LABEL,
             text_field_kind: NativeTextFieldKind::NSSecureTextField,
             initial_value: "",
@@ -47,7 +52,6 @@ impl Default for CredentialSheetPresentation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialSheetRequest {
     pub account: CredentialAccount,
-    pub presentation: CredentialSheetPresentation,
 }
 
 struct SecretStorage {
@@ -144,6 +148,8 @@ pub trait AppKitCredentialSheetBackend: Send + Sync {
         completion: CredentialSheetCompletion,
     ) -> Result<(), CredentialError>;
 
+    fn cancel_sheet(&self);
+
     fn clear_secret_control(&self);
 }
 
@@ -158,6 +164,14 @@ pub trait CredentialSheetPresenter: Send + Sync {
         &self,
         request: &CredentialSheetRequest,
     ) -> Result<CredentialSheetAction, CredentialError>;
+
+    fn present_cancellable(
+        &self,
+        request: &CredentialSheetRequest,
+        _cancellation: &CancellationToken,
+    ) -> Result<CredentialSheetAction, CredentialError> {
+        self.present(request)
+    }
 
     fn clear_secret_control(&self);
 }
@@ -264,9 +278,8 @@ impl CredentialSheetCoordinator {
         }
         let request = CredentialSheetRequest {
             account: account.clone(),
-            presentation: CredentialSheetPresentation::default(),
         };
-        let action = self.presenter.present(&request);
+        let action = self.presenter.present_cancellable(&request, cancellation);
         self.presenter.clear_secret_control();
         match action? {
             CredentialSheetAction::Cancelled => Ok(CredentialSheetOutcome::Cancelled),
@@ -305,7 +318,10 @@ pub struct AppKitCredentialSheet {
 
 impl AppKitCredentialSheet {
     pub fn new(app: AppHandle) -> Self {
-        Self::with_backend(Arc::new(Objc2AppKitCredentialSheetBackend { app }))
+        Self::with_backend(Arc::new(Objc2AppKitCredentialSheetBackend {
+            app,
+            active: Mutex::new(None),
+        }))
     }
 
     pub fn with_backend(backend: Arc<dyn AppKitCredentialSheetBackend>) -> Self {
@@ -316,18 +332,17 @@ impl AppKitCredentialSheet {
 impl CredentialSheetPresenter for AppKitCredentialSheet {
     fn present(
         &self,
-        _request: &CredentialSheetRequest,
+        request: &CredentialSheetRequest,
     ) -> Result<CredentialSheetAction, CredentialError> {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        self.backend.begin_sheet(
-            CredentialSheetPresentation::default(),
-            Box::new(move |result| {
-                let _ = sender.send(result);
-            }),
-        )?;
-        receiver
-            .recv()
-            .map_err(|_| CredentialError::prompt_unavailable())?
+        self.present_with_cancellation(request, &CancellationToken::default())
+    }
+
+    fn present_cancellable(
+        &self,
+        request: &CredentialSheetRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<CredentialSheetAction, CredentialError> {
+        self.present_with_cancellation(request, cancellation)
     }
 
     fn clear_secret_control(&self) {
@@ -335,8 +350,30 @@ impl CredentialSheetPresenter for AppKitCredentialSheet {
     }
 }
 
+impl AppKitCredentialSheet {
+    fn present_with_cancellation(
+        &self,
+        request: &CredentialSheetRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<CredentialSheetAction, CredentialError> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.backend.begin_sheet(
+            CredentialSheetPresentation::for_account(&request.account),
+            Box::new(move |result| {
+                let _ = sender.send(result);
+            }),
+        )?;
+        let backend = self.backend.clone();
+        let _cancellation = cancellation.subscribe(move || backend.cancel_sheet());
+        receiver
+            .recv()
+            .map_err(|_| CredentialError::prompt_unavailable())?
+    }
+}
+
 struct Objc2AppKitCredentialSheetBackend {
     app: AppHandle,
+    active: Mutex<Option<Weak<NativeCredentialSheetSession>>>,
 }
 
 impl AppKitCredentialSheetBackend for Objc2AppKitCredentialSheetBackend {
@@ -353,25 +390,59 @@ impl AppKitCredentialSheetBackend for Objc2AppKitCredentialSheetBackend {
             .get_webview_window(presentation.parent_window_label)
             .ok_or_else(CredentialError::prompt_unavailable)?;
         let schedule_window = window.clone();
-        let completion = Arc::new(Mutex::new(Some(completion)));
-        window
+        let session = Arc::new(NativeCredentialSheetSession::new(completion));
+        *self
+            .active
+            .lock()
+            .map_err(|_| CredentialError::prompt_unavailable())? = Some(Arc::downgrade(&session));
+        let scheduled_session = session.clone();
+        if window
             .run_on_main_thread({
-                let completion = completion.clone();
                 move || {
                     let result = begin_replacement_sheet(
                         &schedule_window,
                         &presentation,
-                        completion.clone(),
+                        scheduled_session.clone(),
                     );
                     if result.is_err() {
                         complete_replacement_sheet(
-                            &completion,
+                            &scheduled_session,
                             Err(CredentialError::prompt_unavailable()),
                         );
                     }
                 }
             })
-            .map_err(|_| CredentialError::prompt_unavailable())
+            .is_err()
+        {
+            complete_replacement_sheet(&session, Err(CredentialError::prompt_unavailable()));
+            return Err(CredentialError::prompt_unavailable());
+        }
+        Ok(())
+    }
+
+    fn cancel_sheet(&self) {
+        let session = self
+            .active
+            .lock()
+            .ok()
+            .and_then(|active| active.as_ref().and_then(Weak::upgrade));
+        let Some(session) = session else {
+            return;
+        };
+        let Some(window) = self.app.get_webview_window(MAIN_WINDOW_LABEL) else {
+            complete_replacement_sheet(&session, Ok(CredentialSheetAction::Cancelled));
+            return;
+        };
+        let schedule_window = window.clone();
+        let scheduled_session = session.clone();
+        if window
+            .run_on_main_thread(move || {
+                cancel_replacement_sheet(&schedule_window, &scheduled_session);
+            })
+            .is_err()
+        {
+            complete_replacement_sheet(&session, Ok(CredentialSheetAction::Cancelled));
+        }
     }
 
     fn clear_secret_control(&self) {
@@ -379,13 +450,34 @@ impl AppKitCredentialSheetBackend for Objc2AppKitCredentialSheetBackend {
     }
 }
 
-type SharedCredentialSheetCompletion = Arc<Mutex<Option<CredentialSheetCompletion>>>;
+struct NativeCredentialSheetSession {
+    completion: Mutex<Option<CredentialSheetCompletion>>,
+    sheet: AtomicPtr<NSWindow>,
+    secure_control: AtomicPtr<NSSecureTextField>,
+}
+
+impl NativeCredentialSheetSession {
+    fn new(completion: CredentialSheetCompletion) -> Self {
+        Self {
+            completion: Mutex::new(Some(completion)),
+            sheet: AtomicPtr::new(ptr::null_mut()),
+            secure_control: AtomicPtr::new(ptr::null_mut()),
+        }
+    }
+
+    fn is_pending(&self) -> bool {
+        match self.completion.lock() {
+            Ok(completion) => completion.is_some(),
+            Err(poisoned) => poisoned.into_inner().is_some(),
+        }
+    }
+}
 
 fn complete_replacement_sheet(
-    completion: &SharedCredentialSheetCompletion,
+    session: &NativeCredentialSheetSession,
     result: Result<CredentialSheetAction, CredentialError>,
 ) {
-    let callback = match completion.lock() {
+    let callback = match session.completion.lock() {
         Ok(mut callback) => callback.take(),
         Err(poisoned) => poisoned.into_inner().take(),
     };
@@ -397,18 +489,22 @@ fn complete_replacement_sheet(
 fn begin_replacement_sheet(
     window: &tauri::WebviewWindow,
     presentation: &CredentialSheetPresentation,
-    completion: SharedCredentialSheetCompletion,
+    session: Arc<NativeCredentialSheetSession>,
 ) -> Result<(), CredentialError> {
     if presentation.creates_independent_window_identity {
         return Err(CredentialError::prompt_unavailable());
+    }
+    if !session.is_pending() {
+        return Ok(());
     }
     let mtm = MainThreadMarker::new().ok_or_else(CredentialError::prompt_unavailable)?;
     let parent = parent_ns_window(window)?;
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&NSString::from_str("Replace credential"));
-    alert.setInformativeText(&NSString::from_str(
-        "Enter a new value. The existing Keychain value is kept unless Save succeeds.",
-    ));
+    alert.setInformativeText(&NSString::from_str(&format!(
+        "Target: {}\n\nEnter a new value. The existing Keychain value is kept unless Save succeeds.",
+        presentation.target_identity
+    )));
     alert.addButtonWithTitle(&NSString::from_str("Save"));
     alert.addButtonWithTitle(&NSString::from_str("Cancel"));
 
@@ -425,8 +521,16 @@ fn begin_replacement_sheet(
     alert.layout();
     let sheet = alert.window();
     let _ = sheet.makeFirstResponder(Some(&input));
+    session
+        .sheet
+        .store((&*sheet as *const NSWindow).cast_mut(), Ordering::Release);
+    session.secure_control.store(
+        (&*input as *const NSSecureTextField).cast_mut(),
+        Ordering::Release,
+    );
 
     let retained_alert = alert.clone();
+    let completion_session = session.clone();
     let completion = RcBlock::new(move |response| {
         let action = if response == NSAlertFirstButtonReturn {
             let value = input.stringValue();
@@ -438,12 +542,42 @@ fn begin_replacement_sheet(
             input.setStringValue(&NSString::from_str(""));
             CredentialSheetAction::Cancelled
         };
-        complete_replacement_sheet(&completion, Ok(action));
+        completion_session
+            .secure_control
+            .store(ptr::null_mut(), Ordering::Release);
+        completion_session
+            .sheet
+            .store(ptr::null_mut(), Ordering::Release);
+        complete_replacement_sheet(&completion_session, Ok(action));
         drop(retained_alert.clone());
     });
 
     parent.beginSheet_completionHandler(&sheet, Some(&completion));
     Ok(())
+}
+
+fn cancel_replacement_sheet(window: &tauri::WebviewWindow, session: &NativeCredentialSheetSession) {
+    debug_assert!(NSThread::isMainThread_class());
+    if !session.is_pending() {
+        return;
+    }
+    let secure_control = session
+        .secure_control
+        .swap(ptr::null_mut(), Ordering::AcqRel);
+    if !secure_control.is_null() {
+        // SAFETY: the pointer is installed and cleared only on the main thread
+        // while the NSAlert completion block retains the secure text field.
+        unsafe { &*secure_control }.setStringValue(&NSString::from_str(""));
+    }
+    let sheet = session.sheet.swap(ptr::null_mut(), Ordering::AcqRel);
+    if !sheet.is_null() {
+        if let Ok(parent) = parent_ns_window(window) {
+            // SAFETY: the pointer belongs to the retained NSAlert and all
+            // access is serialized on the AppKit main thread.
+            parent.endSheet_returnCode(unsafe { &*sheet }, NSModalResponseCancel);
+        }
+    }
+    complete_replacement_sheet(session, Ok(CredentialSheetAction::Cancelled));
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -462,6 +596,8 @@ pub trait AppKitCredentialDeletionBackend: Send + Sync {
         presentation: CredentialDeletionSheetPresentation,
         completion: CredentialDeletionCompletion,
     ) -> Result<(), CredentialError>;
+
+    fn cancel_sheet(&self);
 }
 
 #[derive(Clone)]
@@ -472,7 +608,13 @@ pub struct AppKitCredentialDeletionConfirmation {
 
 impl AppKitCredentialDeletionConfirmation {
     pub fn new(app: AppHandle, gate: Arc<CredentialSheetGate>) -> Self {
-        Self::with_backend(Arc::new(Objc2AppKitCredentialDeletionBackend { app }), gate)
+        Self::with_backend(
+            Arc::new(Objc2AppKitCredentialDeletionBackend {
+                app,
+                active: Mutex::new(None),
+            }),
+            gate,
+        )
     }
 
     pub fn with_backend(
@@ -485,6 +627,24 @@ impl AppKitCredentialDeletionConfirmation {
 
 impl CredentialDeletionConfirmation for AppKitCredentialDeletionConfirmation {
     fn confirm_deletion(&self, plan: &CredentialDeletionPlan) -> Result<bool, CredentialError> {
+        self.confirm_deletion_with_cancellation(plan, &CancellationToken::default())
+    }
+
+    fn confirm_deletion_cancellable(
+        &self,
+        plan: &CredentialDeletionPlan,
+        cancellation: &CancellationToken,
+    ) -> Result<bool, CredentialError> {
+        self.confirm_deletion_with_cancellation(plan, cancellation)
+    }
+}
+
+impl AppKitCredentialDeletionConfirmation {
+    fn confirm_deletion_with_cancellation(
+        &self,
+        plan: &CredentialDeletionPlan,
+        cancellation: &CancellationToken,
+    ) -> Result<bool, CredentialError> {
         let _active = self.gate.try_acquire()?;
         let labels = deletion_consumer_labels(plan)?;
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -498,6 +658,8 @@ impl CredentialDeletionConfirmation for AppKitCredentialDeletionConfirmation {
                 let _ = sender.send(result);
             }),
         )?;
+        let backend = self.backend.clone();
+        let _cancellation = cancellation.subscribe(move || backend.cancel_sheet());
         receiver
             .recv()
             .map_err(|_| CredentialError::prompt_unavailable())?
@@ -506,6 +668,7 @@ impl CredentialDeletionConfirmation for AppKitCredentialDeletionConfirmation {
 
 struct Objc2AppKitCredentialDeletionBackend {
     app: AppHandle,
+    active: Mutex<Option<Weak<NativeCredentialDeletionSession>>>,
 }
 
 impl AppKitCredentialDeletionBackend for Objc2AppKitCredentialDeletionBackend {
@@ -522,22 +685,59 @@ impl AppKitCredentialDeletionBackend for Objc2AppKitCredentialDeletionBackend {
             .get_webview_window(presentation.parent_window_label)
             .ok_or_else(CredentialError::prompt_unavailable)?;
         let schedule_window = window.clone();
-        let completion = Arc::new(Mutex::new(Some(completion)));
-        window
+        let session = Arc::new(NativeCredentialDeletionSession::new(completion));
+        *self
+            .active
+            .lock()
+            .map_err(|_| CredentialError::prompt_unavailable())? = Some(Arc::downgrade(&session));
+        let scheduled_session = session.clone();
+        if window
             .run_on_main_thread({
-                let completion = completion.clone();
                 move || {
-                    let result =
-                        begin_deletion_sheet(&schedule_window, &presentation, completion.clone());
+                    let result = begin_deletion_sheet(
+                        &schedule_window,
+                        &presentation,
+                        scheduled_session.clone(),
+                    );
                     if result.is_err() {
                         complete_deletion_sheet(
-                            &completion,
+                            &scheduled_session,
                             Err(CredentialError::prompt_unavailable()),
                         );
                     }
                 }
             })
-            .map_err(|_| CredentialError::prompt_unavailable())
+            .is_err()
+        {
+            complete_deletion_sheet(&session, Err(CredentialError::prompt_unavailable()));
+            return Err(CredentialError::prompt_unavailable());
+        }
+        Ok(())
+    }
+
+    fn cancel_sheet(&self) {
+        let session = self
+            .active
+            .lock()
+            .ok()
+            .and_then(|active| active.as_ref().and_then(Weak::upgrade));
+        let Some(session) = session else {
+            return;
+        };
+        let Some(window) = self.app.get_webview_window(MAIN_WINDOW_LABEL) else {
+            complete_deletion_sheet(&session, Ok(false));
+            return;
+        };
+        let schedule_window = window.clone();
+        let scheduled_session = session.clone();
+        if window
+            .run_on_main_thread(move || {
+                cancel_deletion_sheet(&schedule_window, &scheduled_session);
+            })
+            .is_err()
+        {
+            complete_deletion_sheet(&session, Ok(false));
+        }
     }
 }
 
@@ -564,13 +764,32 @@ pub fn deletion_consumer_labels(
         .collect()
 }
 
-type SharedCredentialDeletionCompletion = Arc<Mutex<Option<CredentialDeletionCompletion>>>;
+struct NativeCredentialDeletionSession {
+    completion: Mutex<Option<CredentialDeletionCompletion>>,
+    sheet: AtomicPtr<NSWindow>,
+}
+
+impl NativeCredentialDeletionSession {
+    fn new(completion: CredentialDeletionCompletion) -> Self {
+        Self {
+            completion: Mutex::new(Some(completion)),
+            sheet: AtomicPtr::new(ptr::null_mut()),
+        }
+    }
+
+    fn is_pending(&self) -> bool {
+        match self.completion.lock() {
+            Ok(completion) => completion.is_some(),
+            Err(poisoned) => poisoned.into_inner().is_some(),
+        }
+    }
+}
 
 fn complete_deletion_sheet(
-    completion: &SharedCredentialDeletionCompletion,
+    session: &NativeCredentialDeletionSession,
     result: Result<bool, CredentialError>,
 ) {
-    let callback = match completion.lock() {
+    let callback = match session.completion.lock() {
         Ok(mut callback) => callback.take(),
         Err(poisoned) => poisoned.into_inner().take(),
     };
@@ -582,10 +801,13 @@ fn complete_deletion_sheet(
 fn begin_deletion_sheet(
     window: &tauri::WebviewWindow,
     presentation: &CredentialDeletionSheetPresentation,
-    completion: SharedCredentialDeletionCompletion,
+    session: Arc<NativeCredentialDeletionSession>,
 ) -> Result<(), CredentialError> {
     if presentation.creates_independent_window_identity {
         return Err(CredentialError::prompt_unavailable());
+    }
+    if !session.is_pending() {
+        return Ok(());
     }
     let mtm = MainThreadMarker::new().ok_or_else(CredentialError::prompt_unavailable)?;
     let parent = parent_ns_window(window)?;
@@ -600,13 +822,39 @@ fn begin_deletion_sheet(
     alert.addButtonWithTitle(&NSString::from_str("Cancel"));
     let retained_alert = alert.clone();
     let sheet = alert.window();
+    session
+        .sheet
+        .store((&*sheet as *const NSWindow).cast_mut(), Ordering::Release);
+    let completion_session = session.clone();
     let completion = RcBlock::new(move |response| {
-        complete_deletion_sheet(&completion, Ok(response == NSAlertFirstButtonReturn));
+        completion_session
+            .sheet
+            .store(ptr::null_mut(), Ordering::Release);
+        complete_deletion_sheet(
+            &completion_session,
+            Ok(response == NSAlertFirstButtonReturn),
+        );
         drop(retained_alert.clone());
     });
 
     parent.beginSheet_completionHandler(&sheet, Some(&completion));
     Ok(())
+}
+
+fn cancel_deletion_sheet(window: &tauri::WebviewWindow, session: &NativeCredentialDeletionSession) {
+    debug_assert!(NSThread::isMainThread_class());
+    if !session.is_pending() {
+        return;
+    }
+    let sheet = session.sheet.swap(ptr::null_mut(), Ordering::AcqRel);
+    if !sheet.is_null() {
+        if let Ok(parent) = parent_ns_window(window) {
+            // SAFETY: the pointer belongs to the retained NSAlert and all
+            // access is serialized on the AppKit main thread.
+            parent.endSheet_returnCode(unsafe { &*sheet }, NSModalResponseCancel);
+        }
+    }
+    complete_deletion_sheet(session, Ok(false));
 }
 
 fn parent_ns_window(window: &tauri::WebviewWindow) -> Result<&NSWindow, CredentialError> {

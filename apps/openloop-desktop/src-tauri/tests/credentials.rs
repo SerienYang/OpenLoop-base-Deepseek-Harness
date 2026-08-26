@@ -6,7 +6,7 @@ use std::{
     process,
     sync::{mpsc, Arc, Mutex},
     thread,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use openloop_desktop_lib::{
@@ -21,12 +21,14 @@ use openloop_desktop_lib::{
     credentials::{
         credential_bridge_dispatch_tables, delete_credential_with_confirmation,
         parse_keychain_spike_action, AppKitCredentialDeletionBackend,
-        AppKitCredentialDeletionConfirmation, CredentialAccount, CredentialConsumerDisplay,
-        CredentialConsumerLabel, CredentialDeletionCompletion, CredentialDeletionConfirmation,
-        CredentialDeletionOutcome, CredentialDeletionPlan, CredentialDeletionSheetPresentation,
-        CredentialDeletionStore, CredentialError, CredentialReplacement, CredentialSheetGate,
-        CredentialSheetOutcome, KeychainSpikeAction, KeychainSpikeReport, KeychainStore,
-        MAX_SECRET_BYTES,
+        AppKitCredentialDeletionConfirmation, AppKitCredentialSheet, AppKitCredentialSheetBackend,
+        CredentialAccount, CredentialConsumerDisplay, CredentialConsumerLabel,
+        CredentialDeletionCompletion, CredentialDeletionConfirmation, CredentialDeletionOutcome,
+        CredentialDeletionPlan, CredentialDeletionSheetPresentation, CredentialDeletionStore,
+        CredentialError, CredentialReplacement, CredentialReplacementStore, CredentialSheetAction,
+        CredentialSheetCompletion, CredentialSheetCoordinator, CredentialSheetGate,
+        CredentialSheetOutcome, CredentialSheetPresentation, CredentialSheetSecret,
+        KeychainSpikeAction, KeychainSpikeReport, KeychainStore, MAX_SECRET_BYTES,
     },
     launcher::capture_process_identity,
     update::channel::ReleaseChannel,
@@ -190,6 +192,51 @@ impl CredentialReplacement for RecordingReplacement {
     }
 }
 
+#[derive(Default)]
+struct BridgeBoundReplacementStore {
+    accounts: Mutex<Vec<CredentialAccount>>,
+}
+
+impl CredentialReplacementStore for BridgeBoundReplacementStore {
+    fn replace_credential(
+        &self,
+        account: &CredentialAccount,
+        _secret: &[u8],
+    ) -> Result<(), CredentialError> {
+        self.accounts
+            .lock()
+            .expect("bridge-bound account lock")
+            .push(account.clone());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct BridgeBoundAppKitBackend {
+    presentations: Mutex<Vec<CredentialSheetPresentation>>,
+}
+
+impl AppKitCredentialSheetBackend for BridgeBoundAppKitBackend {
+    fn begin_sheet(
+        &self,
+        presentation: CredentialSheetPresentation,
+        completion: CredentialSheetCompletion,
+    ) -> Result<(), CredentialError> {
+        self.presentations
+            .lock()
+            .expect("bridge-bound presentation lock")
+            .push(presentation);
+        completion(Ok(CredentialSheetAction::Save(CredentialSheetSecret::new(
+            b"replacement".to_vec(),
+        ))));
+        Ok(())
+    }
+
+    fn cancel_sheet(&self) {}
+
+    fn clear_secret_control(&self) {}
+}
+
 #[test]
 fn bridge_is_writable_and_replaces_only_when_both_native_presenters_are_installed() {
     let replacement = Arc::new(RecordingReplacement::default());
@@ -239,6 +286,76 @@ fn bridge_is_writable_and_replaces_only_when_both_native_presenters_are_installe
             .expect("replacement account lock")
             .as_slice(),
         &["credential:NATIVE_WRITABLE"]
+    );
+}
+
+#[test]
+fn bridge_binds_validated_ref_to_appkit_target_and_rejects_invalid_ref_before_presentation() {
+    let backend = Arc::new(BridgeBoundAppKitBackend::default());
+    let replacement_store = Arc::new(BridgeBoundReplacementStore::default());
+    let replacement = Arc::new(CredentialSheetCoordinator::new(
+        Arc::new(AppKitCredentialSheet::with_backend(backend.clone())),
+        replacement_store.clone(),
+    ));
+    let (dispatcher, launch_id, secret, peer) = credential_dispatcher_with_ui(
+        Some(replacement),
+        Some(Arc::new(FixedConfirmation::new(false))),
+    );
+    let replacement_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "bound-native-replacement".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "openCredentialReplacement".to_owned(),
+        payload: json!({ "ref": "BROWSER_BOUND_KEY" }),
+    };
+    let response = dispatcher
+        .dispatch(
+            peer,
+            sign_request(replacement_request, [19; 32], &secret)
+                .expect("signed replacement request"),
+        )
+        .expect("replacement response");
+    let response = serde_json::to_value(response).expect("replacement response JSON");
+    assert_eq!(response["result"], "saved");
+
+    let presentations = backend
+        .presentations
+        .lock()
+        .expect("bridge-bound presentation lock");
+    let accounts = replacement_store
+        .accounts
+        .lock()
+        .expect("bridge-bound account lock");
+    assert_eq!(presentations.len(), 1);
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(presentations[0].target_identity, accounts[0].as_str());
+    drop(accounts);
+    drop(presentations);
+
+    let invalid_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "invalid-native-replacement".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "openCredentialReplacement".to_owned(),
+        payload: json!({ "ref": "DIFFERENT:INVALID_KEY" }),
+    };
+    let response = dispatcher
+        .dispatch(
+            peer,
+            sign_request(invalid_request, [20; 32], &secret)
+                .expect("signed invalid replacement request"),
+        )
+        .expect("invalid replacement response");
+    let response = serde_json::to_value(response).expect("invalid response JSON");
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"]["code"], "invalid_request");
+    assert_eq!(
+        backend
+            .presentations
+            .lock()
+            .expect("bridge-bound presentation lock")
+            .len(),
+        1
     );
 }
 
@@ -376,6 +493,50 @@ impl AppKitCredentialDeletionBackend for RecordingAppKitDeletionBackend {
         completion(Ok(false));
         Ok(())
     }
+
+    fn cancel_sheet(&self) {}
+}
+
+struct BlockingAppKitDeletionBackend {
+    entered: Mutex<Option<mpsc::Sender<()>>>,
+    active_completion: Mutex<Option<CredentialDeletionCompletion>>,
+    presentations: Mutex<usize>,
+    cancellations: Mutex<usize>,
+}
+
+impl AppKitCredentialDeletionBackend for BlockingAppKitDeletionBackend {
+    fn begin_sheet(
+        &self,
+        _presentation: CredentialDeletionSheetPresentation,
+        completion: CredentialDeletionCompletion,
+    ) -> Result<(), CredentialError> {
+        let mut presentations = self.presentations.lock().expect("presentation count lock");
+        *presentations += 1;
+        if *presentations == 1 {
+            *self
+                .active_completion
+                .lock()
+                .expect("active completion lock") = Some(completion);
+            if let Some(entered) = self.entered.lock().expect("entered lock").take() {
+                entered.send(()).expect("report deletion sheet entry");
+            }
+        } else {
+            completion(Ok(false));
+        }
+        Ok(())
+    }
+
+    fn cancel_sheet(&self) {
+        *self.cancellations.lock().expect("cancellation count lock") += 1;
+        if let Some(completion) = self
+            .active_completion
+            .lock()
+            .expect("active completion lock")
+            .take()
+        {
+            completion(Ok(false));
+        }
+    }
 }
 
 fn appkit_deletion_confirmation(
@@ -385,6 +546,99 @@ fn appkit_deletion_confirmation(
         backend,
         Arc::new(CredentialSheetGate::default()),
     ))
+}
+
+#[test]
+fn bridge_cancellation_dismisses_appkit_deletion_and_releases_both_gates() {
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let backend = Arc::new(BlockingAppKitDeletionBackend {
+        entered: Mutex::new(Some(entered_tx)),
+        active_completion: Mutex::new(None),
+        presentations: Mutex::new(0),
+        cancellations: Mutex::new(0),
+    });
+    let confirmation = Arc::new(AppKitCredentialDeletionConfirmation::with_backend(
+        backend.clone(),
+        Arc::new(CredentialSheetGate::default()),
+    ));
+    let (dispatcher, launch_id, secret, peer) = credential_dispatcher_with_ui(
+        Some(Arc::new(RecordingReplacement::default())),
+        Some(confirmation),
+    );
+    let delete_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "blocking-appkit-delete".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "unsetCredential".to_owned(),
+        payload: deletion_plan_payload("BLOCKING_APPKIT_DELETE"),
+    };
+    let delete_dispatcher = dispatcher.clone();
+    let delete_secret = secret.clone();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let response = delete_dispatcher
+            .dispatch(
+                peer,
+                sign_request(delete_request, [16; 32], &delete_secret)
+                    .expect("signed deletion request"),
+            )
+            .expect("deletion response");
+        finished_tx.send(response).expect("report deletion outcome");
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("deletion sheet opened");
+
+    let cancel_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "cancel-blocking-appkit-delete".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "$cancel".to_owned(),
+        payload: json!({ "requestId": "blocking-appkit-delete" }),
+    };
+    dispatcher
+        .dispatch(
+            peer,
+            sign_request(cancel_request, [17; 32], &secret).expect("signed cancellation request"),
+        )
+        .expect("cancellation response");
+
+    let cancelled = finished_rx
+        .recv_timeout(Duration::from_millis(250))
+        .expect("cancellation must dismiss the deletion sheet");
+    let cancelled = serde_json::to_value(cancelled).expect("cancelled response JSON");
+    assert_eq!(cancelled["result"], "cancelled");
+
+    let subsequent_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "subsequent-appkit-delete".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "unsetCredential".to_owned(),
+        payload: deletion_plan_payload("SUBSEQUENT_APPKIT_DELETE"),
+    };
+    let subsequent = dispatcher
+        .dispatch(
+            peer,
+            sign_request(subsequent_request, [18; 32], &secret)
+                .expect("signed subsequent deletion request"),
+        )
+        .expect("subsequent deletion response");
+    let subsequent = serde_json::to_value(subsequent).expect("subsequent response JSON");
+    assert_eq!(subsequent["result"], "cancelled");
+    assert_eq!(
+        *backend
+            .presentations
+            .lock()
+            .expect("presentation count lock"),
+        2
+    );
+    assert_eq!(
+        *backend
+            .cancellations
+            .lock()
+            .expect("cancellation count lock"),
+        1
+    );
 }
 
 #[test]

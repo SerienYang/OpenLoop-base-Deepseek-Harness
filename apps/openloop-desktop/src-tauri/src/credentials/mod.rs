@@ -205,6 +205,14 @@ pub enum CredentialDeletionOutcome {
 
 pub trait CredentialDeletionConfirmation: Send + Sync {
     fn confirm_deletion(&self, plan: &CredentialDeletionPlan) -> Result<bool, CredentialError>;
+
+    fn confirm_deletion_cancellable(
+        &self,
+        plan: &CredentialDeletionPlan,
+        _cancellation: &CancellationToken,
+    ) -> Result<bool, CredentialError> {
+        self.confirm_deletion(plan)
+    }
 }
 
 pub fn delete_credential_with_confirmation(
@@ -225,7 +233,12 @@ fn delete_credential_with_confirmation_cancellable(
     if cancellation.is_some_and(CancellationToken::is_cancelled) {
         return Ok(CredentialDeletionOutcome::Cancelled);
     }
-    if !confirmation.confirm_deletion(&plan)? {
+    let confirmed = if let Some(cancellation) = cancellation {
+        confirmation.confirm_deletion_cancellable(&plan, cancellation)?
+    } else {
+        confirmation.confirm_deletion(&plan)?
+    };
+    if !confirmed {
         return Ok(CredentialDeletionOutcome::Cancelled);
     }
     let account = CredentialAccount::new(&plan.reference)?;

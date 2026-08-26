@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, Weak,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -64,21 +64,62 @@ pub struct PeerIdentity {
 
 #[derive(Clone)]
 pub struct CancellationToken {
-    state: Arc<(Mutex<bool>, Condvar)>,
+    state: Arc<(Mutex<CancellationState>, Condvar)>,
+}
+
+type CancellationCallback = Box<dyn FnOnce() + Send + 'static>;
+
+struct CancellationState {
+    cancelled: bool,
+    next_subscription_id: u64,
+    callbacks: HashMap<u64, CancellationCallback>,
+}
+
+pub(crate) struct CancellationSubscription {
+    state: Weak<(Mutex<CancellationState>, Condvar)>,
+    subscription_id: Option<u64>,
+}
+
+impl Drop for CancellationSubscription {
+    fn drop(&mut self) {
+        let Some(subscription_id) = self.subscription_id.take() else {
+            return;
+        };
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        if let Ok(mut state) = state.0.lock() {
+            state.callbacks.remove(&subscription_id);
+        };
+    }
 }
 
 impl CancellationToken {
     pub(crate) fn new() -> Self {
         Self {
-            state: Arc::new((Mutex::new(false), Condvar::new())),
+            state: Arc::new((
+                Mutex::new(CancellationState {
+                    cancelled: false,
+                    next_subscription_id: 0,
+                    callbacks: HashMap::new(),
+                }),
+                Condvar::new(),
+            )),
         }
     }
 
     pub fn cancel(&self) {
-        let (cancelled, wake) = &*self.state;
-        if let Ok(mut cancelled) = cancelled.lock() {
-            *cancelled = true;
+        let callbacks = {
+            let (state, wake) = &*self.state;
+            let Ok(mut state) = state.lock() else {
+                return;
+            };
+            state.cancelled = true;
             wake.notify_all();
+            std::mem::take(&mut state.callbacks)
+        };
+        for callback in callbacks.into_values() {
+            callback();
         }
     }
 
@@ -86,25 +127,51 @@ impl CancellationToken {
         self.state
             .0
             .lock()
-            .map(|cancelled| *cancelled)
+            .map(|state| state.cancelled)
             .unwrap_or(true)
     }
 
     /// Run a commit only while cancellation is excluded from the same state lock.
     pub fn commit_if_active<T>(&self, commit: impl FnOnce() -> T) -> Option<T> {
-        let cancelled = self.state.0.lock().ok()?;
-        if *cancelled {
+        let state = self.state.0.lock().ok()?;
+        if state.cancelled {
             return None;
         }
         Some(commit())
     }
 
+    pub(crate) fn subscribe(
+        &self,
+        callback: impl FnOnce() + Send + 'static,
+    ) -> CancellationSubscription {
+        let mut callback: Option<CancellationCallback> = Some(Box::new(callback));
+        let subscription_id = match self.state.0.lock() {
+            Ok(mut state) if !state.cancelled => {
+                let subscription_id = state.next_subscription_id;
+                state.next_subscription_id = state.next_subscription_id.wrapping_add(1);
+                state.callbacks.insert(
+                    subscription_id,
+                    callback.take().expect("cancellation callback is available"),
+                );
+                Some(subscription_id)
+            }
+            Ok(_) | Err(_) => None,
+        };
+        if let Some(callback) = callback {
+            callback();
+        }
+        CancellationSubscription {
+            state: Arc::downgrade(&self.state),
+            subscription_id,
+        }
+    }
+
     pub fn wait(&self) {
-        let (cancelled, wake) = &*self.state;
-        if let Ok(mut cancelled) = cancelled.lock() {
-            while !*cancelled {
-                match wake.wait(cancelled) {
-                    Ok(next) => cancelled = next,
+        let (state, wake) = &*self.state;
+        if let Ok(mut state) = state.lock() {
+            while !state.cancelled {
+                match wake.wait(state) {
+                    Ok(next) => state = next,
                     Err(_) => return,
                 }
             }
@@ -857,6 +924,71 @@ mod tests {
         assert_eq!(commit.join().expect("commit thread"), Some(7));
         cancel.join().expect("cancellation thread");
         assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn cancellation_callbacks_run_once_outside_the_state_lock() {
+        let cancellation = CancellationToken::new();
+        let callback_cancellation = cancellation.clone();
+        let (callback_finished, callback_result) = std::sync::mpsc::channel();
+        let _subscription = cancellation.subscribe(move || {
+            callback_finished
+                .send(callback_cancellation.commit_if_active(|| ()).is_none())
+                .expect("report callback result");
+        });
+        let cancel_cancellation = cancellation.clone();
+        let cancel = thread::spawn(move || {
+            cancel_cancellation.cancel();
+            cancel_cancellation.cancel();
+        });
+
+        assert!(callback_result
+            .recv_timeout(Duration::from_secs(1))
+            .expect("callback must not run under the cancellation lock"));
+        cancel.join().expect("cancellation thread");
+    }
+
+    #[test]
+    fn dropping_cancellation_subscription_unregisters_callback() {
+        let cancellation = CancellationToken::new();
+        let (callback_called, callback_result) = std::sync::mpsc::channel();
+        let subscription = cancellation.subscribe(move || {
+            callback_called.send(()).expect("report callback");
+        });
+
+        drop(subscription);
+        cancellation.cancel();
+
+        assert!(
+            callback_result
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "dropped subscription still invoked its callback"
+        );
+    }
+
+    #[test]
+    fn cancellation_subscription_does_not_lose_a_concurrent_cancel() {
+        for _ in 0..100 {
+            let cancellation = CancellationToken::new();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let callback_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let cancel_cancellation = cancellation.clone();
+            let cancel_barrier = barrier.clone();
+            let cancel = thread::spawn(move || {
+                cancel_barrier.wait();
+                cancel_cancellation.cancel();
+            });
+            barrier.wait();
+            let callback_count_for_subscription = callback_count.clone();
+            let subscription = cancellation.subscribe(move || {
+                callback_count_for_subscription.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
+
+            cancel.join().expect("cancellation thread");
+            drop(subscription);
+            assert_eq!(callback_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
     }
 
     fn assert_closed_promptly(mut stream: UnixStream) {
