@@ -32,6 +32,7 @@ const MAX_CREDENTIAL_SSE_EVENT_BYTES = 1024 * 1024
 const MAX_CREDENTIAL_SSE_LINE_BYTES = 256 * 1024
 const CREDENTIAL_JSON_RPC_ERROR_MESSAGE = 'mcp-client: credential-backed JSON-RPC request failed'
 const CREDENTIAL_SSE_FAILURE_MESSAGE = 'mcp-client: credential-backed SSE response was rejected'
+const CREDENTIAL_CONTENT_TYPE_FAILURE_MESSAGE = 'mcp-client: credential-backed response content type was rejected'
 const LF = 0x0a
 const CR = 0x0d
 const SPACE = 0x20
@@ -188,6 +189,10 @@ export function createCredentialResolvingFetch(
       }
       return new Response(null, { status: response.status })
     }
+    if (response.status === 202) {
+      await discardResponseBody(response)
+      return new Response(null, { status: 202 })
+    }
     return sanitizeJsonRpcResponse(response, sensitiveValues, signal)
   }
 }
@@ -203,7 +208,10 @@ async function sanitizeJsonRpcResponse(
   if (contentType?.includes('text/event-stream')) {
     return sanitizeSseResponse(response, sensitiveValues)
   }
-  if (!contentType?.includes('application/json')) return response
+  if (!contentType?.includes('application/json')) {
+    await discardResponseBody(response)
+    throw new Error(CREDENTIAL_CONTENT_TYPE_FAILURE_MESSAGE)
+  }
 
   let payload: unknown
   try {

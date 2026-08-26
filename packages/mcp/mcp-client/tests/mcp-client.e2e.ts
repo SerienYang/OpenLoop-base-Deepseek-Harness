@@ -590,14 +590,19 @@ describe('streamable-http — in-process MCP server', () => {
 
 describe('streamable-http credential failure redaction', () => {
   it.each([
-    ['application/json', 'json'],
-    ['application/json-rpc', 'json'],
-    ['application/json; charset=utf-8; vendor=acme', 'json'],
-    ['text/event-stream', 'sse'],
-    ['text/event-stream-x', 'sse'],
+    ['application/json', 'json', 'MCP error -32000: mcp-client: credential-backed JSON-RPC request failed'],
+    ['application/json-rpc', 'json', 'MCP error -32000: mcp-client: credential-backed JSON-RPC request failed'],
+    ['application/json; charset=utf-8; vendor=acme', 'json', 'MCP error -32000: mcp-client: credential-backed JSON-RPC request failed'],
+    ['text/event-stream', 'sse', 'MCP error -32000: mcp-client: credential-backed JSON-RPC request failed'],
+    ['text/event-stream-x', 'sse', 'MCP error -32000: mcp-client: credential-backed JSON-RPC request failed'],
+    [
+      'text/plain; token=mcp-echo-token; ref=MCP_ECHO_REFERENCE',
+      'unsupported',
+      'mcp-client: credential-backed response content type was rejected',
+    ],
   ] as const)(
-    'keeps a credential echo in SDK-accepted %s out of logs and the fatal error graph',
-    async (contentType, responseKind) => {
+    'keeps a credential echo in %s out of logs and the fatal error graph',
+    async (contentType, responseKind, expectedCause) => {
       const privateReference = 'MCP_ECHO_REFERENCE'
       const privateToken = 'mcp-echo-token'
       const diagnostics: string[] = []
@@ -625,7 +630,7 @@ describe('streamable-http credential failure redaction', () => {
               },
             },
           })
-          if (responseKind === 'json') {
+          if (responseKind !== 'sse') {
             response.end(payload)
             return
           }
@@ -685,9 +690,11 @@ describe('streamable-http credential failure redaction', () => {
         expect(observable).not.toContain(`Bearer ${privateToken}`)
         expect((failure as Error).cause).toBeInstanceOf(Error)
         expect((failure as Error).cause).toMatchObject({
-          message: 'MCP error -32000: mcp-client: credential-backed JSON-RPC request failed',
-          data: undefined,
+          message: expectedCause,
         })
+        if (responseKind !== 'unsupported') {
+          expect((failure as Error).cause).toMatchObject({ data: undefined })
+        }
         expect((failure as Error).cause).not.toHaveProperty('cause')
       } finally {
         await ctx.fiber.dispose()

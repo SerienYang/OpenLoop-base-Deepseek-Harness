@@ -57,7 +57,7 @@ describe('MCP credential-backed HTTP headers', () => {
       .mockResolvedValueOnce({ value: 'first-token', source: 'keychain' })
       .mockResolvedValueOnce({ value: 'rotated-token', source: 'keychain' })
     const dispatch = vi.fn<typeof globalThis.fetch>(
-      () => Promise.resolve(new Response(null, { status: 204 })),
+      () => Promise.resolve(new Response(null, { status: 202 })),
     )
     const credentialFetch = createCredentialResolvingFetch({
       headers: { 'x-tenant': 'literal' },
@@ -92,7 +92,7 @@ describe('MCP credential-backed HTTP headers', () => {
       })
     })
     const dispatch = vi.fn<typeof globalThis.fetch>(
-      () => Promise.resolve(new Response(null, { status: 204 })),
+      () => Promise.resolve(new Response(null, { status: 202 })),
     )
     const credentialFetch = createCredentialResolvingFetch({
       headers: {},
@@ -123,7 +123,7 @@ describe('MCP credential-backed HTTP headers', () => {
 
   it('merges configured, Request, and init headers before applying credentials last', async () => {
     const dispatch = vi.fn<typeof globalThis.fetch>(
-      () => Promise.resolve(new Response(null, { status: 204 })),
+      () => Promise.resolve(new Response(null, { status: 202 })),
     )
     const credentialFetch = createCredentialResolvingFetch({
       headers: {
@@ -178,7 +178,7 @@ describe('MCP credential-backed HTTP headers', () => {
   ) => {
     const stalled: PromiseWithResolvers<never> = Promise.withResolvers()
     const dispatch = vi.fn<typeof globalThis.fetch>(
-      () => Promise.resolve(new Response(null, { status: 204 })),
+      () => Promise.resolve(new Response(null, { status: 202 })),
     )
     const credentialFetch = createCredentialResolvingFetch({
       headers: {},
@@ -556,6 +556,79 @@ describe('MCP credential-backed HTTP headers', () => {
     expect(body).not.toContain(privateReference)
     expect(body).not.toContain(privateToken)
     expect(response.headers.get('content-type')).toBe('text/event-stream')
+  })
+
+  it('rejects an unsupported successful content type without retaining header or cleanup secrets', async () => {
+    const privateReference = 'MCP_UNSUPPORTED_REFERENCE'
+    const privateToken = 'mcp-unsupported-token'
+    const rawContentType = `text/plain; token=${privateToken}; ref=${privateReference}`
+    const cancel = vi.fn(() => Promise.reject(new Error(
+      `${privateReference} Authorization: Bearer ${privateToken}`,
+    )))
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef(privateReference), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(new Response(
+        new ReadableStream<Uint8Array>({ cancel }),
+        {
+          status: 200,
+          headers: { 'content-type': rawContentType },
+        },
+      ))),
+    })
+
+    const failure = await credentialFetch('https://mcp.example.test')
+      .then(() => undefined, (error: unknown) => error)
+    const evidence = inspect(failure, { depth: null, showHidden: true })
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message)
+      .toBe('mcp-client: credential-backed response content type was rejected')
+    expect(Object.hasOwn(failure as object, 'cause')).toBe(false)
+    expect(evidence).not.toContain(rawContentType)
+    expect(evidence).not.toContain(privateReference)
+    expect(evidence).not.toContain(privateToken)
+    expect(cancel).toHaveBeenCalledOnce()
+  })
+
+  it('reduces an SDK-accepted 202 response to a body-less header-free response', async () => {
+    const privateReference = 'MCP_ACCEPTED_REFERENCE'
+    const privateToken = 'mcp-accepted-token'
+    const cancel = vi.fn(() => Promise.reject(new Error(
+      `${privateReference} Authorization: Bearer ${privateToken}`,
+    )))
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef(privateReference), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(new Response(
+        new ReadableStream<Uint8Array>({ cancel }),
+        {
+          status: 202,
+          headers: {
+            'content-type': `text/plain; token=${privateToken}; ref=${privateReference}`,
+          },
+        },
+      ))),
+    })
+
+    const response = await credentialFetch('https://mcp.example.test')
+
+    expect(response.status).toBe(202)
+    expect(response.body).toBeNull()
+    expect([...response.headers]).toEqual([])
+    expect(cancel).toHaveBeenCalledOnce()
   })
 
   it('preserves a normal split-byte SSE progress and result stream exactly', async () => {
