@@ -20,9 +20,11 @@ use openloop_desktop_lib::{
     },
     credentials::{
         credential_bridge_dispatch_tables, delete_credential_with_confirmation,
-        parse_keychain_spike_action, CredentialAccount, CredentialConsumerDisplay,
-        CredentialConsumerLabel, CredentialDeletionConfirmation, CredentialDeletionOutcome,
-        CredentialDeletionPlan, CredentialDeletionStore, CredentialError, CredentialReplacement,
+        parse_keychain_spike_action, AppKitCredentialDeletionBackend,
+        AppKitCredentialDeletionConfirmation, CredentialAccount, CredentialConsumerDisplay,
+        CredentialConsumerLabel, CredentialDeletionCompletion, CredentialDeletionConfirmation,
+        CredentialDeletionOutcome, CredentialDeletionPlan, CredentialDeletionSheetPresentation,
+        CredentialDeletionStore, CredentialError, CredentialReplacement, CredentialSheetGate,
         CredentialSheetOutcome, KeychainSpikeAction, KeychainSpikeReport, KeychainStore,
         MAX_SECRET_BYTES,
     },
@@ -349,6 +351,208 @@ fn deletion_plan_payload(reference: &str) -> serde_json::Value {
             },
         }],
     })
+}
+
+#[derive(Default)]
+struct RecordingAppKitDeletionBackend {
+    presentations: Mutex<Vec<CredentialDeletionSheetPresentation>>,
+    callback_count: Mutex<usize>,
+}
+
+impl AppKitCredentialDeletionBackend for RecordingAppKitDeletionBackend {
+    fn begin_sheet(
+        &self,
+        presentation: CredentialDeletionSheetPresentation,
+        completion: CredentialDeletionCompletion,
+    ) -> Result<(), CredentialError> {
+        self.presentations
+            .lock()
+            .expect("deletion presentation lock")
+            .push(presentation);
+        *self
+            .callback_count
+            .lock()
+            .expect("deletion callback count lock") += 1;
+        completion(Ok(false));
+        Ok(())
+    }
+}
+
+fn appkit_deletion_confirmation(
+    backend: Arc<RecordingAppKitDeletionBackend>,
+) -> Arc<AppKitCredentialDeletionConfirmation> {
+    Arc::new(AppKitCredentialDeletionConfirmation::with_backend(
+        backend,
+        Arc::new(CredentialSheetGate::default()),
+    ))
+}
+
+#[test]
+fn bridge_cancel_uses_appkit_confirmation_with_all_labels_and_retains_keychain_item() {
+    let account = unique_account("appkit_cancel");
+    let _cleanup = KeychainCleanup::new(account.clone());
+    let store = KeychainStore::new(ReleaseChannel::Test);
+    store
+        .set(&account, b"retained-secret")
+        .expect("seed credential");
+    let reference = account
+        .as_str()
+        .strip_prefix("credential:")
+        .expect("credential account prefix");
+    let backend = Arc::new(RecordingAppKitDeletionBackend::default());
+    let confirmation = appkit_deletion_confirmation(backend.clone());
+    let (dispatcher, launch_id, secret, peer) = credential_dispatcher_with_ui(
+        Some(Arc::new(RecordingReplacement::default())),
+        Some(confirmation),
+    );
+    let request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "appkit-cancel".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "unsetCredential".to_owned(),
+        payload: json!({
+            "reference": reference,
+            "consumers": [
+                {
+                    "ownerId": "model-route:deepseek-official",
+                    "kind": "model-route",
+                    "display": {
+                        "key": "openloop.credentials.consumer.model-route",
+                        "values": { "routeId": "deepseek-official" },
+                    },
+                },
+                {
+                    "ownerId": "plugin:web-search-deepseek",
+                    "kind": "plugin",
+                    "display": {
+                        "key": "openloop.credentials.consumer.web-search-deepseek",
+                        "values": {},
+                    },
+                },
+                {
+                    "ownerId": "plugin:mcp-client:docs",
+                    "kind": "plugin",
+                    "display": {
+                        "key": "openloop.credentials.consumer.mcp-server",
+                        "values": { "serverName": "docs" },
+                    },
+                },
+            ],
+        }),
+    };
+
+    let response = dispatcher
+        .dispatch(
+            peer,
+            sign_request(request, [14; 32], &secret).expect("signed deletion request"),
+        )
+        .expect("deletion response");
+    let response = serde_json::to_value(response).expect("deletion JSON");
+
+    assert_eq!(response["result"], "cancelled");
+    assert_eq!(
+        store
+            .resolve(&account)
+            .expect("credential retained")
+            .as_slice(),
+        b"retained-secret"
+    );
+    assert_eq!(
+        backend
+            .presentations
+            .lock()
+            .expect("deletion presentation lock")
+            .as_slice(),
+        &[CredentialDeletionSheetPresentation {
+            parent_window_label: "main",
+            consumer_labels: vec![
+                "Model route: deepseek-official".to_owned(),
+                "DeepSeek Web Search".to_owned(),
+                "MCP server: docs".to_owned(),
+            ],
+            creates_independent_window_identity: false,
+        }]
+    );
+    assert_eq!(
+        *backend
+            .callback_count
+            .lock()
+            .expect("deletion callback count lock"),
+        1
+    );
+}
+
+#[test]
+fn bridge_rejects_unsupported_consumer_label_keys_and_values_before_appkit() {
+    let backend = Arc::new(RecordingAppKitDeletionBackend::default());
+    let confirmation = appkit_deletion_confirmation(backend.clone());
+    let (dispatcher, launch_id, secret, peer) = credential_dispatcher_with_ui(
+        Some(Arc::new(RecordingReplacement::default())),
+        Some(confirmation),
+    );
+    let invalid_consumers = [
+        json!({
+            "ownerId": "model-route:deepseek-official",
+            "kind": "model-route",
+            "display": {
+                "key": "browser.controls.this",
+                "values": { "routeId": "deepseek-official" },
+            },
+        }),
+        json!({
+            "ownerId": "model-route:deepseek-official",
+            "kind": "model-route",
+            "display": {
+                "key": "openloop.credentials.consumer.model-route",
+                "values": { "browserLabel": "spoof" },
+            },
+        }),
+        json!({
+            "ownerId": "plugin:web-search-deepseek",
+            "kind": "plugin",
+            "display": {
+                "key": "openloop.credentials.consumer.web-search-deepseek",
+                "values": { "label": "spoof" },
+            },
+        }),
+    ];
+
+    for (index, consumer) in invalid_consumers.into_iter().enumerate() {
+        let request = BridgeRequest {
+            version: BRIDGE_PROTOCOL_VERSION,
+            request_id: format!("injected-label-{index}"),
+            launch_id: launch_id.to_string(),
+            method: "unsetCredential".to_owned(),
+            payload: json!({
+                "reference": "SHARED_API_KEY",
+                "consumers": [consumer],
+            }),
+        };
+        let mut nonce = [15; 32];
+        nonce[0] = u8::try_from(index).expect("small test index");
+        let response = dispatcher
+            .dispatch(
+                peer,
+                sign_request(request, nonce, &secret).expect("signed injected-label request"),
+            )
+            .expect("authenticated error response");
+        let response = serde_json::to_value(response).expect("injected-label JSON");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "invalid_request");
+    }
+
+    assert!(backend
+        .presentations
+        .lock()
+        .expect("deletion presentation lock")
+        .is_empty());
+    assert_eq!(
+        *backend
+            .callback_count
+            .lock()
+            .expect("deletion callback count lock"),
+        0
+    );
 }
 
 #[test]

@@ -9,10 +9,11 @@ use std::{
 use openloop_desktop_lib::{
     bridge::server::CancellationToken,
     credentials::{
-        deletion_consumer_labels, CredentialAccount, CredentialConsumerDisplay,
-        CredentialConsumerLabel, CredentialDeletionPlan, CredentialError,
-        CredentialReplacementStore, CredentialSheetAction, CredentialSheetCoordinator,
-        CredentialSheetOutcome, CredentialSheetPresenter, CredentialSheetRequest,
+        deletion_consumer_labels, AppKitCredentialSheet, AppKitCredentialSheetBackend,
+        CredentialAccount, CredentialConsumerDisplay, CredentialConsumerLabel,
+        CredentialDeletionPlan, CredentialError, CredentialReplacementStore, CredentialSheetAction,
+        CredentialSheetCompletion, CredentialSheetCoordinator, CredentialSheetOutcome,
+        CredentialSheetPresentation, CredentialSheetPresenter, CredentialSheetRequest,
         CredentialSheetSecret, NativeTextFieldKind, MAIN_WINDOW_LABEL,
     },
 };
@@ -89,26 +90,114 @@ fn account() -> CredentialAccount {
     CredentialAccount::new("DEEPSEEK_API_KEY").expect("test account")
 }
 
+struct RecordingAppKitSheetBackend {
+    action: Mutex<Option<CredentialSheetAction>>,
+    presentations: Mutex<Vec<CredentialSheetPresentation>>,
+    callback_count: Mutex<usize>,
+    clear_count: Mutex<usize>,
+}
+
+impl RecordingAppKitSheetBackend {
+    fn new(action: CredentialSheetAction) -> Self {
+        Self {
+            action: Mutex::new(Some(action)),
+            presentations: Mutex::new(Vec::new()),
+            callback_count: Mutex::new(0),
+            clear_count: Mutex::new(0),
+        }
+    }
+}
+
+impl AppKitCredentialSheetBackend for RecordingAppKitSheetBackend {
+    fn begin_sheet(
+        &self,
+        presentation: CredentialSheetPresentation,
+        completion: CredentialSheetCompletion,
+    ) -> Result<(), CredentialError> {
+        self.presentations
+            .lock()
+            .expect("presentation lock")
+            .push(presentation);
+        let action = self
+            .action
+            .lock()
+            .expect("action lock")
+            .take()
+            .expect("one native presentation");
+        *self.callback_count.lock().expect("callback count lock") += 1;
+        completion(Ok(action));
+        Ok(())
+    }
+
+    fn clear_secret_control(&self) {
+        *self.clear_count.lock().expect("clear count lock") += 1;
+    }
+}
+
 #[test]
-fn native_sheet_attaches_to_main_window_with_empty_secure_input() {
-    let presenter = Arc::new(FixedPresenter::new(CredentialSheetAction::Cancelled));
+fn appkit_sheet_saves_through_main_window_secure_input_and_completes_callback() {
+    let backend = Arc::new(RecordingAppKitSheetBackend::new(
+        CredentialSheetAction::Save(CredentialSheetSecret::new(b"replacement".to_vec())),
+    ));
+    let presenter = Arc::new(AppKitCredentialSheet::with_backend(backend.clone()));
     let store = Arc::new(RecordingStore::new(b"old", false));
-    let coordinator = CredentialSheetCoordinator::new(presenter.clone(), store);
+    let coordinator = CredentialSheetCoordinator::new(presenter, store.clone());
+
+    assert_eq!(
+        coordinator.replace(account()).expect("save sheet"),
+        CredentialSheetOutcome::Saved
+    );
+    assert_eq!(
+        store
+            .current
+            .lock()
+            .expect("recording store lock")
+            .as_slice(),
+        b"replacement"
+    );
+
+    let presentations = backend.presentations.lock().expect("presentation lock");
+    let presentation = presentations.first().expect("native sheet presentation");
+    assert_eq!(presentation.parent_window_label, MAIN_WINDOW_LABEL);
+    assert_eq!(
+        presentation.text_field_kind,
+        NativeTextFieldKind::NSSecureTextField
+    );
+    assert_eq!(presentation.initial_value, "");
+    assert!(!presentation.creates_independent_window_identity);
+    assert_eq!(
+        *backend.callback_count.lock().expect("callback count lock"),
+        1
+    );
+    assert_eq!(*backend.clear_count.lock().expect("clear count lock"), 1);
+}
+
+#[test]
+fn appkit_sheet_cancel_completes_callback_clears_control_and_retains_value() {
+    let backend = Arc::new(RecordingAppKitSheetBackend::new(
+        CredentialSheetAction::Cancelled,
+    ));
+    let presenter = Arc::new(AppKitCredentialSheet::with_backend(backend.clone()));
+    let store = Arc::new(RecordingStore::new(b"old", false));
+    let coordinator = CredentialSheetCoordinator::new(presenter, store.clone());
 
     assert_eq!(
         coordinator.replace(account()).expect("cancel sheet"),
         CredentialSheetOutcome::Cancelled
     );
-
-    let requests = presenter.requests.lock().expect("request lock");
-    let request = requests.first().expect("sheet request");
-    assert_eq!(request.presentation.parent_window_label, MAIN_WINDOW_LABEL);
     assert_eq!(
-        request.presentation.text_field_kind,
-        NativeTextFieldKind::NSSecureTextField
+        store
+            .current
+            .lock()
+            .expect("recording store lock")
+            .as_slice(),
+        b"old"
     );
-    assert_eq!(request.presentation.initial_value, "");
-    assert!(!request.presentation.creates_independent_window_identity);
+    assert_eq!(
+        *backend.callback_count.lock().expect("callback count lock"),
+        1
+    );
+    assert_eq!(*backend.clear_count.lock().expect("clear count lock"), 1);
 }
 
 #[test]

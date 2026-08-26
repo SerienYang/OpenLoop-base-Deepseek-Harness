@@ -28,8 +28,10 @@ use crate::update::channel::ReleaseChannel;
 mod secure_sheet;
 
 pub use secure_sheet::{
-    deletion_consumer_labels, AppKitCredentialDeletionConfirmation, AppKitCredentialSheet,
-    CredentialReplacement, CredentialReplacementStore, CredentialSheetAction,
+    deletion_consumer_labels, AppKitCredentialDeletionBackend,
+    AppKitCredentialDeletionConfirmation, AppKitCredentialSheet, AppKitCredentialSheetBackend,
+    CredentialDeletionCompletion, CredentialDeletionSheetPresentation, CredentialReplacement,
+    CredentialReplacementStore, CredentialSheetAction, CredentialSheetCompletion,
     CredentialSheetCoordinator, CredentialSheetGate, CredentialSheetOutcome,
     CredentialSheetPresentation, CredentialSheetPresenter, CredentialSheetRequest,
     CredentialSheetSecret, CredentialSheetZeroizationProbe, NativeTextFieldKind, MAIN_WINDOW_LABEL,
