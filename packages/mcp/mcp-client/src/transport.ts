@@ -34,6 +34,7 @@ const CREDENTIAL_JSON_RPC_ERROR_MESSAGE = 'mcp-client: credential-backed JSON-RP
 const CREDENTIAL_TOOL_ERROR_MESSAGE = 'mcp-client: credential-backed tool request failed'
 const CREDENTIAL_SSE_FAILURE_MESSAGE = 'mcp-client: credential-backed SSE response was rejected'
 const CREDENTIAL_CONTENT_TYPE_FAILURE_MESSAGE = 'mcp-client: credential-backed response content type was rejected'
+const REDACTED_CREDENTIAL_VALUE = '[REDACTED]'
 const LF = 0x0a
 const CR = 0x0d
 const SPACE = 0x20
@@ -294,11 +295,24 @@ async function sanitizeJsonRpcResponse(
     return sanitizedJsonRpcError(requestId)
   }
   const sanitized = sanitizeJsonRpcFailures(payload, requestIds, sensitiveValues)
-  if (!sanitized.changed) return response
+  if (!sanitized.changed) {
+    return new Response(response.body, {
+      status: response.status,
+      headers: sanitizedResponseHeaders(
+        response.headers,
+        sensitiveValues,
+        'application/json',
+      ),
+    })
+  }
   await discardResponseBody(response)
   return new Response(JSON.stringify(sanitized.payload), {
-    status: 200,
-    headers: { 'content-type': 'application/json' },
+    status: response.status,
+    headers: sanitizedResponseHeaders(
+      response.headers,
+      sensitiveValues,
+      'application/json',
+    ),
   })
 }
 
@@ -311,7 +325,11 @@ function sanitizeSseResponse(
   if (body === null) {
     return new Response(failedSseStream(), {
       status: response.status,
-      headers: sanitizedSseHeaders(response.headers, sensitiveValues),
+      headers: sanitizedResponseHeaders(
+        response.headers,
+        sensitiveValues,
+        'text/event-stream',
+      ),
     })
   }
   const sanitizer = new CredentialSseSanitizer(requestIds, sensitiveValues)
@@ -335,21 +353,27 @@ function sanitizeSseResponse(
   }))
   return new Response(containSseStreamFailures(transformed), {
     status: response.status,
-    headers: sanitizedSseHeaders(response.headers, sensitiveValues),
+    headers: sanitizedResponseHeaders(
+      response.headers,
+      sensitiveValues,
+      'text/event-stream',
+    ),
   })
 }
 
-function sanitizedSseHeaders(
+function sanitizedResponseHeaders(
   source: Headers,
   sensitiveValues: ReadonlySet<string>,
+  contentType: string,
 ): Headers {
   const headers = new Headers()
   for (const [name, value] of source) {
     if (name.toLowerCase() === 'authorization') continue
-    if ([...sensitiveValues].some(secret => secret.length > 0 && value.includes(secret))) continue
+    if ([...sensitiveValues].some(secret => secret.length > 0
+      && (name.includes(secret.toLowerCase()) || value.includes(secret)))) continue
     headers.append(name, value)
   }
-  headers.set('content-type', 'text/event-stream')
+  headers.set('content-type', contentType)
   return headers
 }
 
@@ -502,8 +526,12 @@ class CredentialSseSanitizer {
 
   #emitEvent(controller: TransformStreamDefaultController<Uint8Array>): void {
     const event = this.#copyEvent()
+    const eventContainsSensitiveValue = containsSensitiveText(
+      new TextDecoder().decode(event),
+      this.sensitiveValues,
+    )
     if (this.#dataRanges.length === 0) {
-      controller.enqueue(event)
+      if (!eventContainsSensitiveValue) controller.enqueue(event)
       this.clear()
       return
     }
@@ -532,12 +560,14 @@ class CredentialSseSanitizer {
       this.requestIds,
       this.sensitiveValues,
     )
-    if (!sanitized.changed) {
+    if (!sanitized.changed && !eventContainsSensitiveValue) {
       controller.enqueue(event)
       this.clear()
       return
     }
-    controller.enqueue(sanitizedSseEvent(sanitized.payload))
+    controller.enqueue(sanitizedSseEvent(
+      sanitized.changed ? sanitized.payload : payload,
+    ))
     this.clear()
   }
 
@@ -657,20 +687,83 @@ function sanitizeJsonRpcFailures(
   requestIds: ReadonlySet<JsonRpcId> | undefined,
   sensitiveValues: ReadonlySet<string>,
 ): JsonRpcSanitization {
-  if (Array.isArray(payload)) {
+  const redacted = redactSensitiveJson(payload, sensitiveValues)
+  if (Array.isArray(redacted.value)) {
     let changed = false
     const messages: unknown[] = []
-    for (const message of payload as unknown[]) {
+    for (const message of redacted.value) {
       const sanitized = sanitizeJsonRpcFailure(message, requestIds, sensitiveValues)
       if (sanitized !== undefined) changed = true
       messages.push(sanitized ?? message)
     }
-    return changed ? { changed: true, payload: messages } : { changed: false }
+    return changed || redacted.changed
+      ? { changed: true, payload: messages }
+      : { changed: false }
   }
-  const sanitized = sanitizeJsonRpcFailure(payload, requestIds, sensitiveValues)
-  return sanitized === undefined
-    ? { changed: false }
-    : { changed: true, payload: sanitized }
+  const sanitized = sanitizeJsonRpcFailure(
+    redacted.value,
+    requestIds,
+    sensitiveValues,
+  )
+  if (sanitized !== undefined) return { changed: true, payload: sanitized }
+  return redacted.changed
+    ? { changed: true, payload: redacted.value }
+    : { changed: false }
+}
+
+interface RedactedJson {
+  readonly value: unknown
+  readonly changed: boolean
+}
+
+function redactSensitiveJson(
+  value: unknown,
+  sensitiveValues: ReadonlySet<string>,
+): RedactedJson {
+  if (typeof value === 'string') {
+    const redacted = redactSensitiveText(value, sensitiveValues)
+    return { value: redacted, changed: redacted !== value }
+  }
+  if (Array.isArray(value)) {
+    const redactedItems = value.map(item => redactSensitiveJson(item, sensitiveValues))
+    const changed = redactedItems.some(item => item.changed)
+    const items = redactedItems.map(item => item.value)
+    return changed ? { value: items, changed: true } : { value, changed: false }
+  }
+  if (typeof value !== 'object' || value === null) {
+    return { value, changed: false }
+  }
+
+  const redactedEntries = Object.entries(value).map(([key, entry]) => {
+    const redactedKey = redactSensitiveText(key, sensitiveValues)
+    const redactedValue = redactSensitiveJson(entry, sensitiveValues)
+    return {
+      changed: redactedKey !== key || redactedValue.changed,
+      entry: [redactedKey, redactedValue.value] as const,
+    }
+  })
+  const changed = redactedEntries.some(entry => entry.changed)
+  return changed
+    ? { value: Object.fromEntries(redactedEntries.map(entry => entry.entry)), changed: true }
+    : { value, changed: false }
+}
+
+function redactSensitiveText(
+  value: string,
+  sensitiveValues: ReadonlySet<string>,
+): string {
+  let redacted = value
+  for (const secret of sensitiveValues) {
+    if (secret.length > 0) redacted = redacted.split(secret).join(REDACTED_CREDENTIAL_VALUE)
+  }
+  return redacted
+}
+
+function containsSensitiveText(
+  value: string,
+  sensitiveValues: ReadonlySet<string>,
+): boolean {
+  return [...sensitiveValues].some(secret => secret.length > 0 && value.includes(secret))
 }
 
 function sanitizeJsonRpcFailure(

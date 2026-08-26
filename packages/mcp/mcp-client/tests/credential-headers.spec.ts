@@ -274,7 +274,13 @@ describe('MCP credential-backed HTTP headers', () => {
     })
     const successful = new Response(
       JSON.stringify({ jsonrpc: '2.0', id: 8, result: { ok: true } }),
-      { status: 200, headers: { 'content-type': 'application/json' } },
+      {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          'x-safe-response': 'kept',
+        },
+      },
     )
     const dispatch = vi.fn<typeof globalThis.fetch>()
       .mockResolvedValueOnce(reflected)
@@ -308,12 +314,66 @@ describe('MCP credential-backed HTTP headers', () => {
     expect(JSON.stringify(body)).not.toContain(privateToken)
 
     const successfulResult = await credentialFetch('https://mcp.example.test')
-    expect(successfulResult).toBe(successful)
     await expect(successfulResult.json()).resolves.toEqual({
       jsonrpc: '2.0',
       id: 8,
       result: { ok: true },
     })
+    expect([...successfulResult.headers]).toEqual([
+      ['content-type', 'application/json'],
+      ['x-safe-response', 'kept'],
+    ])
+  })
+
+  it('redacts credentials from successful JSON results and response headers', async () => {
+    const privateReference = 'MCP_SUCCESS_JSON_KEY'
+    const privateToken = 'mcp-success-json-token'
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef(privateReference), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(new Response(JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'success-json',
+        result: {
+          text: `result ${privateToken}`,
+          nested: { reference: privateReference },
+        },
+      }), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+          'x-safe-response': 'kept',
+          'x-secret-response': `Bearer ${privateToken}`,
+        },
+      }))),
+    })
+
+    const response = await credentialFetch('https://mcp.example.test', {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 'success-json', method: 'tools/call' }),
+    })
+    const body = await response.json() as unknown
+    const observable = `${JSON.stringify(body)}\n${JSON.stringify([...response.headers])}`
+
+    expect(body).toEqual({
+      jsonrpc: '2.0',
+      id: 'success-json',
+      result: {
+        text: 'result [REDACTED]',
+        nested: { reference: '[REDACTED]' },
+      },
+    })
+    expect(response.headers.get('content-type')).toBe('application/json')
+    expect(response.headers.get('x-safe-response')).toBe('kept')
+    expect(response.headers.has('x-secret-response')).toBe(false)
+    expect(observable).not.toContain(privateReference)
+    expect(observable).not.toContain(privateToken)
   })
 
   it('replaces a credential-reflecting JSON-RPC tool error result', async () => {
@@ -700,6 +760,55 @@ describe('MCP credential-backed HTTP headers', () => {
     })
     expect(body).not.toContain(privateToken)
     expect(JSONRPCMessageSchema.safeParse(eventPayload).success).toBe(true)
+  })
+
+  it('redacts credentials from successful SSE results, comments, and response headers', async () => {
+    const privateReference = 'MCP_SUCCESS_SSE_KEY'
+    const privateToken = 'mcp-success-sse-token'
+    const payload = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'success-sse',
+      result: {
+        content: [{ type: 'text', text: `result ${privateToken}` }],
+        reference: privateReference,
+      },
+    })
+    const credentialFetch = createCredentialResolvingFetch({
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: credentialRef(privateReference), prefix: 'Bearer ' },
+      },
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateToken,
+        source: 'keychain',
+      })),
+      fetch: vi.fn(() => Promise.resolve(new Response(
+        `: ${privateReference}\ndata: ${payload}\n\n`,
+        {
+          status: 200,
+          headers: {
+            'content-type': 'text/event-stream',
+            'x-safe-response': 'kept',
+            'x-secret-response': `Bearer ${privateToken}`,
+          },
+        },
+      ))),
+    })
+
+    const response = await credentialFetch('https://mcp.example.test', {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 'success-sse', method: 'tools/call' }),
+    })
+    const body = await response.text()
+    const observable = `${body}\n${JSON.stringify([...response.headers])}`
+
+    expect(body).toContain('"text":"result [REDACTED]"')
+    expect(body).toContain('"reference":"[REDACTED]"')
+    expect(response.headers.get('content-type')).toBe('text/event-stream')
+    expect(response.headers.get('x-safe-response')).toBe('kept')
+    expect(response.headers.has('x-secret-response')).toBe(false)
+    expect(observable).not.toContain(privateReference)
+    expect(observable).not.toContain(privateToken)
   })
 
   it.each([
