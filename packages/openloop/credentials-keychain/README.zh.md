@@ -15,8 +15,10 @@ inherited process environment (read-only)
 ```
 
 provider 不缓存或记录凭据值与引用。Bridge 返回值只解码一次，随后立即清空可变字节
-数组。直接调用 `CredentialProvider.set()` 或 `unset()` 会失败；Openloop 的变更
-必须通过带原生确认的浏览器安全 facade。
+数组和解码时的临时副本。由于直接调用 `CredentialProvider.set()` 或 `unset()` 会
+失败，`CredentialProvider.describe()` 始终报告 `writable: false`。Openloop 的
+浏览器安全 facade 单独报告可写状态：只有原生 Bridge 确认 Keychain 路径可写，且没有
+只读环境变量或 legacy 来源遮蔽时，才会报告可写。
 
 Keychain item 使用 Tauri Host 按发布通道选择的 service，account 固定为
 `credential:<CREDENTIAL_REFERENCE>`。provider id 不参与存储身份，因此多个模型

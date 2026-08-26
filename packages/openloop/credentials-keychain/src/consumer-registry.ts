@@ -55,10 +55,23 @@ interface Registration {
   readonly token: object
 }
 
+/** One pi-ai route/reference pair in an atomic consumer registration. */
+export interface PiAiCredentialConsumer {
+  readonly routeId: string
+  readonly reference: CredentialRef
+}
+
+/** Mutable ownership handle for one atomically replaceable consumer batch. */
+export interface CredentialConsumerBatchRegistration {
+  replace(consumers: readonly PiAiCredentialConsumer[]): void
+  dispose(): void
+}
+
 /** Optional structural seam consumed by built-in DSH Host plugins. */
 export interface CredentialConsumerRegistryLike {
   registerDeepSeekModel(reference: CredentialRef): () => void
   registerPiAiModel(routeId: string, reference: CredentialRef): () => void
+  registerPiAiModels(consumers: readonly PiAiCredentialConsumer[]): CredentialConsumerBatchRegistration
   registerDeepSeekWebSearch(reference: CredentialRef): () => void
   registerMcpServer(serverName: string, reference: CredentialRef): () => void
 }
@@ -95,6 +108,64 @@ export class CredentialConsumerRegistry implements CredentialConsumerRegistryLik
       kind: 'model-route',
       display: display(CREDENTIAL_CONSUMER_DISPLAY_KEYS.modelRoute, { routeId: route }),
     })
+  }
+
+  /**
+   * Register all credential-bearing pi-ai routes as one replaceable unit.
+   * Every candidate is validated before the live map changes.
+   * @param consumers - Complete desired route/reference set.
+   * @returns Atomic replacement and lifecycle handle.
+   */
+  registerPiAiModels(
+    consumers: readonly PiAiCredentialConsumer[],
+  ): CredentialConsumerBatchRegistration {
+    const token = {}
+    let keys = new Set<string>()
+    let active = true
+    const replace = (next: readonly PiAiCredentialConsumer[]): void => {
+      if (!active) throw new Error('credential consumer batch is disposed')
+      const candidates = new Map<string, Registration>()
+      for (const { routeId, reference } of next) {
+        const route = requiredIdentity(routeId, 'pi-ai route id')
+        const consumer = detachedConsumer({
+          ownerId: piAiModelOwnerId(route),
+          kind: 'model-route',
+          display: display(CREDENTIAL_CONSUMER_DISPLAY_KEYS.modelRoute, { routeId: route }),
+        })
+        const key = consumer.ownerId
+        if (candidates.has(key)) {
+          throw new Error(`credential consumer ${JSON.stringify(key)} is duplicated`)
+        }
+        const existing = this.#registrations.get(key)
+        if (existing !== undefined && existing.token !== token) {
+          throw new Error(`credential consumer ${JSON.stringify(key)} is already registered`)
+        }
+        candidates.set(key, {
+          reference: credentialRef(reference),
+          consumer,
+          token,
+        })
+      }
+      for (const key of keys) {
+        if (this.#registrations.get(key)?.token === token) this.#registrations.delete(key)
+      }
+      for (const [key, registration] of candidates) {
+        this.#registrations.set(key, registration)
+      }
+      keys = new Set(candidates.keys())
+    }
+    replace(consumers)
+    return {
+      replace,
+      dispose: () => {
+        if (!active) return
+        active = false
+        for (const key of keys) {
+          if (this.#registrations.get(key)?.token === token) this.#registrations.delete(key)
+        }
+        keys.clear()
+      },
+    }
   }
 
   /**

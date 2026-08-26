@@ -415,6 +415,51 @@ describe('web-search-deepseek plugin registration', () => {
     expect(disposeConsumer).toHaveBeenCalledTimes(1)
   })
 
+  it('moves its registration with a replaced optional consumer registry', async () => {
+    const firstDispose = vi.fn()
+    const secondDispose = vi.fn()
+    const firstRegister = vi.fn(() => firstDispose)
+    const secondRegister = vi.fn(() => secondDispose)
+    const ctx = new Context()
+    await ctx.plugin(WebRuntime, { searchProvider: DEEPSEEK_PROVIDER_ID })
+    const fiber = ctx.plugin(deepseekPlugin, { apiKeyEnv: 'SEARCH_DYNAMIC_KEY' })
+    await fiber
+
+    const firstProvider = ctx.plugin({
+      name: 'first-search-consumer-registry',
+      apply(serviceCtx: Context) {
+        serviceCtx.provide('credentialConsumers', {
+          registerDeepSeekWebSearch: firstRegister,
+        } as never)
+      },
+    })
+    await firstProvider
+    await vi.waitFor(() => {
+      expect(firstRegister).toHaveBeenCalledWith(credentialRef('SEARCH_DYNAMIC_KEY'))
+    })
+    await firstProvider.dispose()
+    await vi.waitFor(() => {
+      expect(firstDispose).toHaveBeenCalledTimes(1)
+    })
+
+    const secondProvider = ctx.plugin({
+      name: 'second-search-consumer-registry',
+      apply(serviceCtx: Context) {
+        serviceCtx.provide('credentialConsumers', {
+          registerDeepSeekWebSearch: secondRegister,
+        } as never)
+      },
+    })
+    await secondProvider
+    await vi.waitFor(() => {
+      expect(secondRegister).toHaveBeenCalledWith(credentialRef('SEARCH_DYNAMIC_KEY'))
+    })
+
+    await fiber.dispose()
+    expect(secondDispose).toHaveBeenCalledTimes(1)
+    await secondProvider.dispose()
+  })
+
   it('registers the provider into ctx.web (HMR-safe)', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(searchResponse())))
     const ctx = new Context()

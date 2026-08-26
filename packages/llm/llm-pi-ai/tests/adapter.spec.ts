@@ -355,13 +355,14 @@ describe('PiAiAdapter provider routing', () => {
 
 describe('Openloop credential consumer wiring', () => {
   it('registers and releases each credential-bearing pi-ai model route', async () => {
-    const disposers = [vi.fn(), vi.fn()]
-    const registerPiAiModel = vi.fn()
-      .mockReturnValueOnce(disposers[0])
-      .mockReturnValueOnce(disposers[1])
+    const dispose = vi.fn()
+    const registerPiAiModels = vi.fn(() => ({
+      replace: vi.fn(),
+      dispose,
+    }))
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
-    ctx.provide('credentialConsumers', { registerPiAiModel } as never)
+    ctx.provide('credentialConsumers', { registerPiAiModels } as never)
 
     const fiber = ctx.plugin(LlmPiAi, {
       providers: {
@@ -371,12 +372,12 @@ describe('Openloop credential consumer wiring', () => {
     })
     await fiber
 
-    expect(registerPiAiModel.mock.calls).toEqual([
-      ['openai', credentialRef('OPENAI_API_KEY')],
-      ['deepseek', credentialRef('DEEPSEEK_API_KEY')],
+    expect(registerPiAiModels).toHaveBeenCalledWith([
+      { routeId: 'deepseek', reference: credentialRef('DEEPSEEK_API_KEY') },
+      { routeId: 'openai', reference: credentialRef('OPENAI_API_KEY') },
     ])
     await fiber.dispose()
-    expect(disposers.every(dispose => dispose.mock.calls.length === 1)).toBe(true)
+    expect(dispose).toHaveBeenCalledTimes(1)
   })
 })
 

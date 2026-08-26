@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
-use crate::bridge::{server::BridgeHandler, BridgeDispatchTables};
+use crate::bridge::{
+    server::{BridgeHandler, CancellationToken},
+    BridgeDispatchTables,
+};
 use crate::update::channel::ReleaseChannel;
 
 mod secure_prompt;
@@ -209,8 +212,23 @@ pub fn delete_credential_with_confirmation(
     confirmation: &(impl CredentialDeletionConfirmation + ?Sized),
     plan: CredentialDeletionPlan,
 ) -> Result<CredentialDeletionOutcome, CredentialError> {
+    delete_credential_with_confirmation_cancellable(store, confirmation, plan, None)
+}
+
+fn delete_credential_with_confirmation_cancellable(
+    store: &impl CredentialDeletionStore,
+    confirmation: &(impl CredentialDeletionConfirmation + ?Sized),
+    plan: CredentialDeletionPlan,
+    cancellation: Option<&CancellationToken>,
+) -> Result<CredentialDeletionOutcome, CredentialError> {
     validate_deletion_plan(&plan)?;
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Ok(CredentialDeletionOutcome::Cancelled);
+    }
     if !confirmation.confirm_deletion(&plan)? {
+        return Ok(CredentialDeletionOutcome::Cancelled);
+    }
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
         return Ok(CredentialDeletionOutcome::Cancelled);
     }
     let account = CredentialAccount::new(&plan.reference)?;
@@ -294,15 +312,16 @@ pub fn credential_bridge_dispatch_tables(
     browser_safe.insert("openCredentialReplacement".to_owned(), replacement);
     let deletion_store = store;
     let deletion_confirmation = confirmation;
-    let delete: BridgeHandler = Arc::new(move |payload, _cancellation| {
+    let delete: BridgeHandler = Arc::new(move |payload, cancellation| {
         let plan: CredentialDeletionPlan = serde_json::from_value(payload)
             .map_err(|_| crate::bridge::server::BridgeHandlerError::invalid_request())?;
         validate_deletion_plan(&plan)
             .map_err(|_| crate::bridge::server::BridgeHandlerError::invalid_request())?;
-        let outcome = delete_credential_with_confirmation(
+        let outcome = delete_credential_with_confirmation_cancellable(
             &deletion_store,
             deletion_confirmation.as_ref(),
             plan,
+            Some(&cancellation),
         )
         .map_err(|_| crate::bridge::server::BridgeHandlerError::credential_failure())?;
         Ok(Value::String(

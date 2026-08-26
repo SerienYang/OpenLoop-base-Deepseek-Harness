@@ -4,7 +4,8 @@ use std::{
     collections::BTreeMap,
     ffi::OsString,
     process,
-    sync::{Arc, Mutex},
+    sync::{mpsc, Arc, Mutex},
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -68,23 +69,32 @@ fn services_are_exact_and_derived_only_from_release_channel() {
     );
 }
 
-fn dispatch_credential(method: &str, payload: serde_json::Value) -> serde_json::Value {
+fn credential_dispatcher(
+    confirmation: Arc<dyn CredentialDeletionConfirmation>,
+) -> (AuthenticatedBridgeDispatcher, Uuid, Vec<u8>, PeerIdentity) {
     let executable = std::env::current_exe().expect("test executable");
     let launch_id = Uuid::new_v4();
     let secret: Vec<u8> = (0..32).collect();
+    let peer = PeerIdentity {
+        uid: unsafe { libc::geteuid() },
+        pid: process::id(),
+    };
     let dispatcher = AuthenticatedBridgeDispatcher::new(
-        unsafe { libc::geteuid() },
+        peer.uid,
         capture_process_identity(process::id(), &executable).expect("process identity"),
         executable,
         launch_id,
         secret.clone(),
-        credential_bridge_dispatch_tables(
-            KeychainStore::new(ReleaseChannel::Test),
-            Arc::new(CancelCredentialDeletion),
-        )
-        .expect("credential tables"),
+        credential_bridge_dispatch_tables(KeychainStore::new(ReleaseChannel::Test), confirmation)
+            .expect("credential tables"),
     )
     .expect("credential dispatcher");
+    (dispatcher, launch_id, secret, peer)
+}
+
+fn dispatch_credential(method: &str, payload: serde_json::Value) -> serde_json::Value {
+    let (dispatcher, launch_id, secret, peer) =
+        credential_dispatcher(Arc::new(CancelCredentialDeletion));
     let request = BridgeRequest {
         version: BRIDGE_PROTOCOL_VERSION,
         request_id: "credential-request".to_owned(),
@@ -94,10 +104,7 @@ fn dispatch_credential(method: &str, payload: serde_json::Value) -> serde_json::
     };
     let response = dispatcher
         .dispatch(
-            PeerIdentity {
-                uid: unsafe { libc::geteuid() },
-                pid: process::id(),
-            },
+            peer,
             sign_request(request, [7; 32], &secret).expect("signed credential request"),
         )
         .expect("authenticated credential response");
@@ -218,6 +225,20 @@ fn deletion_plan() -> CredentialDeletionPlan {
     }
 }
 
+fn deletion_plan_payload(reference: &str) -> serde_json::Value {
+    json!({
+        "reference": reference,
+        "consumers": [{
+            "ownerId": "model-route:deepseek-official",
+            "kind": "model-route",
+            "display": {
+                "key": "openloop.credentials.consumer.model-route",
+                "values": { "routeId": "deepseek-official" },
+            },
+        }],
+    })
+}
+
 #[test]
 fn native_deletion_confirmation_cancel_retains_the_keychain_item() {
     let store = RecordingDeletionStore::default();
@@ -253,6 +274,158 @@ fn native_deletion_confirmation_deletes_only_after_confirmation() {
     assert_eq!(
         store.deleted.lock().expect("store lock").as_slice(),
         &["credential:SHARED_API_KEY"]
+    );
+}
+
+struct BlockingApproval {
+    entered: Mutex<Option<mpsc::Sender<()>>>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl CredentialDeletionConfirmation for BlockingApproval {
+    fn confirm_deletion(&self, _plan: &CredentialDeletionPlan) -> Result<bool, CredentialError> {
+        if let Some(entered) = self.entered.lock().expect("entered lock").take() {
+            entered.send(()).expect("report confirmation entry");
+        }
+        self.release
+            .lock()
+            .expect("release lock")
+            .recv()
+            .expect("release confirmation");
+        Ok(true)
+    }
+}
+
+#[test]
+fn bridge_cancellation_while_confirmation_is_pending_prevents_deletion() {
+    let reference = format!(
+        "CANCEL_PENDING_{}_{}",
+        process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock follows Unix epoch")
+            .as_nanos()
+    );
+    let account = CredentialAccount::new(&reference).expect("cancellation account");
+    let _cleanup = KeychainCleanup::new(account.clone());
+    let store = KeychainStore::new(ReleaseChannel::Test);
+    store
+        .set(&account, b"pending-cancellation-secret")
+        .expect("seed cancellation credential");
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let confirmation = Arc::new(BlockingApproval {
+        entered: Mutex::new(Some(entered_tx)),
+        release: Mutex::new(release_rx),
+    });
+    let (dispatcher, launch_id, secret, peer) = credential_dispatcher(confirmation);
+    let delete_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "pending-delete".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "unsetCredential".to_owned(),
+        payload: deletion_plan_payload(&reference),
+    };
+    let delete_dispatcher = dispatcher.clone();
+    let delete_secret = secret.clone();
+    let pending = thread::spawn(move || {
+        delete_dispatcher
+            .dispatch(
+                peer,
+                sign_request(delete_request, [8; 32], &delete_secret)
+                    .expect("signed deletion request"),
+            )
+            .expect("deletion response")
+    });
+    entered_rx.recv().expect("confirmation opened");
+
+    let cancel_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "cancel-pending-delete".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "$cancel".to_owned(),
+        payload: json!({ "requestId": "pending-delete" }),
+    };
+    dispatcher
+        .dispatch(
+            peer,
+            sign_request(cancel_request, [9; 32], &secret).expect("signed cancellation request"),
+        )
+        .expect("cancellation response");
+    release_tx.send(()).expect("approve confirmation");
+
+    let response =
+        serde_json::to_value(pending.join().expect("deletion thread")).expect("response JSON");
+    assert_eq!(response["result"], "cancelled");
+    assert_eq!(
+        store
+            .resolve(&account)
+            .expect("credential retained")
+            .as_slice(),
+        b"pending-cancellation-secret"
+    );
+}
+
+#[test]
+fn bridge_pre_cancellation_skips_confirmation_and_deletion() {
+    let reference = format!(
+        "CANCEL_BEFORE_{}_{}",
+        process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock follows Unix epoch")
+            .as_nanos()
+    );
+    let account = CredentialAccount::new(&reference).expect("pre-cancellation account");
+    let _cleanup = KeychainCleanup::new(account.clone());
+    let store = KeychainStore::new(ReleaseChannel::Test);
+    store
+        .set(&account, b"pre-cancellation-secret")
+        .expect("seed pre-cancellation credential");
+    let confirmation = Arc::new(FixedConfirmation::new(true));
+    let (dispatcher, launch_id, secret, peer) = credential_dispatcher(confirmation.clone());
+    let cancel_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "cancel-before-delete".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "$cancel".to_owned(),
+        payload: json!({ "requestId": "pre-cancelled-delete" }),
+    };
+    dispatcher
+        .dispatch(
+            peer,
+            sign_request(cancel_request, [10; 32], &secret)
+                .expect("signed pre-cancellation request"),
+        )
+        .expect("pre-cancellation response");
+    let delete_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "pre-cancelled-delete".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "unsetCredential".to_owned(),
+        payload: deletion_plan_payload(&reference),
+    };
+
+    let response = dispatcher
+        .dispatch(
+            peer,
+            sign_request(delete_request, [11; 32], &secret).expect("signed deletion request"),
+        )
+        .expect("deletion response");
+    let response = serde_json::to_value(response).expect("response JSON");
+
+    assert_eq!(response["result"], "cancelled");
+    assert!(confirmation
+        .observed
+        .lock()
+        .expect("confirmation lock")
+        .is_empty());
+    assert_eq!(
+        store
+            .resolve(&account)
+            .expect("credential retained")
+            .as_slice(),
+        b"pre-cancellation-secret"
     );
 }
 

@@ -80,8 +80,9 @@ export class DesktopBridgeClient {
       cancel = this.#cancel(request.requestId).catch(() => {})
     }
     signal?.addEventListener('abort', onAbort, { once: true })
+    let responseFrame: Uint8Array | undefined
     try {
-      const responseFrame = await this.#transport.exchange(frame, signal)
+      responseFrame = await this.#transport.exchange(frame, signal)
       const envelope = decodeBridgeFrame(responseFrame) as AuthenticatedBridgeResponse
       const response = verifyBridgeResponse(envelope, {
         requestId: request.requestId,
@@ -99,6 +100,7 @@ export class DesktopBridgeClient {
       }
       throw error
     } finally {
+      responseFrame?.fill(0)
       signal?.removeEventListener('abort', onAbort)
     }
   }
@@ -123,10 +125,14 @@ export class DesktopBridgeClient {
     const nonce = this.#nonce()
     const frame = encodeBridgeFrame(authenticateBridgeRequest(cancellation, nonce, state.bytes))
     const responseFrame = await this.#transport.exchange(frame)
-    verifyBridgeResponse(
-      decodeBridgeFrame(responseFrame),
-      { requestId: cancellation.requestId, nonce, secret: state.bytes },
-    )
+    try {
+      verifyBridgeResponse(
+        decodeBridgeFrame(responseFrame),
+        { requestId: cancellation.requestId, nonce, secret: state.bytes },
+      )
+    } finally {
+      responseFrame.fill(0)
+    }
   }
 
   #state(): ClientSecretState {

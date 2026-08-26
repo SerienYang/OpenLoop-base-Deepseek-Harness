@@ -130,18 +130,26 @@ function resolveOptions(ctx: Context, config: Config): DeepSeekSearchProviderOpt
 /** Register the DeepSeek search provider with `ctx.web`. */
 export function apply(ctx: Context, config: Config): void {
   let current: () => Config = () => config
-  const consumers = ctx.get('credentialConsumers') as CredentialConsumerRegistry | undefined
-  let consumerReference: ReturnType<typeof credentialRef> | undefined
-  let removeConsumer: (() => void) | undefined
-  const ensureCredentialConsumer = (): void => {
-    if (consumers === undefined) return
-    const reference = credentialRef(current().apiKeyEnv ?? DEFAULT_API_KEY_ENV)
-    if (reference === consumerReference) return
-    removeConsumer?.()
-    removeConsumer = undefined
-    removeConsumer = consumers.registerDeepSeekWebSearch(reference)
-    consumerReference = reference
-  }
+  let ensureCredentialConsumer = (): void => {}
+  ctx.inject(['credentialConsumers'], (consumerCtx) => {
+    const consumers = consumerCtx.get('credentialConsumers') as CredentialConsumerRegistry
+    let consumerReference: ReturnType<typeof credentialRef> | undefined
+    let removeConsumer: (() => void) | undefined
+    const synchronize = (): void => {
+      const reference = credentialRef(current().apiKeyEnv ?? DEFAULT_API_KEY_ENV)
+      if (reference === consumerReference) return
+      removeConsumer?.()
+      removeConsumer = undefined
+      removeConsumer = consumers.registerDeepSeekWebSearch(reference)
+      consumerReference = reference
+    }
+    ensureCredentialConsumer = synchronize
+    synchronize()
+    return () => {
+      if (ensureCredentialConsumer === synchronize) ensureCredentialConsumer = () => {}
+      removeConsumer?.()
+    }
+  })
   installSettingsSection(ctx, WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, Config, config, {
     setSource: (source) => {
       current = source
@@ -151,8 +159,5 @@ export function apply(ctx: Context, config: Config): void {
     onChange: ensureCredentialConsumer,
   })
   ensureCredentialConsumer()
-  ctx.effect(() => () => {
-    removeConsumer?.()
-  }, 'web-search-deepseek: credential consumer')
   ctx.web.registerSearchProvider(new DeepSeekSearchProvider(() => resolveOptions(ctx, current())))
 }

@@ -187,21 +187,21 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }, 'mcp-client.serverName')
 
   if (config.transport === 'streamable-http') {
-    const consumers = ctx.get('credentialConsumers') as CredentialConsumerRegistry | undefined
     const references = new Set(
       Object.values(config.credentialHeaders ?? {}).map(source => credentialRef(source.ref)),
     )
     if (references.size > 1) {
       throw new Error('mcp-client: one server may reference only one credential across its HTTP headers')
     }
-    if (consumers !== undefined && references.size > 0) {
-      ctx.effect(() => {
+    if (references.size > 0) {
+      ctx.inject(['credentialConsumers'], (consumerCtx) => {
+        const consumers = consumerCtx.get('credentialConsumers') as CredentialConsumerRegistry
         const disposers = [...references].map(reference =>
           consumers.registerMcpServer(config.serverName, reference))
         return () => {
           for (const dispose of disposers) dispose()
         }
-      }, 'mcp-client.credentialConsumers')
+      })
     }
   }
 

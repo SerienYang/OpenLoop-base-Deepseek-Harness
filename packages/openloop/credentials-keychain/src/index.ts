@@ -116,13 +116,13 @@ export class KeychainCredentialProvider extends CredentialProvider {
     }
     const keychain = await this.#bridge.describeCredential(reference)
     if (keychain.configured) {
-      return { configured: true, source: 'keychain', writable: true }
+      return { configured: true, source: 'keychain', writable: false }
     }
     const legacy = await this.#legacy?.describe(reference)
     if (legacy?.configured === true) {
       return { configured: true, source: 'legacy-file', writable: false }
     }
-    return { configured: false, writable: true }
+    return { configured: false, writable: false }
   }
 
   /**
@@ -163,10 +163,13 @@ function decodeSecret(bytes: readonly number[]): string {
     || bytes.some(byte => !Number.isInteger(byte) || byte < 0 || byte > 255)) {
     throw new Error('Keychain returned an invalid credential payload')
   }
+  const copy = Uint8Array.from(bytes)
   try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(bytes))
+    return new TextDecoder('utf-8', { fatal: true }).decode(copy)
   } catch {
     throw new Error('Keychain returned an invalid credential payload')
+  } finally {
+    copy.fill(0)
   }
 }
 

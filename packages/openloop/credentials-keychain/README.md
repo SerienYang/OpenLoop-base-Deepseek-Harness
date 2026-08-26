@@ -15,9 +15,12 @@ inherited process environment (read-only)
 ```
 
 The provider never caches or logs a credential value or reference. A bridge
-result is decoded once and its mutable byte array is cleared immediately.
-Direct `CredentialProvider.set()` and `unset()` calls fail closed: Openloop
-mutations must use the browser-safe facade backed by native confirmation.
+result is decoded once and both its mutable byte array and temporary decode
+copy are cleared immediately. `CredentialProvider.describe()` reports
+`writable: false` because direct `set()` and `unset()` calls fail closed.
+Openloop's browser-safe facade reports writability separately, and only after
+the native bridge confirms the Keychain path while no read-only environment or
+legacy source is shadowing it.
 
 Keychain items use the release-channel service selected by the Tauri Host and
 the account `credential:<CREDENTIAL_REFERENCE>`. Provider ids are not part of

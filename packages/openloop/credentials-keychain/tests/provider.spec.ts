@@ -85,7 +85,7 @@ describe('Keychain credential provider', () => {
     expect(describeCredential).not.toHaveBeenCalled()
   })
 
-  it('reports a Keychain hit as writable and resolves through the authenticated bridge', async () => {
+  it('reports a Keychain hit as read-only through the direct provider contract', async () => {
     const keychain = bridge({
       describeCredential: vi.fn(() => Promise.resolve({
         configured: true,
@@ -99,12 +99,24 @@ describe('Keychain credential provider', () => {
     await expect(credentials.describe(REF)).resolves.toEqual({
       configured: true,
       source: 'keychain',
-      writable: true,
+      writable: false,
     })
+    await expect(credentials.set(REF, 'replacement')).rejects.toThrow(/native-confirmed/)
+    await expect(credentials.unset(REF)).rejects.toThrow(/native-confirmed/)
     await expect(credentials.resolve(REF)).resolves.toEqual({
       value: 'keychain-value',
       source: 'keychain',
     })
+  })
+
+  it('reports an unconfigured reference as read-only when direct writes are unsupported', async () => {
+    const credentials = provider()
+
+    await expect(credentials.describe(REF)).resolves.toEqual({
+      configured: false,
+      writable: false,
+    })
+    await expect(credentials.set(REF, 'replacement')).rejects.toThrow(/native-confirmed/)
   })
 
   it('uses an optional legacy source only after an absent Keychain and keeps it read-only', async () => {
@@ -135,6 +147,37 @@ describe('Keychain credential provider', () => {
     await expect(credentials.resolve(REF)).resolves.toMatchObject({ value: 'rotated-value' })
     expect(resolveCredential).toHaveBeenCalledTimes(2)
     expect(Object.keys(credentials)).not.toContain('value')
+  })
+
+  it('zeroizes both bridge bytes and the temporary typed-array decode copy', async () => {
+    const originalTextDecoder = globalThis.TextDecoder
+    const bytes = secret('temporary-value')
+    let decodedCopy: Uint8Array | undefined
+    class InspectingTextDecoder {
+      readonly #decoder = new originalTextDecoder('utf-8', { fatal: true })
+
+      decode(input?: AllowSharedBufferSource): string {
+        decodedCopy = input as Uint8Array
+        return this.#decoder.decode(input)
+      }
+    }
+    vi.stubGlobal('TextDecoder', InspectingTextDecoder)
+    const credentials = provider({
+      keychain: bridge({
+        resolveCredential: vi.fn(() => Promise.resolve(bytes)),
+      }),
+    })
+
+    try {
+      await expect(credentials.resolve(REF)).resolves.toMatchObject({
+        value: 'temporary-value',
+      })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+    expect(bytes).toEqual(new Array(bytes.length).fill(0))
+    expect(decodedCopy).toBeDefined()
+    expect([...decodedCopy!]).toEqual(new Array(decodedCopy!.length).fill(0))
   })
 
   it('keeps resolve absent from the Browser Remote surface', () => {

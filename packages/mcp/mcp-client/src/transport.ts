@@ -23,6 +23,7 @@ const RESERVED_MCP_HEADERS = new Set([
   'mcp-protocol-version',
   'mcp-session-id',
 ])
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
 
 /** Resolve one credential reference for the current HTTP request. */
 export type CredentialResolver =
@@ -115,7 +116,7 @@ export function validateCredentialHeaders(
       throw new TypeError(`mcp-client: credential header ${JSON.stringify(name)} is duplicated`)
     }
     credentialNames.add(folded)
-    credentialRef(source.ref)
+    safeCredentialRef(source.ref)
     if (source.prefix !== undefined && !HEADER_PREFIX.test(source.prefix)) {
       throw new TypeError(`mcp-client: credential header ${JSON.stringify(name)} has an unsafe prefix`)
     }
@@ -134,9 +135,11 @@ export function createCredentialResolvingFetch(
   const dispatch = options.fetch ?? globalThis.fetch
   return async (input, init) => {
     const headers = new Headers(options.headers)
-    for (const [name, value] of new Headers(init?.headers)) headers.set(name, value)
+    const callerHeaders = init?.headers
+      ?? (input instanceof Request ? input.headers : undefined)
+    for (const [name, value] of new Headers(callerHeaders)) headers.set(name, value)
     for (const [name, source] of Object.entries(options.credentialHeaders)) {
-      const ref = credentialRef(source.ref)
+      const ref = safeCredentialRef(source.ref)
       const resolved = await options.resolve(ref)
       if (resolved === undefined || resolved.value.length === 0) {
         throw new Error('mcp-client: configured credential is not available')
@@ -147,7 +150,20 @@ export function createCredentialResolvingFetch(
       }
       headers.set(name, `${source.prefix ?? ''}${value}`)
     }
-    return dispatch(input, { ...init, headers })
+    const response = await dispatch(input, { ...init, headers, redirect: 'manual' })
+    if (REDIRECT_STATUSES.has(response.status)) {
+      await response.body?.cancel().catch(() => {})
+      throw new Error('mcp-client: credential-backed request redirect was blocked')
+    }
+    return response
+  }
+}
+
+function safeCredentialRef(reference: string): CredentialRef {
+  try {
+    return credentialRef(reference)
+  } catch {
+    throw new TypeError('mcp-client: invalid credential reference')
   }
 }
 

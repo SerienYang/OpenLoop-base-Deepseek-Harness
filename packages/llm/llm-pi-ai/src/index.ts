@@ -88,7 +88,16 @@ export const inject = ['llm']
 const NS = settingsNamespace('llm-pi-ai')
 
 interface CredentialConsumerRegistry {
-  registerPiAiModel(routeId: string, reference: CredentialRef): () => void
+  registerPiAiModels(consumers: readonly {
+    readonly routeId: string
+    readonly reference: CredentialRef
+  }[]): {
+    replace(consumers: readonly {
+      readonly routeId: string
+      readonly reference: CredentialRef
+    }[]): void
+    dispose(): void
+  }
 }
 
 /**
@@ -151,6 +160,16 @@ function directoryEntries(
   return [...entries.values()]
 }
 
+function credentialConsumerEntries(
+  profiles: ReadonlyMap<string, ResolvedPiAiProviderProfile>,
+): Array<{ routeId: string; reference: CredentialRef }> {
+  return [...profiles]
+    .filter((entry): entry is [string, ResolvedPiAiProviderProfile & { apiKeyEnv: CredentialRef }] =>
+      entry[1].apiKeyEnv !== undefined)
+    .map(([routeId, profile]) => ({ routeId, reference: profile.apiKeyEnv }))
+    .sort((left, right) => left.routeId.localeCompare(right.routeId))
+}
+
 /** Register one generic pi-ai adapter for all configured provider routes. */
 export function apply(ctx: Context, config: Config): void {
   let current: () => Config = () => config
@@ -176,39 +195,6 @@ export function apply(ctx: Context, config: Config): void {
     return next
   }
   profiles()
-
-  const consumers = ctx.get('credentialConsumers') as CredentialConsumerRegistry | undefined
-  const credentialRegistrations = new Map<string, {
-    readonly reference: CredentialRef
-    readonly dispose: () => void
-  }>()
-  const ensureCredentialConsumers = (): void => {
-    if (consumers === undefined) return
-    const desired = new Map(
-      [...profiles()]
-        .filter((entry): entry is [string, ResolvedPiAiProviderProfile & { apiKeyEnv: CredentialRef }] =>
-          entry[1].apiKeyEnv !== undefined)
-        .map(([route, profile]) => [route, profile.apiKeyEnv]),
-    )
-    for (const [route, registration] of credentialRegistrations) {
-      if (desired.get(route) !== registration.reference) {
-        registration.dispose()
-        credentialRegistrations.delete(route)
-      }
-    }
-    for (const [route, reference] of desired) {
-      if (credentialRegistrations.has(route)) continue
-      credentialRegistrations.set(route, {
-        reference,
-        dispose: consumers.registerPiAiModel(route, reference),
-      })
-    }
-  }
-  ensureCredentialConsumers()
-  ctx.effect(() => () => {
-    for (const registration of credentialRegistrations.values()) registration.dispose()
-    credentialRegistrations.clear()
-  }, 'llm-pi-ai: credential consumers')
 
   const resolveApiKey = async (
     provider: string,
@@ -252,8 +238,10 @@ export function apply(ctx: Context, config: Config): void {
   // profiles appear, and leave with them.
   let directory: DirectoryRegistrationHandle | undefined
   let directoryFacts: unknown
-  const ensureDirectory = (): void => {
-    const entries = directoryEntries(profiles())
+  const ensureDirectory = (
+    accepted: ReadonlyMap<string, ResolvedPiAiProviderProfile>,
+  ): void => {
+    const entries = directoryEntries(accepted)
     if (deepEqualJson(entries, directoryFacts)) return
     // Atomic replace, never dispose-then-register: a route another adapter
     // family already declares (a profile keyed `deepseek-official`) would
@@ -267,7 +255,7 @@ export function apply(ctx: Context, config: Config): void {
     }
     directoryFacts = entries
   }
-  ensureDirectory()
+  ensureDirectory(profiles())
   /**
    * The credential a named route already resolves, for an interrogation whose
    * draft carries none. A route being declared for the first time names no
@@ -294,8 +282,10 @@ export function apply(ctx: Context, config: Config): void {
   // settings section supplies profiles, and routes drop when it empties.
   let registration: AdapterRegistrationHandle | undefined
   let registeredFacts: unknown
-  const ensureRegistrationFacts = (): void => {
-    const facts = registrationFacts(profiles())
+  const ensureRegistrationFacts = (
+    accepted: ReadonlyMap<string, ResolvedPiAiProviderProfile>,
+  ): void => {
+    const facts = registrationFacts(accepted)
     if (deepEqualJson(facts, registeredFacts)) return
     // The registry captures the route set and each route's retry policy at
     // registration, so a change to either must re-register. The swap is
@@ -303,7 +293,7 @@ export function apply(ctx: Context, config: Config): void {
     // conflicting route leaves the previous routes serving requests, and
     // `registeredFacts` only advances once the registry actually holds the
     // new set — so returning to a working configuration always re-applies.
-    const routes = [...profiles().keys()]
+    const routes = [...accepted.keys()]
     if (registration === undefined) {
       // Dormant bare mount: nothing is registered until a section supplies
       // profiles, and an empty section keeps it that way.
@@ -317,7 +307,22 @@ export function apply(ctx: Context, config: Config): void {
     }
     registeredFacts = facts
   }
-  ensureRegistrationFacts()
+  const initialProfiles = profiles()
+  ensureRegistrationFacts(initialProfiles)
+  let acceptedProfiles = initialProfiles
+  let credentialRegistration: ReturnType<CredentialConsumerRegistry['registerPiAiModels']>
+    | undefined
+  ctx.inject(['credentialConsumers'], (consumerCtx) => {
+    const consumers = consumerCtx.get('credentialConsumers') as CredentialConsumerRegistry
+    const registration = consumers.registerPiAiModels(
+      credentialConsumerEntries(acceptedProfiles),
+    )
+    credentialRegistration = registration
+    return () => {
+      if (credentialRegistration === registration) credentialRegistration = undefined
+      registration.dispose()
+    }
+  })
 
   installSettingsSection(ctx, NS, Config, config, {
     // Refuse an unserviceable section where it is written: without this a
@@ -328,6 +333,9 @@ export function apply(ctx: Context, config: Config): void {
       current = source
     },
     onChange: () => {
+      const desiredProfiles = profiles()
+      const previousProfiles = acceptedProfiles
+      let consumersPrepared = false
       // Named here rather than left to the settings watcher: `assertServiceable`
       // cannot see the llm registry, so a profile claiming a route another
       // adapter family owns is stored successfully and only fails at this swap.
@@ -335,10 +343,19 @@ export function apply(ctx: Context, config: Config): void {
       // generic "settings: watcher failed", naming neither the route nor why it
       // is not serving. The previous routes keep serving either way.
       try {
-        ensureRegistrationFacts()
+        if (credentialRegistration !== undefined) {
+          credentialRegistration.replace(credentialConsumerEntries(desiredProfiles))
+          consumersPrepared = true
+        }
+        ensureRegistrationFacts(desiredProfiles)
+        acceptedProfiles = desiredProfiles
       } catch (error) {
+        if (consumersPrepared) {
+          credentialRegistration?.replace(credentialConsumerEntries(previousProfiles))
+        }
         ctx.logger.error('llm-pi-ai: keeping the previously registered routes after a refused update')
         ctx.logger.error(error)
+        return
       }
       // The directory follows the profiles the registry accepted, so a route
       // that failed to register is not advertised as configurable. A refused
@@ -346,15 +363,9 @@ export function apply(ctx: Context, config: Config): void {
       // is: the previous entries keep serving, and `directoryFacts` stays put
       // so returning to a working configuration re-applies.
       try {
-        ensureDirectory()
+        ensureDirectory(acceptedProfiles)
       } catch (error) {
         ctx.logger.error('llm-pi-ai: keeping the previous configurable-provider directory after a refused update')
-        ctx.logger.error(error)
-      }
-      try {
-        ensureCredentialConsumers()
-      } catch (error) {
-        ctx.logger.error('llm-pi-ai: keeping the previous credential consumers after a refused update')
         ctx.logger.error(error)
       }
     },

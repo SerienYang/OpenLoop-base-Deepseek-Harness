@@ -20,7 +20,7 @@ use std::{
 
 use serde_json::Value;
 use uuid::Uuid;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::launcher::{capture_process_identity, process_identity_matches, ProcessIdentity};
 
@@ -649,8 +649,10 @@ fn serve_connection(
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let envelope: AuthenticatedBridgeRequest = read_json_frame(&mut stream)?;
-    let response = dispatcher.dispatch_signed(peer, envelope)?;
-    write_frame(&mut stream, &response)?;
+    let mut response = dispatcher.dispatch_signed(peer, envelope)?;
+    let write_result = write_frame(&mut stream, &response);
+    response.zeroize();
+    write_result?;
     stream.flush()
 }
 

@@ -277,6 +277,48 @@ describe('authenticated desktop bridge protocol', () => {
     })
   })
 
+  it('zeroizes a received response frame after successful verification', async () => {
+    const responseFrame = encodeBridgeFrame(authenticateBridgeResponse({
+      version: 1,
+      requestId: 'response-zeroize',
+      ok: true,
+      result: [115, 101, 99, 114, 101, 116],
+    }, nonce, secret))
+    const transport: BridgeWireTransport = {
+      exchange: vi.fn(() => Promise.resolve(responseFrame)),
+      close() {},
+    }
+    const client = new DesktopBridgeClient({
+      launchId,
+      secret,
+      transport,
+      requestId: () => 'response-zeroize',
+      nonce: () => nonce,
+    })
+
+    await expect(client.call('resolveCredential', { ref: 'TEST_KEY' }))
+      .resolves.toEqual([115, 101, 99, 114, 101, 116])
+    expect([...responseFrame]).toEqual(new Array(responseFrame.length).fill(0))
+  })
+
+  it('zeroizes a received response frame when parsing fails', async () => {
+    const responseFrame = Uint8Array.from([0, 0, 0, 1, 0xff])
+    const transport: BridgeWireTransport = {
+      exchange: vi.fn(() => Promise.resolve(responseFrame)),
+      close() {},
+    }
+    const client = new DesktopBridgeClient({
+      launchId,
+      secret,
+      transport,
+      requestId: () => 'response-invalid',
+      nonce: () => nonce,
+    })
+
+    await expect(client.call('resolveCredential', { ref: 'TEST_KEY' })).rejects.toThrow()
+    expect([...responseFrame]).toEqual(new Array(responseFrame.length).fill(0))
+  })
+
   it.runIf(process.platform !== 'win32')(
     'rejects an in-flight socket exchange promptly when the client closes',
     async () => {

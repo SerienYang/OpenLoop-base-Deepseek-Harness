@@ -96,6 +96,65 @@ describe('CredentialConsumerRegistry', () => {
     second()
   })
 
+  it('registers and replaces pi-ai route consumers as one atomic batch', () => {
+    const registry = new CredentialConsumerRegistry()
+    const registration = registry.registerPiAiModels([
+      { routeId: 'openai', reference: REF },
+      { routeId: 'deepseek', reference: REF },
+    ])
+    const other = credentialRef('OTHER_KEY')
+
+    registration.replace([
+      { routeId: 'openai', reference: other },
+      { routeId: 'anthropic', reference: other },
+    ])
+
+    expect(registry.planDeletion(REF).consumers).toEqual([])
+    expect(registry.planDeletion(other).consumers.map(consumer => consumer.ownerId)).toEqual([
+      piAiModelOwnerId('anthropic'),
+      piAiModelOwnerId('openai'),
+    ])
+    registration.dispose()
+    expect(registry.planDeletion(other).consumers).toEqual([])
+  })
+
+  it('rolls back an entire pi-ai batch when any owner collides', () => {
+    const registry = new CredentialConsumerRegistry()
+    registry.registerPiAiModel('taken', REF)
+    const other = credentialRef('OTHER_KEY')
+
+    expect(() => registry.registerPiAiModels([
+      { routeId: 'free', reference: other },
+      { routeId: 'taken', reference: other },
+    ])).toThrow(/already registered/)
+
+    expect(registry.planDeletion(other).consumers).toEqual([])
+    expect(registry.planDeletion(REF).consumers.map(consumer => consumer.ownerId))
+      .toEqual([piAiModelOwnerId('taken')])
+  })
+
+  it('keeps the previous pi-ai batch intact when a replacement collides', () => {
+    const registry = new CredentialConsumerRegistry()
+    const registration = registry.registerPiAiModels([
+      { routeId: 'openai', reference: REF },
+    ])
+    registry.registerPiAiModel('taken', REF)
+    const other = credentialRef('OTHER_KEY')
+
+    expect(() => {
+      registration.replace([
+        { routeId: 'openai', reference: other },
+        { routeId: 'taken', reference: other },
+      ])
+    }).toThrow(/already registered/)
+
+    expect(registry.planDeletion(other).consumers).toEqual([])
+    expect(registry.planDeletion(REF).consumers.map(consumer => consumer.ownerId)).toEqual([
+      piAiModelOwnerId('openai'),
+      piAiModelOwnerId('taken'),
+    ])
+  })
+
   it('removing a provider registration never deletes its shared credential', async () => {
     const registry = new CredentialConsumerRegistry()
     const keychain = bridge()
@@ -143,6 +202,55 @@ describe('CredentialConsumerRegistry', () => {
     expect(keychain.deleteCredentialWithConfirmation).toHaveBeenCalledTimes(1)
   })
 
+  it('reports native-confirmed Keychain writability through browser operations only', async () => {
+    const registry = new CredentialConsumerRegistry()
+    registry.registerDeepSeekModel(REF)
+    const keychain = bridge()
+    const provider = new KeychainCredentialProvider(new Context(), { bridge: keychain })
+    const operations = new OpenloopCredentialOperations(provider, registry, keychain)
+
+    await expect(provider.describe(REF)).resolves.toMatchObject({
+      configured: true,
+      source: 'keychain',
+      writable: false,
+    })
+    await expect(operations.describeCredential(REF)).resolves.toEqual({
+      configured: true,
+      source: 'keychain',
+      writable: true,
+    })
+    await expect(operations.openCredentialReplacement(REF)).resolves.toBe('cancelled')
+  })
+
+  it('keeps a legacy-winning reference read-only in browser operations', async () => {
+    const registry = new CredentialConsumerRegistry()
+    registry.registerDeepSeekModel(REF)
+    const keychain = bridge()
+    keychain.describeCredential = vi.fn(() => Promise.resolve({
+      configured: false,
+      writable: true,
+    }))
+    const provider = new KeychainCredentialProvider(new Context(), {
+      bridge: keychain,
+      legacy: {
+        resolve: vi.fn(() => Promise.resolve('legacy-value')),
+        describe: vi.fn(() => Promise.resolve({
+          configured: true,
+          source: 'legacy-file',
+          writable: false,
+        })),
+      },
+    })
+    const operations = new OpenloopCredentialOperations(provider, registry, keychain)
+
+    await expect(operations.describeCredential(REF)).resolves.toEqual({
+      configured: true,
+      source: 'legacy-file',
+      writable: false,
+    })
+    await expect(operations.openCredentialReplacement(REF)).rejects.toThrow(/read-only/)
+  })
+
   it('rejects every browser operation for a reference no built-in Host consumer registered', async () => {
     const registry = new CredentialConsumerRegistry()
     const keychain = bridge()
@@ -157,6 +265,20 @@ describe('CredentialConsumerRegistry', () => {
     await expect(operations.openCredentialReplacement('UNKNOWN_KEY')).rejects.toThrow(/not registered/)
     await expect(operations.deleteCredential('UNKNOWN_KEY')).rejects.toThrow(/not registered/)
     expect(describeCredential).not.toHaveBeenCalled()
+  })
+
+  it('does not echo an invalid browser credential reference in errors', async () => {
+    const registry = new CredentialConsumerRegistry()
+    const keychain = bridge()
+    const operations = new OpenloopCredentialOperations(
+      new KeychainCredentialProvider(new Context(), { bridge: keychain }),
+      registry,
+      keychain,
+    )
+    const invalidReference = 'SECRET-REFERENCE'
+
+    await expect(operations.describeCredential(invalidReference)).rejects.toThrow(/invalid/)
+    await expect(operations.describeCredential(invalidReference)).rejects.not.toThrow(invalidReference)
   })
 
   it('rejects native mutation while the process environment shadows Keychain', async () => {

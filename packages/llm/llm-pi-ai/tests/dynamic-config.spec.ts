@@ -37,7 +37,11 @@ async function home(): Promise<string> {
 }
 
 /** Real dynamic composition mirroring the deepseek twin's harness. */
-async function boot(dir: string, config: LlmPiAi.Config): Promise<Context> {
+async function boot(
+  dir: string,
+  config: LlmPiAi.Config,
+  credentialConsumers?: object,
+): Promise<Context> {
   const ctx = new Context()
   cleanups.push(async () => {
     await ctx.fiber.dispose()
@@ -45,6 +49,9 @@ async function boot(dir: string, config: LlmPiAi.Config): Promise<Context> {
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(FileSettingsProvider, { path: join(dir, 'settings.yaml'), watch: false })
   await ctx.plugin(LocalCredentialProvider, { path: join(dir, '.credentials.yaml'), watch: false })
+  if (credentialConsumers !== undefined) {
+    ctx.provide('credentialConsumers', credentialConsumers as never)
+  }
   await ctx.plugin(LlmPiAi, config)
   return ctx
 }
@@ -156,6 +163,35 @@ describe('request-level dynamic profiles', () => {
     expect(ctx.llm.listProviders().map(provider => provider.id)).toEqual(['openai'])
   })
 
+  it('atomically replaces credential references for an accepted route update', async () => {
+    const dir = await home()
+    let consumerRoutes: Array<{ routeId: string; reference: string }> = []
+    const replace = vi.fn((routes: typeof consumerRoutes) => {
+      consumerRoutes = routes.map(route => ({ ...route }))
+    })
+    const ctx = await boot(
+      dir,
+      { providers: { openai: { apiKeyEnv: 'PI_LIVE_KEY' } } },
+      {
+        registerPiAiModels(routes: typeof consumerRoutes) {
+          consumerRoutes = routes.map(route => ({ ...route }))
+          return { replace, dispose: vi.fn() }
+        },
+      },
+    )
+    replace.mockClear()
+
+    await ctx.settings.update(NS, {
+      providers: { openai: { apiKeyEnv: 'PI_OTHER_KEY' } },
+    })
+    await vi.waitFor(() => {
+      expect(consumerRoutes).toEqual([
+        { routeId: 'openai', reference: credentialRef('PI_OTHER_KEY') },
+      ])
+    })
+    expect(replace).toHaveBeenCalledTimes(1)
+  })
+
   it('refuses a settings write this adapter could not serve, leaving its routes alone', async () => {
     const dir = await home()
     const ctx = await boot(dir, { providers: { openai: {} } })
@@ -177,7 +213,26 @@ describe('request-level dynamic profiles', () => {
       { mode: 0o600 },
     )
     const server = await mockServer([{ events: textEvents }, { events: textEvents }])
-    const ctx = await boot(dir, { providers: { openai: { apiKeyEnv: 'PI_LIVE_KEY', baseURL: `${server.url}/v1` } } })
+    let consumerRoutes: Array<{ routeId: string; reference: string }> = []
+    const replaceConsumers = vi.fn((routes: typeof consumerRoutes) => {
+      consumerRoutes = routes.map(route => ({ ...route }))
+    })
+    const disposeConsumers = vi.fn(() => {
+      consumerRoutes = []
+    })
+    const registerPiAiModels = vi.fn((routes: typeof consumerRoutes) => {
+      consumerRoutes = routes.map(route => ({ ...route }))
+      return { replace: replaceConsumers, dispose: disposeConsumers }
+    })
+    const ctx = await boot(
+      dir,
+      { providers: { openai: { apiKeyEnv: 'PI_LIVE_KEY', baseURL: `${server.url}/v1` } } },
+      { registerPiAiModels },
+    )
+    expect(consumerRoutes).toEqual([
+      { routeId: 'openai', reference: credentialRef('PI_LIVE_KEY') },
+    ])
+    replaceConsumers.mockClear()
     // Another adapter owns `anthropic`; the registry must refuse to hand it over.
     ctx.llm.registerAdapter(['anthropic'], new StubAdapter())
 
@@ -192,6 +247,18 @@ describe('request-level dynamic profiles', () => {
     // owns openai (an eager dispose would have dropped it), and anthropic
     // still belongs to its original adapter.
     expect(ctx.llm.listProviders().map(provider => provider.id).sort()).toEqual(['anthropic', 'openai'])
+    expect(consumerRoutes).toEqual([
+      { routeId: 'openai', reference: credentialRef('PI_LIVE_KEY') },
+    ])
+    expect(replaceConsumers.mock.calls).toEqual([
+      [[
+        { routeId: 'anthropic', reference: credentialRef('PI_OTHER_KEY') },
+        { routeId: 'openai', reference: credentialRef('PI_LIVE_KEY') },
+      ]],
+      [[
+        { routeId: 'openai', reference: credentialRef('PI_LIVE_KEY') },
+      ]],
+    ])
     const result = await assemble(ctx, { provider: 'openai', model: 'gpt-4.1', messages: [] })
     expect(result.finish.kind).toBe('error')
     expect(server.paths).toEqual(['/v1/responses'])

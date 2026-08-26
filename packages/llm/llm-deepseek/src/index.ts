@@ -226,22 +226,26 @@ export function apply(ctx: Context, config: Config): void {
   }
   options()
 
-  const consumers = ctx.get('credentialConsumers') as CredentialConsumerRegistry | undefined
-  let consumerReference: ReturnType<typeof credentialRef> | undefined
-  let removeConsumer: (() => void) | undefined
-  const ensureCredentialConsumer = (): void => {
-    if (consumers === undefined) return
-    const reference = options().apiKeyEnv
-    if (reference === consumerReference) return
-    removeConsumer?.()
-    removeConsumer = undefined
-    removeConsumer = consumers.registerDeepSeekModel(reference)
-    consumerReference = reference
-  }
-  ensureCredentialConsumer()
-  ctx.effect(() => () => {
-    removeConsumer?.()
-  }, 'llm-deepseek: credential consumer')
+  let ensureCredentialConsumer = (): void => {}
+  ctx.inject(['credentialConsumers'], (consumerCtx) => {
+    const consumers = consumerCtx.get('credentialConsumers') as CredentialConsumerRegistry
+    let consumerReference: ReturnType<typeof credentialRef> | undefined
+    let removeConsumer: (() => void) | undefined
+    const synchronize = (): void => {
+      const reference = options().apiKeyEnv
+      if (reference === consumerReference) return
+      removeConsumer?.()
+      removeConsumer = undefined
+      removeConsumer = consumers.registerDeepSeekModel(reference)
+      consumerReference = reference
+    }
+    ensureCredentialConsumer = synchronize
+    synchronize()
+    return () => {
+      if (ensureCredentialConsumer === synchronize) ensureCredentialConsumer = () => {}
+      removeConsumer?.()
+    }
+  })
 
   const resolveApiKey = async (connection: ResolvedDeepSeekOptions): Promise<string> => {
     // Every credential fact comes from the caller's snapshot, so a rejected

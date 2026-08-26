@@ -46,7 +46,15 @@ export class OpenloopCredentialOperations implements CredentialBrowserOperations
    * @returns Value-free credential status.
    */
   async describeCredential(reference: string): Promise<CredentialInfo> {
-    return this.provider.describe(this.#requiredPlan(reference).reference)
+    const ref = this.#requiredPlan(reference).reference
+    const providerInfo = await this.provider.describe(ref)
+    if (providerInfo.source === 'environment' || providerInfo.source === 'legacy-file') {
+      return providerInfo
+    }
+    const nativeInfo = await this.bridge.describeCredential(ref)
+    return nativeInfo.configured
+      ? { configured: true, source: 'keychain', writable: nativeInfo.writable }
+      : { configured: false, writable: nativeInfo.writable }
   }
 
   /**
@@ -80,7 +88,13 @@ export class OpenloopCredentialOperations implements CredentialBrowserOperations
   }
 
   #requiredPlan(reference: string): CredentialDeletionPlan {
-    const plan = this.consumers.planDeletion(credentialRef(reference))
+    let ref: ReturnType<typeof credentialRef>
+    try {
+      ref = credentialRef(reference)
+    } catch {
+      throw new Error('credential reference is invalid')
+    }
+    const plan = this.consumers.planDeletion(ref)
     if (plan.consumers.length === 0) {
       throw new Error('credential reference is not registered by a built-in Host consumer')
     }
@@ -89,7 +103,10 @@ export class OpenloopCredentialOperations implements CredentialBrowserOperations
 
   async #assertWritable(reference: CredentialDeletionPlan['reference']): Promise<void> {
     const info = await this.provider.describe(reference)
-    if (info.writable) return
+    if (info.source !== 'environment' && info.source !== 'legacy-file') {
+      const nativeInfo = await this.bridge.describeCredential(reference)
+      if (nativeInfo.writable) return
+    }
     throw new Error(
       info.source === 'environment'
         ? 'credential is shadowed by the read-only environment'

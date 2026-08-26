@@ -619,6 +619,54 @@ describe('Openloop credential consumer wiring', () => {
     await fiber.dispose()
     expect(disposeConsumer).toHaveBeenCalledTimes(1)
   })
+
+  it('moves its registration with a replaced optional consumer registry', async () => {
+    const firstDispose = vi.fn()
+    const secondDispose = vi.fn()
+    const firstRegister = vi.fn(() => firstDispose)
+    const secondRegister = vi.fn(() => secondDispose)
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const fiber = ctx.plugin(LlmDeepSeek, {
+      apiKeyEnv: 'DEEPSEEK_DYNAMIC_KEY',
+      baseURL: 'http://127.0.0.1:1',
+    })
+    await fiber
+
+    const firstProvider = ctx.plugin({
+      name: 'first-deepseek-consumer-registry',
+      apply(serviceCtx: Context) {
+        serviceCtx.provide('credentialConsumers', {
+          registerDeepSeekModel: firstRegister,
+        } as never)
+      },
+    })
+    await firstProvider
+    await vi.waitFor(() => {
+      expect(firstRegister).toHaveBeenCalledWith(credentialRef('DEEPSEEK_DYNAMIC_KEY'))
+    })
+    await firstProvider.dispose()
+    await vi.waitFor(() => {
+      expect(firstDispose).toHaveBeenCalledTimes(1)
+    })
+
+    const secondProvider = ctx.plugin({
+      name: 'second-deepseek-consumer-registry',
+      apply(serviceCtx: Context) {
+        serviceCtx.provide('credentialConsumers', {
+          registerDeepSeekModel: secondRegister,
+        } as never)
+      },
+    })
+    await secondProvider
+    await vi.waitFor(() => {
+      expect(secondRegister).toHaveBeenCalledWith(credentialRef('DEEPSEEK_DYNAMIC_KEY'))
+    })
+
+    await fiber.dispose()
+    expect(secondDispose).toHaveBeenCalledTimes(1)
+    await secondProvider.dispose()
+  })
 })
 
 describe('plugin registration and config', () => {
