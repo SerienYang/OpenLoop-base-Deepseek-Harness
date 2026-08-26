@@ -28,7 +28,7 @@ function bridge(
   return {
     describeCredential: vi.fn(() => Promise.resolve({
       configured: false,
-      writable: true,
+      writable: false,
     })),
     resolveCredential: vi.fn(() => Promise.resolve(undefined)),
     openCredentialReplacement: vi.fn(() => Promise.resolve('cancelled' as const)),
@@ -238,7 +238,7 @@ describe('Keychain credential provider', () => {
     const ctx = new Context()
     const deleteCredential = vi.fn(() => Promise.resolve('cancelled' as const))
     ctx.provide('openloopCredentialOperations', {
-      describeCredential: vi.fn(() => Promise.resolve({ configured: false, writable: true })),
+      describeCredential: vi.fn(() => Promise.resolve({ configured: false, writable: false })),
       openCredentialReplacement: vi.fn(() => Promise.resolve('cancelled' as const)),
       deleteCredential,
     })

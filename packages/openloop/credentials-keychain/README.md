@@ -18,9 +18,10 @@ The provider never caches or logs a credential value or reference. A bridge
 result is decoded once and both its mutable byte array and temporary decode
 copy are cleared immediately. `CredentialProvider.describe()` reports
 `writable: false` because direct `set()` and `unset()` calls fail closed.
-Openloop's browser-safe facade reports writability separately, and only after
-the native bridge confirms the Keychain path while no read-only environment or
-legacy source is shadowing it.
+Openloop's browser-safe facade reports writability separately. It currently
+reports `writable: false` for Keychain and unconfigured references because the
+Task 1.4 native replacement sheet and deletion confirmation are not installed;
+mutation preflight rejects before either placeholder action runs.
 
 Keychain items use the release-channel service selected by the Tauri Host and
 the account `credential:<CREDENTIAL_REFERENCE>`. Provider ids are not part of
@@ -39,7 +40,11 @@ only a credential reference; it cannot provide consumer names or confirmation
 copy. Every registration and batch replacement is validated atomically before
 publication: a plan may contain at most 255 consumers and at most 56 KiB of
 UTF-8 JSON, leaving 8 KiB for the authenticated bridge envelope. Removing a
-consumer registration never mutates Keychain.
+consumer registration never mutates Keychain. DeepSeek and Web Search
+reference replacement uses a single-owner atomic handle, so a capacity failure
+keeps the prior reference registered. When the registry is already present,
+DeepSeek, pi-ai, Web Search, and credential-backed MCP register synchronously
+before publishing model providers, search providers, connections, or tools.
 
 MCP stdio `env` remains literal configuration. Streamable HTTP may opt into
 `credentialHeaders`; each request resolves every distinct reference once,

@@ -38,6 +38,10 @@ pub const MAX_CREDENTIAL_CONSUMERS: usize = 255;
 pub const MAX_CREDENTIAL_CONSUMER_FIELD_BYTES: usize = 256;
 pub const MAX_CREDENTIAL_DELETION_PLAN_BYTES: usize = 56 * 1024;
 
+// Task 1.4 flips this only when both native replacement and deletion
+// confirmation can complete successfully.
+const NATIVE_CREDENTIAL_MUTATION_AVAILABLE: bool = false;
+
 const TEST_KEYCHAIN_SERVICE: &str = "ai.openloop.credentials.test.v1";
 const STABLE_KEYCHAIN_SERVICE: &str = "ai.openloop.credentials.v1";
 const KEYCHAIN_SPIKE_PREFIX: &[u8] = b"--openloop-keychain";
@@ -313,9 +317,16 @@ pub fn credential_bridge_dispatch_tables(
             .status(&account)
             .map_err(|_| crate::bridge::server::BridgeHandlerError::credential_failure())?;
         Ok(if configured {
-            json!({ "configured": true, "source": "keychain", "writable": true })
+            json!({
+                "configured": true,
+                "source": "keychain",
+                "writable": NATIVE_CREDENTIAL_MUTATION_AVAILABLE,
+            })
         } else {
-            json!({ "configured": false, "writable": true })
+            json!({
+                "configured": false,
+                "writable": NATIVE_CREDENTIAL_MUTATION_AVAILABLE,
+            })
         })
     });
     browser_safe.insert("describeCredential".to_owned(), describe);
@@ -361,6 +372,10 @@ pub fn credential_bridge_dispatch_tables(
         let secret = resolve_store
             .resolve_optional(&account)
             .map_err(|_| crate::bridge::server::BridgeHandlerError::credential_failure())?;
+        if let Some(bytes) = secret.as_deref() {
+            validate_secret(bytes)
+                .map_err(|_| crate::bridge::server::BridgeHandlerError::credential_failure())?;
+        }
         Ok(secret
             .map(|bytes| Value::Array(bytes.iter().map(|byte| Value::from(*byte)).collect()))
             .unwrap_or(Value::Null))

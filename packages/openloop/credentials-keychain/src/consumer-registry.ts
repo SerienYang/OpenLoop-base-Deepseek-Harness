@@ -85,12 +85,18 @@ export interface CredentialConsumerBatchRegistration {
   dispose(): void
 }
 
+/** Mutable ownership handle for one atomically replaceable consumer. */
+export interface CredentialConsumerRegistration {
+  replace(reference: CredentialRef): void
+  dispose(): void
+}
+
 /** Optional structural seam consumed by built-in DSH Host plugins. */
 export interface CredentialConsumerRegistryLike {
-  registerDeepSeekModel(reference: CredentialRef): () => void
+  registerDeepSeekModel(reference: CredentialRef): CredentialConsumerRegistration
   registerPiAiModel(routeId: string, reference: CredentialRef): () => void
   registerPiAiModels(consumers: readonly PiAiCredentialConsumer[]): CredentialConsumerBatchRegistration
-  registerDeepSeekWebSearch(reference: CredentialRef): () => void
+  registerDeepSeekWebSearch(reference: CredentialRef): CredentialConsumerRegistration
   registerMcpServer(serverName: string, reference: CredentialRef): () => void
 }
 
@@ -101,10 +107,10 @@ export class CredentialConsumerRegistry implements CredentialConsumerRegistryLik
   /**
    * Register the built-in DeepSeek model route.
    * @param reference - Credential reference consumed by the route.
-   * @returns Lifecycle disposer.
+   * @returns Atomic replacement and lifecycle handle.
    */
-  registerDeepSeekModel(reference: CredentialRef): () => void {
-    return this.#register(reference, {
+  registerDeepSeekModel(reference: CredentialRef): CredentialConsumerRegistration {
+    return this.#registerReplaceable(reference, {
       ownerId: DEEPSEEK_MODEL_OWNER_ID,
       kind: 'model-route',
       display: display(CREDENTIAL_CONSUMER_DISPLAY_KEYS.modelRoute, {
@@ -201,10 +207,10 @@ export class CredentialConsumerRegistry implements CredentialConsumerRegistryLik
   /**
    * Register the built-in DeepSeek Web Search plugin.
    * @param reference - Credential reference consumed by search.
-   * @returns Lifecycle disposer.
+   * @returns Atomic replacement and lifecycle handle.
    */
-  registerDeepSeekWebSearch(reference: CredentialRef): () => void {
-    return this.#register(reference, {
+  registerDeepSeekWebSearch(reference: CredentialRef): CredentialConsumerRegistration {
+    return this.#registerReplaceable(reference, {
       ownerId: DEEPSEEK_WEB_SEARCH_OWNER_ID,
       kind: 'plugin',
       display: display(CREDENTIAL_CONSUMER_DISPLAY_KEYS.deepseekWebSearch),
@@ -233,6 +239,41 @@ export class CredentialConsumerRegistry implements CredentialConsumerRegistryLik
    */
   planDeletion(reference: CredentialRef): CredentialDeletionPlan {
     return deletionPlan(this.#registrations, openloopCredentialRef(reference))
+  }
+
+  #registerReplaceable(
+    reference: CredentialRef,
+    source: CredentialConsumer,
+  ): CredentialConsumerRegistration {
+    const consumer = detachedConsumer(source)
+    const key = consumer.ownerId
+    const token = {}
+    let active = true
+    const replace = (next: CredentialRef): void => {
+      if (!active) throw new Error('credential consumer registration is disposed')
+      const existing = this.#registrations.get(key)
+      if (existing !== undefined && existing.token !== token) {
+        throw new Error(`credential consumer ${JSON.stringify(key)} is already registered`)
+      }
+      const registration = {
+        reference: openloopCredentialRef(next),
+        consumer,
+        token,
+      }
+      const candidateState = new Map(this.#registrations)
+      candidateState.set(key, registration)
+      validateRegistryState(candidateState)
+      this.#registrations.set(key, registration)
+    }
+    replace(reference)
+    return {
+      replace,
+      dispose: () => {
+        if (!active) return
+        active = false
+        if (this.#registrations.get(key)?.token === token) this.#registrations.delete(key)
+      },
+    }
   }
 
   #register(reference: CredentialRef, consumer: CredentialConsumer): () => void {

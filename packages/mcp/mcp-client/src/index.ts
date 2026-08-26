@@ -169,6 +169,45 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     validateCredentialHeaders(config.headers, config.credentialHeaders ?? {})
   }
 
+  if (config.transport === 'streamable-http') {
+    const references = new Set(
+      Object.values(config.credentialHeaders ?? {}).map(source => credentialRef(source.ref)),
+    )
+    if (references.size > 1) {
+      throw new Error('mcp-client: one server may reference only one credential across its HTTP headers')
+    }
+    const [reference] = references
+    if (reference !== undefined) {
+      let consumerRegistry: CredentialConsumerRegistry | undefined
+      let disposeConsumer: (() => void) | undefined
+      const bindCredentialConsumers = (consumers: CredentialConsumerRegistry): void => {
+        if (consumers === consumerRegistry) return
+        const next = consumers.registerMcpServer(config.serverName, reference)
+        const previous = disposeConsumer
+        consumerRegistry = consumers
+        disposeConsumer = next
+        previous?.()
+      }
+      const initialConsumers = ctx.get('credentialConsumers') as CredentialConsumerRegistry | undefined
+      if (initialConsumers !== undefined) bindCredentialConsumers(initialConsumers)
+      ctx.effect(() => () => {
+        disposeConsumer?.()
+        disposeConsumer = undefined
+        consumerRegistry = undefined
+      }, 'mcp-client: credential consumer')
+      ctx.inject(['credentialConsumers'], (consumerCtx) => {
+        const consumers = consumerCtx.get('credentialConsumers') as CredentialConsumerRegistry
+        bindCredentialConsumers(consumers)
+        return () => {
+          if (consumerRegistry !== consumers) return
+          disposeConsumer?.()
+          disposeConsumer = undefined
+          consumerRegistry = undefined
+        }
+      })
+    }
+  }
+
   // Reserve the namespace next: a duplicate `serverName` fails THIS instance
   // at load with an actionable error and leaves the earlier instance intact.
   ctx.effect(() => {
@@ -185,25 +224,6 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     names.add(config.serverName)
     return () => void names.delete(config.serverName)
   }, 'mcp-client.serverName')
-
-  if (config.transport === 'streamable-http') {
-    const references = new Set(
-      Object.values(config.credentialHeaders ?? {}).map(source => credentialRef(source.ref)),
-    )
-    if (references.size > 1) {
-      throw new Error('mcp-client: one server may reference only one credential across its HTTP headers')
-    }
-    if (references.size > 0) {
-      ctx.inject(['credentialConsumers'], (consumerCtx) => {
-        const consumers = consumerCtx.get('credentialConsumers') as CredentialConsumerRegistry
-        const disposers = [...references].map(reference =>
-          consumers.registerMcpServer(config.serverName, reference))
-        return () => {
-          for (const dispose of disposers) dispose()
-        }
-      })
-    }
-  }
 
   // The supervisor owns the client/transport generations, the reconnect
   // loop, and the live tool registrations; disposal stops reconnection,

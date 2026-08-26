@@ -379,6 +379,27 @@ describe('Openloop credential consumer wiring', () => {
     await fiber.dispose()
     expect(dispose).toHaveBeenCalledTimes(1)
   })
+
+  it('aborts activation before publishing routes when initial consumer registration fails', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.provide('credentialConsumers', {
+      registerPiAiModels: vi.fn(() => {
+        throw new Error('consumer registry refused pi-ai')
+      }),
+    } as never)
+
+    const failure = await ctx.plugin(LlmPiAi, {
+      providers: {
+        openai: { apiKeyEnv: 'OPENAI_API_KEY' },
+      },
+    }).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toMatch(/consumer registry refused pi-ai/)
+    expect(ctx.llm.listProviders()).toEqual([])
+    expect(ctx.llm.listConfigurableProviders()).toEqual([])
+  })
 })
 
 describe('provider profile lifecycle', () => {

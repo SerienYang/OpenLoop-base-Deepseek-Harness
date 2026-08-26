@@ -437,7 +437,10 @@ describe('web-search-deepseek plugin registration', () => {
 
   it('registers and releases its exact built-in credential consumer', async () => {
     const disposeConsumer = vi.fn()
-    const registerDeepSeekWebSearch = vi.fn(() => disposeConsumer)
+    const registerDeepSeekWebSearch = vi.fn(() => ({
+      replace: vi.fn(),
+      dispose: disposeConsumer,
+    }))
     const ctx = new Context()
     await ctx.plugin(WebRuntime, { searchProvider: DEEPSEEK_PROVIDER_ID })
     ctx.provide('credentialConsumers', { registerDeepSeekWebSearch } as never)
@@ -450,11 +453,30 @@ describe('web-search-deepseek plugin registration', () => {
     expect(disposeConsumer).toHaveBeenCalledTimes(1)
   })
 
+  it('aborts activation before publishing the search provider when initial consumer registration fails', async () => {
+    const ctx = new Context()
+    await ctx.plugin(WebRuntime, { searchProvider: DEEPSEEK_PROVIDER_ID })
+    ctx.provide('credentialConsumers', {
+      registerDeepSeekWebSearch: vi.fn(() => {
+        throw new Error('consumer registry refused Web Search')
+      }),
+    } as never)
+
+    const failure = await ctx.plugin(deepseekPlugin, {
+      apiKeyEnv: 'SEARCH_INITIAL_KEY',
+    }).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toMatch(/consumer registry refused Web Search/)
+    await expect(ctx.web.search({ query: 'q' }))
+      .rejects.toThrow(expect.objectContaining({ code: 'WEB_PROVIDER_CONFIGURED_MISSING' }))
+  })
+
   it('moves its registration with a replaced optional consumer registry', async () => {
     const firstDispose = vi.fn()
     const secondDispose = vi.fn()
-    const firstRegister = vi.fn(() => firstDispose)
-    const secondRegister = vi.fn(() => secondDispose)
+    const firstRegister = vi.fn(() => ({ replace: vi.fn(), dispose: firstDispose }))
+    const secondRegister = vi.fn(() => ({ replace: vi.fn(), dispose: secondDispose }))
     const ctx = new Context()
     await ctx.plugin(WebRuntime, { searchProvider: DEEPSEEK_PROVIDER_ID })
     const fiber = ctx.plugin(deepseekPlugin, { apiKeyEnv: 'SEARCH_DYNAMIC_KEY' })

@@ -43,7 +43,10 @@ export const inject = ['web']
 const DEFAULT_API_KEY_ENV = 'DEEPSEEK_API_KEY'
 
 interface CredentialConsumerRegistry {
-  registerDeepSeekWebSearch(reference: ReturnType<typeof credentialRef>): () => void
+  registerDeepSeekWebSearch(reference: ReturnType<typeof credentialRef>): {
+    replace(reference: ReturnType<typeof credentialRef>): void
+    dispose(): void
+  }
 }
 
 /** Plugin config (all optional — `apply` fills env-var and constant defaults). */
@@ -130,29 +133,59 @@ function resolveOptions(ctx: Context, config: Config): DeepSeekSearchProviderOpt
 /** Register the DeepSeek search provider with `ctx.web`. */
 export function apply(ctx: Context, config: Config): void {
   let current: () => Config = () => config
-  let ensureCredentialConsumer = (): void => {}
+  const desiredCredentialReference = (): ReturnType<typeof credentialRef> | undefined => {
+    const source = current()
+    return source.apiKey !== undefined && source.apiKey.length > 0
+      ? undefined
+      : credentialRef(source.apiKeyEnv ?? DEFAULT_API_KEY_ENV)
+  }
+  let consumerRegistry: CredentialConsumerRegistry | undefined
+  let consumerRegistration: ReturnType<CredentialConsumerRegistry['registerDeepSeekWebSearch']>
+    | undefined
+  let consumerReference: ReturnType<typeof credentialRef> | undefined
+  const bindCredentialConsumers = (consumers: CredentialConsumerRegistry): void => {
+    if (consumers === consumerRegistry) return
+    const reference = desiredCredentialReference()
+    const next = reference === undefined
+      ? undefined
+      : consumers.registerDeepSeekWebSearch(reference)
+    const previous = consumerRegistration
+    consumerRegistry = consumers
+    consumerRegistration = next
+    consumerReference = reference
+    previous?.dispose()
+  }
+  const ensureCredentialConsumer = (): void => {
+    if (consumerRegistry === undefined) return
+    const reference = desiredCredentialReference()
+    if (reference === consumerReference) return
+    if (reference === undefined) {
+      consumerRegistration?.dispose()
+      consumerRegistration = undefined
+    } else if (consumerRegistration === undefined) {
+      consumerRegistration = consumerRegistry.registerDeepSeekWebSearch(reference)
+    } else {
+      consumerRegistration.replace(reference)
+    }
+    consumerReference = reference
+  }
+  const initialConsumers = ctx.get('credentialConsumers') as CredentialConsumerRegistry | undefined
+  if (initialConsumers !== undefined) bindCredentialConsumers(initialConsumers)
+  ctx.effect(() => () => {
+    consumerRegistration?.dispose()
+    consumerRegistration = undefined
+    consumerReference = undefined
+    consumerRegistry = undefined
+  }, 'web-search-deepseek: credential consumer')
   ctx.inject(['credentialConsumers'], (consumerCtx) => {
     const consumers = consumerCtx.get('credentialConsumers') as CredentialConsumerRegistry
-    let consumerReference: ReturnType<typeof credentialRef> | undefined
-    let removeConsumer: (() => void) | undefined
-    const synchronize = (): void => {
-      const source = current()
-      const reference = source.apiKey !== undefined && source.apiKey.length > 0
-        ? undefined
-        : credentialRef(source.apiKeyEnv ?? DEFAULT_API_KEY_ENV)
-      if (reference === consumerReference) return
-      removeConsumer?.()
-      removeConsumer = undefined
-      if (reference !== undefined) {
-        removeConsumer = consumers.registerDeepSeekWebSearch(reference)
-      }
-      consumerReference = reference
-    }
-    ensureCredentialConsumer = synchronize
-    synchronize()
+    bindCredentialConsumers(consumers)
     return () => {
-      if (ensureCredentialConsumer === synchronize) ensureCredentialConsumer = () => {}
-      removeConsumer?.()
+      if (consumerRegistry !== consumers) return
+      consumerRegistration?.dispose()
+      consumerRegistration = undefined
+      consumerReference = undefined
+      consumerRegistry = undefined
     }
   })
   installSettingsSection(ctx, WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, Config, config, {

@@ -79,11 +79,10 @@ describe('web-search-deepseek settings section', () => {
   it('registers only the credential reference that actually wins after settings changes', async () => {
     const firstDispose = vi.fn()
     const secondDispose = vi.fn()
-    const thirdDispose = vi.fn()
+    const secondReplace = vi.fn()
     const registerDeepSeekWebSearch = vi.fn()
-      .mockReturnValueOnce(firstDispose)
-      .mockReturnValueOnce(secondDispose)
-      .mockReturnValueOnce(thirdDispose)
+      .mockReturnValueOnce({ replace: vi.fn(), dispose: firstDispose })
+      .mockReturnValueOnce({ replace: secondReplace, dispose: secondDispose })
     const ctx = new Context()
     await ctx.plugin(WebRuntime, {})
     await ctx.plugin(MemorySettings)
@@ -119,14 +118,40 @@ describe('web-search-deepseek settings section', () => {
       apiKeyEnv: 'ROTATED_REFERENCE',
     })
     await vi.waitFor(() => {
-      expect(secondDispose).toHaveBeenCalledTimes(1)
-      expect(registerDeepSeekWebSearch).toHaveBeenCalledTimes(3)
+      expect(secondReplace).toHaveBeenCalledWith(credentialRef('ROTATED_REFERENCE'))
     })
-    expect(registerDeepSeekWebSearch)
-      .toHaveBeenLastCalledWith(credentialRef('ROTATED_REFERENCE'))
+    expect(registerDeepSeekWebSearch).toHaveBeenCalledTimes(2)
 
     await pluginFiber.dispose()
-    expect(thirdDispose).toHaveBeenCalledTimes(1)
+    expect(secondDispose).toHaveBeenCalledTimes(1)
+    await ctx.fiber.dispose()
+  })
+
+  it('keeps the prior consumer after a refused reference replacement and survives a revert', async () => {
+    let activeReference = credentialRef('ACTIVE_REFERENCE')
+    const replace = vi.fn((reference: ReturnType<typeof credentialRef>) => {
+      if (reference === 'REJECTED_REFERENCE') throw new Error('consumer capacity exceeded')
+      activeReference = reference
+    })
+    const ctx = new Context()
+    await ctx.plugin(WebRuntime, {})
+    await ctx.plugin(MemorySettings)
+    ctx.provide('credentialConsumers', {
+      registerDeepSeekWebSearch: vi.fn((reference: ReturnType<typeof credentialRef>) => {
+        activeReference = reference
+        return { replace, dispose: vi.fn() }
+      }),
+    } as never)
+    await ctx.plugin(deepseekPlugin, { apiKeyEnv: 'ACTIVE_REFERENCE' })
+
+    await ctx.settings.update(WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, {
+      apiKeyEnv: 'REJECTED_REFERENCE',
+    })
+    expect(activeReference).toBe(credentialRef('ACTIVE_REFERENCE'))
+
+    await ctx.settings.replace(WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, {})
+    expect(activeReference).toBe(credentialRef('ACTIVE_REFERENCE'))
+    expect(replace).toHaveBeenCalledTimes(1)
     await ctx.fiber.dispose()
   })
 

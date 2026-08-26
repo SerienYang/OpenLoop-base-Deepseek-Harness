@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import {
   createLaunchEnvironmentSnapshot,
   DSH_LAUNCH_ENVIRONMENT_KEY,
@@ -157,6 +157,44 @@ describe('CredentialConsumerRegistry', () => {
     expect(registry.planDeletion(other).consumers).toEqual([])
   })
 
+  it('replaces the DeepSeek model reference atomically and remains reusable after refusal', () => {
+    const registry = new CredentialConsumerRegistry()
+    const other = credentialRef('OTHER_KEY')
+    const blockers = registry.registerPiAiModels(
+      Array.from({ length: MAX_CREDENTIAL_CONSUMERS }, (_, index) => ({
+        routeId: `blocked-${index}`,
+        reference: other,
+      })),
+    )
+    const registration = registry.registerDeepSeekModel(REF)
+
+    expect(() => { registration.replace(other) }).toThrow(/capacity/)
+    expect(registry.planDeletion(REF).consumers.map(consumer => consumer.ownerId))
+      .toEqual([DEEPSEEK_MODEL_OWNER_ID])
+
+    blockers.replace([])
+    registration.replace(other)
+    expect(registry.planDeletion(REF).consumers).toEqual([])
+    expect(registry.planDeletion(other).consumers.map(consumer => consumer.ownerId))
+      .toEqual([DEEPSEEK_MODEL_OWNER_ID])
+    registration.dispose()
+    expect(registry.planDeletion(other).consumers).toEqual([])
+  })
+
+  it('replaces the DeepSeek Web Search reference atomically', () => {
+    const registry = new CredentialConsumerRegistry()
+    const other = credentialRef('OTHER_KEY')
+    const registration = registry.registerDeepSeekWebSearch(REF)
+
+    registration.replace(other)
+
+    expect(registry.planDeletion(REF).consumers).toEqual([])
+    expect(registry.planDeletion(other).consumers.map(consumer => consumer.ownerId))
+      .toEqual([DEEPSEEK_WEB_SEARCH_OWNER_ID])
+    registration.dispose()
+    expect(registry.planDeletion(other).consumers).toEqual([])
+  })
+
   it('rolls back an entire pi-ai batch when any owner collides', () => {
     const registry = new CredentialConsumerRegistry()
     registry.registerPiAiModel('taken', REF)
@@ -285,9 +323,9 @@ describe('CredentialConsumerRegistry', () => {
     const registry = new CredentialConsumerRegistry()
     const keychain = bridge()
     const provider = new KeychainCredentialProvider(new Context(), { bridge: keychain })
-    const remove = registry.registerDeepSeekModel(REF)
+    const registration = registry.registerDeepSeekModel(REF)
 
-    remove()
+    registration.dispose()
 
     await expect(provider.resolve(REF)).resolves.toMatchObject({ value: 'still-present' })
     expect(keychain.deleteCredentialWithConfirmation).not.toHaveBeenCalled()
@@ -328,10 +366,18 @@ describe('CredentialConsumerRegistry', () => {
     expect(keychain.deleteCredentialWithConfirmation).toHaveBeenCalledTimes(1)
   })
 
-  it('reports native-confirmed Keychain writability through browser operations only', async () => {
+  it('reports the native facade read-only until its mutation UI is installed', async () => {
     const registry = new CredentialConsumerRegistry()
     registry.registerDeepSeekModel(REF)
     const keychain = bridge()
+    const describeCredential = vi.fn(() => Promise.resolve({
+      configured: true,
+      source: 'keychain' as const,
+      writable: false,
+    }))
+    const openCredentialReplacement = vi.spyOn(keychain, 'openCredentialReplacement')
+    const deleteCredentialWithConfirmation = vi.spyOn(keychain, 'deleteCredentialWithConfirmation')
+    keychain.describeCredential = describeCredential
     const provider = new KeychainCredentialProvider(new Context(), { bridge: keychain })
     const operations = new OpenloopCredentialOperations(provider, registry, keychain)
 
@@ -343,9 +389,12 @@ describe('CredentialConsumerRegistry', () => {
     await expect(operations.describeCredential(REF)).resolves.toEqual({
       configured: true,
       source: 'keychain',
-      writable: true,
+      writable: false,
     })
-    await expect(operations.openCredentialReplacement(REF)).resolves.toBe('cancelled')
+    await expect(operations.openCredentialReplacement(REF)).rejects.toThrow(/read-only/)
+    await expect(operations.deleteCredential(REF)).rejects.toThrow(/read-only/)
+    expect(openCredentialReplacement).not.toHaveBeenCalled()
+    expect(deleteCredentialWithConfirmation).not.toHaveBeenCalled()
   })
 
   it('keeps a legacy-winning reference read-only in browser operations', async () => {
@@ -432,5 +481,131 @@ describe('CredentialConsumerRegistry', () => {
     await expect(operations.openCredentialReplacement(REF)).rejects.toThrow(/read-only environment/)
     await expect(operations.deleteCredential(REF)).rejects.toThrow(/read-only environment/)
     expect(keychain.deleteCredentialWithConfirmation).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['describe', (operations: OpenloopCredentialOperations, signal: AbortSignal) =>
+      operations.describeCredential(REF, signal)],
+    ['replacement', (operations: OpenloopCredentialOperations, signal: AbortSignal) =>
+      operations.openCredentialReplacement(REF, signal)],
+    ['delete', (operations: OpenloopCredentialOperations, signal: AbortSignal) =>
+      operations.deleteCredential(REF, signal)],
+  ] as const)('aborts %s promptly while provider preflight stalls and observes late rejection', async (
+    _name,
+    start,
+  ) => {
+    const stalled: PromiseWithResolvers<never> = Promise.withResolvers()
+    const describe = vi.fn(() => stalled.promise)
+    const registry = new CredentialConsumerRegistry()
+    registry.registerDeepSeekModel(REF)
+    const keychain = bridge()
+    const nativeDescribe = vi.spyOn(keychain, 'describeCredential')
+    const openCredentialReplacement = vi.spyOn(keychain, 'openCredentialReplacement')
+    const deleteCredentialWithConfirmation = vi.spyOn(keychain, 'deleteCredentialWithConfirmation')
+    const operations = new OpenloopCredentialOperations(
+      { describe } as unknown as CredentialProvider,
+      registry,
+      keychain,
+    )
+    const controller = new AbortController()
+    const pending = start(operations, controller.signal)
+
+    controller.abort(new Error('private abort reason'))
+
+    const failure = await Promise.race([
+      pending.then(() => undefined, (error: unknown) => error),
+      new Promise<never>((_resolve, reject) => {
+        setTimeout(() => { reject(new Error('credential preflight did not abort promptly')) }, 100)
+      }),
+    ])
+    expect(failure).toBeInstanceOf(DOMException)
+    expect(failure).toMatchObject({ name: 'AbortError' })
+    expect(String(failure)).not.toContain('private abort reason')
+    expect(nativeDescribe).not.toHaveBeenCalled()
+    expect(openCredentialReplacement).not.toHaveBeenCalled()
+    expect(deleteCredentialWithConfirmation).not.toHaveBeenCalled()
+
+    stalled.reject(new Error('late private provider rejection'))
+    await Promise.resolve()
+  })
+
+  it.each([
+    ['describe', (operations: OpenloopCredentialOperations, signal: AbortSignal) =>
+      operations.describeCredential(REF, signal)],
+    ['replacement', (operations: OpenloopCredentialOperations, signal: AbortSignal) =>
+      operations.openCredentialReplacement(REF, signal)],
+    ['delete', (operations: OpenloopCredentialOperations, signal: AbortSignal) =>
+      operations.deleteCredential(REF, signal)],
+  ] as const)('aborts %s promptly while native preflight stalls and observes late rejection', async (
+    _name,
+    start,
+  ) => {
+    const stalled: PromiseWithResolvers<never> = Promise.withResolvers()
+    const registry = new CredentialConsumerRegistry()
+    registry.registerDeepSeekModel(REF)
+    const keychain = bridge()
+    const describeCredential = vi.fn(() => stalled.promise)
+    const openCredentialReplacement = vi.spyOn(keychain, 'openCredentialReplacement')
+    const deleteCredentialWithConfirmation = vi.spyOn(keychain, 'deleteCredentialWithConfirmation')
+    keychain.describeCredential = describeCredential
+    const provider = {
+      describe: vi.fn(() => Promise.resolve({ configured: false, writable: false })),
+    } as unknown as CredentialProvider
+    const operations = new OpenloopCredentialOperations(
+      provider,
+      registry,
+      keychain,
+    )
+    const controller = new AbortController()
+    const pending = start(operations, controller.signal)
+    await vi.waitFor(() => { expect(describeCredential).toHaveBeenCalledWith(REF, controller.signal) })
+
+    controller.abort(new Error('private abort reason'))
+
+    const failure = await Promise.race([
+      pending.then(() => undefined, (error: unknown) => error),
+      new Promise<never>((_resolve, reject) => {
+        setTimeout(() => { reject(new Error('credential preflight did not abort promptly')) }, 100)
+      }),
+    ])
+    expect(failure).toBeInstanceOf(DOMException)
+    expect(failure).toMatchObject({ name: 'AbortError' })
+    expect(String(failure)).not.toContain('private abort reason')
+    expect(openCredentialReplacement).not.toHaveBeenCalled()
+    expect(deleteCredentialWithConfirmation).not.toHaveBeenCalled()
+
+    stalled.reject(new Error('late private native rejection'))
+    await Promise.resolve()
+  })
+
+  it.each([
+    ['describe', (operations: OpenloopCredentialOperations, signal: AbortSignal) =>
+      operations.describeCredential(REF, signal)],
+    ['replacement', (operations: OpenloopCredentialOperations, signal: AbortSignal) =>
+      operations.openCredentialReplacement(REF, signal)],
+    ['delete', (operations: OpenloopCredentialOperations, signal: AbortSignal) =>
+      operations.deleteCredential(REF, signal)],
+  ] as const)('rejects pre-aborted %s before starting preflight', async (_name, start) => {
+    const describe = vi.fn(() => Promise.resolve({ configured: false, writable: false }))
+    const registry = new CredentialConsumerRegistry()
+    registry.registerDeepSeekModel(REF)
+    const keychain = bridge()
+    const nativeDescribe = vi.spyOn(keychain, 'describeCredential')
+    const operations = new OpenloopCredentialOperations(
+      { describe } as unknown as CredentialProvider,
+      registry,
+      keychain,
+    )
+    const controller = new AbortController()
+    controller.abort(new Error('private abort reason'))
+
+    const failure = await start(operations, controller.signal)
+      .then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(DOMException)
+    expect(failure).toMatchObject({ name: 'AbortError' })
+    expect(String(failure)).not.toContain('private abort reason')
+    expect(describe).not.toHaveBeenCalled()
+    expect(nativeDescribe).not.toHaveBeenCalled()
   })
 })

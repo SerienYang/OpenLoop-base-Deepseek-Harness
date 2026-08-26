@@ -604,7 +604,11 @@ describe('DeepSeekAdapter against a mock server', () => {
 describe('Openloop credential consumer wiring', () => {
   it('registers the exact DeepSeek model-route owner for its live credential reference', async () => {
     const disposeConsumer = vi.fn()
-    const registerDeepSeekModel = vi.fn(() => disposeConsumer)
+    const replaceConsumer = vi.fn()
+    const registerDeepSeekModel = vi.fn(() => ({
+      replace: replaceConsumer,
+      dispose: disposeConsumer,
+    }))
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     ctx.provide('credentialConsumers', { registerDeepSeekModel } as never)
@@ -620,11 +624,31 @@ describe('Openloop credential consumer wiring', () => {
     expect(disposeConsumer).toHaveBeenCalledTimes(1)
   })
 
+  it('aborts activation before publishing the model provider when initial consumer registration fails', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.provide('credentialConsumers', {
+      registerDeepSeekModel: vi.fn(() => {
+        throw new Error('consumer registry refused DeepSeek')
+      }),
+    } as never)
+
+    const failure = await ctx.plugin(LlmDeepSeek, {
+      apiKeyEnv: 'DEEPSEEK_INITIAL_KEY',
+      baseURL: 'http://127.0.0.1:1',
+    }).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toMatch(/consumer registry refused DeepSeek/)
+    expect(ctx.llm.listProviders()).toEqual([])
+    expect(ctx.llm.listConfigurableProviders()).toEqual([])
+  })
+
   it('moves its registration with a replaced optional consumer registry', async () => {
     const firstDispose = vi.fn()
     const secondDispose = vi.fn()
-    const firstRegister = vi.fn(() => firstDispose)
-    const secondRegister = vi.fn(() => secondDispose)
+    const firstRegister = vi.fn(() => ({ replace: vi.fn(), dispose: firstDispose }))
+    const secondRegister = vi.fn(() => ({ replace: vi.fn(), dispose: secondDispose }))
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     const fiber = ctx.plugin(LlmDeepSeek, {

@@ -46,13 +46,19 @@ export class OpenloopCredentialOperations implements CredentialBrowserOperations
    * @param reference - Browser-supplied credential reference.
    * @returns Value-free credential status.
    */
-  async describeCredential(reference: string): Promise<CredentialInfo> {
+  async describeCredential(reference: string, signal?: AbortSignal): Promise<CredentialInfo> {
     const ref = this.#requiredPlan(reference).reference
-    const providerInfo = await this.provider.describe(ref)
+    const providerInfo = await abortablePreflight(
+      () => this.provider.describe(ref),
+      signal,
+    )
     if (providerInfo.source === 'environment' || providerInfo.source === 'legacy-file') {
       return providerInfo
     }
-    const nativeInfo = await this.bridge.describeCredential(ref)
+    const nativeInfo = await abortablePreflight(
+      () => this.bridge.describeCredential(ref, signal),
+      signal,
+    )
     return nativeInfo.configured
       ? { configured: true, source: 'keychain', writable: nativeInfo.writable }
       : { configured: false, writable: nativeInfo.writable }
@@ -69,7 +75,7 @@ export class OpenloopCredentialOperations implements CredentialBrowserOperations
     signal?: AbortSignal,
   ): Promise<'saved' | 'cancelled'> {
     const plan = this.#requiredPlan(reference)
-    await this.#assertWritable(plan.reference)
+    await this.#assertWritable(plan.reference, signal)
     return this.bridge.openCredentialReplacement(plan.reference, signal)
   }
 
@@ -84,7 +90,7 @@ export class OpenloopCredentialOperations implements CredentialBrowserOperations
     signal?: AbortSignal,
   ): Promise<'deleted' | 'cancelled'> {
     const plan = this.#requiredPlan(reference)
-    await this.#assertWritable(plan.reference)
+    await this.#assertWritable(plan.reference, signal)
     return this.bridge.deleteCredentialWithConfirmation(plan, signal)
   }
 
@@ -97,10 +103,19 @@ export class OpenloopCredentialOperations implements CredentialBrowserOperations
     return plan
   }
 
-  async #assertWritable(reference: CredentialDeletionPlan['reference']): Promise<void> {
-    const info = await this.provider.describe(reference)
+  async #assertWritable(
+    reference: CredentialDeletionPlan['reference'],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const info = await abortablePreflight(
+      () => this.provider.describe(reference),
+      signal,
+    )
     if (info.source !== 'environment' && info.source !== 'legacy-file') {
-      const nativeInfo = await this.bridge.describeCredential(reference)
+      const nativeInfo = await abortablePreflight(
+        () => this.bridge.describeCredential(reference, signal),
+        signal,
+      )
       if (nativeInfo.writable) return
     }
     throw new Error(
@@ -109,4 +124,45 @@ export class OpenloopCredentialOperations implements CredentialBrowserOperations
         : 'credential source is read-only',
     )
   }
+}
+
+/**
+ * Race one non-secret preflight against cancellation without abandoning the
+ * underlying promise's rejection handler.
+ */
+function abortablePreflight<T>(
+  start: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (signal?.aborted === true) return Promise.reject(credentialAbortError())
+  if (signal === undefined) return Promise.resolve().then(start)
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    const finish = (settle: (value: T) => void, value: T): void => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', onAbort)
+      settle(value)
+    }
+    const fail = (error: unknown): void => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', onAbort)
+      reject(error instanceof Error ? error : new Error('credential preflight failed'))
+    }
+    const onAbort = (): void => { fail(credentialAbortError()) }
+    signal.addEventListener('abort', onAbort, { once: true })
+    if (signal.aborted) {
+      onAbort()
+      return
+    }
+    Promise.resolve().then(start).then(
+      (value) => { finish(resolve, value) },
+      (error: unknown) => { fail(error) },
+    )
+  })
+}
+
+function credentialAbortError(): DOMException {
+  return new DOMException('Credential operation aborted', 'AbortError')
 }

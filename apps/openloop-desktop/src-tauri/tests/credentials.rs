@@ -30,6 +30,7 @@ use openloop_desktop_lib::{
     launcher::capture_process_identity,
     update::channel::ReleaseChannel,
 };
+use security_framework::passwords::{set_generic_password_options, PasswordOptions};
 use serde_json::json;
 use tauri::Url;
 use uuid::Uuid;
@@ -130,6 +131,33 @@ fn credential_bridge_dispatch_is_strict_and_keeps_resolution_host_only() {
     );
     assert_eq!(malformed["ok"], false);
     assert_eq!(malformed["error"]["code"], "invalid_request");
+}
+
+#[test]
+fn native_credential_status_is_read_only_until_task_1_4_installs_mutation_ui() {
+    let account = unique_account("native_read_only");
+    let _cleanup = KeychainCleanup::new(account.clone());
+    let reference = account
+        .as_str()
+        .strip_prefix("credential:")
+        .expect("credential account prefix");
+
+    let missing = dispatch_credential("describeCredential", json!({ "ref": reference }));
+    assert_eq!(missing["ok"], true);
+    assert_eq!(
+        missing["result"],
+        json!({ "configured": false, "writable": false })
+    );
+
+    KeychainStore::new(ReleaseChannel::Test)
+        .set(&account, b"configured")
+        .expect("store configured credential");
+    let configured = dispatch_credential("describeCredential", json!({ "ref": reference }));
+    assert_eq!(configured["ok"], true);
+    assert_eq!(
+        configured["result"],
+        json!({ "configured": true, "source": "keychain", "writable": false })
+    );
 }
 
 #[test]
@@ -562,6 +590,27 @@ fn maximum_secret_resolves_through_a_bounded_bridge_response_frame() {
         decoded.response.result.expect("credential result"),
         serde_json::to_value(maximum).expect("maximum credential JSON")
     );
+}
+
+#[test]
+fn oversized_existing_keychain_value_fails_before_bridge_serialization() {
+    let account = unique_account("bridge_oversized");
+    let _cleanup = KeychainCleanup::new(account.clone());
+    let store = KeychainStore::new(ReleaseChannel::Test);
+    let mut options = PasswordOptions::new_generic_password(store.service(), account.as_str());
+    options.set_access_synchronized(Some(false));
+    set_generic_password_options(&vec![b'x'; MAX_SECRET_BYTES + 1], options)
+        .expect("seed oversized external Keychain item");
+    let reference = account
+        .as_str()
+        .strip_prefix("credential:")
+        .expect("credential account prefix");
+
+    let response = dispatch_credential("resolveCredential", json!({ "ref": reference }));
+
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"]["code"], "credential_failure");
+    assert!(serde_json::to_vec(&response).expect("response JSON").len() < 1024);
 }
 
 #[test]

@@ -226,6 +226,32 @@ describe('apply (plugin lifecycle)', () => {
     expect(disposeConsumer).toHaveBeenCalledTimes(1)
   })
 
+  it('aborts activation before connecting or publishing tools when initial consumer registration fails', async () => {
+    ctx.provide('credentialConsumers', {
+      registerMcpServer: vi.fn(() => {
+        throw new Error('consumer registry refused MCP')
+      }),
+    } as never)
+
+    const failure = await ctx.plugin({ name: 'mcp-client-rejected-credential-owner', inject, apply }, {
+      transport: 'streamable-http',
+      serverName: 'rejected',
+      url: 'https://mcp.example.test',
+      headers: {},
+      credentialHeaders: {
+        Authorization: { ref: 'REJECTED_MCP_TOKEN', prefix: 'Bearer ' },
+      },
+      toolCallTimeoutMs: 60_000,
+      failOnStartupError: false,
+    }).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toMatch(/consumer registry refused MCP/)
+    expect(mockConnect).not.toHaveBeenCalled()
+    expect(mockListTools).not.toHaveBeenCalled()
+    expect(ctx.tools.get('mcp__rejected__remote')).toBeUndefined()
+  })
+
   it('moves its credential consumer registration with registry service replacement', async () => {
     const firstDispose = vi.fn()
     const secondDispose = vi.fn()

@@ -40,7 +40,11 @@ interface Harness {
  * flowing through the in-process write path, which is deterministic; external
  * file watching is the providers' own covered concern.
  */
-async function boot(dir: string, config: object): Promise<Harness> {
+async function boot(
+  dir: string,
+  config: object,
+  credentialConsumers?: object,
+): Promise<Harness> {
   vi.stubEnv('DSH_HOME', dir)
   const ctx = new Context()
   cleanups.push(async () => {
@@ -50,6 +54,9 @@ async function boot(dir: string, config: object): Promise<Harness> {
   const settingsFiber = ctx.plugin(FileSettingsProvider, { path: join(dir, 'settings.yaml'), watch: false })
   await settingsFiber
   await ctx.plugin(LocalCredentialProvider, { path: join(dir, '.credentials.yaml'), watch: false })
+  if (credentialConsumers !== undefined) {
+    ctx.provide('credentialConsumers', credentialConsumers as never)
+  }
   await ctx.plugin(LlmDeepSeek, config)
   return { ctx, settingsFiber }
 }
@@ -148,6 +155,32 @@ describe('request-level dynamic configuration', () => {
     })
     expect(ctx.llm.listProviders()).toEqual([{ id: 'deepseek-official', name: 'DeepSeek' }])
     expect(observed).toEqual([['deepseek-official']])
+  })
+
+  it('keeps the prior consumer after a refused reference replacement and survives a revert', async () => {
+    const dir = await home()
+    let activeReference = credentialRef('DEEPSEEK_ACTIVE_KEY')
+    const replace = vi.fn((reference: ReturnType<typeof credentialRef>) => {
+      if (reference === 'DEEPSEEK_REJECTED_KEY') throw new Error('consumer capacity exceeded')
+      activeReference = reference
+    })
+    const { ctx } = await boot(
+      dir,
+      { apiKeyEnv: 'DEEPSEEK_ACTIVE_KEY', baseURL: 'http://127.0.0.1:1' },
+      {
+        registerDeepSeekModel(reference: ReturnType<typeof credentialRef>) {
+          activeReference = reference
+          return { replace, dispose: vi.fn() }
+        },
+      },
+    )
+
+    await ctx.settings.update(NS, { apiKeyEnv: 'DEEPSEEK_REJECTED_KEY' })
+    expect(activeReference).toBe(credentialRef('DEEPSEEK_ACTIVE_KEY'))
+
+    await ctx.settings.replace(NS, {})
+    expect(activeReference).toBe(credentialRef('DEEPSEEK_ACTIVE_KEY'))
+    expect(replace).toHaveBeenCalledTimes(1)
   })
 
   it('keeps the last good options when a settings snapshot fails beyond-schema validation', async () => {

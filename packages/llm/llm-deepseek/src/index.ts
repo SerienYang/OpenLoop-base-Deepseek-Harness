@@ -115,7 +115,10 @@ const BASE_URL_ENV = 'DEEPSEEK_BASE_URL'
 export type ResolvedDeepSeekOptions = DeepSeekConnectionOptions
 
 interface CredentialConsumerRegistry {
-  registerDeepSeekModel(reference: ReturnType<typeof credentialRef>): () => void
+  registerDeepSeekModel(reference: ReturnType<typeof credentialRef>): {
+    replace(reference: ReturnType<typeof credentialRef>): void
+    dispose(): void
+  }
 }
 
 /** Resolve, validate, and detach the advisory model catalog. */
@@ -226,24 +229,43 @@ export function apply(ctx: Context, config: Config): void {
   }
   options()
 
-  let ensureCredentialConsumer = (): void => {}
+  let consumerRegistry: CredentialConsumerRegistry | undefined
+  let consumerRegistration: ReturnType<CredentialConsumerRegistry['registerDeepSeekModel']>
+    | undefined
+  let consumerReference: ReturnType<typeof credentialRef> | undefined
+  const bindCredentialConsumers = (consumers: CredentialConsumerRegistry): void => {
+    if (consumers === consumerRegistry) return
+    const reference = options().apiKeyEnv
+    const next = consumers.registerDeepSeekModel(reference)
+    const previous = consumerRegistration
+    consumerRegistry = consumers
+    consumerRegistration = next
+    consumerReference = reference
+    previous?.dispose()
+  }
+  const ensureCredentialConsumer = (): void => {
+    const reference = options().apiKeyEnv
+    if (consumerRegistration === undefined || reference === consumerReference) return
+    consumerRegistration.replace(reference)
+    consumerReference = reference
+  }
+  const initialConsumers = ctx.get('credentialConsumers') as CredentialConsumerRegistry | undefined
+  if (initialConsumers !== undefined) bindCredentialConsumers(initialConsumers)
+  ctx.effect(() => () => {
+    consumerRegistration?.dispose()
+    consumerRegistration = undefined
+    consumerReference = undefined
+    consumerRegistry = undefined
+  }, 'llm-deepseek: credential consumer')
   ctx.inject(['credentialConsumers'], (consumerCtx) => {
     const consumers = consumerCtx.get('credentialConsumers') as CredentialConsumerRegistry
-    let consumerReference: ReturnType<typeof credentialRef> | undefined
-    let removeConsumer: (() => void) | undefined
-    const synchronize = (): void => {
-      const reference = options().apiKeyEnv
-      if (reference === consumerReference) return
-      removeConsumer?.()
-      removeConsumer = undefined
-      removeConsumer = consumers.registerDeepSeekModel(reference)
-      consumerReference = reference
-    }
-    ensureCredentialConsumer = synchronize
-    synchronize()
+    bindCredentialConsumers(consumers)
     return () => {
-      if (ensureCredentialConsumer === synchronize) ensureCredentialConsumer = () => {}
-      removeConsumer?.()
+      if (consumerRegistry !== consumers) return
+      consumerRegistration?.dispose()
+      consumerRegistration = undefined
+      consumerReference = undefined
+      consumerRegistry = undefined
     }
   })
 

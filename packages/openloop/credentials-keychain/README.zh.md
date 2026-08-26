@@ -17,8 +17,9 @@ inherited process environment (read-only)
 provider 不缓存或记录凭据值与引用。Bridge 返回值只解码一次，随后立即清空可变字节
 数组和解码时的临时副本。由于直接调用 `CredentialProvider.set()` 或 `unset()` 会
 失败，`CredentialProvider.describe()` 始终报告 `writable: false`。Openloop 的
-浏览器安全 facade 单独报告可写状态：只有原生 Bridge 确认 Keychain 路径可写，且没有
-只读环境变量或 legacy 来源遮蔽时，才会报告可写。
+浏览器安全 facade 单独报告可写状态。由于 Task 1.4 的原生替换 sheet 与删除确认尚未
+安装，Keychain 和未配置 reference 当前均报告 `writable: false`；mutation preflight
+会在两个占位 action 运行前拒绝请求。
 
 Keychain item 使用 Tauri Host 按发布通道选择的 service，account 固定为
 `credential:<CREDENTIAL_REFERENCE>`。provider id 不参与存储身份，因此多个模型
@@ -32,7 +33,10 @@ MCP server 提供固定注册方法，并检查 owner id 冲突。删除计划�
 确定的快照，其中本地化 key 由 Host 指定。浏览器删除请求只携带 credential
 reference，不能提供消费者名称或确认文案。每次单项注册和批量替换都会在发布前以原子
 方式校验：一份计划最多包含 255 个 consumer，UTF-8 JSON 最多为 56 KiB，为经过认证的
-Bridge 信封预留 8 KiB。移除 consumer 注册不会修改 Keychain。
+Bridge 信封预留 8 KiB。移除 consumer 注册不会修改 Keychain。DeepSeek 与 Web Search
+通过单 owner 原子 handle 替换 reference，因此容量检查失败时会保留此前的 reference。
+当 registry 在插件加载时已经存在，DeepSeek、pi-ai、Web Search 和使用 credential 的
+MCP 会先同步注册，再发布模型 provider、搜索 provider、连接或工具。
 
 MCP stdio 的 `env` 保持字面量配置。Streamable HTTP 可以显式配置
 `credentialHeaders`；每次请求会对每个不同的 reference 解析一次，并将同一快照复用于

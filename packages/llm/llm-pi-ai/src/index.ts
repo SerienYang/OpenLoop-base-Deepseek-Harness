@@ -199,6 +199,37 @@ export function apply(ctx: Context, config: Config): void {
   const profiles = (): ReadonlyMap<string, ResolvedPiAiProviderProfile> =>
     registrationProfiles ?? acceptedProfiles
 
+  let consumerRegistry: CredentialConsumerRegistry | undefined
+  let credentialRegistration: ReturnType<CredentialConsumerRegistry['registerPiAiModels']>
+    | undefined
+  const bindCredentialConsumers = (consumers: CredentialConsumerRegistry): void => {
+    if (consumers === consumerRegistry) return
+    const next = consumers.registerPiAiModels(
+      credentialConsumerEntries(acceptedProfiles),
+    )
+    const previous = credentialRegistration
+    consumerRegistry = consumers
+    credentialRegistration = next
+    previous?.dispose()
+  }
+  const initialConsumers = ctx.get('credentialConsumers') as CredentialConsumerRegistry | undefined
+  if (initialConsumers !== undefined) bindCredentialConsumers(initialConsumers)
+  ctx.effect(() => () => {
+    credentialRegistration?.dispose()
+    credentialRegistration = undefined
+    consumerRegistry = undefined
+  }, 'llm-pi-ai: credential consumers')
+  ctx.inject(['credentialConsumers'], (consumerCtx) => {
+    const consumers = consumerCtx.get('credentialConsumers') as CredentialConsumerRegistry
+    bindCredentialConsumers(consumers)
+    return () => {
+      if (consumerRegistry !== consumers) return
+      credentialRegistration?.dispose()
+      credentialRegistration = undefined
+      consumerRegistry = undefined
+    }
+  })
+
   const resolveApiKey = async (
     provider: string,
     profile: ResolvedPiAiProviderProfile,
@@ -335,20 +366,6 @@ export function apply(ctx: Context, config: Config): void {
   }
   const initialProfiles = profiles()
   stageRegistrationFacts(initialProfiles)
-  let credentialRegistration: ReturnType<CredentialConsumerRegistry['registerPiAiModels']>
-    | undefined
-  ctx.inject(['credentialConsumers'], (consumerCtx) => {
-    const consumers = consumerCtx.get('credentialConsumers') as CredentialConsumerRegistry
-    const registration = consumers.registerPiAiModels(
-      credentialConsumerEntries(acceptedProfiles),
-    )
-    credentialRegistration = registration
-    return () => {
-      if (credentialRegistration === registration) credentialRegistration = undefined
-      registration.dispose()
-    }
-  })
-
   installSettingsSection(ctx, NS, Config, config, {
     // Refuse an unserviceable section where it is written: without this a
     // schema-valid profile the adapter cannot serve would be stored and then
