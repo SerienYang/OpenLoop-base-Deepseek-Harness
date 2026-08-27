@@ -339,9 +339,13 @@ describe('authenticated desktop bridge protocol', () => {
       'commitWorkspaceAuthorization',
       'abortWorkspaceAuthorization',
       'getWorkspaceGrantGeneration',
+      'inspectWorkspaceGrant',
+      'markWorkspaceGrantNeedsAuthorization',
+      'restoreWorkspaceGrantReady',
       'confirmWorkspaceRevoke',
       'markWorkspaceGrantRevoking',
       'deleteWorkspaceGrant',
+      'readWorkspaceTransaction',
       'prepareWorkspaceTransaction',
       'advanceWorkspaceTransaction',
       'abortWorkspaceTransaction',
@@ -374,6 +378,51 @@ describe('authenticated desktop bridge protocol', () => {
       .toEqual(BROWSER_SAFE_METHODS)
     expect(remoteMethods(service).map(marker => marker.exportName ?? marker.method))
       .not.toEqual(expect.arrayContaining([...HOST_ONLY_METHODS]))
+  })
+
+  it('routes browser Workspace operations through the DSH authority service', async () => {
+    const ctx = new Context()
+    const authority = {
+      list: vi.fn(async () => [{
+        workspaceId: 'workspace-1',
+        name: 'Project Alpha',
+        state: 'ready' as const,
+      }]),
+      add: vi.fn(async () => ({
+        workspaceId: 'workspace-1',
+        name: 'Project Alpha',
+        state: 'ready' as const,
+      })),
+      reauthorize: vi.fn(async () => ({
+        workspaceId: 'workspace-1',
+        name: 'Project Alpha',
+        state: 'ready' as const,
+      })),
+      revoke: vi.fn(async () => 'revoked' as const),
+    }
+    ctx.provide('workspaceAuthority', authority as never)
+    const call = vi.fn(async () => {
+      throw new Error('Workspace browser calls must not dispatch directly to native')
+    })
+    const client = {
+      call,
+      close: vi.fn(),
+    } as unknown as DesktopBridgeClient
+    const service = new OpenloopDesktopRemoteService(ctx, client)
+    const signal = new AbortController().signal
+
+    await expect(service.listWorkspaceGrants(signal)).resolves.toEqual([
+      { workspaceId: 'workspace-1', name: 'Project Alpha', state: 'ready' },
+    ])
+    await expect(service.authorizeWorkspace(signal)).resolves.toMatchObject({
+      name: 'Project Alpha',
+    })
+    await expect(service.reauthorizeWorkspace('workspace-1', signal)).resolves.toMatchObject({
+      name: 'Project Alpha',
+    })
+    await expect(service.revokeWorkspace('workspace-1', signal)).resolves.toBe('revoked')
+    expect(call).not.toHaveBeenCalled()
+    expect(authority.revoke).toHaveBeenCalledWith('workspace-1')
   })
 
   it('sends an authenticated cancellation request for an aborted call', async () => {

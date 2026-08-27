@@ -52,7 +52,11 @@ use crate::update::{
 };
 #[cfg(target_os = "macos")]
 use crate::workspaces::{
-    bridge::install_workspace_transaction_handlers, journal::WorkspaceJournal,
+    bridge::{install_workspace_authority_handlers, install_workspace_transaction_handlers},
+    confirmation::AppKitWorkspaceRevokeConfirmation,
+    grants::GrantStore,
+    journal::WorkspaceJournal,
+    picker::{AppKitWorkspaceDirectoryPicker, PendingGrantRegistry},
 };
 
 pub mod bridge;
@@ -415,6 +419,23 @@ fn start_runtime(
         .map_err(|error| format!("credential bridge setup failed: {error}"))?;
         let workspace_journal = WorkspaceJournal::open(channel_root, updater_config.channel())
             .map_err(|error| format!("Workspace journal setup failed: {error}"))?;
+        let workspace_grants = GrantStore::open(channel_root, updater_config.channel())
+            .map_err(|error| format!("Workspace grant store setup failed: {error}"))?;
+        let launch_grants = workspace_grants
+            .load_for_launch()
+            .map_err(|error| format!("Workspace grant verification failed: {error}"))?;
+        let mut pending_grants = PendingGrantRegistry::new(secrets.launch_id);
+        pending_grants.inject_launch_grants(launch_grants);
+        let pending_grants = Arc::new(Mutex::new(pending_grants));
+        install_workspace_authority_handlers(
+            &mut tables,
+            secrets.launch_id,
+            workspace_grants,
+            workspace_journal.clone(),
+            pending_grants,
+            Arc::new(AppKitWorkspaceDirectoryPicker::new(app.clone())),
+            Arc::new(AppKitWorkspaceRevokeConfirmation::new(app.clone())),
+        )?;
         install_workspace_transaction_handlers(&mut tables, workspace_journal)?;
         let health_plan = match migration_outcome.transaction_id() {
             Some(transaction_id) => {

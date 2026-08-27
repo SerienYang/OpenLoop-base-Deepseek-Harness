@@ -101,6 +101,11 @@ pub enum WorkspaceGrantError {
         expected: u64,
         actual: u64,
     },
+    StatusConflict {
+        expected: GrantStatus,
+        actual: GrantStatus,
+    },
+    MissingWorkspaceGrant(String),
     InvalidPendingGrant,
     LaunchMismatch,
     PromptUnavailable,
@@ -143,6 +148,15 @@ impl fmt::Display for WorkspaceGrantError {
                     formatter,
                     "generation conflict: expected {expected}, actual {actual}"
                 )
+            }
+            Self::StatusConflict { expected, actual } => {
+                write!(
+                    formatter,
+                    "grant status conflict: expected {expected:?}, actual {actual:?}"
+                )
+            }
+            Self::MissingWorkspaceGrant(workspace_id) => {
+                write!(formatter, "Workspace grant {workspace_id:?} does not exist")
             }
             Self::InvalidPendingGrant => formatter.write_str("pending Workspace grant is invalid"),
             Self::LaunchMismatch => {
@@ -208,6 +222,14 @@ impl GrantStore {
         self.load_locked()
     }
 
+    pub fn get(&self, workspace_id: &str) -> Result<Option<WorkspaceGrant>, WorkspaceGrantError> {
+        Ok(self
+            .load()?
+            .grants
+            .into_iter()
+            .find(|grant| grant.workspace_id == workspace_id))
+    }
+
     fn load_locked(&self) -> Result<GrantSnapshot, WorkspaceGrantError> {
         match read_owner_file_at(self.root.as_raw_fd(), &self.filename, MAX_STORE_BYTES)? {
             Some(bytes) => parse_snapshot(&bytes),
@@ -219,23 +241,28 @@ impl GrantStore {
         self.load()?
             .grants
             .into_iter()
-            .map(|grant| match reopen_verified_grant(&grant) {
-                Ok(verified) => {
-                    let (grant, descriptor) = verified.into_parts();
-                    Ok(LaunchGrant {
-                        grant,
-                        descriptor: Some(descriptor),
-                    })
+            .map(|grant| {
+                let persisted_status = grant.status;
+                match reopen_verified_grant(&grant) {
+                    Ok(verified) => {
+                        let (mut grant, descriptor) = verified.into_parts();
+                        grant.status = persisted_status;
+                        Ok(LaunchGrant {
+                            grant,
+                            descriptor: Some(descriptor),
+                        })
+                    }
+                    Err(error @ WorkspaceGrantError::Verification { .. }) => {
+                        let mut unavailable = grant;
+                        unavailable.status =
+                            error.status().unwrap_or(GrantStatus::NeedsAuthorization);
+                        Ok(LaunchGrant {
+                            grant: unavailable,
+                            descriptor: None,
+                        })
+                    }
+                    Err(error) => Err(error),
                 }
-                Err(error @ WorkspaceGrantError::Verification { .. }) => {
-                    let mut unavailable = grant;
-                    unavailable.status = error.status().unwrap_or(GrantStatus::NeedsAuthorization);
-                    Ok(LaunchGrant {
-                        grant: unavailable,
-                        descriptor: None,
-                    })
-                }
-                Err(error) => Err(error),
             })
             .collect()
     }
@@ -279,6 +306,83 @@ impl GrantStore {
         atomic_write_json_at(self.root.as_raw_fd(), &self.filename, &snapshot)?;
         Ok(snapshot.generation)
     }
+
+    pub fn update_status(
+        &self,
+        workspace_id: &str,
+        expected_status: GrantStatus,
+        next_status: GrantStatus,
+        expected_generation: u64,
+    ) -> Result<u64, WorkspaceGrantError> {
+        let _lock = lock_workspace_root(self.root.as_raw_fd())?;
+        let mut snapshot = self.load_locked()?;
+        assert_generation(&snapshot, expected_generation)?;
+        let grant = snapshot
+            .grants
+            .iter_mut()
+            .find(|grant| grant.workspace_id == workspace_id)
+            .ok_or_else(|| WorkspaceGrantError::MissingWorkspaceGrant(workspace_id.to_owned()))?;
+        if grant.status != expected_status {
+            return Err(WorkspaceGrantError::StatusConflict {
+                expected: expected_status,
+                actual: grant.status,
+            });
+        }
+        snapshot.generation = next_generation(snapshot.generation)?;
+        grant.generation = snapshot.generation;
+        grant.status = next_status;
+        atomic_write_json_at(self.root.as_raw_fd(), &self.filename, &snapshot)?;
+        Ok(snapshot.generation)
+    }
+
+    pub fn delete(
+        &self,
+        workspace_id: &str,
+        expected_status: GrantStatus,
+        expected_generation: u64,
+    ) -> Result<u64, WorkspaceGrantError> {
+        let _lock = lock_workspace_root(self.root.as_raw_fd())?;
+        let mut snapshot = self.load_locked()?;
+        assert_generation(&snapshot, expected_generation)?;
+        let Some(index) = snapshot
+            .grants
+            .iter()
+            .position(|grant| grant.workspace_id == workspace_id)
+        else {
+            return Err(WorkspaceGrantError::MissingWorkspaceGrant(
+                workspace_id.to_owned(),
+            ));
+        };
+        if snapshot.grants[index].status != expected_status {
+            return Err(WorkspaceGrantError::StatusConflict {
+                expected: expected_status,
+                actual: snapshot.grants[index].status,
+            });
+        }
+        snapshot.grants.remove(index);
+        snapshot.generation = next_generation(snapshot.generation)?;
+        atomic_write_json_at(self.root.as_raw_fd(), &self.filename, &snapshot)?;
+        Ok(snapshot.generation)
+    }
+}
+
+fn assert_generation(
+    snapshot: &GrantSnapshot,
+    expected_generation: u64,
+) -> Result<(), WorkspaceGrantError> {
+    if snapshot.generation != expected_generation {
+        return Err(WorkspaceGrantError::GenerationConflict {
+            expected: expected_generation,
+            actual: snapshot.generation,
+        });
+    }
+    Ok(())
+}
+
+fn next_generation(generation: u64) -> Result<u64, WorkspaceGrantError> {
+    generation
+        .checked_add(1)
+        .ok_or_else(|| WorkspaceGrantError::Corrupt("grant generation overflow".to_owned()))
 }
 
 fn parse_snapshot(bytes: &[u8]) -> Result<GrantSnapshot, WorkspaceGrantError> {
@@ -539,6 +643,10 @@ impl LaunchGrant {
 
     pub fn descriptor(&self) -> Option<&OwnedFd> {
         self.descriptor.as_ref()
+    }
+
+    pub(crate) fn into_verified_parts(self) -> Option<(WorkspaceGrant, OwnedFd)> {
+        self.descriptor.map(|descriptor| (self.grant, descriptor))
     }
 }
 

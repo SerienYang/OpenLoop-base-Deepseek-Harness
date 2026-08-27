@@ -1,16 +1,24 @@
 #![cfg(target_os = "macos")]
 
 use std::{
+    collections::VecDeque,
     fs,
     os::unix::fs::{symlink, PermissionsExt},
-    path::Path,
-    sync::{Arc, Barrier},
+    path::{Path, PathBuf},
+    process,
+    sync::{Arc, Barrier, Mutex},
     thread,
 };
 
 use openloop_desktop_lib::{
+    bridge::{
+        protocol::{sign_request, BridgeRequest, BRIDGE_PROTOCOL_VERSION},
+        server::{AuthenticatedBridgeDispatcher, BridgeDispatchTables, PeerIdentity},
+    },
+    launcher::capture_process_identity,
     update::channel::ReleaseChannel,
     workspaces::{
+        bridge::{install_workspace_authority_handlers, install_workspace_transaction_handlers},
         confirmation::{
             confirm_workspace_revoke, CommittedWorkspaceProjection,
             CommittedWorkspaceProjectionResolver, RevokeConfirmation, RevokePresentation,
@@ -20,11 +28,77 @@ use openloop_desktop_lib::{
             WorkspaceGrantError,
         },
         journal::{WorkspaceJournal, WorkspaceTransaction, WorkspaceTransactionKind},
-        picker::PendingGrantRegistry,
+        picker::{PendingGrantRegistry, WorkspaceDirectoryPicker},
     },
 };
 use tempfile::tempdir;
 use uuid::Uuid;
+
+fn dispatch_transaction(
+    journal: WorkspaceJournal,
+    method: &str,
+    payload: serde_json::Value,
+) -> serde_json::Value {
+    let executable = std::env::current_exe().expect("test executable");
+    let launch_id = Uuid::new_v4();
+    let secret: Vec<u8> = (0..32).collect();
+    let peer = PeerIdentity {
+        uid: unsafe { libc::geteuid() },
+        pid: process::id(),
+    };
+    let mut tables = BridgeDispatchTables::unavailable();
+    install_workspace_transaction_handlers(&mut tables, journal).expect("transaction handlers");
+    let dispatcher = AuthenticatedBridgeDispatcher::new(
+        peer.uid,
+        capture_process_identity(process::id(), &executable).expect("process identity"),
+        executable,
+        launch_id,
+        secret.clone(),
+        tables,
+    )
+    .expect("transaction dispatcher");
+    let request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "workspace-transaction-request".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: method.to_owned(),
+        payload,
+    };
+    let response = dispatcher
+        .dispatch(
+            peer,
+            sign_request(request, [7; 32], &secret).expect("signed Workspace request"),
+        )
+        .expect("authenticated Workspace response");
+    serde_json::to_value(response).expect("response JSON")
+}
+
+fn dispatch_workspace(
+    dispatcher: &AuthenticatedBridgeDispatcher,
+    launch_id: Uuid,
+    secret: &[u8],
+    peer: PeerIdentity,
+    sequence: u64,
+    method: &str,
+    payload: serde_json::Value,
+) -> serde_json::Value {
+    let request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: format!("workspace-request-{sequence}"),
+        launch_id: launch_id.to_string(),
+        method: method.to_owned(),
+        payload,
+    };
+    let mut nonce = [0; 32];
+    nonce[..8].copy_from_slice(&sequence.to_be_bytes());
+    let response = dispatcher
+        .dispatch(
+            peer,
+            sign_request(request, nonce, secret).expect("signed Workspace request"),
+        )
+        .expect("authenticated Workspace response");
+    serde_json::to_value(response).expect("response JSON")
+}
 
 fn secure_root(path: &Path) {
     fs::create_dir_all(path).expect("create secure root");
@@ -87,6 +161,49 @@ fn grant_store_is_owner_only_channel_isolated_and_generation_guarded() {
             actual: 1
         }
     ));
+}
+
+#[test]
+fn grant_store_status_update_and_delete_are_atomic_cas_mutations() {
+    let root = tempdir().expect("root");
+    let channel = root.path().join("channel");
+    let workspace = root.path().join("workspace");
+    secure_root(&channel);
+    secure_root(&workspace);
+    let store = GrantStore::open(&channel, ReleaseChannel::Test).expect("store");
+    store
+        .commit(grant(&workspace, "workspace-1", 0), 0)
+        .expect("commit grant");
+
+    assert_eq!(
+        store
+            .update_status("workspace-1", GrantStatus::Ready, GrantStatus::Revoking, 1,)
+            .expect("mark revoking"),
+        2
+    );
+    assert_eq!(
+        store
+            .get("workspace-1")
+            .expect("read grant")
+            .expect("grant")
+            .status,
+        GrantStatus::Revoking
+    );
+    assert!(store
+        .update_status(
+            "workspace-1",
+            GrantStatus::Ready,
+            GrantStatus::NeedsAuthorization,
+            2,
+        )
+        .is_err());
+    assert_eq!(
+        store
+            .delete("workspace-1", GrantStatus::Revoking, 2)
+            .expect("delete grant"),
+        3
+    );
+    assert!(store.get("workspace-1").expect("read deleted").is_none());
 }
 
 #[test]
@@ -179,6 +296,139 @@ fn journal_rejects_corruption_and_uses_generation_cas() {
         journal.read(),
         Err(WorkspaceGrantError::Corrupt(_))
     ));
+}
+
+#[test]
+fn transaction_handlers_reject_illegal_abort_and_complete_stages() {
+    let root = tempdir().expect("root");
+    let channel = root.path().join("channel");
+    secure_root(&channel);
+    let journal = WorkspaceJournal::open(&channel, ReleaseChannel::Test).expect("journal");
+    let prepared = WorkspaceTransaction {
+        version: 1,
+        generation: 1,
+        operation_id: Uuid::new_v4(),
+        kind: WorkspaceTransactionKind::Add,
+        workspace_id: None,
+        expected_catalog_generation: 0,
+        expected_grant_generation: 0,
+        stage: "prepared".to_owned(),
+    };
+    journal
+        .write(prepared.clone(), 0)
+        .expect("prepared journal");
+
+    let invalid_complete = dispatch_transaction(
+        journal.clone(),
+        "completeWorkspaceTransaction",
+        serde_json::json!({
+            "operationId": prepared.operation_id,
+            "expectedGeneration": prepared.generation,
+            "expectedStage": "prepared",
+        }),
+    );
+    assert_eq!(invalid_complete["ok"], false);
+    assert_eq!(invalid_complete["error"]["code"], "invalid_request");
+    assert_eq!(journal.read().expect("journal remains"), Some(prepared));
+
+    journal.clear(1).expect("clear prepared");
+    let registry_committed = WorkspaceTransaction {
+        version: 1,
+        generation: 1,
+        operation_id: Uuid::new_v4(),
+        kind: WorkspaceTransactionKind::Add,
+        workspace_id: Some("workspace-1".to_owned()),
+        expected_catalog_generation: 0,
+        expected_grant_generation: 0,
+        stage: "registry-committed".to_owned(),
+    };
+    journal
+        .write(registry_committed.clone(), 0)
+        .expect("registry-committed journal");
+
+    let invalid_abort = dispatch_transaction(
+        journal.clone(),
+        "abortWorkspaceTransaction",
+        serde_json::json!({
+            "operationId": registry_committed.operation_id,
+            "expectedGeneration": registry_committed.generation,
+            "expectedStage": "registry-committed",
+        }),
+    );
+    assert_eq!(invalid_abort["ok"], false);
+    assert_eq!(invalid_abort["error"]["code"], "invalid_request");
+    assert_eq!(
+        journal.read().expect("journal remains"),
+        Some(registry_committed)
+    );
+}
+
+#[test]
+fn add_registry_commit_atomically_binds_workspace_id_and_generation() {
+    let root = tempdir().expect("root");
+    let channel = root.path().join("channel");
+    secure_root(&channel);
+    let journal = WorkspaceJournal::open(&channel, ReleaseChannel::Test).expect("journal");
+    let prepared = WorkspaceTransaction {
+        version: 1,
+        generation: 1,
+        operation_id: Uuid::new_v4(),
+        kind: WorkspaceTransactionKind::Add,
+        workspace_id: None,
+        expected_catalog_generation: 0,
+        expected_grant_generation: 0,
+        stage: "prepared".to_owned(),
+    };
+    journal
+        .write(prepared.clone(), 0)
+        .expect("prepared journal");
+
+    let response = dispatch_transaction(
+        journal.clone(),
+        "advanceWorkspaceTransaction",
+        serde_json::json!({
+            "operationId": prepared.operation_id,
+            "expectedGeneration": prepared.generation,
+            "expectedStage": "prepared",
+            "nextStage": "registry-committed",
+            "workspaceId": "workspace-1",
+        }),
+    );
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(
+        journal.read().expect("journal").expect("transaction"),
+        WorkspaceTransaction {
+            generation: 2,
+            workspace_id: Some("workspace-1".to_owned()),
+            stage: "registry-committed".to_owned(),
+            ..prepared
+        }
+    );
+}
+
+#[test]
+fn add_prepare_rejects_workspace_id_before_registry_commit() {
+    let root = tempdir().expect("root");
+    let channel = root.path().join("channel");
+    secure_root(&channel);
+    let journal = WorkspaceJournal::open(&channel, ReleaseChannel::Test).expect("journal");
+
+    let response = dispatch_transaction(
+        journal.clone(),
+        "prepareWorkspaceTransaction",
+        serde_json::json!({
+            "kind": "add",
+            "workspaceId": "browser-chosen-id",
+            "expectedCatalogGeneration": 0,
+            "expectedGrantGeneration": 0,
+            "stage": "prepared",
+        }),
+    );
+
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"]["code"], "invalid_request");
+    assert!(journal.read().expect("journal").is_none());
 }
 
 #[test]
@@ -299,6 +549,29 @@ fn restart_never_publishes_ready_before_descriptor_verification() {
 }
 
 #[test]
+fn restart_injects_verified_descriptors_without_erasing_persisted_status() {
+    let root = tempdir().expect("root");
+    let channel = root.path().join("channel");
+    let workspace = root.path().join("workspace");
+    secure_root(&channel);
+    secure_root(&workspace);
+    let store = GrantStore::open(&channel, ReleaseChannel::Test).expect("store");
+    store
+        .commit(grant(&workspace, "workspace-1", 0), 0)
+        .expect("commit grant");
+    store
+        .update_status("workspace-1", GrantStatus::Ready, GrantStatus::Revoking, 1)
+        .expect("mark revoking");
+
+    let launch_grants = store.load_for_launch().expect("launch grants");
+    assert_eq!(launch_grants[0].grant().status, GrantStatus::Revoking);
+    assert!(launch_grants[0].descriptor().is_some());
+    let mut registry = PendingGrantRegistry::new(Uuid::new_v4());
+    registry.inject_launch_grants(launch_grants);
+    assert!(registry.committed_descriptor("workspace-1").is_some());
+}
+
+#[test]
 fn restart_rejects_owner_or_mode_changes_even_when_identity_matches() {
     let root = tempdir().expect("root");
     let workspace = root.path().join("workspace");
@@ -366,6 +639,36 @@ fn pending_grants_are_launch_bound_memory_only_and_commit_once() {
     assert!(pending.commit(launch, pending_id, "workspace-1").is_err());
 }
 
+#[test]
+fn reauthorization_pending_grant_must_match_old_identity_or_registry_path() {
+    let root = tempdir().expect("root");
+    let original = root.path().join("original");
+    let replacement = root.path().join("replacement");
+    secure_root(&original);
+    secure_root(&replacement);
+    let canonical_replacement = fs::canonicalize(&replacement).expect("canonical replacement");
+    let launch = Uuid::new_v4();
+    let mut pending = PendingGrantRegistry::new(launch);
+    let pending_id = pending.begin(&replacement).expect("pending replacement");
+    let old_grant = grant(&original, "workspace-1", 1);
+
+    assert!(pending
+        .reauthorization_candidate(launch, pending_id, "workspace-1", Some(&old_grant), None,)
+        .is_err());
+    assert!(pending
+        .reauthorization_candidate(launch, pending_id, "workspace-1", None, Some(&original),)
+        .is_err());
+    assert!(pending
+        .reauthorization_candidate(
+            launch,
+            pending_id,
+            "workspace-1",
+            None,
+            Some(&canonical_replacement),
+        )
+        .is_ok());
+}
+
 struct FixedConfirmation(bool);
 
 impl RevokeConfirmation for FixedConfirmation {
@@ -374,6 +677,305 @@ impl RevokeConfirmation for FixedConfirmation {
         assert_eq!(presentation.title, "Project Alpha");
         Ok(self.0)
     }
+}
+
+struct SequencePicker {
+    outcomes: Mutex<VecDeque<Option<PathBuf>>>,
+}
+
+impl WorkspaceDirectoryPicker for SequencePicker {
+    fn pick(&self) -> Result<Option<PathBuf>, WorkspaceGrantError> {
+        self.outcomes
+            .lock()
+            .expect("picker outcomes")
+            .pop_front()
+            .ok_or(WorkspaceGrantError::PromptUnavailable)
+    }
+}
+
+#[derive(Default)]
+struct RecordingConfirmation {
+    presentations: Mutex<Vec<RevokePresentation>>,
+}
+
+impl RevokeConfirmation for RecordingConfirmation {
+    fn confirm(&self, presentation: &RevokePresentation) -> Result<bool, WorkspaceGrantError> {
+        self.presentations
+            .lock()
+            .expect("presentations")
+            .push(presentation.clone());
+        Ok(true)
+    }
+}
+
+#[test]
+fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_leaks() {
+    let root = tempdir().expect("root");
+    let channel = root.path().join("channel");
+    let workspace = root.path().join("Project Alpha");
+    secure_root(&channel);
+    secure_root(&workspace);
+    let store = GrantStore::open(&channel, ReleaseChannel::Test).expect("store");
+    let journal = WorkspaceJournal::open(&channel, ReleaseChannel::Test).expect("journal");
+    let launch_id = Uuid::new_v4();
+    let registry = Arc::new(Mutex::new(PendingGrantRegistry::new(launch_id)));
+    let picker = Arc::new(SequencePicker {
+        outcomes: Mutex::new(VecDeque::from([None, Some(workspace.clone())])),
+    });
+    let confirmation = Arc::new(RecordingConfirmation::default());
+    let mut tables = BridgeDispatchTables::unavailable();
+    install_workspace_authority_handlers(
+        &mut tables,
+        launch_id,
+        store.clone(),
+        journal.clone(),
+        registry.clone(),
+        picker.clone(),
+        confirmation.clone(),
+    )
+    .expect("authority handlers");
+    let executable = std::env::current_exe().expect("test executable");
+    let secret: Vec<u8> = (0..32).collect();
+    let peer = PeerIdentity {
+        uid: unsafe { libc::geteuid() },
+        pid: process::id(),
+    };
+    let dispatcher = AuthenticatedBridgeDispatcher::new(
+        peer.uid,
+        capture_process_identity(process::id(), &executable).expect("process identity"),
+        executable,
+        launch_id,
+        secret.clone(),
+        tables,
+    )
+    .expect("Workspace dispatcher");
+
+    let cancelled = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        1,
+        "beginWorkspaceAuthorization",
+        serde_json::Value::Null,
+    );
+    assert_eq!(
+        cancelled["result"],
+        serde_json::json!({ "outcome": "cancelled" })
+    );
+    assert_eq!(registry.lock().expect("registry").pending_count(), 0);
+
+    let spoofed = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        2,
+        "beginWorkspaceAuthorization",
+        serde_json::json!({ "path": workspace }),
+    );
+    assert_eq!(spoofed["ok"], false);
+    assert_eq!(spoofed["error"]["code"], "invalid_request");
+
+    let pending = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        3,
+        "beginWorkspaceAuthorization",
+        serde_json::Value::Null,
+    );
+    assert_eq!(pending["result"]["outcome"], "pending");
+    let pending_id = pending["result"]["pendingGrantId"]
+        .as_str()
+        .expect("pending id");
+    assert_eq!(registry.lock().expect("registry").pending_count(), 1);
+    journal
+        .write(
+            WorkspaceTransaction {
+                version: 1,
+                generation: 1,
+                operation_id: Uuid::new_v4(),
+                kind: WorkspaceTransactionKind::Add,
+                workspace_id: Some("workspace-1".to_owned()),
+                expected_catalog_generation: 0,
+                expected_grant_generation: 0,
+                stage: "registry-committed".to_owned(),
+            },
+            0,
+        )
+        .expect("registry-committed journal");
+
+    let committed = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        4,
+        "commitWorkspaceAuthorization",
+        serde_json::json!({
+            "pendingGrantId": pending_id,
+            "workspaceId": "workspace-1",
+            "expectedGrantGeneration": 0,
+        }),
+    );
+    assert_eq!(
+        committed["result"],
+        serde_json::json!({ "workspaceId": "workspace-1", "state": "ready" })
+    );
+    let serialized = committed["result"].to_string();
+    assert!(!serialized.contains(workspace.to_string_lossy().as_ref()));
+    assert!(!serialized.contains("pendingGrantId"));
+    assert!(!serialized.contains("identity"));
+    assert_eq!(
+        store
+            .get("workspace-1")
+            .expect("read grant")
+            .expect("committed grant")
+            .status,
+        GrantStatus::Ready
+    );
+    assert!(registry
+        .lock()
+        .expect("registry")
+        .committed_descriptor("workspace-1")
+        .is_some());
+
+    let inspected = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        5,
+        "inspectWorkspaceGrant",
+        serde_json::json!({ "workspaceId": "workspace-1" }),
+    );
+    assert_eq!(
+        inspected["result"],
+        serde_json::json!({
+            "exists": true,
+            "generation": 1,
+            "identityValid": true,
+            "status": "ready",
+        })
+    );
+    assert!(!inspected["result"].to_string().contains('/'));
+
+    let needs_authorization = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        6,
+        "markWorkspaceGrantNeedsAuthorization",
+        serde_json::json!({
+            "workspaceId": "workspace-1",
+            "expectedGrantGeneration": 1,
+        }),
+    );
+    assert_eq!(needs_authorization["result"], 2);
+    let restored = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        7,
+        "restoreWorkspaceGrantReady",
+        serde_json::json!({
+            "workspaceId": "workspace-1",
+            "expectedGrantGeneration": 2,
+        }),
+    );
+    assert_eq!(restored["result"], 3);
+
+    let confirmed = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        8,
+        "confirmWorkspaceRevoke",
+        serde_json::json!({
+            "workspaceId": "workspace-1",
+            "title": "Project Alpha",
+        }),
+    );
+    assert_eq!(confirmed["result"], "confirmed");
+    assert_eq!(
+        confirmation
+            .presentations
+            .lock()
+            .expect("presentations")
+            .as_slice(),
+        [RevokePresentation {
+            workspace_id: "workspace-1".to_owned(),
+            title: "Project Alpha".to_owned(),
+        }]
+    );
+
+    let revoking = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        9,
+        "markWorkspaceGrantRevoking",
+        serde_json::json!({
+            "workspaceId": "workspace-1",
+            "expectedGrantGeneration": 3,
+        }),
+    );
+    assert_eq!(revoking["result"], 4);
+    let deleted = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        10,
+        "deleteWorkspaceGrant",
+        serde_json::json!({
+            "workspaceId": "workspace-1",
+            "expectedGrantGeneration": 4,
+        }),
+    );
+    assert_eq!(deleted["result"], 5);
+    assert!(store.get("workspace-1").expect("deleted grant").is_none());
+    assert!(registry
+        .lock()
+        .expect("registry")
+        .committed_descriptor("workspace-1")
+        .is_none());
+}
+
+#[test]
+fn installed_transaction_handler_reads_the_durable_journal() {
+    let root = tempdir().expect("root");
+    let channel = root.path().join("channel");
+    secure_root(&channel);
+    let journal = WorkspaceJournal::open(&channel, ReleaseChannel::Test).expect("journal");
+    let transaction = WorkspaceTransaction {
+        version: 1,
+        generation: 1,
+        operation_id: Uuid::new_v4(),
+        kind: WorkspaceTransactionKind::Revoke,
+        workspace_id: Some("workspace-1".to_owned()),
+        expected_catalog_generation: 2,
+        expected_grant_generation: 3,
+        stage: "revoke-prepared".to_owned(),
+    };
+    journal
+        .write(transaction.clone(), 0)
+        .expect("persist transaction");
+
+    let response =
+        dispatch_transaction(journal, "readWorkspaceTransaction", serde_json::Value::Null);
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(
+        response["result"],
+        serde_json::to_value(transaction).expect("transaction JSON")
+    );
 }
 
 struct FixedProjection;

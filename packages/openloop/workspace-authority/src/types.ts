@@ -39,7 +39,7 @@ export interface WorkspaceGrantView {
 }
 
 export const TRANSACTION_STAGES = {
-  add: ['prepared', 'registry-committed', 'grant-committed'],
+  add: ['prepared', 'registry-committed', 'grant-committed', 'authorization-failed'],
   revoke: ['revoke-prepared', 'registry-deleted', 'grant-deleted'],
   reauthorize: ['reauthorize-prepared', 'grant-committed'],
 } as const

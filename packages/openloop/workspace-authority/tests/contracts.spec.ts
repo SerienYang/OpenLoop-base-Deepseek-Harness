@@ -63,12 +63,12 @@ describe('Workspace authority contracts', () => {
 
   it('binds transaction stages to their operation kind', () => {
     expect(TRANSACTION_STAGES).toEqual({
-      add: ['prepared', 'registry-committed', 'grant-committed'],
+      add: ['prepared', 'registry-committed', 'grant-committed', 'authorization-failed'],
       revoke: ['revoke-prepared', 'registry-deleted', 'grant-deleted'],
       reauthorize: ['reauthorize-prepared', 'grant-committed'],
     })
     expectTypeOf<AddWorkspaceTransaction['stage']>().toEqualTypeOf<
-      'prepared' | 'registry-committed' | 'grant-committed'
+      'prepared' | 'registry-committed' | 'grant-committed' | 'authorization-failed'
     >()
     expectTypeOf<RevokeWorkspaceTransaction['stage']>().toEqualTypeOf<
       'revoke-prepared' | 'registry-deleted' | 'grant-deleted'

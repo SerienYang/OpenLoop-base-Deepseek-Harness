@@ -1,6 +1,3 @@
-/* oxlint-disable typescript/no-unsafe-argument, typescript/no-unsafe-assignment */
-/* oxlint-disable typescript/no-unsafe-member-access, typescript/unbound-method */
-// Vitest object-literal test doubles erase contextual parameter types and have no `this` binding.
 import { describe, expect, it, vi } from 'vitest'
 import {
   WorkspaceAuthority,
@@ -8,6 +5,7 @@ import {
   type NativeWorkspaceAuthorityPort,
   type WorkspaceRegistryPort,
 } from '../src/authority.ts'
+import type { WorkspaceTransaction } from '../src/types.ts'
 
 function fixture(options: {
   readonly catalogGeneration?: number
@@ -24,7 +22,7 @@ function fixture(options: {
   }
   const registry: WorkspaceRegistryPort = {
     catalogGeneration: () => catalogGeneration,
-    createExpected: vi.fn(async (path, expected) => {
+    createExpected: vi.fn(async (path: string, expected: number) => {
       if (expected !== catalogGeneration) {
         throw new WorkspaceGenerationConflictError('catalog', expected, catalogGeneration)
       }
@@ -46,7 +44,7 @@ function fixture(options: {
         generation: catalogGeneration,
       }
     }),
-    deleteExpected: vi.fn(async (workspaceId, expected) => {
+    deleteExpected: vi.fn(async (workspaceId: string, expected: number) => {
       if (expected !== catalogGeneration) {
         throw new WorkspaceGenerationConflictError('catalog', expected, catalogGeneration)
       }
@@ -56,28 +54,38 @@ function fixture(options: {
     }),
     markNeedsAuthorization: vi.fn(async () => {}),
     has: workspaceId => workspaces.has(workspaceId),
+    get: (workspaceId) => {
+      const workspace = workspaces.get(workspaceId)
+      return workspace === undefined
+        ? undefined
+        : { name: workspace.name, canonicalPath: workspace.path }
+    },
   }
   const native: NativeWorkspaceAuthorityPort = {
     grantGeneration: () => Promise.resolve(grantGeneration),
     beginWorkspaceAuthorization: vi.fn(async () => ({
+      outcome: 'pending' as const,
       pendingGrantId: 'pending-1',
       canonicalPath: '/host/project',
     })),
-    commitWorkspaceAuthorization: vi.fn(async (_pending, workspaceId, expected) => {
+    commitWorkspaceAuthorization: vi.fn(async (
+      _pending: string,
+      workspaceId: string,
+      expected: number,
+    ) => {
       if (expected !== grantGeneration) {
         throw new WorkspaceGenerationConflictError('grant', expected, grantGeneration)
       }
       grantGeneration += 1
       return {
         workspaceId,
-        name: 'Project',
         state: 'ready' as const,
       }
     }),
     abortWorkspaceAuthorization: vi.fn(async () => {}),
     confirmWorkspaceRevoke: vi.fn(async () =>
       options.cancelledRevoke === true ? 'cancelled' as const : 'confirmed' as const),
-    markGrantRevoking: vi.fn(async (_id, expected) => {
+    markGrantRevoking: vi.fn(async (_id: string, expected: number) => {
       if (expected !== grantGeneration) {
         throw new WorkspaceGenerationConflictError('grant', expected, grantGeneration)
       }
@@ -88,11 +96,18 @@ function fixture(options: {
       grantGeneration += 1
       return grantGeneration
     }),
-    prepareWorkspaceTransaction: vi.fn(async (input) => {
+    prepareWorkspaceTransaction: vi.fn(async (
+      input: Parameters<NativeWorkspaceAuthorityPort['prepareWorkspaceTransaction']>[0],
+    ) => {
       transactions.push(`prepare:${input.kind}`)
       return { operationId: 'operation-1', generation: 1, stage: input.stage }
     }),
-    advanceWorkspaceTransaction: vi.fn(async (_id, _expected, next) => {
+    advanceWorkspaceTransaction: vi.fn(async (
+      _id: string,
+      _generation: number,
+      _expected: WorkspaceTransaction['stage'],
+      next: WorkspaceTransaction['stage'],
+    ) => {
       transactions.push(next)
       return { operationId: 'operation-1', generation: transactions.length, stage: next }
     }),
@@ -125,6 +140,25 @@ describe('WorkspaceAuthority', () => {
       'grant-committed',
       'complete',
     ])
+    expect(value.native.advanceWorkspaceTransaction).toHaveBeenNthCalledWith(
+      1,
+      'operation-1',
+      1,
+      'prepared',
+      'registry-committed',
+      'workspace-1',
+    )
+  })
+
+  it('returns cancelled without touching the registry when the native picker is cancelled', async () => {
+    const value = fixture()
+    vi.mocked(value.native.beginWorkspaceAuthorization).mockResolvedValueOnce({
+      outcome: 'cancelled',
+    })
+
+    await expect(value.authority.add()).resolves.toBe('cancelled')
+    expect(value.registry.createExpected).not.toHaveBeenCalled()
+    expect(value.native.prepareWorkspaceTransaction).not.toHaveBeenCalled()
   })
 
   it('reuses a duplicate canonical path without creating a second row', async () => {
@@ -155,7 +189,8 @@ describe('WorkspaceAuthority', () => {
     expect(value.transactions).toEqual([
       'prepare:add',
       'registry-committed',
-      'abort',
+      'authorization-failed',
+      'complete',
     ])
   })
 
@@ -183,6 +218,8 @@ describe('WorkspaceAuthority', () => {
     const value = fixture({ cancelledRevoke: true, existingWorkspace: true })
 
     await expect(value.authority.revoke('workspace-1')).resolves.toBe('cancelled')
+    expect(value.native.confirmWorkspaceRevoke)
+      .toHaveBeenCalledWith('workspace-1', 'Project')
     expect(value.native.prepareWorkspaceTransaction).not.toHaveBeenCalled()
     expect(value.registry.deleteExpected).not.toHaveBeenCalled()
   })
@@ -192,6 +229,7 @@ describe('WorkspaceAuthority', () => {
 
     await expect(value.authority.reauthorize('workspace-1')).resolves.toMatchObject({
       workspaceId: 'workspace-1',
+      name: 'Project',
       state: 'ready',
     })
     expect(value.transactions).toEqual([

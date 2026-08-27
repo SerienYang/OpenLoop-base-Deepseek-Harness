@@ -67,11 +67,33 @@ export interface WorkspaceGrantView {
     | 'permission-denied'
     | 'identity-mismatch'
     | 'revoking'
+    | 'reauthorizing'
 }
 
 export interface PendingWorkspaceGrant {
+  readonly outcome: 'pending'
   readonly pendingGrantId: string
   readonly path: string
+}
+
+export interface CancelledWorkspaceGrant {
+  readonly outcome: 'cancelled'
+}
+
+export type WorkspaceAuthorizationSelection =
+  | PendingWorkspaceGrant
+  | CancelledWorkspaceGrant
+
+export interface CommittedWorkspaceGrant {
+  readonly workspaceId: string
+  readonly state: WorkspaceGrantView['state']
+}
+
+export interface WorkspaceGrantInspection {
+  readonly exists: boolean
+  readonly generation?: number
+  readonly identityValid: boolean
+  readonly status?: WorkspaceGrantView['state'] | 'reauthorizing'
 }
 
 export type WorkspaceTransactionKind = 'add' | 'revoke' | 'reauthorize'
@@ -84,6 +106,7 @@ export type WorkspaceTransactionStage =
   | 'registry-deleted'
   | 'grant-deleted'
   | 'reauthorize-prepared'
+  | 'authorization-failed'
 
 export interface WorkspaceTransactionInput {
   readonly kind: WorkspaceTransactionKind
@@ -98,6 +121,35 @@ export interface WorkspaceTransactionVersion {
   readonly generation: number
   readonly stage: WorkspaceTransactionStage
 }
+
+interface WorkspaceTransactionBase {
+  readonly version: 1
+  readonly operationId: string
+  readonly generation: number
+  readonly expectedCatalogGeneration: number
+  readonly expectedGrantGeneration: number
+}
+
+export type WorkspaceTransaction =
+  | (WorkspaceTransactionBase & {
+    readonly kind: 'add'
+    readonly workspaceId?: string
+    readonly stage:
+      | 'prepared'
+      | 'registry-committed'
+      | 'grant-committed'
+      | 'authorization-failed'
+  })
+  | (WorkspaceTransactionBase & {
+    readonly kind: 'revoke'
+    readonly workspaceId: string
+    readonly stage: 'revoke-prepared' | 'registry-deleted' | 'grant-deleted'
+  })
+  | (WorkspaceTransactionBase & {
+    readonly kind: 'reauthorize'
+    readonly workspaceId: string
+    readonly stage: 'reauthorize-prepared' | 'grant-committed'
+  })
 
 export interface WorkspaceFileHandle {
   readonly handleId: string

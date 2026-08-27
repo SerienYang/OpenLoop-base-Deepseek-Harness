@@ -7,15 +7,18 @@ import type {
   AppInfo,
   ApprovedCommand,
   CandidateCredentialHealthPlan,
+  CommittedWorkspaceGrant,
   CredentialMigrationStatus,
   CredentialStatus,
   MainWebviewHealthAcknowledgement,
-  PendingWorkspaceGrant,
   ResolvedSecretBytes,
   UpdateStatus,
+  WorkspaceAuthorizationSelection,
   WorkspaceFileHandle,
+  WorkspaceGrantInspection,
   WorkspaceGrantView,
   WorkspaceProcessHandle,
+  WorkspaceTransaction,
   WorkspaceTransactionInput,
   WorkspaceTransactionStage,
   WorkspaceTransactionVersion,
@@ -47,9 +50,13 @@ export const HOST_ONLY_METHODS = [
   'commitWorkspaceAuthorization',
   'abortWorkspaceAuthorization',
   'getWorkspaceGrantGeneration',
+  'inspectWorkspaceGrant',
+  'markWorkspaceGrantNeedsAuthorization',
+  'restoreWorkspaceGrantReady',
   'confirmWorkspaceRevoke',
   'markWorkspaceGrantRevoking',
   'deleteWorkspaceGrant',
+  'readWorkspaceTransaction',
   'prepareWorkspaceTransaction',
   'advanceWorkspaceTransaction',
   'abortWorkspaceTransaction',
@@ -73,6 +80,13 @@ interface CredentialBrowserOperations {
   deleteCredential(reference: string, signal?: AbortSignal): Promise<'deleted' | 'cancelled'>
 }
 
+interface WorkspaceBrowserOperations {
+  list(): Promise<WorkspaceGrantView[]>
+  add(): Promise<WorkspaceGrantView | 'cancelled'>
+  reauthorize(workspaceId: string): Promise<WorkspaceGrantView | 'cancelled'>
+  revoke(workspaceId: string): Promise<'revoked' | 'cancelled'>
+}
+
 function remoteBridgeClient(service: object): DesktopBridgeClient {
   const original = Reflect.get(service, symbols.original) as unknown
   const owner = typeof original === 'object' && original !== null ? original : service
@@ -89,6 +103,18 @@ function credentialOperations(service: object): CredentialBrowserOperations {
     | undefined
   if (operations === undefined) {
     throw new Error('Openloop credential operations are unavailable')
+  }
+  return operations
+}
+
+function workspaceOperations(service: object): WorkspaceBrowserOperations {
+  const original = Reflect.get(service, symbols.original) as unknown
+  const owner = typeof original === 'object' && original !== null ? original : service
+  const operations = remoteContexts.get(owner)?.get('workspaceAuthority') as
+    | WorkspaceBrowserOperations
+    | undefined
+  if (operations === undefined) {
+    throw new Error('Openloop Workspace authority is unavailable')
   }
   return operations
 }
@@ -183,12 +209,14 @@ export class OpenloopDesktopRemoteService extends TypertRemoteService {
 
   @Remote
   listWorkspaceGrants(signal: AbortSignal): Promise<WorkspaceGrantView[]> {
-    return remoteBridgeClient(this).call<WorkspaceGrantView[]>('listWorkspaceGrants', null, signal)
+    signal.throwIfAborted()
+    return workspaceOperations(this).list()
   }
 
   @Remote
   authorizeWorkspace(signal: AbortSignal): Promise<WorkspaceGrantView | 'cancelled'> {
-    return remoteBridgeClient(this).call('authorizeWorkspace', null, signal)
+    signal.throwIfAborted()
+    return workspaceOperations(this).add()
   }
 
   @Remote
@@ -196,12 +224,14 @@ export class OpenloopDesktopRemoteService extends TypertRemoteService {
     workspaceId: string,
     signal: AbortSignal,
   ): Promise<WorkspaceGrantView | 'cancelled'> {
-    return remoteBridgeClient(this).call('reauthorizeWorkspace', { workspaceId }, signal)
+    signal.throwIfAborted()
+    return workspaceOperations(this).reauthorize(workspaceId)
   }
 
   @Remote
   revokeWorkspace(workspaceId: string, signal: AbortSignal): Promise<'revoked' | 'cancelled'> {
-    return remoteBridgeClient(this).call('revokeWorkspace', { workspaceId }, signal)
+    signal.throwIfAborted()
+    return workspaceOperations(this).revoke(workspaceId)
   }
 
   @Remote
@@ -297,8 +327,8 @@ export class OpenloopDesktopHostClient {
     return this.#client.call('unsetCredential', plan, signal)
   }
 
-  beginWorkspaceAuthorization(signal?: AbortSignal): Promise<PendingWorkspaceGrant> {
-    return this.#client.call<PendingWorkspaceGrant>(
+  beginWorkspaceAuthorization(signal?: AbortSignal): Promise<WorkspaceAuthorizationSelection> {
+    return this.#client.call<WorkspaceAuthorizationSelection>(
       'beginWorkspaceAuthorization',
       null,
       signal,
@@ -309,11 +339,17 @@ export class OpenloopDesktopHostClient {
     pendingGrantId: string,
     workspaceId: string,
     expectedGrantGeneration?: number,
+    expectedCanonicalPath?: string,
     signal?: AbortSignal,
-  ): Promise<WorkspaceGrantView> {
-    return this.#client.call<WorkspaceGrantView>(
+  ): Promise<CommittedWorkspaceGrant> {
+    return this.#client.call<CommittedWorkspaceGrant>(
       'commitWorkspaceAuthorization',
-      { pendingGrantId, workspaceId, expectedGrantGeneration },
+      {
+        pendingGrantId,
+        workspaceId,
+        expectedGrantGeneration,
+        ...(expectedCanonicalPath === undefined ? {} : { expectedCanonicalPath }),
+      },
       signal,
     )
   }
@@ -326,11 +362,43 @@ export class OpenloopDesktopHostClient {
     return this.#client.call<number>('getWorkspaceGrantGeneration', null, signal)
   }
 
-  confirmWorkspaceRevoke(
+  inspectWorkspaceGrant(
     workspaceId: string,
     signal?: AbortSignal,
+  ): Promise<WorkspaceGrantInspection> {
+    return this.#client.call('inspectWorkspaceGrant', { workspaceId }, signal)
+  }
+
+  markWorkspaceGrantNeedsAuthorization(
+    workspaceId: string,
+    expectedGrantGeneration: number,
+    signal?: AbortSignal,
+  ): Promise<number> {
+    return this.#client.call(
+      'markWorkspaceGrantNeedsAuthorization',
+      { expectedGrantGeneration, workspaceId },
+      signal,
+    )
+  }
+
+  restoreWorkspaceGrantReady(
+    workspaceId: string,
+    expectedGrantGeneration: number,
+    signal?: AbortSignal,
+  ): Promise<number> {
+    return this.#client.call(
+      'restoreWorkspaceGrantReady',
+      { expectedGrantGeneration, workspaceId },
+      signal,
+    )
+  }
+
+  confirmWorkspaceRevoke(
+    workspaceId: string,
+    title: string,
+    signal?: AbortSignal,
   ): Promise<'confirmed' | 'cancelled'> {
-    return this.#client.call('confirmWorkspaceRevoke', { workspaceId }, signal)
+    return this.#client.call('confirmWorkspaceRevoke', { title, workspaceId }, signal)
   }
 
   markWorkspaceGrantRevoking(
@@ -364,39 +432,53 @@ export class OpenloopDesktopHostClient {
     return this.#client.call('prepareWorkspaceTransaction', input, signal)
   }
 
+  readWorkspaceTransaction(signal?: AbortSignal): Promise<WorkspaceTransaction | null> {
+    return this.#client.call('readWorkspaceTransaction', null, signal)
+  }
+
   advanceWorkspaceTransaction(
     operationId: string,
+    expectedGeneration: number,
     expectedStage: WorkspaceTransactionStage,
     nextStage: WorkspaceTransactionStage,
+    workspaceId?: string,
     signal?: AbortSignal,
   ): Promise<WorkspaceTransactionVersion> {
     return this.#client.call(
       'advanceWorkspaceTransaction',
-      { expectedStage, nextStage, operationId },
+      {
+        expectedGeneration,
+        expectedStage,
+        nextStage,
+        operationId,
+        ...(workspaceId === undefined ? {} : { workspaceId }),
+      },
       signal,
     )
   }
 
   async abortWorkspaceTransaction(
     operationId: string,
+    expectedGeneration: number,
     expectedStage: WorkspaceTransactionStage,
     signal?: AbortSignal,
   ): Promise<void> {
     await this.#client.call<null>(
       'abortWorkspaceTransaction',
-      { expectedStage, operationId },
+      { expectedGeneration, expectedStage, operationId },
       signal,
     )
   }
 
   async completeWorkspaceTransaction(
     operationId: string,
+    expectedGeneration: number,
     expectedStage: WorkspaceTransactionStage,
     signal?: AbortSignal,
   ): Promise<void> {
     await this.#client.call<null>(
       'completeWorkspaceTransaction',
-      { expectedStage, operationId },
+      { expectedGeneration, expectedStage, operationId },
       signal,
     )
   }
