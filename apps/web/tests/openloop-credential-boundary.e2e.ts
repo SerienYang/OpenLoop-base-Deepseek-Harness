@@ -59,6 +59,7 @@ describe('web e2e: Openloop credential boundary', () => {
       secret: BRIDGE_SECRET,
     })
     scaffold = await launchWebScaffold({
+      deepSeekMissingCredential: true,
       openloop: {
         launchId: LAUNCH_ID,
         bootstrapToken: BOOTSTRAP_TOKEN,
