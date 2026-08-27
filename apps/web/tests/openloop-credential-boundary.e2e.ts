@@ -46,6 +46,22 @@ const CORE_MANIFEST = {
   dshDataVersion: 0,
 } as const
 
+async function closeAll(
+  resources: ReadonlyArray<() => Promise<void> | undefined>,
+): Promise<void> {
+  const failures: unknown[] = []
+  for (const close of resources) {
+    try {
+      await close()
+    } catch (error) {
+      failures.push(error)
+    }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, 'credential boundary cleanup failed')
+  }
+}
+
 describe('web e2e: Openloop credential boundary', () => {
   let scaffold: WebScaffold
   let bridge: AuthenticatedUnixBridgeServer
@@ -89,9 +105,11 @@ describe('web e2e: Openloop credential boundary', () => {
   }, 120_000)
 
   afterAll(async () => {
-    await browser?.close()
-    await scaffold?.close()
-    await bridge?.close()
+    await closeAll([
+      () => browser?.close(),
+      () => scaffold?.close(),
+      () => bridge?.close(),
+    ])
   })
 
   it('removes every DSH credential owner from the Openloop browser surface', async () => {
@@ -278,8 +296,10 @@ describe('web e2e: default DSH credential surface remains unchanged', () => {
       await scaffold.ctx.credentials.unset(DSH_REF)
       await expect(scaffold.ctx.credentials.resolve(DSH_REF)).resolves.toBeUndefined()
     } finally {
-      await browser.close()
-      await scaffold.close()
+      await closeAll([
+        () => browser.close(),
+        () => scaffold.close(),
+      ])
     }
   }, 120_000)
 })

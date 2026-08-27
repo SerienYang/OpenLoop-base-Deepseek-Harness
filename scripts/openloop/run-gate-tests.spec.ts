@@ -89,6 +89,10 @@ describe('OpenLoop focused test gate', () => {
       mode: 'playwright',
       file: 'tests/app.spec.ts',
     })
+    expect(parseGateArguments(['web-vitest', '--file', 'tests/app.spec.ts'])).toEqual({
+      mode: 'web-vitest',
+      file: 'tests/app.spec.ts',
+    })
     expect(parseGateArguments([
       'wdio',
       '--config', 'wdio.conf.ts',
@@ -154,7 +158,7 @@ describe('OpenLoop focused test gate', () => {
     const commands: Array<{ command: string; args: string[] }> = []
 
     await runGateTests(
-      ['playwright', '--file', 'apps/web/tests/boundary.e2e.ts'],
+      ['web-vitest', '--file', 'apps/web/tests/boundary.e2e.ts'],
       {
         root,
         runCommand(command: string, args: string[]) {
@@ -172,14 +176,46 @@ describe('OpenLoop focused test gate', () => {
       },
     )
 
+    expect(commands).toEqual([
+      {
+        command: 'pnpm',
+        args: ['run', 'build'],
+      },
+      {
+        command: 'pnpm',
+        args: [
+          'exec', 'vitest', 'run',
+          '--config', 'vitest.web.config.ts',
+          'apps/web/tests/boundary.e2e.ts',
+          '--reporter=json',
+        ],
+      },
+    ])
+  })
+
+  it('preserves the Playwright runner contract', async () => {
+    const { runGateTests } = await loadGateModule()
+    const root = fixtureRoot()
+    write(root, 'tests/app.spec.ts', "test('app', () => {})\n")
+    const commands: Array<{ command: string; args: string[] }> = []
+
+    await runGateTests(['playwright', '--file', 'tests/app.spec.ts'], {
+      root,
+      runCommand(command: string, args: string[]) {
+        commands.push({ command, args })
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            stats: { expected: 1, unexpected: 0, flaky: 0, skipped: 0 },
+          }),
+          stderr: '',
+        }
+      },
+    })
+
     expect(commands).toEqual([{
       command: 'pnpm',
-      args: [
-        'exec', 'vitest', 'run',
-        '--config', 'vitest.web.config.ts',
-        'apps/web/tests/boundary.e2e.ts',
-        '--reporter=json',
-      ],
+      args: ['exec', 'playwright', 'test', 'tests/app.spec.ts', '--reporter=json'],
     }])
   })
 
@@ -869,7 +905,7 @@ describe('OpenLoop focused test gate', () => {
     const root = fixtureRoot()
     write(root, 'tests/app.spec.ts', "test('app', () => {})\n")
 
-    await expect(runGateTests(['playwright', '--file', 'tests/app.spec.ts'], {
+    await expect(runGateTests(['web-vitest', '--file', 'tests/app.spec.ts'], {
       root,
       runCommand: () => ({
         status: 0,
@@ -880,6 +916,23 @@ describe('OpenLoop focused test gate', () => {
         stderr: '',
       }),
     })).rejects.toThrow('Vitest all discovered tests were skipped')
+  })
+
+  it('rejects an all-skipped Playwright result', async () => {
+    const { runGateTests } = await loadGateModule()
+    const root = fixtureRoot()
+    write(root, 'tests/app.spec.ts', "test('app', () => {})\n")
+
+    await expect(runGateTests(['playwright', '--file', 'tests/app.spec.ts'], {
+      root,
+      runCommand: () => ({
+        status: 0,
+        stdout: JSON.stringify({
+          stats: { expected: 0, unexpected: 0, flaky: 0, skipped: 2 },
+        }),
+        stderr: '',
+      }),
+    })).rejects.toThrow('Playwright all discovered tests were skipped')
   })
 
   it('rejects an all-skipped WDIO result', async () => {
@@ -912,7 +965,7 @@ describe('OpenLoop focused test gate', () => {
     write(root, 'target/openloop', 'binary')
     write(root, 'tests/window.e2e.ts', "describe('window', () => {})\n")
 
-    await expect(runGateTests(['playwright', '--file', 'tests/app.spec.ts'], {
+    await expect(runGateTests(['web-vitest', '--file', 'tests/app.spec.ts'], {
       root,
       runCommand: () => ({
         status: 0,
@@ -937,5 +990,22 @@ describe('OpenLoop focused test gate', () => {
         stderr: '',
       }),
     })).rejects.toThrow('WDIO executed zero tests')
+  })
+
+  it('rejects a zero-execution Playwright summary', async () => {
+    const { runGateTests } = await loadGateModule()
+    const root = fixtureRoot()
+    write(root, 'tests/app.spec.ts', "test('app', () => {})\n")
+
+    await expect(runGateTests(['playwright', '--file', 'tests/app.spec.ts'], {
+      root,
+      runCommand: () => ({
+        status: 0,
+        stdout: JSON.stringify({
+          stats: { expected: 0, unexpected: 0, flaky: 0, skipped: 0 },
+        }),
+        stderr: '',
+      }),
+    })).rejects.toThrow('Playwright executed zero tests')
   })
 })

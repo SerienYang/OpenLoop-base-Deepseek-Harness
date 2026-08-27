@@ -11,7 +11,7 @@ import {
   verifyBridgeRequest,
   type AuthenticatedBridgeRequest,
   type BridgeRequest,
-} from '@openloop/desktop-bridge-host'
+} from '@openloop/desktop-bridge-host/test-support'
 
 export interface RecordedBridgeCall {
   readonly method: string
@@ -87,15 +87,20 @@ export class AuthenticatedUnixBridgeServer {
   }
 
   async close(): Promise<void> {
+    const failures: unknown[] = []
     for (const socket of this.#sockets) socket.destroy()
+    this.#secret.fill(0)
     await new Promise<void>((resolve, reject) => {
       this.#server.close((error) => {
         if (error === undefined) resolve()
         else reject(error)
       })
-    })
-    this.#secret.fill(0)
+    }).catch((error: unknown) => failures.push(error))
     await rm(this.#directory, { recursive: true, force: true })
+      .catch((error: unknown) => failures.push(error))
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'authenticated bridge cleanup failed')
+    }
   }
 
   #serve(socket: Socket): void {

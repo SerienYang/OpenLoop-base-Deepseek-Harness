@@ -76,6 +76,10 @@ export function parseGateArguments(args) {
       const options = optionMap(rest, ['--file'])
       return { mode, file: options['--file'] }
     }
+    case 'web-vitest': {
+      const options = optionMap(rest, ['--file'])
+      return { mode, file: options['--file'] }
+    }
     case 'wdio': {
       const options = optionMap(rest, ['--config', '--binary', '--file'])
       return {
@@ -89,7 +93,7 @@ export function parseGateArguments(args) {
       if (rest.length > 0) throw new Error('scan-repo accepts no options')
       return { mode }
     default:
-      throw new Error('mode must be vitest, cargo, playwright, wdio, or scan-repo')
+      throw new Error('mode must be vitest, cargo, playwright, web-vitest, wdio, or scan-repo')
   }
 }
 
@@ -436,6 +440,19 @@ function assertCargoResult(result) {
   assertCommandPassed(result, 'Cargo')
 }
 
+function assertPlaywrightResult(result) {
+  const report = parseJsonOutput(result.stdout, 'Playwright')
+  const stats = report.stats ?? {}
+  const executed = Number(stats.expected ?? 0)
+    + Number(stats.unexpected ?? 0)
+    + Number(stats.flaky ?? 0)
+  if (executed === 0 && Number(stats.skipped ?? 0) > 0) {
+    throw new Error('Playwright all discovered tests were skipped')
+  }
+  if (executed === 0) throw new Error('Playwright executed zero tests')
+  assertCommandPassed(result, 'Playwright')
+}
+
 function assertWdioResult(result) {
   const summaries = [...`${result.stdout}\n${result.stderr}`.matchAll(
     /(\d+)\s+passed,\s+(\d+)\s+failed,\s+(\d+)\s+skipped/gu,
@@ -515,6 +532,21 @@ export async function runGateTests(args, dependencies = {}) {
   if (request.mode === 'playwright') {
     const file = repoPath(root, request.file, 'target')
     validateSkips(root, [file.absolute], allowlist)
+    const result = await invoke(
+      runCommand,
+      root,
+      'pnpm',
+      ['exec', 'playwright', 'test', file.relative, '--reporter=json'],
+    )
+    assertPlaywrightResult(result)
+    return
+  }
+
+  if (request.mode === 'web-vitest') {
+    const file = repoPath(root, request.file, 'target')
+    validateSkips(root, [file.absolute], allowlist)
+    const build = await invoke(runCommand, root, 'pnpm', ['run', 'build'])
+    assertCommandPassed(build, 'Web test build')
     const result = await invoke(
       runCommand,
       root,

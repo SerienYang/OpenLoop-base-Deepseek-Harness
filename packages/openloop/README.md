@@ -67,5 +67,5 @@ It also boots the default DSH Web profile to check that its onboarding,
 Models, Plugins, and credential service behavior remain available.
 
 ```sh
-DSH_SNAPSHOT=replay pnpm openloop:gate-test -- playwright --file apps/web/tests/openloop-credential-boundary.e2e.ts
+DSH_SNAPSHOT=replay pnpm openloop:gate-test -- web-vitest --file apps/web/tests/openloop-credential-boundary.e2e.ts
 ```

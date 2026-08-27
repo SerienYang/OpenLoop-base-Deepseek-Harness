@@ -57,5 +57,5 @@ API proxy、Connection、Typert gateway、desktop Remote 与 `bootstrap-host` �
 服务仍然可用。
 
 ```sh
-DSH_SNAPSHOT=replay pnpm openloop:gate-test -- playwright --file apps/web/tests/openloop-credential-boundary.e2e.ts
+DSH_SNAPSHOT=replay pnpm openloop:gate-test -- web-vitest --file apps/web/tests/openloop-credential-boundary.e2e.ts
 ```
