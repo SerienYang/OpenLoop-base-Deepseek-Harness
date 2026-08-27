@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     os::{
-        fd::OwnedFd,
+        fd::{AsRawFd, OwnedFd, RawFd},
         unix::fs::{MetadataExt, PermissionsExt},
     },
     path::{Path, PathBuf},
@@ -23,6 +23,7 @@ struct PendingGrant {
 pub struct PendingGrantRegistry {
     launch_id: Uuid,
     pending: HashMap<Uuid, PendingGrant>,
+    committed: HashMap<String, PendingGrant>,
 }
 
 impl PendingGrantRegistry {
@@ -30,6 +31,7 @@ impl PendingGrantRegistry {
         Self {
             launch_id,
             pending: HashMap::new(),
+            committed: HashMap::new(),
         }
     }
 
@@ -83,17 +85,17 @@ impl PendingGrantRegistry {
         if launch_id != self.launch_id {
             return Err(WorkspaceGrantError::LaunchMismatch);
         }
-        let pending = self
+        let mut pending = self
             .pending
             .remove(&pending_id)
             .ok_or(WorkspaceGrantError::InvalidPendingGrant)?;
         if workspace_id.is_empty() {
             return Err(WorkspaceGrantError::InvalidPendingGrant);
         }
-        Ok(WorkspaceGrant {
-            workspace_id: workspace_id.to_owned(),
-            ..pending.grant
-        })
+        pending.grant.workspace_id = workspace_id.to_owned();
+        let grant = pending.grant.clone();
+        self.committed.insert(workspace_id.to_owned(), pending);
+        Ok(grant)
     }
 
     pub fn abort(&mut self, launch_id: Uuid, pending_id: Uuid) -> Result<(), WorkspaceGrantError> {
@@ -102,5 +104,15 @@ impl PendingGrantRegistry {
         }
         self.pending.remove(&pending_id);
         Ok(())
+    }
+
+    pub fn committed_descriptor(&self, workspace_id: &str) -> Option<RawFd> {
+        self.committed
+            .get(workspace_id)
+            .map(|grant| grant._descriptor.as_raw_fd())
+    }
+
+    pub fn revoke_committed(&mut self, workspace_id: &str) {
+        self.committed.remove(workspace_id);
     }
 }

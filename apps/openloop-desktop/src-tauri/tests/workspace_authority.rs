@@ -278,6 +278,7 @@ fn pending_grants_are_launch_bound_memory_only_and_commit_once() {
         .commit(launch, pending_id, "workspace-1")
         .expect("commit pending");
     assert_eq!(committed.workspace_id, "workspace-1");
+    assert!(pending.committed_descriptor("workspace-1").is_some());
     assert!(pending.commit(launch, pending_id, "workspace-1").is_err());
 }
 
