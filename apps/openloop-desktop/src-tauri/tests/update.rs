@@ -532,6 +532,26 @@ fn unbound_companion_recovery_rejects_a_migration_bound_journal() {
 }
 
 #[test]
+fn companion_recovery_rejects_an_update_journal_without_a_migration_binding() {
+    let (fixture, installed, candidate) = transaction_fixture();
+    RecoveryTransaction::open(fixture.path(), &installed, &candidate)
+        .expect("transaction")
+        .prepare(None)
+        .expect("plain update preparation");
+    let mut companion = RecordingCompanion::default();
+
+    let error = recover_interrupted_update_with_companion(fixture.path(), &mut companion)
+        .expect_err("companion recovery requires a durable migration binding");
+
+    assert!(error.to_string().contains("migration"));
+    assert_eq!(companion.commits, 0);
+    assert_eq!(companion.rollbacks, 0);
+    assert_eq!(marker(&installed), "old");
+    assert_eq!(marker(&candidate), "new");
+    assert!(update_journal_path(fixture.path()).exists());
+}
+
+#[test]
 fn update_recovery_rejects_a_companion_bound_to_another_migration() {
     let (fixture, installed, candidate) = transaction_fixture();
     let migration_id = uuid::Uuid::new_v4();

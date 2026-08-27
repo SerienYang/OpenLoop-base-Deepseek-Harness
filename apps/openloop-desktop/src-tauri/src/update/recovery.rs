@@ -686,14 +686,14 @@ pub fn pending_update_migration_transaction_id(root: &Path) -> Result<Option<Uui
 }
 
 pub fn recover_interrupted_update(root: &Path) -> Result<(), RecoveryError> {
-    recover_interrupted_update_with_companion(root, &mut NoopCompanion)
+    recover_interrupted_update_inner(root, None, &mut NoopCompanion, false)
 }
 
 pub fn recover_interrupted_update_with_companion(
     root: &Path,
     companion: &mut impl PublicationCompanion,
 ) -> Result<(), RecoveryError> {
-    recover_interrupted_update_inner(root, None, companion)
+    recover_interrupted_update_inner(root, None, companion, true)
 }
 
 pub fn recover_interrupted_update_with_bound_companion(
@@ -701,13 +701,14 @@ pub fn recover_interrupted_update_with_bound_companion(
     migration_transaction_id: Uuid,
     companion: &mut impl PublicationCompanion,
 ) -> Result<(), RecoveryError> {
-    recover_interrupted_update_inner(root, Some(migration_transaction_id), companion)
+    recover_interrupted_update_inner(root, Some(migration_transaction_id), companion, true)
 }
 
 fn recover_interrupted_update_inner(
     root: &Path,
     expected_migration_transaction_id: Option<Uuid>,
     companion: &mut impl PublicationCompanion,
+    has_companion: bool,
 ) -> Result<(), RecoveryError> {
     let (root_path, root_descriptor) = open_update_root(root)?;
     let Some(journal) = read_recovery_journal(root_descriptor.as_raw_fd())? else {
@@ -715,6 +716,11 @@ fn recover_interrupted_update_inner(
         return Ok(());
     };
     validate_recovery_journal(&journal)?;
+    if has_companion != expected_migration_transaction_id.is_some() {
+        return Err(RecoveryError::invalid(
+            "update migration recovery requires an exactly bound companion",
+        ));
+    }
     if journal.migration_transaction_id != expected_migration_transaction_id {
         return Err(RecoveryError::invalid(
             "update journal migration transaction identity does not match",
