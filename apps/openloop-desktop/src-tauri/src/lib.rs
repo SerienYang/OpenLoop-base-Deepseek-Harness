@@ -58,6 +58,8 @@ pub mod credentials;
 pub mod launcher;
 pub mod spikes;
 pub mod update;
+#[cfg(target_os = "macos")]
+pub mod workspaces;
 
 #[cfg(target_os = "macos")]
 pub fn build_browser_webview(
