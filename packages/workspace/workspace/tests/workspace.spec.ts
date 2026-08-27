@@ -12,12 +12,13 @@ import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import { MemoryMediaPool, MemoryStorageBackend } from '../../../storage/storage-domain/tests/helpers/memory-backend.ts'
 import WorkspaceRegistry, {
   WorkspaceId,
+  WorkspaceGenerationConflictError,
   WorkspaceMoveInvalidError,
   WorkspaceOrderInvalidError,
 } from '../src/index.ts'
 import type { WorkspaceDomainState, WorkspaceRecord } from '../src/index.ts'
 
-const DOMAIN_VERSION = 2
+const DOMAIN_VERSION = 3
 
 const header = (id: string, cwd?: string, createdAt = 0): SessionHeader => ({
   version: 0,
@@ -143,8 +144,8 @@ function record(path: string, sessionIds: string[], createdAt = '2026-07-24T00:0
  * Media written before archivedSessionIds existed omit the field; keeping the
  * fixtures in that shape continuously proves the schema default upgrades them.
  */
-type StoredDomainState = Omit<WorkspaceDomainState, 'archivedSessionIds'>
-  & Partial<Pick<WorkspaceDomainState, 'archivedSessionIds'>>
+type StoredDomainState = Omit<WorkspaceDomainState, 'archivedSessionIds' | 'generation'>
+  & Partial<Pick<WorkspaceDomainState, 'archivedSessionIds' | 'generation'>>
 
 function storedPool(
   entries: Array<[string, WorkspaceRecord]>,
@@ -196,7 +197,12 @@ describe('WorkspaceRegistry lifecycle and bootstrap', () => {
     await fiber.await()
     expect(ctx.workspaceRegistry.list()).toEqual([])
     expect(list).toHaveBeenCalledTimes(1)
-    expect(storedState(pool)).toEqual({ initialized: true, workspaceIds: [], archivedSessionIds: [] })
+    expect(storedState(pool)).toEqual({
+      initialized: true,
+      workspaceIds: [],
+      archivedSessionIds: [],
+      generation: 0,
+    })
   })
 
   it('bootstraps once from list headers only, in workspace/session createdAt order', async () => {
@@ -230,6 +236,7 @@ describe('WorkspaceRegistry lifecycle and bootstrap', () => {
       initialized: true,
       workspaceIds: result.registry.list().map(workspace => workspace.id),
       archivedSessionIds: [],
+      generation: 0,
     })
   })
 
@@ -258,7 +265,12 @@ describe('WorkspaceRegistry lifecycle and bootstrap', () => {
     const second = await harness({ pool, sessions: [header('late', late, 100)] })
     expect(second.list).not.toHaveBeenCalled()
     expect(second.registry.list()).toEqual([])
-    expect(storedState(pool)).toEqual({ initialized: true, workspaceIds: [], archivedSessionIds: [] })
+    expect(storedState(pool)).toEqual({
+      initialized: true,
+      workspaceIds: [],
+      archivedSessionIds: [],
+      generation: 0,
+    })
   })
 
   it('reuses partial records after a bootstrap record write fails', async () => {
@@ -352,6 +364,29 @@ describe('WorkspaceRegistry lifecycle and bootstrap', () => {
 })
 
 describe('WorkspaceRegistry create and lookup', () => {
+  it('guards structural mutations with a durable monotonic catalog generation', async () => {
+    const firstDir = await makeDir('generation-first')
+    const secondDir = await makeDir('generation-second')
+    const { registry } = await harness()
+
+    expect(registry.catalogGeneration()).toBe(0)
+    const created = await registry.createExpected(firstDir, 0)
+    expect(created).toMatchObject({ created: true, generation: 1 })
+    expect(registry.catalogGeneration()).toBe(1)
+    const reused = await registry.createExpected(firstDir, 1)
+    expect(reused).toMatchObject({
+      workspace: created.workspace,
+      created: false,
+      generation: 1,
+    })
+    await expect(registry.createExpected(secondDir, 0))
+      .rejects.toEqual(new WorkspaceGenerationConflictError(0, 1))
+    const deleted = await registry.deleteExpected(created.workspace.id, 1)
+    expect(deleted).toEqual({ deleted: true, generation: 2 })
+    await expect(registry.deleteExpected(created.workspace.id, 1))
+      .rejects.toEqual(new WorkspaceGenerationConflictError(1, 2))
+  })
+
   it('creates newest-first and idempotently reuses a canonical path without retitling', async () => {
     const firstDir = await makeDir('first')
     const secondDir = await makeDir('second')
@@ -480,13 +515,20 @@ describe('WorkspaceRegistry create and lookup', () => {
     const dir = await makeDir('delete-registration')
     const result = await harness({ sessions: [header('kept-session', dir)] })
     const workspace = await result.registry.create(dir)
+    expect(result.registry.catalogGeneration()).toBe(0)
     await workspace.attachSession(SessionId('kept-session'))
 
     await expect(result.registry.delete(workspace.id)).resolves.toBe(true)
+    expect(result.registry.catalogGeneration()).toBe(1)
     await expect(result.registry.delete(workspace.id)).resolves.toBe(false)
     expect(result.registry.get(workspace.id)).toBeUndefined()
     expect(result.registry.list()).toEqual([])
-    expect(storedState(result.pool)).toEqual({ initialized: true, workspaceIds: [], archivedSessionIds: [] })
+    expect(storedState(result.pool)).toEqual({
+      initialized: true,
+      workspaceIds: [],
+      archivedSessionIds: [],
+      generation: 1,
+    })
     expect(result.pool.media.get('workspace')!.tables.get('workspaces')!.has(workspace.id)).toBe(false)
     await expect(realpath(dir)).resolves.toBe(dir)
     expect(result.list).toHaveBeenCalledTimes(1)
@@ -530,6 +572,7 @@ describe('WorkspaceRegistry create and lookup', () => {
       initialized: true,
       workspaceIds: [],
       archivedSessionIds: [],
+      generation: 2,
       pendingMutation: { operation: 'delete', workspaceId: workspace.id },
     })
     const reregistered = await first.registry.create(dir)
@@ -538,6 +581,7 @@ describe('WorkspaceRegistry create and lookup', () => {
       initialized: true,
       workspaceIds: [reregistered.id],
       archivedSessionIds: [],
+      generation: 3,
     })
     await first.fiber.dispose()
 
@@ -817,7 +861,12 @@ describe('header-validated membership projection', () => {
     const createRecovery = await harness({ pool: interruptedCreate })
     expect(createRecovery.registry.list()).toEqual([])
     expect(interruptedCreate.media.get('workspace')!.tables.get('workspaces')!.has(createId)).toBe(false)
-    expect(storedState(interruptedCreate)).toEqual({ initialized: true, workspaceIds: [], archivedSessionIds: [] })
+    expect(storedState(interruptedCreate)).toEqual({
+      initialized: true,
+      workspaceIds: [],
+      archivedSessionIds: [],
+      generation: 0,
+    })
 
     const interruptedDelete = storedPool(
       [[deleteId, record(deleteDir, [])]],
@@ -830,7 +879,12 @@ describe('header-validated membership projection', () => {
     const deleteRecovery = await harness({ pool: interruptedDelete })
     expect(deleteRecovery.registry.list()).toEqual([])
     expect(interruptedDelete.media.get('workspace')!.tables.get('workspaces')!.has(deleteId)).toBe(false)
-    expect(storedState(interruptedDelete)).toEqual({ initialized: true, workspaceIds: [], archivedSessionIds: [] })
+    expect(storedState(interruptedDelete)).toEqual({
+      initialized: true,
+      workspaceIds: [],
+      archivedSessionIds: [],
+      generation: 0,
+    })
 
     const corruptPending = storedPool(
       [[deleteId, record(deleteDir, [])]],

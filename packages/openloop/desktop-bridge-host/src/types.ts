@@ -74,6 +74,31 @@ export interface PendingWorkspaceGrant {
   readonly path: string
 }
 
+export type WorkspaceTransactionKind = 'add' | 'revoke' | 'reauthorize'
+
+export type WorkspaceTransactionStage =
+  | 'prepared'
+  | 'registry-committed'
+  | 'grant-committed'
+  | 'revoke-prepared'
+  | 'registry-deleted'
+  | 'grant-deleted'
+  | 'reauthorize-prepared'
+
+export interface WorkspaceTransactionInput {
+  readonly kind: WorkspaceTransactionKind
+  readonly workspaceId?: string
+  readonly expectedCatalogGeneration: number
+  readonly expectedGrantGeneration: number
+  readonly stage: WorkspaceTransactionStage
+}
+
+export interface WorkspaceTransactionVersion {
+  readonly operationId: string
+  readonly generation: number
+  readonly stage: WorkspaceTransactionStage
+}
+
 export interface WorkspaceFileHandle {
   readonly handleId: string
 }

@@ -47,13 +47,21 @@ pub const BROWSER_SAFE_METHODS: [&str; 13] = [
     "revealWorkspace",
 ];
 
-pub const HOST_ONLY_METHODS: [&str; 8] = [
+pub const HOST_ONLY_METHODS: [&str; 16] = [
     "resolveCredential",
     "getCandidateCredentialHealthPlan",
     "acknowledgeMainWebviewHealth",
     "beginWorkspaceAuthorization",
     "commitWorkspaceAuthorization",
     "abortWorkspaceAuthorization",
+    "getWorkspaceGrantGeneration",
+    "confirmWorkspaceRevoke",
+    "markWorkspaceGrantRevoking",
+    "deleteWorkspaceGrant",
+    "prepareWorkspaceTransaction",
+    "advanceWorkspaceTransaction",
+    "abortWorkspaceTransaction",
+    "completeWorkspaceTransaction",
     "openWorkspaceFile",
     "spawnWorkspaceProcess",
 ];
@@ -212,6 +220,13 @@ impl BridgeHandlerError {
         Self {
             code: "credential_failure",
             message: "desktop credential operation failed",
+        }
+    }
+
+    pub fn workspace_failure() -> Self {
+        Self {
+            code: "workspace_failure",
+            message: "desktop Workspace operation failed",
         }
     }
 }

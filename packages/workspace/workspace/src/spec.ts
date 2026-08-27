@@ -52,6 +52,7 @@ export const workspaceDomainState = z.object({
   initialized: z.boolean(),
   workspaceIds: z.array(workspaceId),
   archivedSessionIds: z.array(z.string().transform(SessionId)).default([]),
+  generation: z.number().int().nonnegative().default(0),
   pendingMutation: workspacePendingMutation.optional(),
 })
 
@@ -66,10 +67,15 @@ export type WorkspaceDomainState = z.infer<typeof workspaceDomainState>
  */
 export const workspaceDomainSpec = defineDomain({
   name: 'workspace',
-  version: 2,
+  version: 3,
   global: {
     schema: workspaceDomainState,
-    initial: { initialized: false, workspaceIds: [], archivedSessionIds: [] },
+    initial: {
+      initialized: false,
+      workspaceIds: [],
+      archivedSessionIds: [],
+      generation: 0,
+    },
   },
   tables: { workspaces: domainTable<WorkspaceId, WorkspaceRecord>(workspaceRecord) },
 })

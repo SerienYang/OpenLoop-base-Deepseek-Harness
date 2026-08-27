@@ -13,6 +13,12 @@
     },
     {
       "path": "../../runtime-diagnostics/invariants"
+    },
+    {
+      "path": "../../workspace/workspace"
+    },
+    {
+      "path": "../desktop-bridge-host"
     }
   ]
 }

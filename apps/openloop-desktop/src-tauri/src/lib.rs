@@ -50,6 +50,10 @@ use crate::update::{
         recover_interrupted_update_with_bound_companion, PublicationOutcome, RecoveryTransaction,
     },
 };
+#[cfg(target_os = "macos")]
+use crate::workspaces::{
+    bridge::install_workspace_transaction_handlers, journal::WorkspaceJournal,
+};
 
 pub mod bridge;
 pub mod browser;
@@ -409,6 +413,9 @@ fn start_runtime(
             migration_status.clone(),
         )
         .map_err(|error| format!("credential bridge setup failed: {error}"))?;
+        let workspace_journal = WorkspaceJournal::open(channel_root, updater_config.channel())
+            .map_err(|error| format!("Workspace journal setup failed: {error}"))?;
+        install_workspace_transaction_handlers(&mut tables, workspace_journal)?;
         let health_plan = match migration_outcome.transaction_id() {
             Some(transaction_id) => {
                 let plan = credential_health_plan(channel_root, &dsh_home, Some(transaction_id))

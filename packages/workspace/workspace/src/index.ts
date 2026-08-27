@@ -63,6 +63,17 @@ export class WorkspaceOrderInvalidError extends Error {
   }
 }
 
+/** An expected-generation structural mutation raced another committed mutation. */
+export class WorkspaceGenerationConflictError extends Error {
+  constructor(
+    readonly expected: number,
+    readonly actual: number,
+  ) {
+    super(`workspace catalog generation conflict: expected ${expected}, actual ${actual}`)
+    this.name = 'WorkspaceGenerationConflictError'
+  }
+}
+
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -160,7 +171,31 @@ export class WorkspaceRegistry extends Service {
     if (!(await stat(canonical)).isDirectory()) {
       throw new Error(`cannot create a workspace at '${canonical}': path is not a directory`)
     }
-    return await this.enqueueOperation(() => this.createCanonical(canonical, title))
+    const result = await this.enqueueOperation(() => this.createCanonical(canonical, title))
+    return result.workspace
+  }
+
+  catalogGeneration(): number {
+    return this.requireState().generation
+  }
+
+  async createExpected(
+    path: string,
+    expectedGeneration: number,
+    title?: string,
+  ): Promise<{
+    readonly workspace: Workspace
+    readonly created: boolean
+    readonly generation: number
+  }> {
+    const canonical = await realpathNormalize(path)
+    if (!(await stat(canonical)).isDirectory()) {
+      throw new Error(`cannot create a workspace at '${canonical}': path is not a directory`)
+    }
+    return await this.enqueueOperation(() => {
+      this.assertGeneration(expectedGeneration)
+      return this.createCanonical(canonical, title)
+    })
   }
 
   /**
@@ -200,6 +235,17 @@ export class WorkspaceRegistry extends Service {
     return this.enqueueOperation(() => this.deleteKnown(id))
   }
 
+  deleteExpected(
+    id: WorkspaceId,
+    expectedGeneration: number,
+  ): Promise<{ readonly deleted: boolean; readonly generation: number }> {
+    return this.enqueueOperation(async () => {
+      this.assertGeneration(expectedGeneration)
+      const deleted = await this.deleteKnown(id)
+      return { deleted, generation: this.requireState().generation }
+    })
+  }
+
   /**
    * Move one workspace within the durable display order, DOM-insertBefore-like.
    * With an anchor it lands before that workspace; without one it appends.
@@ -219,7 +265,7 @@ export class WorkspaceRegistry extends Service {
       const at = beforeId === undefined ? without.length : without.indexOf(beforeId)
       const workspaceIds = [...without.slice(0, at), id, ...without.slice(at)]
       if (sameIds(workspaceIds, state.workspaceIds)) return state.workspaceIds
-      await this.setState({ ...state, workspaceIds })
+      await this.setState({ ...state, workspaceIds, generation: state.generation + 1 })
       return workspaceIds
     })
   }
@@ -282,9 +328,22 @@ export class WorkspaceRegistry extends Service {
     return undefined
   }
 
-  private async createCanonical(canonical: string, title?: string): Promise<WorkspaceEntity> {
+  private async createCanonical(
+    canonical: string,
+    title?: string,
+  ): Promise<{
+    readonly workspace: WorkspaceEntity
+    readonly created: boolean
+    readonly generation: number
+  }> {
     for (const entity of this.entities.values()) {
-      if (entity.path === canonical) return entity
+      if (entity.path === canonical) {
+        return {
+          workspace: entity,
+          created: false,
+          generation: this.requireState().generation,
+        }
+      }
     }
 
     const workspaceName = title ?? basename(canonical)
@@ -331,6 +390,7 @@ export class WorkspaceRegistry extends Service {
         initialized: true,
         workspaceIds: [id, ...state.workspaceIds],
         archivedSessionIds: state.archivedSessionIds,
+        generation: state.generation + 1,
       })
     } catch (error) {
       this.entities.delete(id)
@@ -352,7 +412,11 @@ export class WorkspaceRegistry extends Service {
       }
       throw error
     }
-    return entity
+    return {
+      workspace: entity,
+      created: true,
+      generation: state.generation + 1,
+    }
   }
 
   private async deleteKnown(id: WorkspaceId): Promise<boolean> {
@@ -363,6 +427,7 @@ export class WorkspaceRegistry extends Service {
       initialized: true,
       workspaceIds: state.workspaceIds.filter(workspaceId => workspaceId !== id),
       archivedSessionIds: state.archivedSessionIds,
+      generation: state.generation + 1,
     }
     await this.setState({
       ...nextState,
@@ -420,6 +485,7 @@ export class WorkspaceRegistry extends Service {
       initialized: state.initialized,
       workspaceIds: state.workspaceIds,
       archivedSessionIds: state.archivedSessionIds,
+      generation: state.generation,
     })
   }
 
@@ -502,9 +568,19 @@ export class WorkspaceRegistry extends Service {
       .map(([id]) => id)
 
     if (!sameIds(state.workspaceIds, workspaceIds)) {
-      await this.setState({ initialized: false, workspaceIds, archivedSessionIds: state.archivedSessionIds })
+      await this.setState({
+        initialized: false,
+        workspaceIds,
+        archivedSessionIds: state.archivedSessionIds,
+        generation: state.generation,
+      })
     }
-    await this.setState({ initialized: true, workspaceIds, archivedSessionIds: state.archivedSessionIds })
+    await this.setState({
+      initialized: true,
+      workspaceIds,
+      archivedSessionIds: state.archivedSessionIds,
+      generation: state.generation,
+    })
   }
 
   private validateStoredState(state: WorkspaceDomainState): void {
@@ -638,6 +714,13 @@ export class WorkspaceRegistry extends Service {
   private requireState(): WorkspaceDomainState {
     if (this.state === undefined) throw new Error('workspace registry is not started yet')
     return this.state
+  }
+
+  private assertGeneration(expected: number): void {
+    const actual = this.requireState().generation
+    if (expected !== actual) {
+      throw new WorkspaceGenerationConflictError(expected, actual)
+    }
   }
 
   private async setState(state: WorkspaceDomainState): Promise<void> {

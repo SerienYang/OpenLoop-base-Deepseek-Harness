@@ -16,6 +16,9 @@ import type {
   WorkspaceFileHandle,
   WorkspaceGrantView,
   WorkspaceProcessHandle,
+  WorkspaceTransactionInput,
+  WorkspaceTransactionStage,
+  WorkspaceTransactionVersion,
 } from './types.ts'
 
 export type * from './types.ts'
@@ -43,6 +46,14 @@ export const HOST_ONLY_METHODS = [
   'beginWorkspaceAuthorization',
   'commitWorkspaceAuthorization',
   'abortWorkspaceAuthorization',
+  'getWorkspaceGrantGeneration',
+  'confirmWorkspaceRevoke',
+  'markWorkspaceGrantRevoking',
+  'deleteWorkspaceGrant',
+  'prepareWorkspaceTransaction',
+  'advanceWorkspaceTransaction',
+  'abortWorkspaceTransaction',
+  'completeWorkspaceTransaction',
   'openWorkspaceFile',
   'spawnWorkspaceProcess',
 ] as const
@@ -297,17 +308,97 @@ export class OpenloopDesktopHostClient {
   commitWorkspaceAuthorization(
     pendingGrantId: string,
     workspaceId: string,
+    expectedGrantGeneration?: number,
     signal?: AbortSignal,
   ): Promise<WorkspaceGrantView> {
     return this.#client.call<WorkspaceGrantView>(
       'commitWorkspaceAuthorization',
-      { pendingGrantId, workspaceId },
+      { pendingGrantId, workspaceId, expectedGrantGeneration },
       signal,
     )
   }
 
   abortWorkspaceAuthorization(pendingGrantId: string, signal?: AbortSignal): Promise<void> {
     return this.#client.call<void>('abortWorkspaceAuthorization', { pendingGrantId }, signal)
+  }
+
+  getWorkspaceGrantGeneration(signal?: AbortSignal): Promise<number> {
+    return this.#client.call<number>('getWorkspaceGrantGeneration', null, signal)
+  }
+
+  confirmWorkspaceRevoke(
+    workspaceId: string,
+    signal?: AbortSignal,
+  ): Promise<'confirmed' | 'cancelled'> {
+    return this.#client.call('confirmWorkspaceRevoke', { workspaceId }, signal)
+  }
+
+  markWorkspaceGrantRevoking(
+    workspaceId: string,
+    expectedGrantGeneration: number,
+    signal?: AbortSignal,
+  ): Promise<number> {
+    return this.#client.call<number>(
+      'markWorkspaceGrantRevoking',
+      { expectedGrantGeneration, workspaceId },
+      signal,
+    )
+  }
+
+  deleteWorkspaceGrant(
+    workspaceId: string,
+    expectedGrantGeneration: number,
+    signal?: AbortSignal,
+  ): Promise<number> {
+    return this.#client.call<number>(
+      'deleteWorkspaceGrant',
+      { expectedGrantGeneration, workspaceId },
+      signal,
+    )
+  }
+
+  prepareWorkspaceTransaction(
+    input: WorkspaceTransactionInput,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceTransactionVersion> {
+    return this.#client.call('prepareWorkspaceTransaction', input, signal)
+  }
+
+  advanceWorkspaceTransaction(
+    operationId: string,
+    expectedStage: WorkspaceTransactionStage,
+    nextStage: WorkspaceTransactionStage,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceTransactionVersion> {
+    return this.#client.call(
+      'advanceWorkspaceTransaction',
+      { expectedStage, nextStage, operationId },
+      signal,
+    )
+  }
+
+  async abortWorkspaceTransaction(
+    operationId: string,
+    expectedStage: WorkspaceTransactionStage,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.#client.call<null>(
+      'abortWorkspaceTransaction',
+      { expectedStage, operationId },
+      signal,
+    )
+  }
+
+  async completeWorkspaceTransaction(
+    operationId: string,
+    expectedStage: WorkspaceTransactionStage,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.#client.call<null>(
+      'completeWorkspaceTransaction',
+      { expectedStage, operationId },
+      signal,
+    )
   }
 
   openWorkspaceFile(

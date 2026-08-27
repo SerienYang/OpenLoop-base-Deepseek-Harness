@@ -48,3 +48,4 @@
 - insert:
     - id: workspace-authority
       name: '@openloop/workspace-authority'
+      inject: [workspaceRegistry, desktopBridge]
