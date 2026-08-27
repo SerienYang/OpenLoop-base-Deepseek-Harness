@@ -16,11 +16,13 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use super::recovery::{CandidateHealth, HealthStatus};
 
 pub const HEALTH_PROBE_ARGUMENT: &str = "--openloop-update-health-probe";
 pub const TEST_PROBE_FAILURE_ENVIRONMENT: &str = "OPENLOOP_UPDATE_SPIKE_PROBE_FAILURE";
+pub const MIGRATION_TRANSACTION_ENVIRONMENT: &str = "OPENLOOP_MIGRATION_TRANSACTION_ID";
 const MAX_PROBE_OUTPUT: usize = 16 * 1024;
 const PROCESS_REAP_GRACE: Duration = Duration::from_millis(100);
 
@@ -30,6 +32,18 @@ pub struct HealthProbeReport {
     status: String,
     pub app_version: String,
     pub core_manifest_sha256: String,
+    pub migration_transaction_id: Option<Uuid>,
+    pub readiness: AppHealthReadiness,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppHealthReadiness {
+    pub host: bool,
+    pub sidecar: bool,
+    pub bridge: bool,
+    pub data_version: bool,
+    pub main_webview: bool,
 }
 
 impl HealthProbeReport {
@@ -38,7 +52,68 @@ impl HealthProbeReport {
             status: "healthy".to_owned(),
             app_version: app_version.to_owned(),
             core_manifest_sha256: core_manifest_sha256.to_owned(),
+            migration_transaction_id: None,
+            readiness: AppHealthReadiness {
+                host: true,
+                sidecar: true,
+                bridge: false,
+                data_version: false,
+                main_webview: false,
+            },
         }
+    }
+
+    pub fn new(
+        app_version: impl Into<String>,
+        core_manifest_sha256: impl Into<String>,
+        migration_transaction_id: Option<Uuid>,
+        readiness: AppHealthReadiness,
+    ) -> Self {
+        Self {
+            status: "healthy".to_owned(),
+            app_version: app_version.into(),
+            core_manifest_sha256: core_manifest_sha256.into(),
+            migration_transaction_id,
+            readiness,
+        }
+    }
+
+    pub fn validate_full_health(
+        &self,
+        expected_version: &str,
+        expected_migration_transaction_id: Option<Uuid>,
+    ) -> Result<(), HealthProbeError> {
+        if self.status != "healthy" || self.app_version != expected_version {
+            return Err(HealthProbeError::invalid(
+                "candidate Host health report does not match the update version",
+            ));
+        }
+        if self.migration_transaction_id != expected_migration_transaction_id {
+            return Err(HealthProbeError::invalid(
+                "candidate migration transaction identity does not match",
+            ));
+        }
+        for (label, ready) in [
+            ("host", self.readiness.host),
+            ("sidecar", self.readiness.sidecar),
+            ("bridge", self.readiness.bridge),
+            ("dataVersion", self.readiness.data_version),
+            ("mainWebview", self.readiness.main_webview),
+        ] {
+            if !ready {
+                return Err(HealthProbeError::invalid(format!(
+                    "candidate {label} health is not ready"
+                )));
+            }
+        }
+        validate_sha256(
+            &self.core_manifest_sha256,
+            "candidate Host core manifest identity",
+        )
+    }
+
+    pub fn set_migration_transaction_id(&mut self, transaction_id: Option<Uuid>) {
+        self.migration_transaction_id = transaction_id;
     }
 
     pub fn to_json_line(&self) -> Result<String, HealthProbeError> {
@@ -162,6 +237,7 @@ impl BundleHealthProbe {
 pub struct CandidateProcessHealth {
     expected_version: String,
     dsh_home: PathBuf,
+    expected_migration_transaction_id: Option<Uuid>,
 }
 
 impl CandidateProcessHealth {
@@ -169,7 +245,13 @@ impl CandidateProcessHealth {
         Self {
             expected_version: expected_version.into(),
             dsh_home: dsh_home.into(),
+            expected_migration_transaction_id: None,
         }
+    }
+
+    pub fn with_migration_transaction(mut self, transaction_id: Option<Uuid>) -> Self {
+        self.expected_migration_transaction_id = transaction_id;
+        self
     }
 
     fn run(&self, candidate: &Path, timeout: Duration) -> Result<(), HealthProbeError> {
@@ -192,18 +274,21 @@ impl CandidateProcessHealth {
         command
             .arg(HEALTH_PROBE_ARGUMENT)
             .env("DSH_HOME", &self.dsh_home);
+        if let Some(transaction_id) = self.expected_migration_transaction_id {
+            command.env(
+                MIGRATION_TRANSACTION_ENVIRONMENT,
+                transaction_id.to_string(),
+            );
+        } else {
+            command.env_remove(MIGRATION_TRANSACTION_ENVIRONMENT);
+        }
         let output = bounded_output(command, remaining_health_budget(deadline)?)?;
         validate_success_output(&output, "candidate Host health probe")?;
         let report: HealthProbeReport =
             parse_single_json_line(&output.stdout, "candidate Host health probe")?;
-        if report.status != "healthy" || report.app_version != self.expected_version {
-            return Err(HealthProbeError::invalid(
-                "candidate Host health report does not match the update version",
-            ));
-        }
-        validate_sha256(
-            &report.core_manifest_sha256,
-            "candidate Host core manifest identity",
+        report.validate_full_health(
+            &self.expected_version,
+            self.expected_migration_transaction_id,
         )
     }
 }

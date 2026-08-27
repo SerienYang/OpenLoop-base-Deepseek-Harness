@@ -25,6 +25,7 @@ use crate::bridge::{
 };
 use crate::update::channel::ReleaseChannel;
 
+pub mod migration;
 mod secure_sheet;
 
 pub use secure_sheet::{

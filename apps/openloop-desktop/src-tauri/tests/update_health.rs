@@ -11,12 +11,14 @@ use std::{
 use openloop_desktop_lib::update::{
     coordinator::{parse_host_action, HostAction},
     health::{
-        ensure_channel_dsh_home, required_dsh_home, BundleHealthProbe, CandidateProcessHealth,
-        HEALTH_PROBE_ARGUMENT, TEST_PROBE_FAILURE_ENVIRONMENT,
+        ensure_channel_dsh_home, required_dsh_home, AppHealthReadiness, BundleHealthProbe,
+        CandidateProcessHealth, HealthProbeReport, HEALTH_PROBE_ARGUMENT,
+        MIGRATION_TRANSACTION_ENVIRONMENT, TEST_PROBE_FAILURE_ENVIRONMENT,
     },
     recovery::{CandidateHealth, HealthStatus},
 };
 use tempfile::tempdir;
+use uuid::Uuid;
 
 const VERSION: &str = "1.2.3-test.4";
 const IDENTIFIER: &str = "ai.openloop.desktop.test";
@@ -78,7 +80,7 @@ fn app_bundle(main_script: &str, sidecar_script: &str) -> (tempfile::TempDir, Pa
 
 fn healthy_probe_report() -> String {
     format!(
-        "{{\"status\":\"healthy\",\"appVersion\":\"{VERSION}\",\"coreManifestSha256\":\"{CORE_SHA256}\"}}"
+        "{{\"status\":\"healthy\",\"appVersion\":\"{VERSION}\",\"coreManifestSha256\":\"{CORE_SHA256}\",\"migrationTransactionId\":null,\"readiness\":{{\"host\":true,\"sidecar\":true,\"bridge\":true,\"dataVersion\":true,\"mainWebview\":true}}}}"
     )
 }
 
@@ -230,6 +232,48 @@ fn candidate_process_health_reports_success_failure_and_timeout() {
         !marker.exists(),
         "timed-out Host probe left its descendant running"
     );
+}
+
+#[test]
+fn candidate_process_health_carries_and_verifies_migration_transaction_identity() {
+    let _guard = lock_process_health_tests();
+    let transaction_id = Uuid::new_v4();
+    let dsh_home_root = tempdir().expect("DSH_HOME root");
+    let dsh_home = dsh_home_root.path().join("Openloop-Test/dsh");
+    fs::create_dir_all(&dsh_home).expect("DSH_HOME");
+    let report = HealthProbeReport::new(
+        VERSION,
+        CORE_SHA256,
+        Some(transaction_id),
+        AppHealthReadiness {
+            host: true,
+            sidecar: true,
+            bridge: true,
+            data_version: true,
+            main_webview: true,
+        },
+    )
+    .to_json_line()
+    .expect("health report");
+    let script = format!(
+        "#!/bin/sh\n[ \"$1\" = \"{HEALTH_PROBE_ARGUMENT}\" ] || exit 91\n[ \"${{{MIGRATION_TRANSACTION_ENVIRONMENT}}}\" = '{transaction_id}' ] || exit 92\nprintf '%s\\n' '{}'\n",
+        report.trim_end()
+    );
+    let (_root, app) = app_bundle(&script, "#!/bin/sh\nexit 0\n");
+    let mut health = CandidateProcessHealth::new(VERSION, &dsh_home)
+        .with_migration_transaction(Some(transaction_id));
+
+    assert_eq!(
+        health.await_health(&app, PROBE_TIMEOUT),
+        HealthStatus::Healthy
+    );
+
+    let mut mismatched = CandidateProcessHealth::new(VERSION, &dsh_home)
+        .with_migration_transaction(Some(Uuid::new_v4()));
+    assert!(matches!(
+        mismatched.await_health(&app, PROBE_TIMEOUT),
+        HealthStatus::Failed(_)
+    ));
 }
 
 #[test]
@@ -423,4 +467,64 @@ fn probe_failure_injection_is_test_channel_private_mode_only() {
         TEST_PROBE_FAILURE_ENVIRONMENT,
         "OPENLOOP_UPDATE_SPIKE_PROBE_FAILURE"
     );
+}
+
+#[test]
+fn candidate_full_health_requires_every_component_and_matching_migration_transaction() {
+    let transaction_id = Uuid::new_v4();
+    let expected = Some(transaction_id);
+    let healthy = AppHealthReadiness {
+        host: true,
+        sidecar: true,
+        bridge: true,
+        data_version: true,
+        main_webview: true,
+    };
+    let report = HealthProbeReport::new(VERSION, CORE_SHA256, expected, healthy);
+    assert!(report.validate_full_health(VERSION, expected).is_ok());
+
+    for failed_component in ["host", "sidecar", "bridge", "dataVersion", "mainWebview"] {
+        let mut readiness = healthy;
+        match failed_component {
+            "host" => readiness.host = false,
+            "sidecar" => readiness.sidecar = false,
+            "bridge" => readiness.bridge = false,
+            "dataVersion" => readiness.data_version = false,
+            "mainWebview" => readiness.main_webview = false,
+            _ => unreachable!(),
+        }
+        let report = HealthProbeReport::new(VERSION, CORE_SHA256, expected, readiness);
+        let error = report
+            .validate_full_health(VERSION, expected)
+            .expect_err("one failed component must reject full health");
+        assert!(
+            error.to_string().contains(failed_component),
+            "failure did not identify {failed_component}: {error}"
+        );
+    }
+
+    assert!(report
+        .validate_full_health(VERSION, Some(Uuid::new_v4()))
+        .is_err());
+}
+
+#[test]
+fn navigation_without_main_webview_ack_is_not_full_health() {
+    let report = HealthProbeReport::new(
+        VERSION,
+        CORE_SHA256,
+        None,
+        AppHealthReadiness {
+            host: true,
+            sidecar: true,
+            bridge: true,
+            data_version: true,
+            main_webview: false,
+        },
+    );
+
+    let error = report
+        .validate_full_health(VERSION, None)
+        .expect_err("navigation alone must not commit health");
+    assert!(error.to_string().contains("mainWebview"));
 }

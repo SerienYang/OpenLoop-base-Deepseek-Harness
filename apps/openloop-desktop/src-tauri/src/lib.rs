@@ -14,12 +14,19 @@ use crate::bridge::BridgeDispatchTables;
 use crate::bridge::{AuthenticatedBridgeDispatcher, BridgeListener, BridgeServer};
 #[cfg(target_os = "macos")]
 use crate::credentials::{
-    credential_bridge_dispatch_tables, AppKitCredentialDeletionConfirmation, AppKitCredentialSheet,
-    CredentialSheetCoordinator, CredentialSheetGate, KeychainStore,
+    credential_bridge_dispatch_tables,
+    migration::{
+        commit_migration, prepare_migration, rollback_migration, MigrationOutcome,
+        NoopMigrationHook,
+    },
+    AppKitCredentialDeletionConfirmation, AppKitCredentialSheet, CredentialSheetCoordinator,
+    CredentialSheetGate, KeychainStore,
 };
 use crate::launcher::{
     InstanceAction, LaunchReadinessExpectation, LaunchSecrets, SingleInstance, SupervisedChild,
 };
+#[cfg(target_os = "macos")]
+use crate::update::recovery::PublicationCompanion;
 use crate::update::{
     archive::stage_verified_archive,
     coordinator::{
@@ -28,7 +35,7 @@ use crate::update::{
     },
     health::{
         ensure_channel_dsh_home, required_dsh_home, BundleHealthProbe, CandidateProcessHealth,
-        TEST_PROBE_FAILURE_ENVIRONMENT,
+        MIGRATION_TRANSACTION_ENVIRONMENT, TEST_PROBE_FAILURE_ENVIRONMENT,
     },
     lease::UpdateLease,
     recovery::{PublicationOutcome, RecoveryTransaction},
@@ -166,7 +173,114 @@ struct RuntimeProcessState {
     _instance: SingleInstance,
     _update_lease: UpdateLease,
     _bridge: BridgeServer,
+    #[cfg(target_os = "macos")]
+    launch_id: uuid::Uuid,
+    #[cfg(target_os = "macos")]
+    pending_migration: Mutex<Option<PendingCredentialMigration>>,
     child: Mutex<SupervisedChild>,
+}
+
+#[cfg(target_os = "macos")]
+struct PendingCredentialMigration {
+    channel_root: PathBuf,
+    dsh_home: PathBuf,
+    transaction_id: Option<uuid::Uuid>,
+    store: KeychainStore,
+}
+
+#[cfg(target_os = "macos")]
+impl PendingCredentialMigration {
+    fn new(
+        channel_root: &Path,
+        dsh_home: &Path,
+        transaction_id: uuid::Uuid,
+        store: KeychainStore,
+    ) -> Self {
+        Self {
+            channel_root: channel_root.to_owned(),
+            dsh_home: dsh_home.to_owned(),
+            transaction_id: Some(transaction_id),
+            store,
+        }
+    }
+
+    fn transaction_id(&self) -> Option<uuid::Uuid> {
+        self.transaction_id
+    }
+
+    fn commit_migration(&mut self) -> Result<(), String> {
+        let Some(transaction_id) = self.transaction_id else {
+            return Ok(());
+        };
+        commit_migration(
+            &self.channel_root,
+            &self.dsh_home,
+            transaction_id,
+            &mut NoopMigrationHook,
+        )
+        .map_err(|error| error.to_string())?;
+        self.transaction_id = None;
+        Ok(())
+    }
+
+    fn rollback_migration(&mut self) -> Result<(), String> {
+        let Some(transaction_id) = self.transaction_id else {
+            return Ok(());
+        };
+        rollback_migration(
+            &self.channel_root,
+            &self.dsh_home,
+            transaction_id,
+            &self.store,
+            &mut NoopMigrationHook,
+        )
+        .map_err(|error| error.to_string())?;
+        self.transaction_id = None;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl PublicationCompanion for PendingCredentialMigration {
+    fn commit(&mut self) -> Result<(), String> {
+        self.commit_migration()
+    }
+
+    fn rollback(&mut self) -> Result<(), String> {
+        self.rollback_migration()
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for PendingCredentialMigration {
+    fn drop(&mut self) {
+        let _ = self.rollback_migration();
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn acknowledge_main_webview_health(
+    launch_id: uuid::Uuid,
+    migration_transaction_id: Option<uuid::Uuid>,
+    state: tauri::State<'_, RuntimeProcessState>,
+) -> Result<(), String> {
+    if launch_id != state.launch_id {
+        return Err("main WebView health launch identity does not match".to_owned());
+    }
+    let mut pending = state
+        .pending_migration
+        .lock()
+        .map_err(|_| "credential migration health state is unavailable".to_owned())?;
+    match pending.as_mut() {
+        Some(migration) if migration.transaction_id() == migration_transaction_id => {
+            migration.commit_migration()?;
+            pending.take();
+            Ok(())
+        }
+        None if migration_transaction_id.is_none() => Ok(()),
+        _ => Err("main WebView health migration identity does not match".to_owned()),
+    }
 }
 
 fn find_runtime_executable(executable: &Path, resource_dir: &Path) -> Option<PathBuf> {
@@ -202,8 +316,6 @@ fn start_runtime(
     let channel_root = dsh_home
         .parent()
         .ok_or_else(|| "Openloop channel data root is unavailable".to_owned())?;
-    let update_lease = UpdateLease::shared(channel_root)
-        .map_err(|error| format!("runtime update lease acquisition failed: {error}"))?;
     let requested_socket_path = channel_root.join("openloop-runtime.sock");
     let instance = SingleInstance::acquire(&requested_socket_path)
         .map_err(|error| format!("single-instance acquisition failed: {error}"))?;
@@ -211,6 +323,26 @@ fn start_runtime(
         app.exit(0);
         return Ok(None);
     }
+    #[cfg(target_os = "macos")]
+    let store = KeychainStore::new(updater_config.channel());
+    #[cfg(target_os = "macos")]
+    let (migration_outcome, pending_migration, migration_lease) = {
+        let migration_lease = UpdateLease::exclusive(channel_root)
+            .map_err(|error| format!("credential migration lease acquisition failed: {error}"))?;
+        let migration_outcome =
+            prepare_migration(channel_root, &dsh_home, &store, &mut NoopMigrationHook)
+                .unwrap_or(MigrationOutcome::ReadOnlyLegacy);
+        let pending_migration = migration_outcome.transaction_id().map(|transaction_id| {
+            PendingCredentialMigration::new(channel_root, &dsh_home, transaction_id, store)
+        });
+        (migration_outcome, pending_migration, migration_lease)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let migration_lease = UpdateLease::exclusive(channel_root)
+        .map_err(|error| format!("credential migration lease acquisition failed: {error}"))?;
+    let update_lease = migration_lease
+        .downgrade()
+        .map_err(|error| format!("runtime lease downgrade failed: {error}"))?;
     let bridge_socket_path = if instance.socket_path() == requested_socket_path {
         channel_root.join("openloop-bridge.sock")
     } else {
@@ -245,18 +377,22 @@ fn start_runtime(
         .map_err(|error| error.to_string())?;
     #[cfg(target_os = "macos")]
     let dispatch_tables = {
-        let store = KeychainStore::new(updater_config.channel());
         let sheet_gate = std::sync::Arc::new(CredentialSheetGate::default());
-        let replacement = std::sync::Arc::new(CredentialSheetCoordinator::with_gate(
-            std::sync::Arc::new(AppKitCredentialSheet::new(app.clone())),
-            std::sync::Arc::new(store),
-            sheet_gate.clone(),
-        ));
-        let deletion = std::sync::Arc::new(AppKitCredentialDeletionConfirmation::new(
-            app.clone(),
-            sheet_gate,
-        ));
-        credential_bridge_dispatch_tables(store, Some(replacement), Some(deletion))
+        let writable = migration_outcome != MigrationOutcome::ReadOnlyLegacy;
+        let replacement = writable.then(|| {
+            std::sync::Arc::new(CredentialSheetCoordinator::with_gate(
+                std::sync::Arc::new(AppKitCredentialSheet::new(app.clone())),
+                std::sync::Arc::new(store),
+                sheet_gate.clone(),
+            )) as std::sync::Arc<dyn crate::credentials::CredentialReplacement>
+        });
+        let deletion = writable.then(|| {
+            std::sync::Arc::new(AppKitCredentialDeletionConfirmation::new(
+                app.clone(),
+                sheet_gate,
+            )) as std::sync::Arc<dyn crate::credentials::CredentialDeletionConfirmation>
+        });
+        credential_bridge_dispatch_tables(store, replacement, deletion)
             .map_err(|error| format!("credential bridge setup failed: {error}"))?
     };
     #[cfg(not(target_os = "macos"))]
@@ -293,6 +429,10 @@ fn start_runtime(
         _instance: instance,
         _update_lease: update_lease,
         _bridge: bridge,
+        #[cfg(target_os = "macos")]
+        launch_id: secrets.launch_id,
+        #[cfg(target_os = "macos")]
+        pending_migration: Mutex::new(pending_migration),
         child: Mutex::new(child),
     }))
 }
@@ -380,9 +520,18 @@ fn run_health_probe(
         return Err("trusted test health failure was injected".to_owned());
     }
     let app = current_app_bundle()?;
-    let report = probe
+    let mut report = probe
         .inspect(&app, Duration::from_secs(45), &dsh_home)
         .map_err(|error| error.to_string())?;
+    let migration_transaction_id = std::env::var(MIGRATION_TRANSACTION_ENVIRONMENT)
+        .ok()
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|_| "candidate migration transaction identity is invalid".to_owned())
+        })
+        .transpose()?;
+    report.set_migration_transaction_id(migration_transaction_id);
     write_stdout_line(&report.to_json_line().map_err(|error| error.to_string())?)
 }
 
@@ -446,12 +595,30 @@ async fn run_update_spike(
         .ok_or_else(|| "installed app has no recovery root".to_owned())?;
     let transaction = RecoveryTransaction::open(root, &installed, candidate.path())
         .map_err(|error| format!("open candidate recovery transaction failed: {error}"))?;
-    let mut health = CandidateProcessHealth::new(&update.version, dsh_home);
-    let (publication, preserved_backup, failed_candidate) = match transaction
-        .publish(&mut health)
-        .map_err(|error| {
-        format!("publish candidate recovery transaction failed: {error}")
-    })? {
+    #[cfg(target_os = "macos")]
+    let publication_outcome = {
+        let store = KeychainStore::new(updater_config.channel());
+        let migration = prepare_migration(channel_root, &dsh_home, &store, &mut NoopMigrationHook)
+            .map_err(|error| format!("candidate credential migration failed: {error}"))?;
+        let mut pending_migration = migration.transaction_id().map(|transaction_id| {
+            PendingCredentialMigration::new(channel_root, &dsh_home, transaction_id, store)
+        });
+        let mut health = CandidateProcessHealth::new(&update.version, dsh_home)
+            .with_migration_transaction(migration.transaction_id());
+        if let Some(companion) = pending_migration.as_mut() {
+            transaction.publish_with_companion(&mut health, companion)
+        } else {
+            transaction.publish(&mut health)
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
+    let publication_outcome = {
+        let mut health = CandidateProcessHealth::new(&update.version, dsh_home);
+        transaction.publish(&mut health)
+    };
+    let publication_outcome = publication_outcome
+        .map_err(|error| format!("publish candidate recovery transaction failed: {error}"))?;
+    let (publication, preserved_backup, failed_candidate) = match publication_outcome {
         PublicationOutcome::Committed { preserved_backup } => {
             (InstallPublication::Committed, Some(preserved_backup), None)
         }
@@ -540,6 +707,15 @@ pub fn run() -> i32 {
         .target("darwin-aarch64")
         .pubkey(updater_config.public_key())
         .build();
+    #[cfg(target_os = "macos")]
+    let builder = tauri::Builder::default()
+        .plugin(updater_plugin)
+        .manage(updater_config)
+        .invoke_handler(tauri::generate_handler![
+            build_manifest,
+            acknowledge_main_webview_health
+        ]);
+    #[cfg(not(target_os = "macos"))]
     let builder = tauri::Builder::default()
         .plugin(updater_plugin)
         .manage(updater_config)

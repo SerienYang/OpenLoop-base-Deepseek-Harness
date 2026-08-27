@@ -24,6 +24,11 @@ pub trait CandidateHealth {
     fn await_health(&mut self, candidate: &Path, timeout: Duration) -> HealthStatus;
 }
 
+pub trait PublicationCompanion {
+    fn commit(&mut self) -> Result<(), String>;
+    fn rollback(&mut self) -> Result<(), String>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublicationOutcome {
     Committed {
@@ -66,6 +71,18 @@ struct NoopHook;
 
 impl TransactionHook for NoopHook {
     fn before(&mut self, _: RecoveryBoundary, _: &Path, _: &Path) {}
+}
+
+struct NoopCompanion;
+
+impl PublicationCompanion for NoopCompanion {
+    fn commit(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn rollback(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[cfg(debug_assertions)]
@@ -187,7 +204,15 @@ impl RecoveryTransaction {
         self,
         health: &mut impl CandidateHealth,
     ) -> Result<PublicationOutcome, RecoveryError> {
-        self.publish_inner(health, &mut NoopHook)
+        self.publish_inner(health, &mut NoopHook, &mut NoopCompanion)
+    }
+
+    pub fn publish_with_companion(
+        self,
+        health: &mut impl CandidateHealth,
+        companion: &mut impl PublicationCompanion,
+    ) -> Result<PublicationOutcome, RecoveryError> {
+        self.publish_inner(health, &mut NoopHook, companion)
     }
 
     #[cfg(debug_assertions)]
@@ -196,13 +221,14 @@ impl RecoveryTransaction {
         health: &mut impl CandidateHealth,
         hook: &mut impl RecoveryTestHook,
     ) -> Result<PublicationOutcome, RecoveryError> {
-        self.publish_inner(health, &mut TestHookAdapter(hook))
+        self.publish_inner(health, &mut TestHookAdapter(hook), &mut NoopCompanion)
     }
 
     fn publish_inner(
         self,
         health: &mut impl CandidateHealth,
         hook: &mut impl TransactionHook,
+        companion: &mut impl PublicationCompanion,
     ) -> Result<PublicationOutcome, RecoveryError> {
         if let Err(source) = self.swap_checked(
             &self.installed_name,
@@ -218,11 +244,19 @@ impl RecoveryTransaction {
         }
 
         let installed_path = self.path(&self.installed_name);
-        let status = health.await_health(&installed_path, HEALTH_TIMEOUT);
+        let mut status = health.await_health(&installed_path, HEALTH_TIMEOUT);
         if status == HealthStatus::Healthy {
-            return Ok(PublicationOutcome::Committed {
-                preserved_backup: self.path(&self.candidate_name),
-            });
+            match companion.commit() {
+                Ok(()) => {
+                    return Ok(PublicationOutcome::Committed {
+                        preserved_backup: self.path(&self.candidate_name),
+                    });
+                }
+                Err(_) => {
+                    status =
+                        HealthStatus::Failed("candidate companion health commit failed".to_owned());
+                }
+            }
         }
 
         if let Err(restore) = self.health_rollback_swap(hook) {
@@ -231,6 +265,9 @@ impl RecoveryTransaction {
                 candidate_republish: None,
             });
         }
+        companion
+            .rollback()
+            .map_err(|_| RecoveryError::CompanionRollback)?;
         Ok(PublicationOutcome::RolledBack {
             status,
             failed_candidate: self.path(&self.candidate_name),
@@ -518,6 +555,7 @@ pub enum RecoveryError {
         restore: io::Error,
         candidate_republish: Option<io::Error>,
     },
+    CompanionRollback,
 }
 
 impl RecoveryError {
@@ -548,6 +586,7 @@ impl fmt::Display for RecoveryError {
                 }
                 Ok(())
             }
+            Self::CompanionRollback => formatter.write_str("candidate companion rollback failed"),
         }
     }
 }
@@ -558,6 +597,7 @@ impl Error for RecoveryError {
             Self::InvalidState(_) => None,
             Self::Io { source, .. } => Some(source),
             Self::RestoreFailed { restore, .. } => Some(restore),
+            Self::CompanionRollback => None,
         }
     }
 }
