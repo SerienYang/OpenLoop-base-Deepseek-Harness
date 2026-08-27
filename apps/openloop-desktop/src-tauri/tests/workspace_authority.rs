@@ -4,6 +4,8 @@ use std::{
     fs,
     os::unix::fs::{symlink, PermissionsExt},
     path::Path,
+    sync::{Arc, Barrier},
+    thread,
 };
 
 use openloop_desktop_lib::{
@@ -180,6 +182,75 @@ fn journal_rejects_corruption_and_uses_generation_cas() {
 }
 
 #[test]
+fn grant_generation_cas_serializes_concurrent_writers() {
+    let root = tempdir().expect("root");
+    let channel = root.path().join("channel");
+    let workspace = root.path().join("workspace");
+    secure_root(&channel);
+    secure_root(&workspace);
+    let store = GrantStore::open(&channel, ReleaseChannel::Test).expect("store");
+    let barrier = Arc::new(Barrier::new(3));
+    let threads = (0..2)
+        .map(|index| {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            let workspace = workspace.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                store.commit(grant(&workspace, &format!("workspace-{index}"), 1), 0)
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    let outcomes = threads
+        .into_iter()
+        .map(|thread| thread.join().expect("writer"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        outcomes.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "{outcomes:?}"
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| matches!(
+                result,
+                Err(WorkspaceGrantError::GenerationConflict {
+                    expected: 0,
+                    actual: 1
+                })
+            ))
+            .count(),
+        1,
+        "{outcomes:?}"
+    );
+}
+
+#[test]
+fn store_writes_remain_bound_to_the_opened_channel_descriptor() {
+    let root = tempdir().expect("root");
+    let channel = root.path().join("channel");
+    let moved = root.path().join("moved-channel");
+    let workspace = root.path().join("workspace");
+    secure_root(&channel);
+    secure_root(&workspace);
+    let store = GrantStore::open(&channel, ReleaseChannel::Test).expect("store");
+    fs::rename(&channel, &moved).expect("move opened root");
+    secure_root(&channel);
+
+    store
+        .commit(grant(&workspace, "workspace-1", 1), 0)
+        .expect("descriptor-bound commit");
+
+    assert!(moved
+        .join(store.path().file_name().expect("filename"))
+        .is_file());
+    assert!(!store.path().exists());
+}
+
+#[test]
 fn restart_reopens_by_descriptor_and_rejects_replacement_or_parent_symlink() {
     let root = tempdir().expect("root");
     let parent = root.path().join("parent");
@@ -225,6 +296,19 @@ fn restart_never_publishes_ready_before_descriptor_verification() {
     assert_eq!(restarted.len(), 1);
     assert_eq!(restarted[0].grant().status, GrantStatus::PermissionDenied);
     assert!(!restarted[0].is_ready());
+}
+
+#[test]
+fn restart_rejects_owner_or_mode_changes_even_when_identity_matches() {
+    let root = tempdir().expect("root");
+    let workspace = root.path().join("workspace");
+    secure_root(&workspace);
+    let original = grant(&workspace, "workspace-1", 1);
+    fs::set_permissions(&workspace, fs::Permissions::from_mode(0o777))
+        .expect("make workspace unsafe");
+
+    let error = reopen_verified_grant(&original).expect_err("unsafe mode rejected");
+    assert_eq!(error.status(), Some(GrantStatus::PermissionDenied));
 }
 
 #[test]

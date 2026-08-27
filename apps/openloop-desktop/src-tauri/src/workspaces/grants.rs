@@ -1,17 +1,18 @@
 use std::{
     collections::HashSet,
     error::Error,
-    ffi::{CString, OsStr},
+    ffi::{CStr, CString},
     fmt, fs,
     io::{self, Read, Write},
     os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
+        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::{
             ffi::OsStrExt,
-            fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+            fs::{MetadataExt, PermissionsExt},
         },
     },
     path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 use serde::{Deserialize, Serialize};
@@ -166,8 +167,9 @@ impl Error for WorkspaceGrantError {
 
 #[derive(Debug, Clone)]
 pub struct GrantStore {
-    root: PathBuf,
     path: PathBuf,
+    root: Arc<OwnedFd>,
+    filename: CString,
 }
 
 impl GrantStore {
@@ -180,14 +182,20 @@ impl GrantStore {
         channel: ReleaseChannel,
         expected_uid: u32,
     ) -> Result<Self, WorkspaceGrantError> {
-        validate_private_root_for_owner(root, expected_uid)?;
+        let root_descriptor = open_private_root_for_owner(root, expected_uid)?;
         let suffix = match channel {
             ReleaseChannel::Test => "test",
             ReleaseChannel::Stable => "stable",
         };
+        let filename = CString::new(format!(".openloop-workspace-grants.{suffix}.v1.json"))
+            .map_err(|_| WorkspaceGrantError::UnsafePath("invalid grant filename".to_owned()))?;
+        let _lock = lock_workspace_root(root_descriptor.as_raw_fd())?;
         Ok(Self {
-            root: root.to_owned(),
-            path: root.join(format!(".openloop-workspace-grants.{suffix}.v1.json")),
+            path: root.join(filename.to_str().map_err(|_| {
+                WorkspaceGrantError::UnsafePath("invalid grant filename".to_owned())
+            })?),
+            root: Arc::new(root_descriptor),
+            filename,
         })
     }
 
@@ -196,7 +204,12 @@ impl GrantStore {
     }
 
     pub fn load(&self) -> Result<GrantSnapshot, WorkspaceGrantError> {
-        match read_owner_file(&self.root, &self.path, MAX_STORE_BYTES)? {
+        let _lock = lock_workspace_root(self.root.as_raw_fd())?;
+        self.load_locked()
+    }
+
+    fn load_locked(&self) -> Result<GrantSnapshot, WorkspaceGrantError> {
+        match read_owner_file_at(self.root.as_raw_fd(), &self.filename, MAX_STORE_BYTES)? {
             Some(bytes) => parse_snapshot(&bytes),
             None => Ok(GrantSnapshot::default()),
         }
@@ -232,7 +245,8 @@ impl GrantStore {
         grant: WorkspaceGrant,
         expected_generation: u64,
     ) -> Result<u64, WorkspaceGrantError> {
-        let mut snapshot = self.load()?;
+        let _lock = lock_workspace_root(self.root.as_raw_fd())?;
+        let mut snapshot = self.load_locked()?;
         if snapshot.generation != expected_generation {
             return Err(WorkspaceGrantError::GenerationConflict {
                 expected: expected_generation,
@@ -262,7 +276,7 @@ impl GrantStore {
         snapshot
             .grants
             .sort_by(|left, right| left.workspace_id.cmp(&right.workspace_id));
-        atomic_write_json(&self.root, &self.path, &snapshot)?;
+        atomic_write_json_at(self.root.as_raw_fd(), &self.filename, &snapshot)?;
         Ok(snapshot.generation)
     }
 }
@@ -291,36 +305,14 @@ fn parse_snapshot(bytes: &[u8]) -> Result<GrantSnapshot, WorkspaceGrantError> {
     Ok(snapshot)
 }
 
-pub(crate) fn read_owner_file(
-    root: &Path,
-    path: &Path,
+pub(crate) fn read_owner_file_at(
+    root: RawFd,
+    name: &CStr,
     max_bytes: u64,
 ) -> Result<Option<Vec<u8>>, WorkspaceGrantError> {
-    validate_private_root(root)?;
-    let root_path = CString::new(root.as_os_str().as_bytes())
-        .map_err(|_| WorkspaceGrantError::UnsafePath("Workspace root contains NUL".to_owned()))?;
-    let root_fd = unsafe {
-        libc::open(
-            root_path.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-        )
-    };
-    if root_fd < 0 {
-        return Err(WorkspaceGrantError::io(
-            "open Workspace state root",
-            io::Error::last_os_error(),
-        ));
-    }
-    let root_file = unsafe { fs::File::from_raw_fd(root_fd) };
-    let name = path.file_name().ok_or_else(|| {
-        WorkspaceGrantError::UnsafePath("Workspace state filename missing".to_owned())
-    })?;
-    let name = CString::new(name.as_bytes()).map_err(|_| {
-        WorkspaceGrantError::UnsafePath("Workspace state filename contains NUL".to_owned())
-    })?;
     let descriptor = unsafe {
         libc::openat(
-            root_file.as_raw_fd(),
+            root,
             name.as_ptr(),
             libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
         )
@@ -369,14 +361,14 @@ pub(crate) fn read_owner_file(
     Ok(Some(bytes))
 }
 
-pub(crate) fn validate_private_root(root: &Path) -> Result<(), WorkspaceGrantError> {
-    validate_private_root_for_owner(root, unsafe { libc::geteuid() })
+pub(crate) fn open_private_root(root: &Path) -> Result<OwnedFd, WorkspaceGrantError> {
+    open_private_root_for_owner(root, unsafe { libc::geteuid() })
 }
 
-fn validate_private_root_for_owner(
+fn open_private_root_for_owner(
     root: &Path,
     expected_uid: u32,
-) -> Result<(), WorkspaceGrantError> {
+) -> Result<OwnedFd, WorkspaceGrantError> {
     let metadata = fs::symlink_metadata(root)
         .map_err(|source| WorkspaceGrantError::io("inspect Workspace data root", source))?;
     if metadata.file_type().is_symlink()
@@ -388,55 +380,140 @@ fn validate_private_root_for_owner(
             "Workspace data root must be an owner-only real directory".to_owned(),
         ));
     }
-    Ok(())
+    let root_path = CString::new(root.as_os_str().as_bytes())
+        .map_err(|_| WorkspaceGrantError::UnsafePath("Workspace root contains NUL".to_owned()))?;
+    let descriptor = unsafe {
+        libc::open(
+            root_path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if descriptor < 0 {
+        return Err(WorkspaceGrantError::io(
+            "open Workspace data root",
+            io::Error::last_os_error(),
+        ));
+    }
+    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    let opened = descriptor_stat(descriptor.as_raw_fd())
+        .map_err(|source| WorkspaceGrantError::io("inspect opened Workspace root", source))?;
+    if FileIdentity::from_stat(&opened) != FileIdentity::from_metadata(&metadata)
+        || opened.st_uid != expected_uid
+        || opened.st_mode as u32 & 0o077 != 0
+    {
+        return Err(WorkspaceGrantError::WrongOwnerOrMode(
+            "Workspace data root identity changed while opening".to_owned(),
+        ));
+    }
+    Ok(descriptor)
 }
 
-pub(crate) fn atomic_write_json<T: Serialize>(
-    root: &Path,
-    destination: &Path,
+pub(crate) fn lock_workspace_root(root: RawFd) -> Result<fs::File, WorkspaceGrantError> {
+    let name = c_name(".openloop-workspace.lock")?;
+    let descriptor = unsafe {
+        libc::openat(
+            root,
+            name.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if descriptor < 0 {
+        return Err(WorkspaceGrantError::io(
+            "open Workspace lock",
+            io::Error::last_os_error(),
+        ));
+    }
+    let file = unsafe { fs::File::from_raw_fd(descriptor) };
+    let metadata = descriptor_stat(file.as_raw_fd())
+        .map_err(|source| WorkspaceGrantError::io("inspect Workspace lock", source))?;
+    if metadata.st_mode as u32 & libc::S_IFMT as u32 != libc::S_IFREG as u32
+        || metadata.st_uid != unsafe { libc::geteuid() }
+        || metadata.st_mode as u32 & 0o077 != 0
+        || metadata.st_nlink != 1
+    {
+        return Err(WorkspaceGrantError::WrongOwnerOrMode(
+            "Workspace lock must be owner-only and singly linked".to_owned(),
+        ));
+    }
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } < 0 {
+        return Err(WorkspaceGrantError::io(
+            "lock Workspace state",
+            io::Error::last_os_error(),
+        ));
+    }
+    Ok(file)
+}
+
+pub(crate) fn atomic_write_json_at<T: Serialize>(
+    root: RawFd,
+    destination: &CStr,
     value: &T,
 ) -> Result<(), WorkspaceGrantError> {
-    validate_private_root(root)?;
-    if let Ok(metadata) = fs::symlink_metadata(destination) {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(WorkspaceGrantError::UnsafePath(
-                "Workspace state destination is unsafe".to_owned(),
-            ));
-        }
-    }
-    let temporary = root.join(format!(
-        ".{}.{}.tmp",
-        destination
-            .file_name()
-            .and_then(OsStr::to_str)
-            .unwrap_or("workspace-state"),
-        Uuid::new_v4()
-    ));
+    let temporary = c_name(&format!(".openloop-workspace.{}.tmp", Uuid::new_v4()))?;
     let bytes = serde_json::to_vec(value)
         .map_err(|source| WorkspaceGrantError::Corrupt(source.to_string()))?;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temporary)
-        .map_err(|source| WorkspaceGrantError::io("create Workspace state", source))?;
+    let descriptor = unsafe {
+        libc::openat(
+            root,
+            temporary.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if descriptor < 0 {
+        return Err(WorkspaceGrantError::io(
+            "create Workspace state",
+            io::Error::last_os_error(),
+        ));
+    }
+    let mut file = unsafe { fs::File::from_raw_fd(descriptor) };
     let result = (|| {
         file.write_all(&bytes)
             .map_err(|source| WorkspaceGrantError::io("write Workspace state", source))?;
         file.sync_all()
             .map_err(|source| WorkspaceGrantError::io("sync Workspace state", source))?;
-        fs::rename(&temporary, destination)
-            .map_err(|source| WorkspaceGrantError::io("publish Workspace state", source))?;
-        let root_file = fs::File::open(root)
-            .map_err(|source| WorkspaceGrantError::io("open Workspace data root", source))?;
-        root_file
-            .sync_all()
-            .map_err(|source| WorkspaceGrantError::io("sync Workspace data root", source))
+        if unsafe { libc::renameat(root, temporary.as_ptr(), root, destination.as_ptr()) } < 0 {
+            return Err(WorkspaceGrantError::io(
+                "publish Workspace state",
+                io::Error::last_os_error(),
+            ));
+        }
+        sync_descriptor(root, "sync Workspace data root")
     })();
     if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+        unsafe {
+            libc::unlinkat(root, temporary.as_ptr(), 0);
+        }
     }
     result
+}
+
+pub(crate) fn remove_file_at(root: RawFd, name: &CStr) -> Result<(), WorkspaceGrantError> {
+    if unsafe { libc::unlinkat(root, name.as_ptr(), 0) } < 0 {
+        let source = io::Error::last_os_error();
+        if source.kind() != io::ErrorKind::NotFound {
+            return Err(WorkspaceGrantError::io("remove Workspace state", source));
+        }
+    }
+    sync_descriptor(root, "sync Workspace data root")
+}
+
+fn sync_descriptor(descriptor: RawFd, action: &'static str) -> Result<(), WorkspaceGrantError> {
+    if unsafe { libc::fsync(descriptor) } < 0 {
+        return Err(WorkspaceGrantError::io(action, io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+pub(crate) fn c_name(value: &str) -> Result<CString, WorkspaceGrantError> {
+    if value.is_empty() || value.as_bytes().contains(&b'/') {
+        return Err(WorkspaceGrantError::UnsafePath(
+            "Workspace state filename is invalid".to_owned(),
+        ));
+    }
+    CString::new(value)
+        .map_err(|_| WorkspaceGrantError::UnsafePath("Workspace filename contains NUL".to_owned()))
 }
 
 #[derive(Debug)]
@@ -537,6 +614,12 @@ pub fn reopen_verified_grant(grant: &WorkspaceGrant) -> Result<VerifiedGrant, Wo
         return Err(WorkspaceGrantError::verification(
             GrantStatus::IdentityMismatch,
             "Workspace identity changed",
+        ));
+    }
+    if metadata.st_uid != unsafe { libc::geteuid() } || metadata.st_mode as u32 & 0o002 != 0 {
+        return Err(WorkspaceGrantError::verification(
+            GrantStatus::PermissionDenied,
+            "Workspace ownership or permissions are unsafe",
         ));
     }
     let mut verified = grant.clone();

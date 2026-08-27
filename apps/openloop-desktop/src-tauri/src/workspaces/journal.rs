@@ -1,6 +1,8 @@
 use std::{
-    fs, io,
+    ffi::CString,
+    os::fd::{AsRawFd, OwnedFd},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use serde::{Deserialize, Serialize};
@@ -9,7 +11,8 @@ use uuid::Uuid;
 use crate::update::channel::ReleaseChannel;
 
 use super::grants::{
-    atomic_write_json, read_owner_file, validate_private_root, WorkspaceGrantError,
+    atomic_write_json_at, c_name, lock_workspace_root, open_private_root, read_owner_file_at,
+    remove_file_at, WorkspaceGrantError,
 };
 
 const MAX_JOURNAL_BYTES: u64 = 64 * 1024;
@@ -37,20 +40,28 @@ pub struct WorkspaceTransaction {
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceJournal {
-    root: PathBuf,
     path: PathBuf,
+    root: Arc<OwnedFd>,
+    filename: CString,
 }
 
 impl WorkspaceJournal {
     pub fn open(root: &Path, channel: ReleaseChannel) -> Result<Self, WorkspaceGrantError> {
-        validate_private_root(root)?;
+        let root_descriptor = open_private_root(root)?;
         let suffix = match channel {
             ReleaseChannel::Test => "test",
             ReleaseChannel::Stable => "stable",
         };
+        let filename = c_name(&format!(".openloop-workspace-transaction.{suffix}.v1.json"))?;
+        let _lock = lock_workspace_root(root_descriptor.as_raw_fd())?;
         Ok(Self {
-            root: root.to_owned(),
-            path: root.join(format!(".openloop-workspace-transaction.{suffix}.v1.json")),
+            path: root.join(
+                filename.to_str().map_err(|_| {
+                    WorkspaceGrantError::UnsafePath("invalid journal name".to_owned())
+                })?,
+            ),
+            root: Arc::new(root_descriptor),
+            filename,
         })
     }
 
@@ -59,7 +70,14 @@ impl WorkspaceJournal {
     }
 
     pub fn read(&self) -> Result<Option<WorkspaceTransaction>, WorkspaceGrantError> {
-        let Some(bytes) = read_owner_file(&self.root, &self.path, MAX_JOURNAL_BYTES)? else {
+        let _lock = lock_workspace_root(self.root.as_raw_fd())?;
+        self.read_locked()
+    }
+
+    fn read_locked(&self) -> Result<Option<WorkspaceTransaction>, WorkspaceGrantError> {
+        let Some(bytes) =
+            read_owner_file_at(self.root.as_raw_fd(), &self.filename, MAX_JOURNAL_BYTES)?
+        else {
             return Ok(None);
         };
         let value: WorkspaceTransaction = serde_json::from_slice(&bytes).map_err(|source| {
@@ -78,7 +96,8 @@ impl WorkspaceJournal {
         transaction: WorkspaceTransaction,
         expected_generation: u64,
     ) -> Result<(), WorkspaceGrantError> {
-        let actual = self.read()?.map_or(0, |current| current.generation);
+        let _lock = lock_workspace_root(self.root.as_raw_fd())?;
+        let actual = self.read_locked()?.map_or(0, |current| current.generation);
         if actual != expected_generation {
             return Err(WorkspaceGrantError::GenerationConflict {
                 expected: expected_generation,
@@ -90,26 +109,18 @@ impl WorkspaceJournal {
                 "Workspace transaction generation is invalid".to_owned(),
             ));
         }
-        atomic_write_json(&self.root, &self.path, &transaction)
+        atomic_write_json_at(self.root.as_raw_fd(), &self.filename, &transaction)
     }
 
     pub fn clear(&self, expected_generation: u64) -> Result<(), WorkspaceGrantError> {
-        let actual = self.read()?.map_or(0, |current| current.generation);
+        let _lock = lock_workspace_root(self.root.as_raw_fd())?;
+        let actual = self.read_locked()?.map_or(0, |current| current.generation);
         if actual != expected_generation {
             return Err(WorkspaceGrantError::GenerationConflict {
                 expected: expected_generation,
                 actual,
             });
         }
-        match fs::remove_file(&self.path) {
-            Ok(()) => {
-                let root = fs::File::open(&self.root)
-                    .map_err(|source| WorkspaceGrantError::Io("open Workspace root", source))?;
-                root.sync_all()
-                    .map_err(|source| WorkspaceGrantError::Io("sync Workspace root", source))
-            }
-            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(WorkspaceGrantError::Io("remove Workspace journal", source)),
-        }
+        remove_file_at(self.root.as_raw_fd(), &self.filename)
     }
 }
