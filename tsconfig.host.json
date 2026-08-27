@@ -305,6 +305,7 @@
     { "path": "./packages/openloop/bundle" },
     { "path": "./packages/openloop/adapters" },
     { "path": "./packages/openloop/desktop-bridge-host" },
-    { "path": "./packages/openloop/credentials-keychain" }
+    { "path": "./packages/openloop/credentials-keychain" },
+    { "path": "./packages/openloop/workspace-authority" }
   ]
 }

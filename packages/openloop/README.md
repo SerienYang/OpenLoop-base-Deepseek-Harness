@@ -31,6 +31,11 @@ isolated macOS Keychain items and an optional read-only legacy source. Its
 Host-only consumer registry derives native deletion-confirmation labels;
 browser callers can neither resolve plaintext nor supply those labels.
 
+`@openloop/workspace-authority` owns the Host-side Workspace grant, transaction,
+generation-conflict, and recovery contracts. Its browser view contains only
+the DSH Workspace id, display name, and public state; canonical paths,
+filesystem identities, descriptors, and pending grant ids remain Host-only.
+
 Create packages through the root command:
 
 ```sh

@@ -42,6 +42,7 @@
     "@openloop/credentials-keychain": "workspace:*",
     "@openloop/desktop-bridge-host": "workspace:*",
     "@openloop/runtime-bootstrap": "workspace:^",
+    "@openloop/workspace-authority": "workspace:*",
     "js-yaml": "^4.2.0"
   },
   "peerDependencies": {
