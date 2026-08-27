@@ -288,7 +288,7 @@ impl RecoveryTransaction {
         self,
         health: &mut impl CandidateHealth,
     ) -> Result<PublicationOutcome, RecoveryError> {
-        self.publish_inner(health, &mut NoopHook, &mut NoopCompanion)
+        self.publish_inner(health, &mut NoopHook, &mut NoopCompanion, false)
     }
 
     pub fn publish_with_companion(
@@ -296,7 +296,7 @@ impl RecoveryTransaction {
         health: &mut impl CandidateHealth,
         companion: &mut impl PublicationCompanion,
     ) -> Result<PublicationOutcome, RecoveryError> {
-        self.publish_inner(health, &mut NoopHook, companion)
+        self.publish_inner(health, &mut NoopHook, companion, true)
     }
 
     #[cfg(debug_assertions)]
@@ -305,7 +305,12 @@ impl RecoveryTransaction {
         health: &mut impl CandidateHealth,
         hook: &mut impl RecoveryTestHook,
     ) -> Result<PublicationOutcome, RecoveryError> {
-        self.publish_inner(health, &mut TestHookAdapter(hook), &mut NoopCompanion)
+        self.publish_inner(
+            health,
+            &mut TestHookAdapter(hook),
+            &mut NoopCompanion,
+            false,
+        )
     }
 
     #[cfg(debug_assertions)]
@@ -315,7 +320,7 @@ impl RecoveryTransaction {
         companion: &mut impl PublicationCompanion,
         hook: &mut impl RecoveryTestHook,
     ) -> Result<PublicationOutcome, RecoveryError> {
-        self.publish_inner(health, &mut TestHookAdapter(hook), companion)
+        self.publish_inner(health, &mut TestHookAdapter(hook), companion, true)
     }
 
     fn publish_inner(
@@ -323,7 +328,18 @@ impl RecoveryTransaction {
         health: &mut impl CandidateHealth,
         hook: &mut impl TransactionHook,
         companion: &mut impl PublicationCompanion,
+        has_companion: bool,
     ) -> Result<PublicationOutcome, RecoveryError> {
+        if has_companion != self.migration_transaction_id.is_some() {
+            return Err(RecoveryError::invalid(
+                "update migration transaction requires an exactly bound companion",
+            ));
+        }
+        if has_companion && !self.prepared {
+            return Err(RecoveryError::invalid(
+                "migration-bound update must be durably prepared before publication",
+            ));
+        }
         if !self.prepared {
             self.persist_journal(RecoveryState::Prepared, hook)?;
             self.prepared = true;
@@ -699,9 +715,7 @@ fn recover_interrupted_update_inner(
         return Ok(());
     };
     validate_recovery_journal(&journal)?;
-    if expected_migration_transaction_id
-        .is_some_and(|expected| journal.migration_transaction_id != Some(expected))
-    {
+    if journal.migration_transaction_id != expected_migration_transaction_id {
         return Err(RecoveryError::invalid(
             "update journal migration transaction identity does not match",
         ));

@@ -234,6 +234,12 @@ pub enum MigrationDeleteOutcome {
     PreservedIndeterminate,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrationRollbackStatus {
+    Completed,
+    PreservedConflict,
+}
+
 impl MigrationStore for KeychainStore {
     fn resolve(
         &self,
@@ -537,7 +543,11 @@ pub fn prepare_migration_with_filesystem(
                     return Ok(MigrationOutcome::PendingHealth(journal.transaction_id));
                 }
                 if roots.entry_exists(roots.dsh.as_raw_fd(), LEGACY_FILE)? {
-                    rollback_loaded(&roots, &journal, store)?;
+                    if rollback_loaded(&roots, &journal, store)?
+                        == MigrationRollbackStatus::PreservedConflict
+                    {
+                        return Ok(MigrationOutcome::ReadOnlyLegacy);
+                    }
                 } else {
                     finish_committed(&roots, journal, hook)?;
                     return Ok(MigrationOutcome::NotNeeded);
@@ -555,7 +565,13 @@ pub fn prepare_migration_with_filesystem(
                 roots.persist_journal(&resumed, None, hook)?;
                 return Ok(MigrationOutcome::PendingHealth(resumed.transaction_id));
             }
-            _ => rollback_loaded(&roots, &journal, store)?,
+            _ => {
+                if rollback_loaded(&roots, &journal, store)?
+                    == MigrationRollbackStatus::PreservedConflict
+                {
+                    return Ok(MigrationOutcome::ReadOnlyLegacy);
+                }
+            }
         }
     }
 
@@ -571,14 +587,14 @@ pub fn rollback_migration(
     transaction_id: Uuid,
     store: &impl MigrationStore,
     hook: &mut impl MigrationHook,
-) -> Result<(), MigrationError> {
+) -> Result<MigrationRollbackStatus, MigrationError> {
     let roots = SecureRoots::open(
         channel_root,
         dsh_home,
         HostMigrationFilesystem.expected_owner(),
     )?;
     let Some(journal) = roots.read_journal()? else {
-        return Ok(());
+        return Ok(MigrationRollbackStatus::Completed);
     };
     if journal.transaction_id != transaction_id {
         return Err(MigrationError::invalid(
@@ -597,7 +613,8 @@ pub fn rollback_migration(
                 | MigrationState::Committed
         )
     {
-        return finish_committed(&roots, journal, hook);
+        finish_committed(&roots, journal, hook)?;
+        return Ok(MigrationRollbackStatus::Completed);
     }
     rollback_loaded(&roots, &journal, store)
 }
@@ -846,7 +863,7 @@ fn rollback_loaded(
     roots: &SecureRoots,
     journal: &Journal,
     store: &impl MigrationStore,
-) -> Result<(), MigrationError> {
+) -> Result<MigrationRollbackStatus, MigrationError> {
     let source_exists = roots.entry_exists(roots.dsh.as_raw_fd(), LEGACY_FILE)?;
     let staged_name = staged_name(journal.transaction_id);
     let staged_exists = roots.entry_exists(roots.dsh.as_raw_fd(), &staged_name)?;
@@ -879,7 +896,8 @@ fn rollback_values(
     journal: &Journal,
     document: &LegacyDocument,
     store: &impl MigrationStore,
-) -> Result<(), MigrationError> {
+) -> Result<MigrationRollbackStatus, MigrationError> {
+    let mut preserved_conflict = false;
     for reference in &journal.transaction_created_refs {
         let Some(secret) = document.values.get(reference) else {
             continue;
@@ -889,10 +907,15 @@ fn rollback_values(
         if store.delete_if_migration_owned(&account, secret, journal.transaction_id)?
             == MigrationDeleteOutcome::PreservedIndeterminate
         {
-            return Err(MigrationError::Conflict(reference.clone()));
+            preserved_conflict = true;
         }
     }
-    roots.remove_journal()
+    if preserved_conflict {
+        return Ok(MigrationRollbackStatus::PreservedConflict);
+    }
+    roots
+        .remove_journal()
+        .map(|_| MigrationRollbackStatus::Completed)
 }
 
 fn insert_sorted_unique(values: &mut Vec<String>, value: &str) {

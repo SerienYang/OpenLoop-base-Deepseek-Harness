@@ -241,6 +241,7 @@ impl PendingCredentialMigration {
             &self.store,
             &mut NoopMigrationHook,
         )
+        .map(|_| ())
         .map_err(|error| error.to_string())?;
         self.transaction_id = None;
         Ok(())
