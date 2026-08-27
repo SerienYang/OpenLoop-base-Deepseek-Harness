@@ -1,6 +1,12 @@
 import { Readable } from 'node:stream'
 import { runInNewContext } from 'node:vm'
 import { Context } from '@deepseek-ai/cordis'
+import {
+  createLaunchEnvironmentSnapshot,
+  DSH_LAUNCH_ENVIRONMENT_KEY,
+} from '@deepseek-ai/dsh-launch-environment'
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { KeychainCredentialProvider } from '@openloop/credentials-keychain'
 import { describe, expect, test, vi } from 'vitest'
 import { installRuntimeBootstrap } from '@openloop/runtime-bootstrap'
 import {
@@ -223,7 +229,7 @@ describe('Openloop bootstrap Host route', () => {
       references: ['ALPHA_TOKEN', 'ZETA_TOKEN'],
     }))
     const acknowledgeMainWebviewHealth = vi.fn(() => Promise.resolve())
-    const describe = vi.fn(() => Promise.resolve({
+    const describeCredential = vi.fn(() => Promise.resolve({
       configured: true,
       source: 'keychain',
       writable: false,
@@ -239,8 +245,18 @@ describe('Openloop bootstrap Host route', () => {
     ctx.provide('desktopBridge', {
       getCandidateCredentialHealthPlan,
       acknowledgeMainWebviewHealth,
+      describeCredential,
+      resolveCredential: vi.fn(() => Promise.resolve(undefined)),
+      openCredentialReplacement: vi.fn(() => Promise.resolve('cancelled')),
+      deleteCredentialWithConfirmation: vi.fn(() => Promise.resolve('cancelled')),
     } as never)
-    ctx.provide('credentials', { describe } as never)
+    ctx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, createLaunchEnvironmentSnapshot([]))
+    const credentials = new KeychainCredentialProvider(ctx)
+    await expect(credentials.describe(credentialRef('ALPHA_TOKEN'))).resolves.toMatchObject({
+      configured: true,
+      source: 'keychain',
+    })
+    describeCredential.mockClear()
     installRuntimeBootstrap(ctx, {
       launchId: 'launch-id',
       bootstrapToken: Uint8Array.from([0xab, 0xcd]),
@@ -277,7 +293,7 @@ describe('Openloop bootstrap Host route', () => {
     )
 
     expect(completion.state.status).toBe(200)
-    expect(describe.mock.calls).toEqual([
+    expect(describeCredential.mock.calls).toEqual([
       ['ALPHA_TOKEN'],
       ['ZETA_TOKEN'],
     ])

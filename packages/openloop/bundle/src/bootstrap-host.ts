@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { Context } from '@deepseek-ai/cordis'
+import { symbols, type Context } from '@deepseek-ai/cordis'
 import type { RuntimeBootstrap } from '@openloop/runtime-bootstrap'
 import type {} from '@openloop/runtime-bootstrap'
 
@@ -280,8 +280,16 @@ async function candidateCredentialHealthProof(
     await ctx.desktopBridge.getCandidateCredentialHealthPlan(),
   )
   if (plan.migrationTransactionId === null) return undefined
+  const injected = ctx.get('credentials')
+  if (injected === undefined) {
+    throw new Error('candidate credential provider is unavailable')
+  }
+  const original = Reflect.get(injected, symbols.original) as unknown
+  const credentials = typeof original === 'object' && original !== null
+    ? original as BootstrapHostContext['credentials']
+    : injected
   for (const reference of plan.references) {
-    const status = await ctx.credentials.describe(reference)
+    const status = await credentials.describe(reference)
     if (!status.configured || status.source !== 'keychain') {
       throw new Error('candidate credential is not Keychain-backed')
     }

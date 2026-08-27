@@ -167,6 +167,114 @@ print(json.dumps(readiness, separators=(",", ":")), flush=True)
     .replace("__CORE__", CORE_SHA256)
 }
 
+fn credential_health_runtime_sidecar(transaction_id: Uuid) -> String {
+    r#"#!/usr/bin/python3
+import hashlib, hmac, json, os, socket, struct, sys, uuid
+
+assert sys.argv[1:] == []
+frame = b""
+while True:
+    chunk = os.read(3, 65536)
+    if not chunk:
+        break
+    frame += chunk
+assert frame[:4] == b"OLSP" and struct.unpack(">H", frame[4:6])[0] == 1
+offset = 10
+def field():
+    global offset
+    length = struct.unpack(">I", frame[offset:offset + 4])[0]
+    offset += 4
+    value = frame[offset:offset + length]
+    offset += length
+    return value
+launch_id = str(uuid.UUID(bytes=field()))
+field()
+secret = field()
+socket_path = field().decode()
+
+def sized(value):
+    return struct.pack(">I", len(value)) + value
+
+def bridge_call(method, payload, request_id, counter):
+    nonce = counter.to_bytes(8, "big") + bytes(24)
+    canonical_payload = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    canonical = (
+        b"openloop.bridge.request.v1\0"
+        + nonce
+        + struct.pack(">I", 1)
+        + sized(request_id.encode())
+        + sized(launch_id.encode())
+        + sized(method.encode())
+        + sized(canonical_payload)
+    )
+    envelope = {
+        "request": {
+            "version": 1,
+            "requestId": request_id,
+            "launchId": launch_id,
+            "method": method,
+            "payload": payload,
+        },
+        "nonce": nonce.hex(),
+        "mac": hmac.new(secret, canonical, hashlib.sha256).hexdigest(),
+    }
+    body = json.dumps(envelope, separators=(",", ":")).encode()
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.connect(socket_path)
+    client.sendall(struct.pack(">I", len(body)) + body)
+    client.shutdown(socket.SHUT_WR)
+    header = client.recv(4)
+    length = struct.unpack(">I", header)[0]
+    response = b""
+    while len(response) < length:
+        response += client.recv(length - len(response))
+    parsed = json.loads(response)["response"]
+    assert parsed["ok"] is True
+    return parsed["result"]
+
+plan = bridge_call("getCandidateCredentialHealthPlan", None, "health-plan", 1)
+assert plan == {
+    "migrationTransactionId": "__TRANSACTION__",
+    "references": ["ALPHA_TOKEN", "ZETA_TOKEN"],
+}
+for index, reference in enumerate(plan["references"], start=2):
+    status = bridge_call(
+        "describeCredential",
+        {"ref": reference},
+        "credential-status-" + str(index),
+        index,
+    )
+    assert status["configured"] is True
+    assert status["source"] == "keychain"
+payload = {
+    "launchId": launch_id,
+    "coreManifestSha256": "__CORE__",
+    "openloopDataVersion": 0,
+    "dshDataVersion": 0,
+    "credentialHealth": {
+        "migrationTransactionId": "__TRANSACTION__",
+        "ready": True,
+        "checkedCount": len(plan["references"]),
+    },
+}
+bridge_call("acknowledgeMainWebviewHealth", payload, "candidate-health", 10)
+readiness = {
+    "type": "openloop.runtime.ready",
+    "version": 1,
+    "launchId": launch_id,
+    "profile": "openloop",
+    "host": "127.0.0.1",
+    "port": 43123,
+    "origin": "http://127.0.0.1:43123",
+    "coreManifestSha256": "__CORE__",
+    "healthSmoke": {"method": "GET", "path": "/", "status": 200},
+}
+print(json.dumps(readiness, separators=(",", ":")), flush=True)
+"#
+    .replace("__CORE__", CORE_SHA256)
+    .replace("__TRANSACTION__", &transaction_id.to_string())
+}
+
 fn runtime_sidecar_without_webview_callback() -> String {
     r#"#!/usr/bin/python3
 import json, os, struct, uuid
@@ -203,6 +311,47 @@ readiness = {
 print(json.dumps(readiness, separators=(",", ":")), flush=True)
 "#
     .replace("__CORE__", CORE_SHA256)
+}
+
+#[test]
+fn candidate_probe_routes_every_planned_reference_through_the_native_status_handler() {
+    let dsh_home_root = tempdir().expect("DSH_HOME root");
+    let dsh_home = dsh_home_root.path().join("Openloop-Test/dsh");
+    fs::create_dir_all(&dsh_home).expect("DSH_HOME");
+    let transaction_id = Uuid::new_v4();
+    let sidecar = credential_health_runtime_sidecar(transaction_id);
+    let (_root, app) = app_bundle("#!/bin/sh\nexit 0\n", &sidecar);
+    let probe = BundleHealthProbe::new(VERSION, IDENTIFIER, CORE_SHA256, 0, 0);
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let status_observed = observed.clone();
+
+    let session = probe
+        .begin_with_credential_health(
+            &app,
+            PROBE_TIMEOUT,
+            &dsh_home,
+            CredentialHealthPlan {
+                migration_transaction_id: Some(transaction_id),
+                references: vec!["ALPHA_TOKEN".to_owned(), "ZETA_TOKEN".to_owned()],
+            },
+            move |reference| {
+                status_observed
+                    .lock()
+                    .expect("status observations")
+                    .push(reference.to_owned());
+                Ok(true)
+            },
+        )
+        .expect("start candidate credential health");
+    let report = session.finish().expect("candidate credential health");
+
+    assert_eq!(
+        observed.lock().expect("status observations").as_slice(),
+        ["ALPHA_TOKEN", "ZETA_TOKEN"]
+    );
+    report
+        .validate_full_health(VERSION, Some(transaction_id), 2)
+        .expect("complete candidate credential health");
 }
 
 #[test]
