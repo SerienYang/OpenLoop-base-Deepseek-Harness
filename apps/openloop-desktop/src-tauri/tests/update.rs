@@ -355,13 +355,11 @@ fn recovery_first_swap_crash_boundary_keeps_both_complete_apps() {
 }
 
 #[test]
-fn durable_update_journal_owns_migration_before_swap_and_recovers_together() {
+fn crash_after_durable_prepare_without_migration_state_recovers_together() {
     let (fixture, installed, candidate) = transaction_fixture();
     let migration_id = uuid::Uuid::new_v4();
-    let transaction = RecoveryTransaction::open(fixture.path(), &installed, &candidate)
-        .expect("transaction")
-        .with_migration_transaction(Some(migration_id));
-    let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
+    let transaction =
+        RecoveryTransaction::open(fixture.path(), &installed, &candidate).expect("transaction");
     let mut companion = RecordingCompanion::default();
     let mut hook = TransactionHook(|boundary, _: &Path, _: &Path| {
         if boundary == RecoveryBoundary::AfterJournalParentFsync(RecoveryState::Prepared) {
@@ -370,7 +368,7 @@ fn durable_update_journal_owns_migration_before_swap_and_recovers_together() {
     });
 
     let crashed = catch_unwind(AssertUnwindSafe(|| {
-        let _ = transaction.publish_with_companion_and_hook(&mut health, &mut companion, &mut hook);
+        let _ = transaction.prepare_with_hook(Some(migration_id), &mut hook);
     }));
     assert!(crashed.is_err());
     let journal =
@@ -391,13 +389,43 @@ fn durable_update_journal_owns_migration_before_swap_and_recovers_together() {
 }
 
 #[test]
-fn update_recovery_rejects_a_companion_bound_to_another_migration() {
+fn prepared_transaction_publish_does_not_rewrite_prepared_ownership() {
     let (fixture, installed, candidate) = transaction_fixture();
     let migration_id = uuid::Uuid::new_v4();
     let transaction = RecoveryTransaction::open(fixture.path(), &installed, &candidate)
         .expect("transaction")
-        .with_migration_transaction(Some(migration_id));
+        .prepare(Some(migration_id))
+        .expect("durable prepared ownership");
     let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
+    let mut companion = RecordingCompanion::default();
+    let mut hook = TransactionHook(|boundary, _: &Path, _: &Path| {
+        assert!(
+            !matches!(
+                boundary,
+                RecoveryBoundary::BeforeJournalFileFsync(RecoveryState::Prepared)
+                    | RecoveryBoundary::AfterJournalFileFsync(RecoveryState::Prepared)
+                    | RecoveryBoundary::BeforeJournalParentFsync(RecoveryState::Prepared)
+                    | RecoveryBoundary::AfterJournalParentFsync(RecoveryState::Prepared)
+            ),
+            "publish rewrote durable prepared ownership"
+        );
+    });
+
+    let outcome = transaction
+        .publish_with_companion_and_hook(&mut health, &mut companion, &mut hook)
+        .expect("publish prepared transaction");
+
+    assert!(matches!(outcome, PublicationOutcome::Committed { .. }));
+    assert_eq!(companion.commits, 1);
+    assert_eq!(companion.rollbacks, 0);
+}
+
+#[test]
+fn update_recovery_rejects_a_companion_bound_to_another_migration() {
+    let (fixture, installed, candidate) = transaction_fixture();
+    let migration_id = uuid::Uuid::new_v4();
+    let transaction =
+        RecoveryTransaction::open(fixture.path(), &installed, &candidate).expect("transaction");
     let mut companion = RecordingCompanion::default();
     let mut hook = TransactionHook(|boundary, _: &Path, _: &Path| {
         if boundary == RecoveryBoundary::AfterJournalParentFsync(RecoveryState::Prepared) {
@@ -405,7 +433,7 @@ fn update_recovery_rejects_a_companion_bound_to_another_migration() {
         }
     });
     assert!(catch_unwind(AssertUnwindSafe(|| {
-        let _ = transaction.publish_with_companion_and_hook(&mut health, &mut companion, &mut hook);
+        let _ = transaction.prepare_with_hook(Some(migration_id), &mut hook);
     }))
     .is_err());
 
@@ -430,7 +458,8 @@ fn death_after_app_swap_restores_app_and_companion_from_durable_journal() {
     let migration_id = uuid::Uuid::new_v4();
     let transaction = RecoveryTransaction::open(fixture.path(), &installed, &candidate)
         .expect("transaction")
-        .with_migration_transaction(Some(migration_id));
+        .prepare(Some(migration_id))
+        .expect("durable prepared transaction");
     let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
     let mut companion = RecordingCompanion::default();
     let mut hook = TransactionHook(|boundary, _: &Path, _: &Path| {
@@ -473,9 +502,9 @@ fn process_death_at_each_prehealth_journal_boundary_restores_both_transactions()
 
     for crash_boundary in boundaries {
         let (fixture, installed, candidate) = transaction_fixture();
-        let transaction = RecoveryTransaction::open(fixture.path(), &installed, &candidate)
-            .expect("transaction")
-            .with_migration_transaction(Some(uuid::Uuid::new_v4()));
+        let transaction =
+            RecoveryTransaction::open(fixture.path(), &installed, &candidate).expect("transaction");
+        let migration_id = uuid::Uuid::new_v4();
         let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
         let mut companion = RecordingCompanion::default();
         let mut hook = TransactionHook(|boundary, _: &Path, _: &Path| {
@@ -485,6 +514,9 @@ fn process_death_at_each_prehealth_journal_boundary_restores_both_transactions()
         });
 
         assert!(catch_unwind(AssertUnwindSafe(|| {
+            let transaction = transaction
+                .prepare_with_hook(Some(migration_id), &mut hook)
+                .expect("durable prepared transaction");
             let _ =
                 transaction.publish_with_companion_and_hook(&mut health, &mut companion, &mut hook);
         }))
@@ -523,7 +555,8 @@ fn process_death_at_each_durable_rollback_boundary_resumes_to_one_authority() {
         let (fixture, installed, candidate) = transaction_fixture();
         let transaction = RecoveryTransaction::open(fixture.path(), &installed, &candidate)
             .expect("transaction")
-            .with_migration_transaction(Some(uuid::Uuid::new_v4()));
+            .prepare(Some(uuid::Uuid::new_v4()))
+            .expect("durable prepared transaction");
         let mut health =
             HealthProbe(|_: &Path, _: Duration| HealthStatus::Failed("candidate failed".into()));
         let mut companion = RecordingCompanion::default();
@@ -558,7 +591,8 @@ fn process_death_after_companion_commit_recovers_forward_idempotently() {
     let (fixture, installed, candidate) = transaction_fixture();
     let transaction = RecoveryTransaction::open(fixture.path(), &installed, &candidate)
         .expect("transaction")
-        .with_migration_transaction(Some(uuid::Uuid::new_v4()));
+        .prepare(Some(uuid::Uuid::new_v4()))
+        .expect("durable prepared transaction");
     let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
     let mut companion = RecordingCompanion::default();
     let mut hook = TransactionHook(|boundary, _: &Path, _: &Path| {
@@ -588,7 +622,8 @@ fn restart_commit_failure_before_irreversible_delete_rolls_back_both_transaction
     let (fixture, installed, candidate) = transaction_fixture();
     let transaction = RecoveryTransaction::open(fixture.path(), &installed, &candidate)
         .expect("transaction")
-        .with_migration_transaction(Some(uuid::Uuid::new_v4()));
+        .prepare(Some(uuid::Uuid::new_v4()))
+        .expect("durable prepared transaction");
     let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
     let mut initial_companion = RecordingCompanion::default();
     let mut hook = TransactionHook(|boundary, _: &Path, _: &Path| {
@@ -621,7 +656,8 @@ fn restart_resumes_companion_rollback_after_the_old_app_was_durably_restored() {
     let (fixture, installed, candidate) = transaction_fixture();
     let transaction = RecoveryTransaction::open(fixture.path(), &installed, &candidate)
         .expect("transaction")
-        .with_migration_transaction(Some(uuid::Uuid::new_v4()));
+        .prepare(Some(uuid::Uuid::new_v4()))
+        .expect("durable prepared transaction");
     let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
     let mut initial_companion = RecordingCompanion::default();
     let mut hook = TransactionHook(|boundary, _: &Path, _: &Path| {

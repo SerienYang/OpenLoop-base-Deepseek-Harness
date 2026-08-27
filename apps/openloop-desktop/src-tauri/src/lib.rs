@@ -19,8 +19,8 @@ use crate::bridge::{
 use crate::credentials::{
     credential_bridge_dispatch_tables_with_migration_status,
     migration::{
-        commit_migration, prepare_migration, rollback_migration, MigrationOutcome,
-        NoopMigrationHook, ReadOnlyLegacySource,
+        commit_migration, plan_migration, prepare_migration, prepare_migration_with_transaction_id,
+        rollback_migration, MigrationOutcome, NoopMigrationHook, ReadOnlyLegacySource,
     },
     AppKitCredentialDeletionConfirmation, AppKitCredentialSheet, CredentialMigrationStatusHandle,
     CredentialSheetCoordinator, CredentialSheetGate, KeychainStore,
@@ -706,14 +706,27 @@ async fn run_update_spike(
     #[cfg(target_os = "macos")]
     let publication_outcome = {
         let store = KeychainStore::new(updater_config.channel());
-        let migration = prepare_migration(channel_root, &dsh_home, &store, &mut NoopMigrationHook)
-            .map_err(|error| format!("candidate credential migration failed: {error}"))?;
+        let migration_plan = plan_migration(channel_root, &dsh_home, &mut NoopMigrationHook)
+            .map_err(|error| format!("candidate credential migration planning failed: {error}"))?;
+        let transaction = transaction
+            .prepare(migration_plan.transaction_id())
+            .map_err(|error| format!("prepare candidate recovery transaction failed: {error}"))?;
+        let migration = match migration_plan.transaction_id() {
+            Some(transaction_id) => prepare_migration_with_transaction_id(
+                channel_root,
+                &dsh_home,
+                &store,
+                transaction_id,
+                &mut NoopMigrationHook,
+            )
+            .map_err(|error| format!("candidate credential migration failed: {error}"))?,
+            None => MigrationOutcome::NotNeeded,
+        };
         let mut pending_migration = migration.transaction_id().map(|transaction_id| {
             PendingCredentialMigration::new(channel_root, &dsh_home, transaction_id, store)
         });
         let mut health = CandidateProcessHealth::new(&update.version, dsh_home)
             .with_migration_transaction(migration.transaction_id());
-        let transaction = transaction.with_migration_transaction(migration.transaction_id());
         if let Some(companion) = pending_migration.as_mut() {
             transaction.publish_with_companion(&mut health, companion)
         } else {

@@ -97,6 +97,21 @@ impl MigrationOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MigrationPlan {
+    NotNeeded,
+    Planned(Uuid),
+}
+
+impl MigrationPlan {
+    pub fn transaction_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Planned(transaction_id) => Some(*transaction_id),
+            Self::NotNeeded => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrationBoundary {
     BeforeKeychainWrite {
         reference: String,
@@ -207,6 +222,7 @@ pub trait MigrationStore {
     fn delete_if_migration_owned(
         &self,
         account: &CredentialAccount,
+        expected_secret: &[u8],
         transaction_id: Uuid,
     ) -> Result<MigrationDeleteOutcome, MigrationStoreError>;
 }
@@ -215,6 +231,7 @@ pub trait MigrationStore {
 pub enum MigrationDeleteOutcome {
     Deleted,
     NotOwned,
+    PreservedIndeterminate,
 }
 
 impl MigrationStore for KeychainStore {
@@ -239,17 +256,23 @@ impl MigrationStore for KeychainStore {
     fn delete_if_migration_owned(
         &self,
         account: &CredentialAccount,
+        expected_secret: &[u8],
         transaction_id: Uuid,
     ) -> Result<MigrationDeleteOutcome, MigrationStoreError> {
-        self.delete_if_migration_owned(account, transaction_id)
-            .map(|deleted| {
-                if deleted {
-                    MigrationDeleteOutcome::Deleted
-                } else {
-                    MigrationDeleteOutcome::NotOwned
-                }
-            })
-            .map_err(|_| MigrationStoreError::unavailable())
+        let current = self
+            .resolve_migration_owned(account, transaction_id)
+            .map_err(|_| MigrationStoreError::unavailable())?;
+        let Some(current) = current else {
+            return Ok(MigrationDeleteOutcome::NotOwned);
+        };
+
+        // Security.framework cannot bind SecItemDelete to kSecValueData. A
+        // read followed by delete would race an external replacement, so the
+        // canonical item is preserved for explicit user cleanup.
+        if current.as_slice() != expected_secret {
+            return Ok(MigrationDeleteOutcome::PreservedIndeterminate);
+        }
+        Ok(MigrationDeleteOutcome::PreservedIndeterminate)
     }
 }
 
@@ -409,6 +432,71 @@ pub fn prepare_migration(
     prepare_migration_with_filesystem(
         channel_root,
         dsh_home,
+        store,
+        &mut HostMigrationFilesystem,
+        hook,
+    )
+}
+
+pub fn plan_migration(
+    channel_root: &Path,
+    dsh_home: &Path,
+    hook: &mut impl MigrationHook,
+) -> Result<MigrationPlan, MigrationError> {
+    let roots = SecureRoots::open(
+        channel_root,
+        dsh_home,
+        HostMigrationFilesystem.expected_owner(),
+    )?;
+    if let Some(journal) = roots.read_journal()? {
+        if journal.state != MigrationState::Discovered {
+            return Err(MigrationError::invalid(
+                "credential migration is already in progress",
+            ));
+        }
+        return Ok(MigrationPlan::Planned(journal.transaction_id));
+    }
+    let Some(document) = roots.read_legacy(LEGACY_FILE)? else {
+        return Ok(MigrationPlan::NotNeeded);
+    };
+    let journal = discovered_journal(&document, Uuid::new_v4());
+    roots.persist_journal(&journal, None, hook)?;
+    Ok(MigrationPlan::Planned(journal.transaction_id))
+}
+
+pub fn prepare_migration_with_transaction_id(
+    channel_root: &Path,
+    dsh_home: &Path,
+    store: &impl MigrationStore,
+    transaction_id: Uuid,
+    hook: &mut impl MigrationHook,
+) -> Result<MigrationOutcome, MigrationError> {
+    let roots = SecureRoots::open(
+        channel_root,
+        dsh_home,
+        HostMigrationFilesystem.expected_owner(),
+    )?;
+    let journal = roots
+        .read_journal()?
+        .ok_or_else(|| MigrationError::invalid("planned credential migration disappeared"))?;
+    if journal.transaction_id != transaction_id {
+        return Err(MigrationError::invalid(
+            "credential migration transaction identity changed",
+        ));
+    }
+    if journal.state != MigrationState::Discovered {
+        return Err(MigrationError::invalid(
+            "planned credential migration is no longer pristine",
+        ));
+    }
+    let document = roots
+        .read_legacy(LEGACY_FILE)?
+        .ok_or_else(|| MigrationError::invalid("legacy credential source disappeared"))?;
+    verify_planned_document(&journal, &document)?;
+    apply_migration_document(
+        &roots,
+        document,
+        journal,
         store,
         &mut HostMigrationFilesystem,
         hook,
@@ -604,8 +692,13 @@ fn migrate_document(
     filesystem: &mut impl MigrationFilesystem,
     hook: &mut impl MigrationHook,
 ) -> Result<MigrationOutcome, MigrationError> {
-    let transaction_id = Uuid::new_v4();
-    let mut journal = Journal {
+    let journal = discovered_journal(&document, Uuid::new_v4());
+    roots.persist_journal(&journal, None, hook)?;
+    apply_migration_document(roots, document, journal, store, filesystem, hook)
+}
+
+fn discovered_journal(document: &LegacyDocument, transaction_id: Uuid) -> Journal {
+    Journal {
         transaction_id,
         source: document.identity,
         references: document
@@ -624,8 +717,37 @@ fn migrate_document(
         pre_existing_refs: Vec::new(),
         transaction_created_refs: Vec::new(),
         state: MigrationState::Discovered,
-    };
-    roots.persist_journal(&journal, None, hook)?;
+    }
+}
+
+fn verify_planned_document(
+    journal: &Journal,
+    document: &LegacyDocument,
+) -> Result<(), MigrationError> {
+    verify_source_identity(&document.identity, &journal.source)?;
+    if journal.references.keys().ne(document.values.keys())
+        || journal.references.values().any(|reference| {
+            reference.state != ReferenceState::Planned || reference.previous.is_some()
+        })
+        || !journal.pre_existing_refs.is_empty()
+        || !journal.transaction_created_refs.is_empty()
+    {
+        return Err(MigrationError::invalid(
+            "planned credential migration no longer matches its legacy source",
+        ));
+    }
+    Ok(())
+}
+
+fn apply_migration_document(
+    roots: &SecureRoots,
+    document: LegacyDocument,
+    mut journal: Journal,
+    store: &impl MigrationStore,
+    filesystem: &mut impl MigrationFilesystem,
+    hook: &mut impl MigrationHook,
+) -> Result<MigrationOutcome, MigrationError> {
+    let transaction_id = journal.transaction_id;
     journal.state = MigrationState::WritingKeychain;
     roots.persist_journal(&journal, None, hook)?;
 
@@ -759,12 +881,16 @@ fn rollback_values(
     store: &impl MigrationStore,
 ) -> Result<(), MigrationError> {
     for reference in &journal.transaction_created_refs {
-        if !document.values.contains_key(reference) {
+        let Some(secret) = document.values.get(reference) else {
             continue;
-        }
+        };
         let account = CredentialAccount::new(reference)
             .map_err(|_| MigrationError::invalid("migration journal reference is invalid"))?;
-        let _ = store.delete_if_migration_owned(&account, journal.transaction_id)?;
+        if store.delete_if_migration_owned(&account, secret, journal.transaction_id)?
+            == MigrationDeleteOutcome::PreservedIndeterminate
+        {
+            return Err(MigrationError::Conflict(reference.clone()));
+        }
     }
     roots.remove_journal()
 }

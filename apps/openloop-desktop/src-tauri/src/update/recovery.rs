@@ -176,6 +176,7 @@ pub struct RecoveryTransaction {
     candidate_identity: FileIdentity,
     transaction_id: Uuid,
     migration_transaction_id: Option<Uuid>,
+    prepared: bool,
 }
 
 pub fn update_journal_path(root: &Path) -> PathBuf {
@@ -247,12 +248,40 @@ impl RecoveryTransaction {
             candidate_identity,
             transaction_id: Uuid::new_v4(),
             migration_transaction_id: None,
+            prepared: false,
         })
     }
 
-    pub fn with_migration_transaction(mut self, transaction_id: Option<Uuid>) -> Self {
-        self.migration_transaction_id = transaction_id;
-        self
+    pub fn prepare(self, migration_transaction_id: Option<Uuid>) -> Result<Self, RecoveryError> {
+        self.prepare_inner(migration_transaction_id, &mut NoopHook)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn prepare_with_hook(
+        self,
+        migration_transaction_id: Option<Uuid>,
+        hook: &mut impl RecoveryTestHook,
+    ) -> Result<Self, RecoveryError> {
+        self.prepare_inner(migration_transaction_id, &mut TestHookAdapter(hook))
+    }
+
+    fn prepare_inner(
+        mut self,
+        migration_transaction_id: Option<Uuid>,
+        hook: &mut impl TransactionHook,
+    ) -> Result<Self, RecoveryError> {
+        if self.prepared {
+            if self.migration_transaction_id != migration_transaction_id {
+                return Err(RecoveryError::invalid(
+                    "prepared update migration transaction identity changed",
+                ));
+            }
+            return Ok(self);
+        }
+        self.migration_transaction_id = migration_transaction_id;
+        self.persist_journal(RecoveryState::Prepared, hook)?;
+        self.prepared = true;
+        Ok(self)
     }
 
     pub fn publish(
@@ -290,12 +319,15 @@ impl RecoveryTransaction {
     }
 
     fn publish_inner(
-        self,
+        mut self,
         health: &mut impl CandidateHealth,
         hook: &mut impl TransactionHook,
         companion: &mut impl PublicationCompanion,
     ) -> Result<PublicationOutcome, RecoveryError> {
-        self.persist_journal(RecoveryState::Prepared, hook)?;
+        if !self.prepared {
+            self.persist_journal(RecoveryState::Prepared, hook)?;
+            self.prepared = true;
+        }
         if let Err(source) = self.swap_checked(
             &self.installed_name,
             self.installed_identity,
@@ -685,6 +717,7 @@ fn recover_interrupted_update_inner(
         candidate_identity: journal.candidate_identity,
         transaction_id: journal.transaction_id,
         migration_transaction_id: journal.migration_transaction_id,
+        prepared: true,
     };
     let installed_observed = identity_at(transaction.root.as_raw_fd(), &transaction.installed_name)
         .map_err(|source| RecoveryError::io("inspect recovery installed app", source))?;

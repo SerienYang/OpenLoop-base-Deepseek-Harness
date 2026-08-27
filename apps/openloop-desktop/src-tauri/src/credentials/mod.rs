@@ -151,6 +151,20 @@ impl KeychainStore {
         }
     }
 
+    pub(crate) fn resolve_migration_owned(
+        &self,
+        account: &CredentialAccount,
+        transaction_id: uuid::Uuid,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, CredentialError> {
+        let mut options = self.password_options(account);
+        options.set_comment(&migration_marker(transaction_id));
+        match generic_password(options) {
+            Ok(secret) => Ok(Some(Zeroizing::new(secret))),
+            Err(error) if error.code() == errSecItemNotFound => Ok(None),
+            Err(error) => Err(CredentialError::keychain("resolve", error.code())),
+        }
+    }
+
     pub fn status(&self, account: &CredentialAccount) -> Result<bool, CredentialError> {
         let mut options = ItemSearchOptions::new();
         options
@@ -189,20 +203,6 @@ impl KeychainStore {
         options.set_comment(&migration_marker(transaction_id));
         security_framework::passwords::set_generic_password_options(secret, options)
             .map_err(|error| CredentialError::keychain("set", error.code()))
-    }
-
-    pub(crate) fn delete_if_migration_owned(
-        &self,
-        account: &CredentialAccount,
-        transaction_id: uuid::Uuid,
-    ) -> Result<bool, CredentialError> {
-        let mut options = self.password_options(account);
-        options.set_comment(&migration_marker(transaction_id));
-        match delete_generic_password_options(options) {
-            Ok(()) => Ok(true),
-            Err(error) if error.code() == errSecItemNotFound => Ok(false),
-            Err(error) => Err(CredentialError::keychain("delete", error.code())),
-        }
     }
 
     fn item_search(&self, account: &CredentialAccount) -> ItemSearchOptions {

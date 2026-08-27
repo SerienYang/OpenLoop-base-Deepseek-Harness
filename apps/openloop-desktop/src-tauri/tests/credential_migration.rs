@@ -11,7 +11,8 @@ use std::{
 use openloop_desktop_lib::{
     credentials::{
         migration::{
-            commit_migration, journal_path, prepare_migration, prepare_migration_with_filesystem,
+            commit_migration, journal_path, plan_migration, prepare_migration,
+            prepare_migration_with_filesystem, prepare_migration_with_transaction_id,
             rollback_migration, staged_path, Journal, MigrationBoundary, MigrationDeleteOutcome,
             MigrationFilesystem, MigrationHook, MigrationOutcome, MigrationState, MigrationStore,
             MigrationStoreError, NoopMigrationHook, PreviousValue, ReadOnlyLegacySource,
@@ -22,8 +23,8 @@ use openloop_desktop_lib::{
     update::{
         channel::ReleaseChannel,
         recovery::{
-            CandidateHealth, HealthStatus, PublicationCompanion, PublicationOutcome,
-            RecoveryTransaction,
+            recover_interrupted_update_with_bound_companion, update_journal_path, CandidateHealth,
+            HealthStatus, PublicationCompanion, PublicationOutcome, RecoveryTransaction,
         },
     },
 };
@@ -66,6 +67,13 @@ impl MemoryStore {
             .insert(reference.to_owned(), value.to_vec());
         self.owners.lock().expect("memory owners").remove(reference);
     }
+
+    fn external_set_preserving_owner(&self, reference: &str, value: &[u8]) {
+        self.values
+            .lock()
+            .expect("memory store")
+            .insert(reference.to_owned(), value.to_vec());
+    }
 }
 
 impl MigrationStore for MemoryStore {
@@ -106,6 +114,7 @@ impl MigrationStore for MemoryStore {
     fn delete_if_migration_owned(
         &self,
         account: &CredentialAccount,
+        expected_secret: &[u8],
         transaction_id: Uuid,
     ) -> Result<MigrationDeleteOutcome, MigrationStoreError> {
         let reference = account.as_str().trim_start_matches("credential:");
@@ -113,8 +122,12 @@ impl MigrationStore for MemoryStore {
         if owners.get(reference) != Some(&transaction_id) {
             return Ok(MigrationDeleteOutcome::NotOwned);
         }
+        let mut values = self.values.lock().expect("memory store");
+        if values.get(reference).map(Vec::as_slice) != Some(expected_secret) {
+            return Ok(MigrationDeleteOutcome::PreservedIndeterminate);
+        }
         owners.remove(reference);
-        self.values.lock().expect("memory store").remove(reference);
+        values.remove(reference);
         Ok(MigrationDeleteOutcome::Deleted)
     }
 }
@@ -632,10 +645,11 @@ impl MigrationStore for WriteThenFailStore {
     fn delete_if_migration_owned(
         &self,
         account: &CredentialAccount,
+        expected_secret: &[u8],
         transaction_id: Uuid,
     ) -> Result<MigrationDeleteOutcome, MigrationStoreError> {
         self.inner
-            .delete_if_migration_owned(account, transaction_id)
+            .delete_if_migration_owned(account, expected_secret, transaction_id)
     }
 }
 
@@ -965,6 +979,7 @@ impl MigrationStore for ReplaceBetweenResolveAndDeleteStore {
     fn delete_if_migration_owned(
         &self,
         account: &CredentialAccount,
+        expected_secret: &[u8],
         transaction_id: Uuid,
     ) -> Result<MigrationDeleteOutcome, MigrationStoreError> {
         let mut replace = self.replace_on_resolve.lock().expect("replacement gate");
@@ -973,7 +988,7 @@ impl MigrationStore for ReplaceBetweenResolveAndDeleteStore {
             *replace = false;
         }
         self.inner
-            .delete_if_migration_owned(account, transaction_id)
+            .delete_if_migration_owned(account, expected_secret, transaction_id)
     }
 }
 
@@ -1000,6 +1015,34 @@ fn rollback_never_deletes_a_replacement_racing_between_ownership_check_and_delet
         store.inner.get("TOKEN").as_deref(),
         Some(b"external-replacement".as_slice())
     );
+}
+
+#[test]
+fn rollback_preserves_a_replacement_that_retains_the_migration_marker() {
+    let (_root, channel_root, dsh_home) = fixture();
+    write_legacy(&dsh_home, b"TOKEN: migration-secret\n");
+    let store = MemoryStore::default();
+    let outcome = prepare_migration(&channel_root, &dsh_home, &store, &mut NoopMigrationHook)
+        .expect("migration");
+    let transaction_id = outcome.transaction_id().expect("transaction");
+    store.external_set_preserving_owner("TOKEN", b"external-replacement");
+
+    let error = rollback_migration(
+        &channel_root,
+        &dsh_home,
+        transaction_id,
+        &store,
+        &mut NoopMigrationHook,
+    )
+    .expect_err("replacement with retained marker must be preserved");
+
+    assert!(error.to_string().contains("conflict"));
+    assert_eq!(
+        store.get("TOKEN").as_deref(),
+        Some(b"external-replacement".as_slice())
+    );
+    assert!(dsh_home.join(".credentials.yaml").is_file());
+    assert!(journal_path(&channel_root).is_file());
 }
 
 #[test]
@@ -1089,7 +1132,7 @@ fn source_requires_regular_owner_only_stable_identity() {
 }
 
 #[test]
-fn real_test_channel_keychain_migration_is_isolated_and_cleanup_safe() {
+fn real_keychain_rollback_preserves_an_indeterminate_canonical_item() {
     let (_root, channel_root, dsh_home) = fixture();
     let reference = format!(
         "OPENLOOP_MIGRATION_TEST_{}_{}",
@@ -1113,6 +1156,25 @@ fn real_test_channel_keychain_migration_is_isolated_and_cleanup_safe() {
         b"integration-secret"
     );
 
+    let error = rollback_migration(
+        &channel_root,
+        &dsh_home,
+        transaction_id,
+        &store,
+        &mut NoopMigrationHook,
+    )
+    .expect_err("real Keychain rollback cannot atomically prove ownership");
+    assert!(error.to_string().contains("conflict"));
+    assert_eq!(
+        store
+            .resolve(&account)
+            .expect("preserved Keychain item")
+            .as_slice(),
+        b"integration-secret"
+    );
+    assert!(dsh_home.join(".credentials.yaml").is_file());
+    assert!(journal_path(&channel_root).is_file());
+    store.delete(&account).expect("explicit post-test cleanup");
     rollback_migration(
         &channel_root,
         &dsh_home,
@@ -1120,10 +1182,12 @@ fn real_test_channel_keychain_migration_is_isolated_and_cleanup_safe() {
         &store,
         &mut NoopMigrationHook,
     )
-    .expect("real Keychain rollback");
+    .expect("rollback after explicit Keychain cleanup");
+    assert!(dsh_home.join(".credentials.yaml").is_file());
+    assert!(!journal_path(&channel_root).exists());
     assert!(store
         .resolve_optional(&account)
-        .expect("post rollback")
+        .expect("post-retry Keychain state")
         .is_none());
 }
 
@@ -1214,6 +1278,135 @@ impl PublicationCompanion for MigrationCompanion<'_> {
 fn app_bundle(path: &Path, marker: &str) {
     fs::create_dir(path).expect("app bundle");
     fs::write(path.join("marker"), marker).expect("app marker");
+}
+
+struct DurableOwnershipHook<'a> {
+    update_root: &'a Path,
+    migration_id: Uuid,
+    observed_first_write: bool,
+}
+
+impl MigrationHook for DurableOwnershipHook<'_> {
+    fn reached(&mut self, boundary: MigrationBoundary) -> Result<(), MigrationStoreError> {
+        if matches!(boundary, MigrationBoundary::BeforeKeychainWrite { .. }) {
+            let journal = fs::read_to_string(update_journal_path(self.update_root))
+                .expect("durable update journal before Keychain write");
+            assert!(journal.contains("\"state\":\"prepared\""));
+            assert!(journal.contains(&format!(
+                "\"migrationTransactionId\":\"{}\"",
+                self.migration_id
+            )));
+            self.observed_first_write = true;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn update_ownership_is_durable_before_planned_migration_writes() {
+    let (root, channel_root, dsh_home) = fixture();
+    write_legacy(&dsh_home, b"TOKEN: migration-secret\n");
+    let store = MemoryStore::default();
+    let installed = root.path().join("Openloop.app");
+    let candidate = root.path().join("Candidate.app");
+    app_bundle(&installed, "old");
+    app_bundle(&candidate, "candidate");
+
+    let plan =
+        plan_migration(&channel_root, &dsh_home, &mut NoopMigrationHook).expect("migration plan");
+    let migration_id = plan.transaction_id().expect("planned migration");
+    assert_eq!(
+        read_journal(&channel_root).state,
+        MigrationState::Discovered
+    );
+    assert_eq!(store.get("TOKEN"), None);
+    assert!(dsh_home.join(".credentials.yaml").is_file());
+
+    let transaction = RecoveryTransaction::open(root.path(), &installed, &candidate)
+        .expect("update transaction")
+        .prepare(Some(migration_id))
+        .expect("durable update ownership");
+    let update_journal =
+        fs::read_to_string(update_journal_path(root.path())).expect("update journal");
+    assert!(update_journal.contains(&migration_id.to_string()));
+    assert_eq!(store.get("TOKEN"), None);
+    assert_eq!(
+        read_journal(&channel_root).state,
+        MigrationState::Discovered
+    );
+
+    let mut migration_hook = DurableOwnershipHook {
+        update_root: root.path(),
+        migration_id,
+        observed_first_write: false,
+    };
+    let migration = prepare_migration_with_transaction_id(
+        &channel_root,
+        &dsh_home,
+        &store,
+        migration_id,
+        &mut migration_hook,
+    )
+    .expect("apply planned migration");
+    assert!(migration_hook.observed_first_write);
+    assert_eq!(migration, MigrationOutcome::PendingHealth(migration_id));
+    assert_eq!(
+        store.get("TOKEN").as_deref(),
+        Some(b"migration-secret".as_slice())
+    );
+
+    let mut health = FixedHealth(HealthStatus::Failed("candidate failed".to_owned()));
+    let mut companion = MigrationCompanion {
+        channel_root: &channel_root,
+        dsh_home: &dsh_home,
+        transaction_id: migration_id,
+        store: &store,
+    };
+    let outcome = transaction
+        .publish_with_companion(&mut health, &mut companion)
+        .expect("rollback update and migration");
+
+    assert!(matches!(outcome, PublicationOutcome::RolledBack { .. }));
+    assert_eq!(store.get("TOKEN"), None);
+    assert!(dsh_home.join(".credentials.yaml").is_file());
+    assert!(!journal_path(&channel_root).exists());
+    assert!(!update_journal_path(root.path()).exists());
+}
+
+#[test]
+fn prepared_update_without_a_migration_journal_recovers_with_real_companion() {
+    let (root, channel_root, dsh_home) = fixture();
+    let store = MemoryStore::default();
+    let installed = root.path().join("Openloop.app");
+    let candidate = root.path().join("Candidate.app");
+    app_bundle(&installed, "old");
+    app_bundle(&candidate, "candidate");
+    let migration_id = Uuid::new_v4();
+    RecoveryTransaction::open(root.path(), &installed, &candidate)
+        .expect("update transaction")
+        .prepare(Some(migration_id))
+        .expect("durable update ownership");
+    assert!(!journal_path(&channel_root).exists());
+    let mut companion = MigrationCompanion {
+        channel_root: &channel_root,
+        dsh_home: &dsh_home,
+        transaction_id: migration_id,
+        store: &store,
+    };
+
+    recover_interrupted_update_with_bound_companion(root.path(), migration_id, &mut companion)
+        .expect("recover prepared update without migration journal");
+
+    assert_eq!(
+        fs::read_to_string(installed.join("marker")).expect("installed marker"),
+        "old"
+    );
+    assert_eq!(
+        fs::read_to_string(candidate.join("marker")).expect("candidate marker"),
+        "candidate"
+    );
+    assert!(!update_journal_path(root.path()).exists());
+    assert!(!journal_path(&channel_root).exists());
 }
 
 #[test]
