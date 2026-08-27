@@ -8,7 +8,6 @@ import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type {} from '@deepseek-ai/dsh-api-gateway'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 import {
   assertFixtureInventory,
   captureStableAria,
@@ -16,10 +15,10 @@ import {
   launchWebScaffold,
   watchConsole,
   webSnapshotMode,
-  type OpenloopFixtureDesktopBridge,
   type WebScaffold,
   WELCOME_NOTICE_COPY,
 } from './scaffold.ts'
+import { AuthenticatedUnixBridgeServer } from './openloop-bridge-server.ts'
 import { ZH_BROWSER_LOCALE } from './support.ts'
 
 const SNAPSHOT_DIR = fileURLToPath(new URL(
@@ -30,76 +29,44 @@ const UI_EXPECTED = join(SNAPSHOT_DIR, 'ui.expected.md')
 const MODE = webSnapshotMode()
 const REF = 'DEEPSEEK_API_KEY'
 const DSH_REF = credentialRef(REF)
-
-class DeferredCredentialSheet implements OpenloopFixtureDesktopBridge {
-  configured = false
-  readonly calls: Array<{ method: string; payload: unknown }> = []
-  private openedResolve!: () => void
-  private readonly opened = new Promise<void>((resolve) => {
-    this.openedResolve = resolve
-  })
-  private replacementResolve: ((result: 'saved') => void) | undefined
-
-  async call<Result>(method: string, payload: unknown): Promise<Result> {
-    this.calls.push({ method, payload })
-    switch (method) {
-      case 'describeCredential':
-        return {
-          configured: this.configured,
-          writable: true,
-        } as Result
-      case 'openCredentialReplacement':
-        this.openedResolve()
-        return await new Promise<'saved'>((resolve) => {
-          this.replacementResolve = resolve
-        }) as Result
-      case 'resolveCredential':
-        return null as Result
-      case 'getAppInfo':
-        return { appVersion: '0.1.0', channel: 'test' } as Result
-      default:
-        throw new Error(`unexpected fake desktop bridge method ${method}`)
-    }
-  }
-
-  whenOpened(): Promise<void> {
-    return this.opened
-  }
-
-  completeSaved(): void {
-    if (this.replacementResolve === undefined) {
-      throw new Error('credential replacement sheet is not pending')
-    }
-    this.configured = true
-    this.replacementResolve('saved')
-    this.replacementResolve = undefined
-  }
-}
-
-function legacyRequest(method: string, payload: unknown): Request {
-  return new Request(`http://openloop.test/api/${method}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      type: 'client-request',
-      rpcId: `boundary-${method}`,
-      method,
-      payload,
-    }),
-  })
-}
+const LAUNCH_ID = '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90'
+const BOOTSTRAP_TOKEN = Uint8Array.from({ length: 32 }, (_, index) => index + 1)
+const BRIDGE_SECRET = Uint8Array.from({ length: 32 }, (_, index) => index + 65)
+const CORE_MANIFEST_SHA256 = 'a'.repeat(64)
+const CORE_MANIFEST = {
+  appVersion: '0.1.0',
+  channel: 'test',
+  dshTag: 'dsh-v0.1.0-rc.7',
+  dshCommit: '99f6f02fecdb7dff40c3fbc9470f5907c29f74ca',
+  runtimeVersion: 1,
+  bridgeProtocolVersion: 1,
+  uiSdkVersion: '0.1.0',
+  pluginPackageSpecVersion: '0.1.0',
+  openloopDataVersion: 0,
+  dshDataVersion: 0,
+} as const
 
 describe('web e2e: Openloop credential boundary', () => {
   let scaffold: WebScaffold
-  let bridge: DeferredCredentialSheet
+  let bridge: AuthenticatedUnixBridgeServer
   let browser: Browser
   let page: Page
   let tripwire: ReturnType<typeof watchConsole>
 
   beforeAll(async () => {
-    bridge = new DeferredCredentialSheet()
+    bridge = await AuthenticatedUnixBridgeServer.start({
+      launchId: LAUNCH_ID,
+      secret: BRIDGE_SECRET,
+    })
     scaffold = await launchWebScaffold({
-      openloop: { desktopBridge: bridge },
+      openloop: {
+        launchId: LAUNCH_ID,
+        bootstrapToken: BOOTSTRAP_TOKEN,
+        bridgeSecret: BRIDGE_SECRET,
+        socketPath: bridge.socketPath,
+        coreManifest: CORE_MANIFEST,
+        coreManifestSha256: CORE_MANIFEST_SHA256,
+      },
     })
     browser = await chromium.launch()
     page = await browser.newPage({
@@ -107,13 +74,23 @@ describe('web e2e: Openloop credential boundary', () => {
       locale: ZH_BROWSER_LOCALE,
     })
     tripwire = watchConsole(page)
-    await page.goto(scaffold.baseUrl, { waitUntil: 'load' })
+    const bootstrap = Buffer.from(BOOTSTRAP_TOKEN).toString('hex')
+    await page.goto(
+      `${scaffold.baseUrl}/#bootstrap=${bootstrap}&launch=${LAUNCH_ID}`,
+      { waitUntil: 'load' },
+    )
     await page.waitForSelector('#root', { timeout: 30_000 })
+    await page.waitForFunction(
+      () => document.documentElement.dataset.openloopBootstrap === 'ready',
+      undefined,
+      { timeout: 30_000 },
+    )
   }, 120_000)
 
   afterAll(async () => {
     await browser?.close()
     await scaffold?.close()
+    await bridge?.close()
   })
 
   it('removes every DSH credential owner from the Openloop browser surface', async () => {
@@ -127,15 +104,30 @@ describe('web e2e: Openloop credential boundary', () => {
       expect(entry(id)?.disabled, `${id} must stay disabled in the Openloop profile`).toBe(true)
     }
     for (const id of [
+      'desktop-bridge-host',
       'credentials-keychain',
       'connection',
       'api-gateway',
       'typert-gateway',
+      'openloop-bootstrap',
     ]) {
       expect(entry(id)?.fiber, `${id} must be active in the Openloop fixture`).toBeDefined()
     }
+    expect(await page.locator('html').getAttribute('data-openloop-bootstrap')).toBe('ready')
     expect(scaffold.ctx.get('browserApiPolicy')).toBeDefined()
     expect(scaffold.ctx.get('openloopCredentialOperations')).toBeDefined()
+    expect(bridge.calls.filter(call => call.method === 'getCandidateCredentialHealthPlan'))
+      .toHaveLength(1)
+    expect(bridge.calls.filter(call => call.method === 'acknowledgeMainWebviewHealth'))
+      .toEqual([{
+        method: 'acknowledgeMainWebviewHealth',
+        payload: {
+          launchId: LAUNCH_ID,
+          coreManifestSha256: CORE_MANIFEST_SHA256,
+          openloopDataVersion: 0,
+          dshDataVersion: 0,
+        },
+      }])
     expect(await page.locator('input[type="password"]').count()).toBe(0)
     expect(await page.getByRole('button', { name: '设置', exact: true }).count()).toBe(0)
     expect(await page.getByRole('dialog', { name: WELCOME_NOTICE_COPY.zh.title }).count()).toBe(0)
@@ -164,7 +156,7 @@ describe('web e2e: Openloop credential boundary', () => {
     }).finally(() => {
       replacementSettled = true
     })
-    await bridge.whenOpened()
+    await bridge.whenCredentialReplacementOpened()
 
     expect(replacementSettled).toBe(false)
     await expect(scaffold.ctx.typertGateway.invoke({
@@ -173,7 +165,7 @@ describe('web e2e: Openloop credential boundary', () => {
       args: { ref: REF },
     })).resolves.toEqual({ configured: false, writable: true })
 
-    bridge.completeSaved()
+    bridge.completeCredentialReplacement()
     await expect(replacement).resolves.toBe('saved')
     await expect(scaffold.ctx.typertGateway.invoke({
       namespace: 'openloopDesktop',
@@ -190,20 +182,28 @@ describe('web e2e: Openloop credential boundary', () => {
     const api = scaffold.ctx.apiProxy
     const set = vi.spyOn(api.credentials, 'set')
     const unset = vi.spyOn(api.credentials, 'unset')
-    const dispatcher = toFetchHandler(
-      api,
-      scaffold.ctx.get('browserApiPolicy'),
-    )
+    const resolve = vi.spyOn(scaffold.ctx.credentials, 'resolve')
     for (const [method, payload] of [
       ['credentials.set', { ref: REF, value: 'must-not-be-read' }],
       ['credentials.unset', { ref: REF }],
       ['credentials.resolve', { ref: REF }],
     ] as const) {
-      const response = await dispatcher.fetch(legacyRequest(method, payload))
+      const response = await fetch(`${scaffold.baseUrl}/api/${method}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          type: 'client-request',
+          rpcId: `boundary-${method}`,
+          method,
+          payload,
+        }),
+      })
       expect([method, response.status]).toEqual([method, 403])
     }
     expect(set).not.toHaveBeenCalled()
     expect(unset).not.toHaveBeenCalled()
+    expect(resolve).not.toHaveBeenCalled()
+    expect(bridge.calls.filter(call => call.method === 'resolveCredential')).toEqual([])
 
     for (const [namespace, method, args] of [
       ['openloopDesktop', 'resolveCredential', { ref: REF }],
@@ -224,6 +224,7 @@ describe('web e2e: Openloop credential boundary', () => {
       args: {},
     })).resolves.toEqual({ appVersion: '0.1.0', channel: 'test' })
     expect(bridge.calls.filter(call => call.method === 'getAppInfo')).toHaveLength(1)
+    expect(bridge.calls.filter(call => call.method === 'resolveCredential')).toEqual([])
   })
 
   it('keeps the fixture inventory closed', async () => {

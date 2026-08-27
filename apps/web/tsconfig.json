@@ -43,6 +43,7 @@
     "tests/declared-reasoning.e2e.ts",
     "tests/onboarding-deepseek-config.e2e.ts",
     "tests/onboarding-usable-provider.e2e.ts",
+    "tests/openloop-bridge-server.ts",
     "tests/openloop-credential-boundary.e2e.ts",
     "tests/remote-welcome.e2e.ts",
     "tests/workspace-management.e2e.ts",

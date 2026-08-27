@@ -51,16 +51,20 @@ and future expiry.
 
 The browser E2E fixture composes the shipped DSH base and Web bundles with the
 Openloop patch, using `runtime/openloop/package.json` as its module fallback
-anchor. It keeps the real Keychain credential provider, API proxy, connection,
-Typert gateway, and Openloop desktop Remote while replacing only the native
-sheet/Keychain boundary with a deferred fake.
+anchor. It runs the production runtime-bootstrap, desktop-bridge-host,
+Keychain credential provider, API proxy, connection, Typert gateway, desktop
+Remote, and bootstrap-host plugins through their normal Cordis lifecycle. An
+authenticated fake Unix domain socket endpoint replaces the macOS-native
+UDS/Keychain implementation; this scenario does not exercise Tauri, Security
+framework storage, or native sheet rendering.
 
 The scenario proves that the Openloop browser exposes none of the DSH
 password-entry owners, a credential is not reported configured before the
-native sheet completes, and both legacy HTTP and Typert dispatch reject
-plaintext credential operations. It also boots the default DSH Web profile to
-show that its onboarding, Models, Plugins, and credential service behavior are
-unchanged.
+fake native endpoint completes replacement, the page bootstrap exchange and
+health acknowledgement finish, and both the real Connection/WebServer route
+and Typert gateway reject browser access to plaintext credential operations.
+It also boots the default DSH Web profile to check that its onboarding,
+Models, Plugins, and credential service behavior remain available.
 
 ```sh
 DSH_SNAPSHOT=replay pnpm openloop:gate-test -- playwright --file apps/web/tests/openloop-credential-boundary.e2e.ts

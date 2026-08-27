@@ -61,6 +61,10 @@ import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-agent'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
+import {
+  installRuntimeBootstrap,
+  type RuntimeLaunchSecrets,
+} from '@openloop/runtime-bootstrap'
 import { REPO_ROOT, requireDist } from './support.ts'
 
 // Host-side web e2e cannot import a browser package: doing so would pull that
@@ -103,7 +107,6 @@ const OPENLOOP_PATCH_PATH = join(REPO_ROOT, 'packages/openloop/bundle/cordis.pat
 /** The installation anchor whose dependency surface the profile module fallback mirrors. */
 const INSTALL_ANCHOR = join(REPO_ROOT, 'apps/cli/package.json')
 const OPENLOOP_INSTALL_ANCHOR = join(REPO_ROOT, 'runtime/openloop/package.json')
-const OPENLOOP_DESKTOP_BRIDGE_PACKAGE = '@openloop/desktop-bridge-host'
 /** The deployment's own agent-preset root, shipped beside the app's config. */
 const SHIPPED_PRESET_DIR = join(REPO_ROOT, 'apps/cli/config/agent-presets')
 
@@ -186,40 +189,19 @@ export interface WebScaffold {
   close(): Promise<void>
 }
 
-/** Native boundary accepted by the Openloop fixture profile. */
-export interface OpenloopFixtureDesktopBridge {
-  call<Result = unknown>(
-    method: string,
-    payload: unknown,
-    signal?: AbortSignal,
-  ): Promise<Result>
-}
-
-interface OpenloopDesktopBridgeModule {
-  createBrowserApiPolicy(source: unknown): {
-    readonly version: 1
-    allowsTarget?(method: string): boolean
-    allows(method: string, payload: unknown): boolean
-  }
-  readonly openloopBrowserApiManifest: unknown
-  readonly OpenloopDesktopHostClient: new (
-    client: OpenloopFixtureDesktopBridge,
-  ) => unknown
-  readonly OpenloopDesktopRemoteService: new (
-    ctx: Context,
-    client: OpenloopFixtureDesktopBridge,
-  ) => unknown
+/** Launch identity supplied by the fake native endpoint to the real Openloop plugins. */
+export interface OpenloopFixtureRuntime extends RuntimeLaunchSecrets {
+  readonly coreManifest: Readonly<Record<string, unknown>>
+  readonly coreManifestSha256: string
 }
 
 /** Options for {@link launchWebScaffold}. */
 export interface LaunchOptions {
   /**
-   * Boot the shipped Openloop product patch. The supplied bridge replaces only
-   * the native UDS/Keychain boundary; browser policy and Host plugins stay real.
+   * Boot the shipped Openloop product patch against a fake native UDS endpoint.
+   * The production runtime-bootstrap and desktop bridge plugins own all wiring.
    */
-  openloop?: {
-    desktopBridge: OpenloopFixtureDesktopBridge
-  }
+  openloop?: OpenloopFixtureRuntime
   /**
    * Optional product overlay applied after the shipped Web surface and before
    * the scaffold's hermetic test patches, matching the launcher's `--patch`
@@ -532,16 +514,6 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
     ...mode === 'record' || options.deepSeekMissingCredential === true
       ? []
       : [{ id: 'llm-deepseek', disabled: true }],
-    ...options.openloop === undefined
-      ? []
-      : [
-        { id: 'desktop-bridge-host', disabled: true },
-        { id: 'openloop-bootstrap', disabled: true },
-        {
-          id: 'typert-loader',
-          config: { packages: ['@openloop/desktop-bridge-host'] },
-        },
-      ],
   ]
 
   // Sessions inherit the gateway's process.cwd() default; run the boot from
@@ -576,22 +548,19 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
         throw new Error(`web e2e scaffold: the web app requested exit ${String(code)} with no arguments to reject`)
       },
     })
-    let openloopDesktopBridge: OpenloopDesktopBridgeModule | undefined
     if (options.openloop !== undefined) {
-      openloopDesktopBridge = await import(
-        OPENLOOP_DESKTOP_BRIDGE_PACKAGE,
-      ) as OpenloopDesktopBridgeModule
-      ctx.provide(
-        'browserApiPolicy',
-        openloopDesktopBridge.createBrowserApiPolicy(
-          openloopDesktopBridge.openloopBrowserApiManifest,
-        ),
-      )
-      ctx.provide(
-        'desktopBridge',
-        new openloopDesktopBridge.OpenloopDesktopHostClient(
-          options.openloop.desktopBridge,
-        ) as never,
+      const {
+        coreManifest,
+        coreManifestSha256,
+        ...launchSecrets
+      } = options.openloop
+      const disposeRuntimeBootstrap = installRuntimeBootstrap(ctx, launchSecrets, {
+        manifest: coreManifest,
+        sha256: coreManifestSha256,
+      })
+      ctx.effect(
+        () => disposeRuntimeBootstrap,
+        'web e2e scaffold: Openloop runtime bootstrap',
       )
     }
     await ctx.plugin(Loader)
@@ -607,12 +576,6 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
     })
     await ctx.loader.await()
     assertEntriesLoaded(ctx, 'web e2e scaffold')
-    if (options.openloop !== undefined && openloopDesktopBridge !== undefined) {
-      new openloopDesktopBridge.OpenloopDesktopRemoteService(
-        ctx,
-        options.openloop.desktopBridge,
-      )
-    }
     if (options.openloop === undefined && options.welcomeNoticePending !== true) {
       await ctx.settings.mutate(settingsNamespace(WELCOME_NOTICE_SETTINGS_NAMESPACE), [{
         op: 'set', path: [WELCOME_NOTICE_ACK_FIELD], value: WELCOME_NOTICE_VERSION,

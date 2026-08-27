@@ -40,3 +40,22 @@ bundle 行，并且只添加一个编译聚合引用。
 OpenLoop 聚焦测试通过 `pnpm openloop:gate-test -- <mode>` 运行。
 获批的临时跳过项位于 `scripts/openloop/test-skip-allowlist.json`；每条记录都必须
 包含负责人、原因和未来的到期日期。
+
+## 凭据边界证据
+
+浏览器 E2E fixture 组合发布的 DSH base、Web bundle 与 Openloop patch，并继续以
+`runtime/openloop/package.json` 作为模块解析 anchor。测试通过正常 Cordis lifecycle
+运行生产 `runtime-bootstrap`、`desktop-bridge-host`、Keychain credential provider、
+API proxy、Connection、Typert gateway、desktop Remote 与 `bootstrap-host` 插件。
+测试只用一个经过认证的 Unix domain socket 假端点替代 macOS 原生 UDS/Keychain
+实现；它不覆盖 Tauri、Security framework 存储或原生 sheet 渲染。
+
+该场景验证 Openloop 浏览器不暴露 DSH 密码输入入口、凭据在假原生端点完成替换前
+不会被报告为已配置、页面 bootstrap exchange 与 health acknowledgement 能完成，
+并验证真实 Connection/WebServer route 和 Typert gateway 都会拒绝浏览器读取明文
+凭据。它还启动默认 DSH Web profile，检查 onboarding、Models、Plugins 与原凭据
+服务仍然可用。
+
+```sh
+DSH_SNAPSHOT=replay pnpm openloop:gate-test -- playwright --file apps/web/tests/openloop-credential-boundary.e2e.ts
+```
