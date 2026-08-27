@@ -1,6 +1,5 @@
 use std::{
     fs, io,
-    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -9,7 +8,11 @@ use uuid::Uuid;
 
 use crate::update::channel::ReleaseChannel;
 
-use super::grants::{atomic_write_json, validate_private_root, WorkspaceGrantError};
+use super::grants::{
+    atomic_write_json, read_owner_file, validate_private_root, WorkspaceGrantError,
+};
+
+const MAX_JOURNAL_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -56,24 +59,9 @@ impl WorkspaceJournal {
     }
 
     pub fn read(&self) -> Result<Option<WorkspaceTransaction>, WorkspaceGrantError> {
-        let metadata = match fs::symlink_metadata(&self.path) {
-            Ok(metadata) => metadata,
-            Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => {
-                return Err(WorkspaceGrantError::Io("inspect Workspace journal", source))
-            }
+        let Some(bytes) = read_owner_file(&self.root, &self.path, MAX_JOURNAL_BYTES)? else {
+            return Ok(None);
         };
-        if metadata.file_type().is_symlink()
-            || !metadata.is_file()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.permissions().mode() & 0o077 != 0
-        {
-            return Err(WorkspaceGrantError::UnsafePath(
-                "Workspace journal must be an owner-only regular file".to_owned(),
-            ));
-        }
-        let bytes = fs::read(&self.path)
-            .map_err(|source| WorkspaceGrantError::Io("read Workspace journal", source))?;
         let value: WorkspaceTransaction = serde_json::from_slice(&bytes).map_err(|source| {
             WorkspaceGrantError::Corrupt(format!("invalid Workspace journal: {source}"))
         })?;

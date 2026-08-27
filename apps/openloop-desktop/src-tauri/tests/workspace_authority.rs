@@ -9,7 +9,10 @@ use std::{
 use openloop_desktop_lib::{
     update::channel::ReleaseChannel,
     workspaces::{
-        confirmation::{confirm_workspace_revoke, RevokeConfirmation},
+        confirmation::{
+            confirm_workspace_revoke, CommittedWorkspaceProjection, RevokeConfirmation,
+            RevokePresentation,
+        },
         grants::{
             reopen_verified_grant, FileIdentity, GrantStatus, GrantStore, WorkspaceGrant,
             WorkspaceGrantError,
@@ -225,6 +228,41 @@ fn restart_never_publishes_ready_before_descriptor_verification() {
 }
 
 #[test]
+fn restart_rejects_symlink_replacement_at_every_parent_depth() {
+    for depth in 0..3 {
+        let root = tempdir().expect("root");
+        let parents = ["one", "two", "three"];
+        let workspace = parents
+            .iter()
+            .fold(root.path().to_path_buf(), |path, component| {
+                path.join(component)
+            })
+            .join("workspace");
+        secure_root(&workspace);
+        let original = grant(&workspace, "workspace-1", 1);
+        let attacked = parents
+            .iter()
+            .take(depth + 1)
+            .fold(root.path().to_path_buf(), |path, component| {
+                path.join(component)
+            });
+        let moved = root.path().join(format!("moved-{depth}"));
+        fs::rename(&attacked, &moved).expect("move attacked parent");
+        symlink(&moved, &attacked).expect("replace parent with symlink");
+
+        let error = reopen_verified_grant(&original).expect_err("parent symlink rejected");
+        assert!(matches!(
+            error.status(),
+            Some(
+                GrantStatus::Missing
+                    | GrantStatus::PermissionDenied
+                    | GrantStatus::IdentityMismatch
+            )
+        ));
+    }
+}
+
+#[test]
 fn pending_grants_are_launch_bound_memory_only_and_commit_once() {
     let root = tempdir().expect("root");
     let workspace = root.path().join("workspace");
@@ -246,20 +284,25 @@ fn pending_grants_are_launch_bound_memory_only_and_commit_once() {
 struct FixedConfirmation(bool);
 
 impl RevokeConfirmation for FixedConfirmation {
-    fn confirm(&self, title: &str) -> Result<bool, WorkspaceGrantError> {
-        assert_eq!(title, "Project Alpha");
+    fn confirm(&self, presentation: &RevokePresentation) -> Result<bool, WorkspaceGrantError> {
+        assert_eq!(presentation.workspace_id, "workspace-1");
+        assert_eq!(presentation.title, "Project Alpha");
         Ok(self.0)
     }
 }
 
 #[test]
 fn revoke_confirmation_uses_committed_title_and_cancellation_is_value_only() {
+    let projection = CommittedWorkspaceProjection {
+        workspace_id: "workspace-1".to_owned(),
+        title: "Project Alpha".to_owned(),
+    };
     assert!(
-        !confirm_workspace_revoke(&FixedConfirmation(false), "Project Alpha")
+        !confirm_workspace_revoke(&FixedConfirmation(false), &projection)
             .expect("cancel confirmation")
     );
     assert!(
-        confirm_workspace_revoke(&FixedConfirmation(true), "Project Alpha")
+        confirm_workspace_revoke(&FixedConfirmation(true), &projection)
             .expect("approve confirmation")
     );
 }

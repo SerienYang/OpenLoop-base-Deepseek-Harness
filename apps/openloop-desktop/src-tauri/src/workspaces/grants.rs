@@ -3,7 +3,7 @@ use std::{
     error::Error,
     ffi::{CString, OsStr},
     fmt, fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd},
         unix::{
@@ -102,6 +102,7 @@ pub enum WorkspaceGrantError {
     },
     InvalidPendingGrant,
     LaunchMismatch,
+    PromptUnavailable,
     Verification {
         status: GrantStatus,
         message: String,
@@ -145,6 +146,9 @@ impl fmt::Display for WorkspaceGrantError {
             Self::InvalidPendingGrant => formatter.write_str("pending Workspace grant is invalid"),
             Self::LaunchMismatch => {
                 formatter.write_str("pending Workspace grant belongs to another launch")
+            }
+            Self::PromptUnavailable => {
+                formatter.write_str("native Workspace prompt is unavailable")
             }
             Self::Verification { message, .. } => formatter.write_str(message),
         }
@@ -192,7 +196,10 @@ impl GrantStore {
     }
 
     pub fn load(&self) -> Result<GrantSnapshot, WorkspaceGrantError> {
-        read_snapshot(&self.path)
+        match read_owner_file(&self.root, &self.path, MAX_STORE_BYTES)? {
+            Some(bytes) => parse_snapshot(&bytes),
+            None => Ok(GrantSnapshot::default()),
+        }
     }
 
     pub fn load_for_launch(&self) -> Result<Vec<LaunchGrant>, WorkspaceGrantError> {
@@ -260,32 +267,8 @@ impl GrantStore {
     }
 }
 
-fn read_snapshot(path: &Path) -> Result<GrantSnapshot, WorkspaceGrantError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => {
-            return Ok(GrantSnapshot::default())
-        }
-        Err(source) => return Err(WorkspaceGrantError::io("inspect grant store", source)),
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(WorkspaceGrantError::UnsafePath(
-            "Workspace grant store must be a regular file".to_owned(),
-        ));
-    }
-    if metadata.uid() != unsafe { libc::geteuid() } || metadata.permissions().mode() & 0o077 != 0 {
-        return Err(WorkspaceGrantError::WrongOwnerOrMode(
-            "Workspace grant store must be owner-only".to_owned(),
-        ));
-    }
-    if metadata.len() > MAX_STORE_BYTES {
-        return Err(WorkspaceGrantError::Corrupt(
-            "Workspace grant store exceeds its size limit".to_owned(),
-        ));
-    }
-    let bytes =
-        fs::read(path).map_err(|source| WorkspaceGrantError::io("read grant store", source))?;
-    let snapshot: GrantSnapshot = serde_json::from_slice(&bytes)
+fn parse_snapshot(bytes: &[u8]) -> Result<GrantSnapshot, WorkspaceGrantError> {
+    let snapshot: GrantSnapshot = serde_json::from_slice(bytes)
         .map_err(|source| WorkspaceGrantError::Corrupt(format!("invalid grant store: {source}")))?;
     if snapshot.version != STORE_VERSION {
         return Err(WorkspaceGrantError::Corrupt(
@@ -306,6 +289,84 @@ fn read_snapshot(path: &Path) -> Result<GrantSnapshot, WorkspaceGrantError> {
         }
     }
     Ok(snapshot)
+}
+
+pub(crate) fn read_owner_file(
+    root: &Path,
+    path: &Path,
+    max_bytes: u64,
+) -> Result<Option<Vec<u8>>, WorkspaceGrantError> {
+    validate_private_root(root)?;
+    let root_path = CString::new(root.as_os_str().as_bytes())
+        .map_err(|_| WorkspaceGrantError::UnsafePath("Workspace root contains NUL".to_owned()))?;
+    let root_fd = unsafe {
+        libc::open(
+            root_path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if root_fd < 0 {
+        return Err(WorkspaceGrantError::io(
+            "open Workspace state root",
+            io::Error::last_os_error(),
+        ));
+    }
+    let root_file = unsafe { fs::File::from_raw_fd(root_fd) };
+    let name = path.file_name().ok_or_else(|| {
+        WorkspaceGrantError::UnsafePath("Workspace state filename missing".to_owned())
+    })?;
+    let name = CString::new(name.as_bytes()).map_err(|_| {
+        WorkspaceGrantError::UnsafePath("Workspace state filename contains NUL".to_owned())
+    })?;
+    let descriptor = unsafe {
+        libc::openat(
+            root_file.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )
+    };
+    if descriptor < 0 {
+        let source = io::Error::last_os_error();
+        return if source.kind() == io::ErrorKind::NotFound {
+            Ok(None)
+        } else if source.raw_os_error() == Some(libc::ELOOP) {
+            Err(WorkspaceGrantError::UnsafePath(
+                "Workspace state file is a symlink".to_owned(),
+            ))
+        } else {
+            Err(WorkspaceGrantError::io("open Workspace state file", source))
+        };
+    }
+    let mut file = unsafe { fs::File::from_raw_fd(descriptor) };
+    let metadata = descriptor_stat(file.as_raw_fd())
+        .map_err(|source| WorkspaceGrantError::io("inspect Workspace state file", source))?;
+    if metadata.st_mode as u32 & libc::S_IFMT as u32 != libc::S_IFREG as u32 {
+        return Err(WorkspaceGrantError::UnsafePath(
+            "Workspace state must be a regular file".to_owned(),
+        ));
+    }
+    if metadata.st_uid != unsafe { libc::geteuid() }
+        || metadata.st_mode as u32 & 0o077 != 0
+        || metadata.st_nlink != 1
+    {
+        return Err(WorkspaceGrantError::WrongOwnerOrMode(
+            "Workspace state must be owner-only and singly linked".to_owned(),
+        ));
+    }
+    if metadata.st_size < 0 || metadata.st_size as u64 > max_bytes {
+        return Err(WorkspaceGrantError::Corrupt(
+            "Workspace state exceeds its size limit".to_owned(),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.st_size as usize);
+    file.read_to_end(&mut bytes)
+        .map_err(|source| WorkspaceGrantError::io("read Workspace state file", source))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(WorkspaceGrantError::Corrupt(
+            "Workspace state exceeds its size limit".to_owned(),
+        ));
+    }
+    Ok(Some(bytes))
 }
 
 pub(crate) fn validate_private_root(root: &Path) -> Result<(), WorkspaceGrantError> {
