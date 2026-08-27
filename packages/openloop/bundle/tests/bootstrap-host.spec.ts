@@ -49,7 +49,13 @@ function installDesktopBridge(
   ctx: Context,
   acknowledgeMainWebviewHealth = vi.fn(() => Promise.resolve()),
 ): void {
-  ctx.provide('desktopBridge', { acknowledgeMainWebviewHealth } as never)
+  ctx.provide('desktopBridge', {
+    getCandidateCredentialHealthPlan: () => Promise.resolve({
+      migrationTransactionId: null,
+      references: [],
+    }),
+    acknowledgeMainWebviewHealth,
+  } as never)
 }
 
 describe('Openloop bootstrap Host route', () => {
@@ -312,6 +318,62 @@ describe('Openloop bootstrap Host route', () => {
         source: 'environment',
         writable: false,
       }),
+    } as never)
+    installRuntimeBootstrap(ctx, {
+      launchId: 'launch-id',
+      bootstrapToken: Uint8Array.from([0xab, 0xcd]),
+      bridgeSecret: Uint8Array.from([1, 2]),
+      socketPath: '/tmp/openloop.sock',
+    }, {
+      manifest: {
+        openloopDataVersion: 3,
+        dshDataVersion: 7,
+      },
+      sha256: 'a'.repeat(64),
+    })
+    apply(ctx)
+
+    const exchange = responseRecorder()
+    await route?.handler(
+      request(JSON.stringify({ launchId: 'launch-id', token: 'abcd' })),
+      exchange.response,
+    )
+    const completion = responseRecorder()
+    await route?.handler(
+      request(JSON.stringify({
+        launchId: 'launch-id',
+        coreManifestSha256: 'a'.repeat(64),
+        openloopDataVersion: 3,
+        dshDataVersion: 7,
+      }), {
+        method: 'PUT',
+        cookie: String(exchange.state.headers?.['set-cookie']).split(';', 1)[0] ?? '',
+      }),
+      completion.response,
+    )
+
+    expect(completion.state.status).toBe(503)
+    expect(acknowledgeMainWebviewHealth).not.toHaveBeenCalled()
+  })
+
+  test('fails closed when the Host credential health plan is unavailable', async () => {
+    let route: BootstrapHostRoute | undefined
+    const acknowledgeMainWebviewHealth = vi.fn(() => Promise.resolve())
+    const ctx = new Context()
+    ctx.provide('webServer', {
+      register: (value: BootstrapHostRoute) => {
+        route = value
+        return () => {}
+      },
+      tapIndex: () => () => {},
+    })
+    ctx.provide('desktopBridge', {
+      getCandidateCredentialHealthPlan: () =>
+        Promise.reject(new Error('desktop bridge not_implemented')),
+      acknowledgeMainWebviewHealth,
+    } as never)
+    ctx.provide('credentials', {
+      describe: vi.fn(),
     } as never)
     installRuntimeBootstrap(ctx, {
       launchId: 'launch-id',

@@ -46,7 +46,7 @@ interface BootstrapWebServer {
 }
 
 interface BootstrapDesktopBridge {
-  getCandidateCredentialHealthPlan?(): Promise<unknown>
+  getCandidateCredentialHealthPlan(): Promise<unknown>
   acknowledgeMainWebviewHealth(acknowledgement: {
     readonly launchId: string
     readonly coreManifestSha256: string
@@ -276,19 +276,10 @@ function injectBootstrapScript(html: string): string {
 async function candidateCredentialHealthProof(
   ctx: BootstrapHostContext,
 ): Promise<CandidateCredentialHealthProof | undefined> {
-  if (ctx.desktopBridge.getCandidateCredentialHealthPlan === undefined) return undefined
-  let plan: {
-    readonly migrationTransactionId: string | null
-    readonly references: readonly string[]
-  }
-  try {
-    plan = parseCandidateCredentialHealthPlan(
-      await ctx.desktopBridge.getCandidateCredentialHealthPlan(),
-    )
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('not_implemented')) return undefined
-    throw error
-  }
+  const plan = parseCandidateCredentialHealthPlan(
+    await ctx.desktopBridge.getCandidateCredentialHealthPlan(),
+  )
+  if (plan.migrationTransactionId === null) return undefined
   for (const reference of plan.references) {
     const status = await ctx.credentials.describe(reference)
     if (!status.configured || status.source !== 'keychain') {

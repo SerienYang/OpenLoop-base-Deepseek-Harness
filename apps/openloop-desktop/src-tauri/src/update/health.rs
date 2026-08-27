@@ -272,6 +272,21 @@ fn validate_credential_health(
     Ok(())
 }
 
+pub fn install_credential_health_plan_handler(
+    dispatch_tables: &mut BridgeDispatchTables,
+    plan: CredentialHealthPlan,
+) -> Result<(), HealthProbeError> {
+    let handler: BridgeHandler = Arc::new(move |payload, _cancellation| {
+        if !payload.is_null() {
+            return Err(BridgeHandlerError::invalid_request());
+        }
+        serde_json::to_value(&plan).map_err(|_| BridgeHandlerError::invalid_request())
+    });
+    dispatch_tables
+        .set_host_handler("getCandidateCredentialHealthPlan", handler)
+        .map_err(|source| HealthProbeError::io("configure credential plan bridge", source))
+}
+
 #[derive(Debug, Clone)]
 pub struct BundleHealthProbe {
     app_version: String,
@@ -443,7 +458,10 @@ impl BundleHealthProbe {
             self.openloop_data_version,
             self.dsh_data_version,
         );
-        if let Some(health) = credential_health.as_ref() {
+        if let Some(health) = credential_health
+            .as_ref()
+            .filter(|health| health.plan.migration_transaction_id.is_some())
+        {
             expectation = expectation.with_credential_health_plan(health.plan.clone());
         }
         let handler: BridgeHandler = Arc::new(move |payload, _cancellation| {
@@ -465,17 +483,7 @@ impl BundleHealthProbe {
         let mut dispatch_tables = BridgeDispatchTables::unavailable();
         if let Some(health) = credential_health {
             let plan = health.plan;
-            let plan_handler: BridgeHandler = Arc::new(move |payload, _cancellation| {
-                if !payload.is_null() {
-                    return Err(BridgeHandlerError::invalid_request());
-                }
-                serde_json::to_value(&plan).map_err(|_| BridgeHandlerError::invalid_request())
-            });
-            dispatch_tables
-                .set_host_handler("getCandidateCredentialHealthPlan", plan_handler)
-                .map_err(|source| {
-                    HealthProbeError::io("configure credential plan bridge", source)
-                })?;
+            install_credential_health_plan_handler(&mut dispatch_tables, plan)?;
             let status = health.status;
             let status_handler: BridgeHandler = Arc::new(move |payload, _cancellation| {
                 let request: CredentialStatusRequest = serde_json::from_value(payload)

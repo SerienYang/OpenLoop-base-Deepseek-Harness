@@ -39,8 +39,9 @@ use crate::update::{
         InstallPublication, InstallReport,
     },
     health::{
-        ensure_channel_dsh_home, required_dsh_home, BundleHealthProbe, CandidateProcessHealth,
-        CredentialHealthPlan, MainWebviewHealthAcknowledgement, MainWebviewHealthExpectation,
+        ensure_channel_dsh_home, install_credential_health_plan_handler, required_dsh_home,
+        BundleHealthProbe, CandidateProcessHealth, CredentialHealthPlan,
+        MainWebviewHealthAcknowledgement, MainWebviewHealthExpectation,
         MIGRATION_TRANSACTION_ENVIRONMENT, TEST_PROBE_FAILURE_ENVIRONMENT,
     },
     lease::UpdateLease,
@@ -406,14 +407,35 @@ fn start_runtime(
             migration_status.clone(),
         )
         .map_err(|error| format!("credential bridge setup failed: {error}"))?;
+        let health_plan = match migration_outcome.transaction_id() {
+            Some(transaction_id) => {
+                let plan = credential_health_plan(channel_root, &dsh_home, Some(transaction_id))
+                    .map_err(|error| {
+                        format!("main WebView credential health plan failed: {error}")
+                    })?;
+                CredentialHealthPlan {
+                    migration_transaction_id: plan.migration_transaction_id,
+                    references: plan.references,
+                }
+            }
+            None => CredentialHealthPlan {
+                migration_transaction_id: None,
+                references: Vec::new(),
+            },
+        };
+        install_credential_health_plan_handler(&mut tables, health_plan.clone())
+            .map_err(|error| format!("credential health bridge setup failed: {error}"))?;
         let health_state = health.clone();
         let completed_migration_status = migration_status.clone();
-        let expectation = MainWebviewHealthExpectation::new(
+        let mut expectation = MainWebviewHealthExpectation::new(
             secrets.launch_id,
             CORE_MANIFEST_SHA256,
             manifest.openloop_data_version,
             manifest.dsh_data_version,
         );
+        if health_plan.migration_transaction_id.is_some() {
+            expectation = expectation.with_credential_health_plan(health_plan);
+        }
         let handler: BridgeHandler = Arc::new(move |payload, _cancellation| {
             let acknowledgement: MainWebviewHealthAcknowledgement = serde_json::from_value(payload)
                 .map_err(|_| BridgeHandlerError::invalid_request())?;
