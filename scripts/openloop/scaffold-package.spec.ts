@@ -11,6 +11,7 @@ import {
 import { join, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
+import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
 import { load } from 'js-yaml'
 import { afterEach, describe, expect, it } from 'vitest'
 
@@ -328,6 +329,43 @@ describe('OpenLoop package scaffolder', () => {
     expect(loaded.plugin.name).toBe('window-state')
     expect(typeof loaded.plugin.apply).toBe('function')
     expect(load(readFileSync(join(bundleDirectory, 'cordis.patch.yml'), 'utf8'))).toEqual([
+      { insert: [{ id: 'window-state', name: '@openloop/window-state' }] },
+    ])
+  })
+
+  it('preserves Loader !!js expressions when appending a bundle row', async () => {
+    const { scaffoldPackage } = await loadScaffoldModule()
+    const root = fixtureRoot()
+    const bundleDirectory = join(root, 'packages/openloop/desktop')
+    writeJson(join(bundleDirectory, 'package.json'), {
+      name: '@openloop/desktop',
+      private: true,
+      dependencies: {},
+    })
+    const originalPatch = [
+      '- id: web-runtime',
+      '  inject: [webStartup, browserApiPolicy]',
+      '  config:',
+      '    trustedHosts: !!js ctx.webStartup.trustedHosts',
+      '',
+    ].join('\n')
+    writeFileSync(join(bundleDirectory, 'cordis.patch.yml'), originalPatch)
+
+    scaffoldPackage({
+      root,
+      name: 'window-state',
+      face: 'host',
+      bundleRow: 'desktop',
+    })
+
+    const patch = readFileSync(join(bundleDirectory, 'cordis.patch.yml'), 'utf8')
+    expect(patch.startsWith(originalPatch)).toBe(true)
+    expect(load(patch, { schema: entryListSchema })).toEqual([
+      {
+        id: 'web-runtime',
+        inject: ['webStartup', 'browserApiPolicy'],
+        config: { trustedHosts: { __jsExpr: 'ctx.webStartup.trustedHosts' } },
+      },
       { insert: [{ id: 'window-state', name: '@openloop/window-state' }] },
     ])
   })

@@ -12,13 +12,25 @@ import {
 } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { dump, load } from 'js-yaml'
+import { dump, JSON_SCHEMA, load, Type } from 'js-yaml'
 import ts from 'typescript'
 
 const faces = new Set(['host', 'client', 'pure'])
 const packageNamePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const ownedPaths = ['package.json', 'src', 'README.md', 'tsconfig.json']
 const cordisPackage = '@deepseek-ai/cordis'
+const jsExpressionType = new Type('tag:yaml.org,2002:js', {
+  kind: 'scalar',
+  resolve: data => typeof data === 'string',
+  construct: data => ({ __jsExpr: data }),
+  predicate: value => (
+    typeof value === 'object'
+    && value !== null
+    && typeof value.__jsExpr === 'string'
+  ),
+  represent: value => value.__jsExpr,
+})
+const entryListSchema = JSON_SCHEMA.extend(jsExpressionType)
 
 function optionValue(args, index, option) {
   const value = args[index + 1]
@@ -162,7 +174,8 @@ function prepareBundle(root, bundleName, packageName, rowId) {
   }
 
   const manifest = readJson(manifestPath)
-  const document = load(readFileSync(patchPath, 'utf8')) ?? []
+  const patchSource = readFileSync(patchPath, 'utf8')
+  const document = load(patchSource, { schema: entryListSchema }) ?? []
   if (!Array.isArray(document)) {
     throw new Error(`bundle ${bundleName} cordis.patch.yml must contain a list`)
   }
@@ -178,8 +191,12 @@ function prepareBundle(root, bundleName, packageName, rowId) {
     ...(manifest.dependencies ?? {}),
     [packageName]: 'workspace:*',
   }
-  document.push({ insert: [{ id: rowId, name: packageName }] })
-  return { manifestPath, manifest, patchPath, document }
+  const row = { insert: [{ id: rowId, name: packageName }] }
+  const rowSource = dump([row], { lineWidth: -1, noRefs: true, schema: entryListSchema })
+  const patchContent = document.length === 0
+    ? rowSource
+    : `${patchSource}${patchSource.endsWith('\n') ? '' : '\n'}${rowSource}`
+  return { manifestPath, manifest, patchPath, patchContent }
 }
 
 function packageManifest({ name, face, clientBundle, service, cordisPlugin }) {
@@ -474,7 +491,7 @@ export function scaffoldPackage(options, dependencies = {}) {
       },
       {
         path: bundle.patchPath,
-        content: dump(bundle.document, { lineWidth: -1, noRefs: true }),
+        content: bundle.patchContent,
       },
     )
   }
