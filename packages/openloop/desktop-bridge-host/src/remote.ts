@@ -6,6 +6,7 @@ import type { DesktopBridgeClient } from './client.ts'
 import type {
   AppInfo,
   ApprovedCommand,
+  CandidateCredentialHealthPlan,
   CredentialMigrationStatus,
   CredentialStatus,
   MainWebviewHealthAcknowledgement,
@@ -37,6 +38,7 @@ export const BROWSER_SAFE_METHODS = [
 
 export const HOST_ONLY_METHODS = [
   'resolveCredential',
+  'getCandidateCredentialHealthPlan',
   'acknowledgeMainWebviewHealth',
   'beginWorkspaceAuthorization',
   'commitWorkspaceAuthorization',
@@ -224,6 +226,16 @@ export class OpenloopDesktopHostClient {
     await this.#client.call<null>(
       'acknowledgeMainWebviewHealth',
       acknowledgement,
+      signal,
+    )
+  }
+
+  getCandidateCredentialHealthPlan(
+    signal?: AbortSignal,
+  ): Promise<CandidateCredentialHealthPlan> {
+    return this.#client.call<CandidateCredentialHealthPlan>(
+      'getCandidateCredentialHealthPlan',
+      null,
       signal,
     )
   }

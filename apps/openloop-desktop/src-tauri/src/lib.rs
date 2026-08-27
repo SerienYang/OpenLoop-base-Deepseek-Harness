@@ -19,11 +19,13 @@ use crate::bridge::{
 use crate::credentials::{
     credential_bridge_dispatch_tables_with_migration_status,
     migration::{
-        commit_migration, plan_migration, prepare_migration, prepare_migration_with_transaction_id,
-        rollback_migration, MigrationOutcome, NoopMigrationHook, ReadOnlyLegacySource,
+        commit_migration, credential_health_plan, plan_migration, prepare_migration,
+        prepare_migration_with_transaction_id, rollback_migration, MigrationOutcome,
+        NoopMigrationHook, ReadOnlyLegacySource,
     },
-    AppKitCredentialDeletionConfirmation, AppKitCredentialSheet, CredentialMigrationStatusHandle,
-    CredentialSheetCoordinator, CredentialSheetGate, KeychainStore,
+    AppKitCredentialDeletionConfirmation, AppKitCredentialSheet, CredentialAccount,
+    CredentialMigrationStatusHandle, CredentialSheetCoordinator, CredentialSheetGate,
+    KeychainStore,
 };
 use crate::launcher::{
     InstanceAction, LaunchReadinessExpectation, LaunchSecrets, SingleInstance, SupervisedChild,
@@ -38,7 +40,7 @@ use crate::update::{
     },
     health::{
         ensure_channel_dsh_home, required_dsh_home, BundleHealthProbe, CandidateProcessHealth,
-        MainWebviewHealthAcknowledgement, MainWebviewHealthExpectation,
+        CredentialHealthPlan, MainWebviewHealthAcknowledgement, MainWebviewHealthExpectation,
         MIGRATION_TRANSACTION_ENVIRONMENT, TEST_PROBE_FAILURE_ENVIRONMENT,
     },
     lease::UpdateLease,
@@ -572,6 +574,7 @@ fn start_health_probe(
     let dsh_home_value = std::env::var_os("DSH_HOME");
     let dsh_home = required_dsh_home(dsh_home_value.as_deref(), updater_config.data_root_name())
         .map_err(|error| error.to_string())?;
+    let injected = std::env::var(TEST_PROBE_FAILURE_ENVIRONMENT).ok();
     let probe = BundleHealthProbe::new(
         &manifest.app_version,
         updater_config.bundle_identifier(),
@@ -579,7 +582,6 @@ fn start_health_probe(
         manifest.openloop_data_version,
         manifest.dsh_data_version,
     );
-    let injected = std::env::var(TEST_PROBE_FAILURE_ENVIRONMENT).ok();
     if probe
         .test_failure_injection(&manifest.channel, injected.as_deref())
         .map_err(|error| error.to_string())?
@@ -587,9 +589,6 @@ fn start_health_probe(
         return Err("trusted test health failure was injected".to_owned());
     }
     let app_bundle = current_app_bundle()?;
-    let session = probe
-        .begin(&app_bundle, Duration::from_secs(45), &dsh_home)
-        .map_err(|error| error.to_string())?;
     let migration_transaction_id = std::env::var(MIGRATION_TRANSACTION_ENVIRONMENT)
         .ok()
         .map(|value| {
@@ -598,6 +597,28 @@ fn start_health_probe(
                 .map_err(|_| "candidate migration transaction identity is invalid".to_owned())
         })
         .transpose()?;
+    let channel_root = dsh_home
+        .parent()
+        .ok_or_else(|| "candidate channel data root is unavailable".to_owned())?;
+    let migration_plan = credential_health_plan(channel_root, &dsh_home, migration_transaction_id)
+        .map_err(|error| format!("candidate credential health plan failed: {error}"))?;
+    let health_plan = CredentialHealthPlan {
+        migration_transaction_id: migration_plan.migration_transaction_id,
+        references: migration_plan.references,
+    };
+    let store = KeychainStore::new(updater_config.channel());
+    let session = probe
+        .begin_with_credential_health(
+            &app_bundle,
+            Duration::from_secs(45),
+            &dsh_home,
+            health_plan,
+            move |reference| {
+                let account = CredentialAccount::new(reference).map_err(|_| ())?;
+                store.status(&account).map_err(|_| ())
+            },
+        )
+        .map_err(|error| error.to_string())?;
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "candidate health WebView is missing".to_owned())?;
@@ -612,8 +633,7 @@ fn start_health_probe(
         .map_err(|error| format!("navigate candidate health WebView failed: {error}"))?;
     let app = app.clone();
     std::thread::spawn(move || match session.finish() {
-        Ok(mut report) => {
-            report.set_migration_transaction_id(migration_transaction_id);
+        Ok(report) => {
             match report
                 .to_json_line()
                 .map_err(|error| error.to_string())
@@ -726,8 +746,14 @@ async fn run_update_spike(
         let mut pending_migration = migration.transaction_id().map(|transaction_id| {
             PendingCredentialMigration::new(channel_root, &dsh_home, transaction_id, store)
         });
+        let credential_plan =
+            credential_health_plan(channel_root, &dsh_home, migration.transaction_id())
+                .map_err(|error| format!("candidate credential health plan failed: {error}"))?;
         let mut health = CandidateProcessHealth::new(&update.version, dsh_home)
-            .with_migration_transaction(migration.transaction_id());
+            .with_migration_expectation(
+                credential_plan.migration_transaction_id,
+                credential_plan.references.len(),
+            );
         if let Some(companion) = pending_migration.as_mut() {
             transaction.publish_with_companion(&mut health, companion)
         } else {

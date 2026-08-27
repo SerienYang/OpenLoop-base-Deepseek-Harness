@@ -209,6 +209,147 @@ describe('Openloop bootstrap Host route', () => {
     })
   })
 
+  test('proves every candidate migration credential through ctx.credentials.describe', async () => {
+    let route: BootstrapHostRoute | undefined
+    const transactionId = '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90'
+    const getCandidateCredentialHealthPlan = vi.fn(() => Promise.resolve({
+      migrationTransactionId: transactionId,
+      references: ['ALPHA_TOKEN', 'ZETA_TOKEN'],
+    }))
+    const acknowledgeMainWebviewHealth = vi.fn(() => Promise.resolve())
+    const describe = vi.fn(() => Promise.resolve({
+      configured: true,
+      source: 'keychain',
+      writable: false,
+    }))
+    const ctx = new Context()
+    ctx.provide('webServer', {
+      register: (value: BootstrapHostRoute) => {
+        route = value
+        return () => {}
+      },
+      tapIndex: () => () => {},
+    })
+    ctx.provide('desktopBridge', {
+      getCandidateCredentialHealthPlan,
+      acknowledgeMainWebviewHealth,
+    } as never)
+    ctx.provide('credentials', { describe } as never)
+    installRuntimeBootstrap(ctx, {
+      launchId: 'launch-id',
+      bootstrapToken: Uint8Array.from([0xab, 0xcd]),
+      bridgeSecret: Uint8Array.from([1, 2]),
+      socketPath: '/tmp/openloop.sock',
+    }, {
+      manifest: {
+        appVersion: '0.1.0',
+        channel: 'test',
+        openloopDataVersion: 3,
+        dshDataVersion: 7,
+      },
+      sha256: 'a'.repeat(64),
+    })
+    apply(ctx)
+
+    const exchange = responseRecorder()
+    await route?.handler(
+      request(JSON.stringify({ launchId: 'launch-id', token: 'abcd' })),
+      exchange.response,
+    )
+    const completion = responseRecorder()
+    await route?.handler(
+      request(JSON.stringify({
+        launchId: 'launch-id',
+        coreManifestSha256: 'a'.repeat(64),
+        openloopDataVersion: 3,
+        dshDataVersion: 7,
+      }), {
+        method: 'PUT',
+        cookie: String(exchange.state.headers?.['set-cookie']).split(';', 1)[0] ?? '',
+      }),
+      completion.response,
+    )
+
+    expect(completion.state.status).toBe(200)
+    expect(describe.mock.calls).toEqual([
+      ['ALPHA_TOKEN'],
+      ['ZETA_TOKEN'],
+    ])
+    expect(acknowledgeMainWebviewHealth).toHaveBeenCalledWith({
+      launchId: 'launch-id',
+      coreManifestSha256: 'a'.repeat(64),
+      openloopDataVersion: 3,
+      dshDataVersion: 7,
+      credentialHealth: {
+        migrationTransactionId: transactionId,
+        ready: true,
+        checkedCount: 2,
+      },
+    })
+  })
+
+  test('rejects a pending candidate migration unless every credential is Keychain-backed', async () => {
+    let route: BootstrapHostRoute | undefined
+    const acknowledgeMainWebviewHealth = vi.fn(() => Promise.resolve())
+    const ctx = new Context()
+    ctx.provide('webServer', {
+      register: (value: BootstrapHostRoute) => {
+        route = value
+        return () => {}
+      },
+      tapIndex: () => () => {},
+    })
+    ctx.provide('desktopBridge', {
+      getCandidateCredentialHealthPlan: () => Promise.resolve({
+        migrationTransactionId: '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
+        references: ['DEEPSEEK_API_KEY'],
+      }),
+      acknowledgeMainWebviewHealth,
+    } as never)
+    ctx.provide('credentials', {
+      describe: () => Promise.resolve({
+        configured: true,
+        source: 'environment',
+        writable: false,
+      }),
+    } as never)
+    installRuntimeBootstrap(ctx, {
+      launchId: 'launch-id',
+      bootstrapToken: Uint8Array.from([0xab, 0xcd]),
+      bridgeSecret: Uint8Array.from([1, 2]),
+      socketPath: '/tmp/openloop.sock',
+    }, {
+      manifest: {
+        openloopDataVersion: 3,
+        dshDataVersion: 7,
+      },
+      sha256: 'a'.repeat(64),
+    })
+    apply(ctx)
+
+    const exchange = responseRecorder()
+    await route?.handler(
+      request(JSON.stringify({ launchId: 'launch-id', token: 'abcd' })),
+      exchange.response,
+    )
+    const completion = responseRecorder()
+    await route?.handler(
+      request(JSON.stringify({
+        launchId: 'launch-id',
+        coreManifestSha256: 'a'.repeat(64),
+        openloopDataVersion: 3,
+        dshDataVersion: 7,
+      }), {
+        method: 'PUT',
+        cookie: String(exchange.state.headers?.['set-cookie']).split(';', 1)[0] ?? '',
+      }),
+      completion.response,
+    )
+
+    expect(completion.state.status).toBe(503)
+    expect(acknowledgeMainWebviewHealth).not.toHaveBeenCalled()
+  })
+
   test('retains completion capability after native rejection and rejects replay after success', async () => {
     let route: BootstrapHostRoute | undefined
     const ctx = new Context()
@@ -219,9 +360,15 @@ describe('Openloop bootstrap Host route', () => {
       },
       tapIndex: () => () => {},
     })
-    const acknowledgeMainWebviewHealth = vi.fn()
-      .mockRejectedValueOnce(new Error('native health rejected'))
-      .mockResolvedValueOnce(undefined)
+    let session = ''
+    const acknowledgeMainWebviewHealth = vi.fn(async () => {
+      expect(ctx.runtimeBootstrap.claimBootstrapTokenIfMatches(Uint8Array.from([0xab, 0xcd])))
+        .toEqual({ status: 'expired' })
+      expect(ctx.runtimeBootstrap.bootstrapCompletionState(session)).toBe('local-committed')
+      if (acknowledgeMainWebviewHealth.mock.calls.length === 1) {
+        throw new Error('native health rejected')
+      }
+    })
     installDesktopBridge(ctx, acknowledgeMainWebviewHealth)
     installRuntimeBootstrap(ctx, {
       launchId: 'launch-id',
@@ -246,6 +393,7 @@ describe('Openloop bootstrap Host route', () => {
     )
     expect(exchange.state.status).toBe(200)
     const cookie = String(exchange.state.headers?.['set-cookie']).split(';', 1)[0] ?? ''
+    session = cookie.split('=', 2)[1] ?? ''
     const completionBody = JSON.stringify({
       launchId: 'launch-id',
       coreManifestSha256: 'a'.repeat(64),
@@ -260,6 +408,7 @@ describe('Openloop bootstrap Host route', () => {
     )
     expect(failed.state.status).toBe(503)
     expect(failed.state.body).not.toContain('native health rejected')
+    expect(ctx.runtimeBootstrap.bootstrapCompletionState(session)).toBe('local-committed')
 
     const retried = responseRecorder()
     await route?.handler(

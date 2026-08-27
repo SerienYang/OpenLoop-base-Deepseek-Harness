@@ -102,6 +102,13 @@ pub enum MigrationPlan {
     Planned(Uuid),
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialHealthPlan {
+    pub migration_transaction_id: Option<Uuid>,
+    pub references: Vec<String>,
+}
+
 impl MigrationPlan {
     pub fn transaction_id(&self) -> Option<Uuid> {
         match self {
@@ -427,6 +434,55 @@ pub fn journal_path(channel_root: &Path) -> PathBuf {
 
 pub fn staged_path(dsh_home: &Path, transaction_id: Uuid) -> PathBuf {
     dsh_home.join(staged_name(transaction_id))
+}
+
+pub fn credential_health_plan(
+    channel_root: &Path,
+    dsh_home: &Path,
+    expected_transaction_id: Option<Uuid>,
+) -> Result<CredentialHealthPlan, MigrationError> {
+    let roots = SecureRoots::open(
+        channel_root,
+        dsh_home,
+        HostMigrationFilesystem.expected_owner(),
+    )?;
+    let journal = roots.read_journal()?;
+    match (expected_transaction_id, journal) {
+        (None, None) => Ok(CredentialHealthPlan {
+            migration_transaction_id: None,
+            references: Vec::new(),
+        }),
+        (None, Some(_)) => Err(MigrationError::invalid(
+            "credential migration journal exists without an expected transaction",
+        )),
+        (Some(_), None) => Err(MigrationError::invalid(
+            "expected credential migration journal is unavailable",
+        )),
+        (Some(expected), Some(journal)) => {
+            if journal.transaction_id != expected {
+                return Err(MigrationError::invalid(
+                    "credential migration transaction identity changed",
+                ));
+            }
+            if !matches!(
+                journal.state,
+                MigrationState::LegacyStaged | MigrationState::CommitPrepared
+            ) || journal.references.is_empty()
+                || journal
+                    .references
+                    .values()
+                    .any(|reference| reference.state != ReferenceState::Verified)
+            {
+                return Err(MigrationError::invalid(
+                    "credential migration is not ready for candidate health",
+                ));
+            }
+            Ok(CredentialHealthPlan {
+                migration_transaction_id: Some(expected),
+                references: journal.references.into_keys().collect(),
+            })
+        }
+    }
 }
 
 pub fn prepare_migration(

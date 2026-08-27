@@ -64,8 +64,30 @@ pub struct HealthProbeReport {
     status: String,
     pub app_version: String,
     pub core_manifest_sha256: String,
-    pub migration_transaction_id: Option<Uuid>,
+    pub credential_health: CredentialHealthProof,
     pub readiness: AppHealthReadiness,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CredentialHealthPlan {
+    pub migration_transaction_id: Option<Uuid>,
+    pub references: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CredentialHealthProof {
+    pub migration_transaction_id: Option<Uuid>,
+    pub ready: bool,
+    pub checked_count: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CredentialStatusRequest {
+    #[serde(rename = "ref")]
+    reference: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,6 +107,8 @@ pub struct MainWebviewHealthAcknowledgement {
     pub core_manifest_sha256: String,
     pub openloop_data_version: u64,
     pub dsh_data_version: u64,
+    #[serde(default)]
+    pub credential_health: Option<CredentialHealthProof>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +117,7 @@ pub struct MainWebviewHealthExpectation {
     core_manifest_sha256: String,
     openloop_data_version: u64,
     dsh_data_version: u64,
+    credential_health_plan: Option<CredentialHealthPlan>,
 }
 
 impl MainWebviewHealthExpectation {
@@ -107,7 +132,13 @@ impl MainWebviewHealthExpectation {
             core_manifest_sha256: core_manifest_sha256.into(),
             openloop_data_version,
             dsh_data_version,
+            credential_health_plan: None,
         }
+    }
+
+    pub fn with_credential_health_plan(mut self, plan: CredentialHealthPlan) -> Self {
+        self.credential_health_plan = Some(plan);
+        self
     }
 
     pub fn validate(
@@ -135,6 +166,18 @@ impl MainWebviewHealthExpectation {
                 "main WebView data version identity does not match",
             ));
         }
+        match (
+            self.credential_health_plan.as_ref(),
+            acknowledgement.credential_health.as_ref(),
+        ) {
+            (None, None) => {}
+            (Some(plan), Some(proof)) => validate_credential_health(proof, plan)?,
+            (None, Some(_)) | (Some(_), None) => {
+                return Err(HealthProbeError::invalid(
+                    "candidate credential health proof presence does not match",
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -150,7 +193,11 @@ impl HealthProbeReport {
             status: "healthy".to_owned(),
             app_version: app_version.into(),
             core_manifest_sha256: core_manifest_sha256.into(),
-            migration_transaction_id,
+            credential_health: CredentialHealthProof {
+                migration_transaction_id,
+                ready: migration_transaction_id.is_none(),
+                checked_count: 0,
+            },
             readiness,
         }
     }
@@ -159,17 +206,20 @@ impl HealthProbeReport {
         &self,
         expected_version: &str,
         expected_migration_transaction_id: Option<Uuid>,
+        expected_credential_count: usize,
     ) -> Result<(), HealthProbeError> {
         if self.status != "healthy" || self.app_version != expected_version {
             return Err(HealthProbeError::invalid(
                 "candidate Host health report does not match the update version",
             ));
         }
-        if self.migration_transaction_id != expected_migration_transaction_id {
-            return Err(HealthProbeError::invalid(
-                "candidate migration transaction identity does not match",
-            ));
-        }
+        validate_credential_health(
+            &self.credential_health,
+            &CredentialHealthPlan {
+                migration_transaction_id: expected_migration_transaction_id,
+                references: vec![String::new(); expected_credential_count],
+            },
+        )?;
         for (label, ready) in [
             ("host", self.readiness.host),
             ("sidecar", self.readiness.sidecar),
@@ -189,8 +239,13 @@ impl HealthProbeReport {
         )
     }
 
-    pub fn set_migration_transaction_id(&mut self, transaction_id: Option<Uuid>) {
-        self.migration_transaction_id = transaction_id;
+    pub fn with_credential_health(mut self, proof: CredentialHealthProof) -> Self {
+        self.credential_health = proof;
+        self
+    }
+
+    pub fn set_credential_health(&mut self, proof: CredentialHealthProof) {
+        self.credential_health = proof;
     }
 
     pub fn to_json_line(&self) -> Result<String, HealthProbeError> {
@@ -198,6 +253,23 @@ impl HealthProbeReport {
             .map(|value| format!("{value}\n"))
             .map_err(|source| HealthProbeError::json("serialize health probe report", source))
     }
+}
+
+fn validate_credential_health(
+    proof: &CredentialHealthProof,
+    plan: &CredentialHealthPlan,
+) -> Result<(), HealthProbeError> {
+    if proof.migration_transaction_id != plan.migration_transaction_id
+        || !proof.ready
+        || proof.checked_count != plan.references.len()
+        || (plan.migration_transaction_id.is_some() && plan.references.is_empty())
+        || (plan.migration_transaction_id.is_none() && !plan.references.is_empty())
+    {
+        return Err(HealthProbeError::invalid(
+            "candidate credential health does not match the migration journal",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -209,9 +281,16 @@ pub struct BundleHealthProbe {
     dsh_data_version: u64,
 }
 
+type CredentialStatusProbe = Arc<dyn Fn(&str) -> Result<bool, ()> + Send + Sync + 'static>;
+
+struct CandidateCredentialHealth {
+    plan: CredentialHealthPlan,
+    status: CredentialStatusProbe,
+}
+
 pub struct CandidateWebviewProbe {
     bootstrap_url: String,
-    completion: Receiver<()>,
+    completion: Receiver<CredentialHealthProof>,
     deadline: Instant,
     app_version: String,
     core_manifest_sha256: String,
@@ -226,7 +305,7 @@ impl CandidateWebviewProbe {
     }
 
     pub fn finish(mut self) -> Result<HealthProbeReport, HealthProbeError> {
-        let completion = self
+        let credential_health = self
             .completion
             .recv_timeout(remaining_health_budget(self.deadline)?)
             .map_err(|error| match error {
@@ -239,7 +318,7 @@ impl CandidateWebviewProbe {
             .child
             .terminate_if_verified()
             .map_err(|source| HealthProbeError::invalid(source.to_string()));
-        completion?;
+        let credential_health = credential_health?;
         termination?;
         Ok(HealthProbeReport::new(
             &self.app_version,
@@ -252,7 +331,8 @@ impl CandidateWebviewProbe {
                 data_version: true,
                 main_webview: true,
             },
-        ))
+        )
+        .with_credential_health(credential_health))
     }
 }
 
@@ -284,6 +364,35 @@ impl BundleHealthProbe {
         app: &Path,
         timeout: Duration,
         dsh_home: &Path,
+    ) -> Result<CandidateWebviewProbe, HealthProbeError> {
+        self.begin_inner(app, timeout, dsh_home, None)
+    }
+
+    pub fn begin_with_credential_health(
+        &self,
+        app: &Path,
+        timeout: Duration,
+        dsh_home: &Path,
+        plan: CredentialHealthPlan,
+        status: impl Fn(&str) -> Result<bool, ()> + Send + Sync + 'static,
+    ) -> Result<CandidateWebviewProbe, HealthProbeError> {
+        self.begin_inner(
+            app,
+            timeout,
+            dsh_home,
+            Some(CandidateCredentialHealth {
+                plan,
+                status: Arc::new(status),
+            }),
+        )
+    }
+
+    fn begin_inner(
+        &self,
+        app: &Path,
+        timeout: Duration,
+        dsh_home: &Path,
+        credential_health: Option<CandidateCredentialHealth>,
     ) -> Result<CandidateWebviewProbe, HealthProbeError> {
         let deadline = Instant::now() + timeout;
         validate_dsh_home(dsh_home, None)?;
@@ -328,22 +437,70 @@ impl BundleHealthProbe {
         let mut child = SupervisedChild::spawn_with_dsh_home(&sidecar, &secrets, dsh_home)
             .map_err(|source| HealthProbeError::invalid(source.to_string()))?;
         let (completion_sender, completion) = mpsc::sync_channel(1);
-        let expectation = MainWebviewHealthExpectation::new(
+        let mut expectation = MainWebviewHealthExpectation::new(
             secrets.launch_id,
             &self.core_manifest_sha256,
             self.openloop_data_version,
             self.dsh_data_version,
         );
+        if let Some(health) = credential_health.as_ref() {
+            expectation = expectation.with_credential_health_plan(health.plan.clone());
+        }
         let handler: BridgeHandler = Arc::new(move |payload, _cancellation| {
             let acknowledgement: MainWebviewHealthAcknowledgement = serde_json::from_value(payload)
                 .map_err(|_| BridgeHandlerError::invalid_request())?;
             expectation
                 .validate(&acknowledgement)
                 .map_err(|_| BridgeHandlerError::invalid_request())?;
-            let _ = completion_sender.try_send(());
+            let proof = acknowledgement
+                .credential_health
+                .unwrap_or(CredentialHealthProof {
+                    migration_transaction_id: None,
+                    ready: true,
+                    checked_count: 0,
+                });
+            let _ = completion_sender.try_send(proof);
             Ok(serde_json::Value::Null)
         });
         let mut dispatch_tables = BridgeDispatchTables::unavailable();
+        if let Some(health) = credential_health {
+            let plan = health.plan;
+            let plan_handler: BridgeHandler = Arc::new(move |payload, _cancellation| {
+                if !payload.is_null() {
+                    return Err(BridgeHandlerError::invalid_request());
+                }
+                serde_json::to_value(&plan).map_err(|_| BridgeHandlerError::invalid_request())
+            });
+            dispatch_tables
+                .set_host_handler("getCandidateCredentialHealthPlan", plan_handler)
+                .map_err(|source| {
+                    HealthProbeError::io("configure credential plan bridge", source)
+                })?;
+            let status = health.status;
+            let status_handler: BridgeHandler = Arc::new(move |payload, _cancellation| {
+                let request: CredentialStatusRequest = serde_json::from_value(payload)
+                    .map_err(|_| BridgeHandlerError::invalid_request())?;
+                let configured = status(&request.reference)
+                    .map_err(|_| BridgeHandlerError::credential_failure())?;
+                Ok(if configured {
+                    serde_json::json!({
+                        "configured": true,
+                        "source": "keychain",
+                        "writable": false,
+                    })
+                } else {
+                    serde_json::json!({
+                        "configured": false,
+                        "writable": false,
+                    })
+                })
+            });
+            dispatch_tables
+                .set_browser_handler("describeCredential", status_handler)
+                .map_err(|source| {
+                    HealthProbeError::io("configure credential status bridge", source)
+                })?;
+        }
         dispatch_tables
             .set_host_handler("acknowledgeMainWebviewHealth", handler)
             .map_err(|source| HealthProbeError::io("configure health bridge", source))?;
@@ -427,6 +584,7 @@ pub struct CandidateProcessHealth {
     expected_version: String,
     dsh_home: PathBuf,
     expected_migration_transaction_id: Option<Uuid>,
+    expected_credential_count: usize,
 }
 
 impl CandidateProcessHealth {
@@ -435,11 +593,17 @@ impl CandidateProcessHealth {
             expected_version: expected_version.into(),
             dsh_home: dsh_home.into(),
             expected_migration_transaction_id: None,
+            expected_credential_count: 0,
         }
     }
 
-    pub fn with_migration_transaction(mut self, transaction_id: Option<Uuid>) -> Self {
+    pub fn with_migration_expectation(
+        mut self,
+        transaction_id: Option<Uuid>,
+        credential_count: usize,
+    ) -> Self {
         self.expected_migration_transaction_id = transaction_id;
+        self.expected_credential_count = credential_count;
         self
     }
 
@@ -478,6 +642,7 @@ impl CandidateProcessHealth {
         report.validate_full_health(
             &self.expected_version,
             self.expected_migration_transaction_id,
+            self.expected_credential_count,
         )
     }
 }

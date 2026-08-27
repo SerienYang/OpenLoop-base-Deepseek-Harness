@@ -8,6 +8,8 @@ const BOOTSTRAP_COOKIE_NAME = 'openloop_bootstrap'
 const MAX_REQUEST_BYTES = 8 * 1024
 const TOKEN_PATTERN = /^[0-9a-f]+$/u
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
+const CREDENTIAL_REFERENCE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u
 
 export interface BootstrapHostRoute {
   readonly path: string
@@ -44,16 +46,35 @@ interface BootstrapWebServer {
 }
 
 interface BootstrapDesktopBridge {
+  getCandidateCredentialHealthPlan?(): Promise<unknown>
   acknowledgeMainWebviewHealth(acknowledgement: {
     readonly launchId: string
     readonly coreManifestSha256: string
     readonly openloopDataVersion: number
     readonly dshDataVersion: number
+    readonly credentialHealth?: CandidateCredentialHealthProof
   }): Promise<void>
+}
+
+interface CandidateCredentialHealthProof {
+  readonly migrationTransactionId: string | null
+  readonly ready: true
+  readonly checkedCount: number
+}
+
+interface CandidateCredentialHealthPlan {
+  readonly migrationTransactionId: string | null
+  readonly references: readonly string[]
 }
 
 interface BootstrapHostContext extends Context {
   readonly desktopBridge: BootstrapDesktopBridge
+  readonly credentials: {
+    describe(reference: string): Promise<{
+      readonly configured: boolean
+      readonly source?: string
+    }>
+  }
   readonly webServer: BootstrapWebServer
   readonly runtimeBootstrap: RuntimeBootstrap
 }
@@ -64,7 +85,7 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-export const inject = ['desktopBridge', 'webServer', 'runtimeBootstrap']
+export const inject = ['desktopBridge', 'webServer', 'runtimeBootstrap', 'credentials']
 
 function responseJson(
   response: ServerResponse,
@@ -134,6 +155,29 @@ function parseCompletionRequest(value: unknown): BootstrapCompletionRequest {
     coreManifestSha256: record.coreManifestSha256,
     openloopDataVersion: record.openloopDataVersion as number,
     dshDataVersion: record.dshDataVersion as number,
+  }
+}
+
+function parseCandidateCredentialHealthPlan(value: unknown): CandidateCredentialHealthPlan {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('candidate credential health plan must be an object')
+  }
+  const record = value as Record<string, unknown>
+  const transactionId = record.migrationTransactionId
+  const references = record.references
+  if (Object.keys(record).length !== 2
+    || (transactionId !== null
+      && (typeof transactionId !== 'string' || !UUID_PATTERN.test(transactionId)))
+    || !Array.isArray(references)
+    || references.some((reference: unknown) =>
+      typeof reference !== 'string' || !CREDENTIAL_REFERENCE_PATTERN.test(reference))
+    || new Set(references).size !== references.length
+    || (transactionId === null) !== (references.length === 0)) {
+    throw new Error('candidate credential health plan is invalid')
+  }
+  return {
+    migrationTransactionId: transactionId,
+    references: references as string[],
   }
 }
 
@@ -229,11 +273,41 @@ function injectBootstrapScript(html: string): string {
   return `${script}${html}`
 }
 
+async function candidateCredentialHealthProof(
+  ctx: BootstrapHostContext,
+): Promise<CandidateCredentialHealthProof | undefined> {
+  if (ctx.desktopBridge.getCandidateCredentialHealthPlan === undefined) return undefined
+  let plan: {
+    readonly migrationTransactionId: string | null
+    readonly references: readonly string[]
+  }
+  try {
+    plan = parseCandidateCredentialHealthPlan(
+      await ctx.desktopBridge.getCandidateCredentialHealthPlan(),
+    )
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('not_implemented')) return undefined
+    throw error
+  }
+  for (const reference of plan.references) {
+    const status = await ctx.credentials.describe(reference)
+    if (!status.configured || status.source !== 'keychain') {
+      throw new Error('candidate credential is not Keychain-backed')
+    }
+  }
+  return {
+    migrationTransactionId: plan.migrationTransactionId,
+    ready: true,
+    checkedCount: plan.references.length,
+  }
+}
+
 async function handleBootstrap(
   request: IncomingMessage,
   response: ServerResponse,
   runtime: RuntimeBootstrap,
   desktopBridge: BootstrapDesktopBridge,
+  ctx: BootstrapHostContext,
 ): Promise<void> {
   if (request.method === 'GET') {
     const session = cookieValue(request)
@@ -286,8 +360,15 @@ async function handleBootstrap(
       responseJson(response, 401, { error: 'bootstrap completion identity is not current' })
       return
     }
+    let credentialHealth: CandidateCredentialHealthProof | undefined
+    try {
+      credentialHealth = await candidateCredentialHealthProof(ctx)
+    } catch {
+      responseJson(response, 503, { error: 'Openloop candidate credential health failed' })
+      return
+    }
     const claim = runtime.claimBootstrapCompletion(session)
-    if (claim !== 'claimed') {
+    if (claim !== 'claimed' && claim !== 'local-committed') {
       responseJson(
         response,
         claim === 'completed' ? 410 : claim === 'busy' ? 409 : 401,
@@ -295,16 +376,23 @@ async function handleBootstrap(
       )
       return
     }
+    if (claim === 'claimed' && !runtime.commitBootstrapCompletion(session)) {
+      runtime.releaseBootstrapCompletion(session)
+      responseJson(response, 409, { error: 'bootstrap completion commit failed' })
+      return
+    }
     try {
-      await desktopBridge.acknowledgeMainWebviewHealth(completion)
+      await desktopBridge.acknowledgeMainWebviewHealth({
+        ...completion,
+        ...(credentialHealth === undefined ? {} : { credentialHealth }),
+      })
     } catch {
       runtime.releaseBootstrapCompletion(session)
       responseJson(response, 503, { error: 'Openloop main WebView health was rejected' })
       return
     }
-    if (!runtime.commitBootstrapCompletion(session)) {
-      runtime.releaseBootstrapCompletion(session)
-      responseJson(response, 409, { error: 'bootstrap completion commit failed' })
+    if (!runtime.markBootstrapCompletionAcknowledged(session)) {
+      responseJson(response, 409, { error: 'bootstrap completion acknowledgement failed' })
       return
     }
     responseJson(response, 200, { completed: true })
@@ -375,6 +463,7 @@ export function apply(ctx: Context): void {
         response,
         bootstrapCtx.runtimeBootstrap,
         bootstrapCtx.desktopBridge,
+        bootstrapCtx,
       ),
   } as const
   bootstrapCtx.effect(

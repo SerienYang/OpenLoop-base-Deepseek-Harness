@@ -38,11 +38,23 @@ export interface CredentialMigrationStatus {
   readonly retryRequired: boolean
 }
 
+export interface CandidateCredentialHealthPlan {
+  readonly migrationTransactionId: string | null
+  readonly references: readonly string[]
+}
+
+export interface CandidateCredentialHealthProof {
+  readonly migrationTransactionId: string | null
+  readonly ready: boolean
+  readonly checkedCount: number
+}
+
 export interface MainWebviewHealthAcknowledgement {
   readonly launchId: string
   readonly coreManifestSha256: string
   readonly openloopDataVersion: number
   readonly dshDataVersion: number
+  readonly credentialHealth?: CandidateCredentialHealthProof
 }
 
 export interface WorkspaceGrantView {

@@ -18,7 +18,13 @@ export interface RuntimeBuildIdentity {
 export type BootstrapTokenClaimResult =
   | { readonly status: 'claimed'; readonly claimId: string }
   | { readonly status: 'invalid' | 'expired' }
-export type BootstrapCompletionClaimResult = 'claimed' | 'busy' | 'invalid' | 'completed'
+export type BootstrapCompletionState = 'pending' | 'local-committed' | 'native-acknowledged'
+export type BootstrapCompletionClaimResult =
+  | 'claimed'
+  | 'local-committed'
+  | 'busy'
+  | 'invalid'
+  | 'completed'
 
 /**
  * Host-only service for one-time launch-secret handoff, bootstrap-session validation, and runtime build identity.
@@ -34,9 +40,11 @@ export interface RuntimeBootstrap {
   readonly consumeBridgeSecret: () => Uint8Array | undefined
   readonly issueBootstrapSession: (claimId: string) => string | undefined
   readonly validateBootstrapSession: (value: string) => boolean
+  readonly bootstrapCompletionState: (session: string) => BootstrapCompletionState | 'invalid'
   readonly claimBootstrapCompletion: (session: string) => BootstrapCompletionClaimResult
   readonly releaseBootstrapCompletion: (session: string) => void
   readonly commitBootstrapCompletion: (session: string) => boolean
+  readonly markBootstrapCompletionAcknowledged: (session: string) => boolean
   readonly coreManifest: () => Readonly<Record<string, unknown>> | undefined
   readonly coreManifestSha256: () => string | undefined
 }
@@ -62,7 +70,7 @@ export function installRuntimeBootstrap(
   let bootstrapClaim: { readonly id: string } | undefined
   let bootstrapSession: Uint8Array | undefined
   let completionClaimed = false
-  let completionCommitted = false
+  let completionState: BootstrapCompletionState = 'pending'
   const requireActive = (): void => {
     if (!active) throw new Error('runtime bootstrap service is disposed')
   }
@@ -95,7 +103,7 @@ export function installRuntimeBootstrap(
     },
     issueBootstrapSession: (claimId) => {
       requireActive()
-      if (bootstrapClaim?.id !== claimId || completionCommitted) return undefined
+      if (bootstrapClaim?.id !== claimId || completionState !== 'pending') return undefined
       bootstrapSession ??= randomBytes(32)
       return Buffer.from(bootstrapSession).toString('hex')
     },
@@ -104,17 +112,22 @@ export function installRuntimeBootstrap(
       if (bootstrapSession === undefined || !/^[0-9a-f]{64}$/u.test(value)) return false
       return timingSafeEqual(bootstrapSession, Buffer.from(value, 'hex'))
     },
+    bootstrapCompletionState: (session) => {
+      requireActive()
+      return service.validateBootstrapSession(session) ? completionState : 'invalid'
+    },
     claimBootstrapCompletion: (session) => {
       requireActive()
       if (!service.validateBootstrapSession(session)) return 'invalid'
-      if (completionCommitted) return 'completed'
+      if (completionState === 'native-acknowledged') return 'completed'
       if (completionClaimed) return 'busy'
       completionClaimed = true
-      return 'claimed'
+      return completionState === 'local-committed' ? 'local-committed' : 'claimed'
     },
     releaseBootstrapCompletion: (session) => {
       requireActive()
-      if (service.validateBootstrapSession(session) && !completionCommitted) {
+      if (service.validateBootstrapSession(session)
+        && completionState !== 'native-acknowledged') {
         completionClaimed = false
       }
     },
@@ -122,15 +135,25 @@ export function installRuntimeBootstrap(
       requireActive()
       if (!service.validateBootstrapSession(session)
         || !completionClaimed
-        || completionCommitted
+        || completionState !== 'pending'
         || bootstrapToken === undefined) {
         return false
       }
       bootstrapToken.fill(0)
       bootstrapToken = undefined
       bootstrapClaim = undefined
+      completionState = 'local-committed'
+      return true
+    },
+    markBootstrapCompletionAcknowledged: (session) => {
+      requireActive()
+      if (!service.validateBootstrapSession(session)
+        || !completionClaimed
+        || completionState !== 'local-committed') {
+        return false
+      }
       completionClaimed = false
-      completionCommitted = true
+      completionState = 'native-acknowledged'
       return true
     },
     coreManifest: () => {
@@ -154,7 +177,7 @@ export function installRuntimeBootstrap(
     bridgeSecret = undefined
     bootstrapSession = undefined
     completionClaimed = false
-    completionCommitted = false
+    completionState = 'pending'
     remove()
   }
 }

@@ -11,12 +11,13 @@ use std::{
 use openloop_desktop_lib::{
     credentials::{
         migration::{
-            commit_migration, journal_path, plan_migration, prepare_migration,
-            prepare_migration_with_filesystem, prepare_migration_with_transaction_id,
-            rollback_migration, staged_path, Journal, MigrationBoundary, MigrationDeleteOutcome,
-            MigrationFilesystem, MigrationHook, MigrationOutcome, MigrationRollbackStatus,
-            MigrationState, MigrationStore, MigrationStoreError, NoopMigrationHook, PreviousValue,
-            ReadOnlyLegacySource, ReferenceState,
+            commit_migration, credential_health_plan, journal_path, plan_migration,
+            prepare_migration, prepare_migration_with_filesystem,
+            prepare_migration_with_transaction_id, rollback_migration, staged_path, Journal,
+            MigrationBoundary, MigrationDeleteOutcome, MigrationFilesystem, MigrationHook,
+            MigrationOutcome, MigrationRollbackStatus, MigrationState, MigrationStore,
+            MigrationStoreError, NoopMigrationHook, PreviousValue, ReadOnlyLegacySource,
+            ReferenceState,
         },
         CredentialAccount, KeychainStore, MAX_SECRET_BYTES,
     },
@@ -226,6 +227,46 @@ fn migration_records_sorted_redacted_journal_and_waits_for_health_commit() {
     .expect("full health commits migration");
     assert!(!staged_path(&dsh_home, transaction_id).exists());
     assert!(!journal_path(&channel_root).exists());
+}
+
+#[test]
+fn candidate_health_plan_is_value_free_and_strictly_bound_to_the_pending_journal() {
+    let (_root, channel_root, dsh_home) = fixture();
+    write_legacy(
+        &dsh_home,
+        b"ZETA_TOKEN: zeta-secret\nALPHA_TOKEN: alpha-secret\n",
+    );
+    let outcome = prepare_migration(
+        &channel_root,
+        &dsh_home,
+        &MemoryStore::default(),
+        &mut NoopMigrationHook,
+    )
+    .expect("pending migration");
+    let transaction_id = outcome.transaction_id().expect("transaction");
+
+    let plan = credential_health_plan(&channel_root, &dsh_home, Some(transaction_id))
+        .expect("candidate health plan");
+    assert_eq!(plan.migration_transaction_id, Some(transaction_id));
+    assert_eq!(plan.references, vec!["ALPHA_TOKEN", "ZETA_TOKEN"]);
+    let serialized = serde_json::to_string(&plan).expect("serialize plan");
+    assert!(!serialized.contains("alpha-secret"));
+    assert!(!serialized.contains("zeta-secret"));
+
+    assert!(
+        credential_health_plan(&channel_root, &dsh_home, Some(Uuid::new_v4())).is_err(),
+        "mismatched transaction identity produced a plan"
+    );
+    assert!(
+        credential_health_plan(&channel_root, &dsh_home, None).is_err(),
+        "pending migration produced an empty no-migration plan"
+    );
+
+    let (_empty_root, empty_channel_root, empty_dsh_home) = fixture();
+    let empty = credential_health_plan(&empty_channel_root, &empty_dsh_home, None)
+        .expect("explicit no-migration plan");
+    assert_eq!(empty.migration_transaction_id, None);
+    assert!(empty.references.is_empty());
 }
 
 #[test]

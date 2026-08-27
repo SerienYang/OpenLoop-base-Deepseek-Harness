@@ -209,7 +209,7 @@ describe('OpenLoop browser API policy manifest', () => {
     }
   })
 
-  it('lists exactly the 13 browser facade endpoints while denying all seven Host-only methods', () => {
+  it('lists exactly the 13 browser facade endpoints while denying all eight Host-only methods', () => {
     const policy = createBrowserApiPolicy(shippedManifest())
 
     expect(BROWSER_SAFE_METHODS.map(method => `openloopDesktop/${method}`).sort()).toEqual([
@@ -396,6 +396,24 @@ describe('OpenLoop browser API policy', () => {
       acknowledgement,
       undefined,
     )
+  })
+
+  it('requests the value-free candidate credential plan only through the Host client', async () => {
+    const plan = {
+      migrationTransactionId: '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
+      references: ['DEEPSEEK_API_KEY'],
+    }
+    const call = vi.fn(() => Promise.resolve(plan))
+    const client = new OpenloopDesktopHostClient({ call } as unknown as DesktopBridgeClient)
+
+    await expect(client.getCandidateCredentialHealthPlan()).resolves.toEqual(plan)
+    expect(call).toHaveBeenCalledWith(
+      'getCandidateCredentialHealthPlan',
+      null,
+      undefined,
+    )
+    expect(Object.keys(OpenloopDesktopRemoteService.prototype))
+      .not.toContain('getCandidateCredentialHealthPlan')
   })
 
   it('returns value-only migration status while browser retry remains denied', async () => {

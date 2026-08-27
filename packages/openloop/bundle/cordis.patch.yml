@@ -44,4 +44,4 @@
       inject: [desktopBridge]
     - id: openloop-bootstrap
       name: '@openloop/bundle/bootstrap-host'
-      inject: [desktopBridge, webServer, runtimeBootstrap]
+      inject: [credentials, desktopBridge, webServer, runtimeBootstrap]

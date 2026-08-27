@@ -47,8 +47,9 @@ pub const BROWSER_SAFE_METHODS: [&str; 13] = [
     "revealWorkspace",
 ];
 
-pub const HOST_ONLY_METHODS: [&str; 7] = [
+pub const HOST_ONLY_METHODS: [&str; 8] = [
     "resolveCredential",
+    "getCandidateCredentialHealthPlan",
     "acknowledgeMainWebviewHealth",
     "beginWorkspaceAuthorization",
     "commitWorkspaceAuthorization",
@@ -288,6 +289,14 @@ impl BridgeDispatchTables {
             return Err(invalid("bridge dispatch table contains an invalid method"));
         }
         self.host_only.insert(method.to_owned(), handler);
+        Ok(())
+    }
+
+    pub fn set_browser_handler(&mut self, method: &str, handler: BridgeHandler) -> io::Result<()> {
+        if !BROWSER_SAFE_METHODS.contains(&method) {
+            return Err(invalid("bridge dispatch table contains an invalid method"));
+        }
+        self.browser_safe.insert(method.to_owned(), handler);
         Ok(())
     }
 

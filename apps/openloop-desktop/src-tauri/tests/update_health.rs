@@ -12,9 +12,9 @@ use openloop_desktop_lib::update::{
     coordinator::{parse_host_action, HostAction},
     health::{
         ensure_channel_dsh_home, required_dsh_home, AppHealthReadiness, BundleHealthProbe,
-        CandidateProcessHealth, HealthProbeReport, MainWebviewHealthAcknowledgement,
-        MainWebviewHealthExpectation, HEALTH_PROBE_ARGUMENT, MIGRATION_TRANSACTION_ENVIRONMENT,
-        TEST_PROBE_FAILURE_ENVIRONMENT,
+        CandidateProcessHealth, CredentialHealthPlan, CredentialHealthProof, HealthProbeReport,
+        MainWebviewHealthAcknowledgement, MainWebviewHealthExpectation, HEALTH_PROBE_ARGUMENT,
+        MIGRATION_TRANSACTION_ENVIRONMENT, TEST_PROBE_FAILURE_ENVIRONMENT,
     },
     recovery::{CandidateHealth, HealthStatus},
 };
@@ -81,7 +81,7 @@ fn app_bundle(main_script: &str, sidecar_script: &str) -> (tempfile::TempDir, Pa
 
 fn healthy_probe_report() -> String {
     format!(
-        "{{\"status\":\"healthy\",\"appVersion\":\"{VERSION}\",\"coreManifestSha256\":\"{CORE_SHA256}\",\"migrationTransactionId\":null,\"readiness\":{{\"host\":true,\"sidecar\":true,\"bridge\":true,\"dataVersion\":true,\"mainWebview\":true}}}}"
+        "{{\"status\":\"healthy\",\"appVersion\":\"{VERSION}\",\"coreManifestSha256\":\"{CORE_SHA256}\",\"credentialHealth\":{{\"migrationTransactionId\":null,\"ready\":true,\"checkedCount\":0}},\"readiness\":{{\"host\":true,\"sidecar\":true,\"bridge\":true,\"dataVersion\":true,\"mainWebview\":true}}}}"
     )
 }
 
@@ -266,7 +266,7 @@ fn self_probe_requires_the_launch_bound_webview_callback() {
     assert_eq!(report.app_version, VERSION);
     assert_eq!(report.core_manifest_sha256, CORE_SHA256);
     report
-        .validate_full_health(VERSION, None)
+        .validate_full_health(VERSION, None, 0)
         .expect("bundle inspection must produce reachable full health");
 
     fs::write(
@@ -390,6 +390,11 @@ fn candidate_process_health_carries_and_verifies_migration_transaction_identity(
             main_webview: true,
         },
     )
+    .with_credential_health(CredentialHealthProof {
+        migration_transaction_id: Some(transaction_id),
+        ready: true,
+        checked_count: 2,
+    })
     .to_json_line()
     .expect("health report");
     let script = format!(
@@ -398,7 +403,7 @@ fn candidate_process_health_carries_and_verifies_migration_transaction_identity(
     );
     let (_root, app) = app_bundle(&script, "#!/bin/sh\nexit 0\n");
     let mut health = CandidateProcessHealth::new(VERSION, &dsh_home)
-        .with_migration_transaction(Some(transaction_id));
+        .with_migration_expectation(Some(transaction_id), 2);
 
     assert_eq!(
         health.await_health(&app, PROBE_TIMEOUT),
@@ -406,7 +411,7 @@ fn candidate_process_health_carries_and_verifies_migration_transaction_identity(
     );
 
     let mut mismatched = CandidateProcessHealth::new(VERSION, &dsh_home)
-        .with_migration_transaction(Some(Uuid::new_v4()));
+        .with_migration_expectation(Some(Uuid::new_v4()), 2);
     assert!(matches!(
         mismatched.await_health(&app, PROBE_TIMEOUT),
         HealthStatus::Failed(_)
@@ -613,7 +618,12 @@ fn candidate_full_health_requires_every_component_and_matching_migration_transac
         main_webview: true,
     };
     let report = HealthProbeReport::new(VERSION, CORE_SHA256, expected, healthy);
-    assert!(report.validate_full_health(VERSION, expected).is_ok());
+    let report = report.with_credential_health(CredentialHealthProof {
+        migration_transaction_id: expected,
+        ready: true,
+        checked_count: 2,
+    });
+    assert!(report.validate_full_health(VERSION, expected, 2).is_ok());
 
     for failed_component in ["host", "sidecar", "bridge", "dataVersion", "mainWebview"] {
         let mut readiness = healthy;
@@ -625,9 +635,14 @@ fn candidate_full_health_requires_every_component_and_matching_migration_transac
             "mainWebview" => readiness.main_webview = false,
             _ => unreachable!(),
         }
-        let report = HealthProbeReport::new(VERSION, CORE_SHA256, expected, readiness);
+        let report = HealthProbeReport::new(VERSION, CORE_SHA256, expected, readiness)
+            .with_credential_health(CredentialHealthProof {
+                migration_transaction_id: expected,
+                ready: true,
+                checked_count: 2,
+            });
         let error = report
-            .validate_full_health(VERSION, expected)
+            .validate_full_health(VERSION, expected, 2)
             .expect_err("one failed component must reject full health");
         assert!(
             error.to_string().contains(failed_component),
@@ -636,8 +651,19 @@ fn candidate_full_health_requires_every_component_and_matching_migration_transac
     }
 
     assert!(report
-        .validate_full_health(VERSION, Some(Uuid::new_v4()))
+        .validate_full_health(VERSION, Some(Uuid::new_v4()), 2)
         .is_err());
+    assert!(report.validate_full_health(VERSION, expected, 0).is_err());
+    assert!(
+        HealthProbeReport::new(VERSION, CORE_SHA256, expected, healthy)
+            .with_credential_health(CredentialHealthProof {
+                migration_transaction_id: expected,
+                ready: false,
+                checked_count: 2,
+            })
+            .validate_full_health(VERSION, expected, 2)
+            .is_err()
+    );
 }
 
 #[test]
@@ -656,7 +682,7 @@ fn navigation_without_main_webview_ack_is_not_full_health() {
     );
 
     let error = report
-        .validate_full_health(VERSION, None)
+        .validate_full_health(VERSION, None, 0)
         .expect_err("navigation alone must not commit health");
     assert!(error.to_string().contains("mainWebview"));
 }
@@ -670,6 +696,7 @@ fn main_webview_health_ack_requires_exact_launch_core_and_data_identity() {
         core_manifest_sha256: CORE_SHA256.to_owned(),
         openloop_data_version: 3,
         dsh_data_version: 7,
+        credential_health: None,
     };
 
     assert!(expectation.validate(&acknowledgement).is_ok());
@@ -696,5 +723,50 @@ fn main_webview_health_ack_requires_exact_launch_core_and_data_identity() {
             expectation.validate(&mismatch).is_err(),
             "mismatched WebView health identity was accepted: {mismatch:?}"
         );
+    }
+}
+
+#[test]
+fn candidate_webview_ack_requires_the_journal_bound_credential_aggregate() {
+    let transaction_id = Uuid::new_v4();
+    let launch_id = Uuid::new_v4();
+    let expectation = MainWebviewHealthExpectation::new(launch_id, CORE_SHA256, 3, 7)
+        .with_credential_health_plan(CredentialHealthPlan {
+            migration_transaction_id: Some(transaction_id),
+            references: vec!["ALPHA_TOKEN".to_owned(), "ZETA_TOKEN".to_owned()],
+        });
+    let acknowledgement = MainWebviewHealthAcknowledgement {
+        launch_id,
+        core_manifest_sha256: CORE_SHA256.to_owned(),
+        openloop_data_version: 3,
+        dsh_data_version: 7,
+        credential_health: Some(CredentialHealthProof {
+            migration_transaction_id: Some(transaction_id),
+            ready: true,
+            checked_count: 2,
+        }),
+    };
+
+    assert!(expectation.validate(&acknowledgement).is_ok());
+    for credential_health in [
+        CredentialHealthProof {
+            migration_transaction_id: Some(Uuid::new_v4()),
+            ..acknowledgement.credential_health.clone().expect("proof")
+        },
+        CredentialHealthProof {
+            ready: false,
+            ..acknowledgement.credential_health.clone().expect("proof")
+        },
+        CredentialHealthProof {
+            checked_count: 0,
+            ..acknowledgement.credential_health.clone().expect("proof")
+        },
+    ] {
+        assert!(expectation
+            .validate(&MainWebviewHealthAcknowledgement {
+                credential_health: Some(credential_health),
+                ..acknowledgement.clone()
+            })
+            .is_err());
     }
 }

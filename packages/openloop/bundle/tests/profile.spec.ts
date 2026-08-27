@@ -145,7 +145,7 @@ describe('OpenLoop profile', () => {
     expect(composeEntries([patch]).find(entry => entry.id === 'openloop-bootstrap')).toEqual({
       id: 'openloop-bootstrap',
       name: '@openloop/bundle/bootstrap-host',
-      inject: ['desktopBridge', 'webServer', 'runtimeBootstrap'],
+      inject: ['credentials', 'desktopBridge', 'webServer', 'runtimeBootstrap'],
     })
   })
 
