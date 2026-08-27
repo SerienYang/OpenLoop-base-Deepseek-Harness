@@ -27,6 +27,13 @@ interface BootstrapResponse {
   readonly coreManifestSha256: string
 }
 
+interface BootstrapCompletionRequest {
+  readonly launchId: string
+  readonly coreManifestSha256: string
+  readonly openloopDataVersion: number
+  readonly dshDataVersion: number
+}
+
 interface BootstrapWebServer {
   register(route: {
     readonly kind: 'exact'
@@ -106,6 +113,30 @@ function parseRequest(value: unknown): BootstrapRequest {
   return { launchId: record.launchId, token: record.token.toLowerCase() }
 }
 
+function parseCompletionRequest(value: unknown): BootstrapCompletionRequest {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('bootstrap completion must be an object')
+  }
+  const record = value as Record<string, unknown>
+  if (Object.keys(record).length !== 4
+    || typeof record.launchId !== 'string'
+    || record.launchId.length === 0
+    || typeof record.coreManifestSha256 !== 'string'
+    || !SHA256_PATTERN.test(record.coreManifestSha256)
+    || !Number.isSafeInteger(record.openloopDataVersion)
+    || (record.openloopDataVersion as number) < 0
+    || !Number.isSafeInteger(record.dshDataVersion)
+    || (record.dshDataVersion as number) < 0) {
+    throw new Error('bootstrap completion fields are invalid')
+  }
+  return {
+    launchId: record.launchId,
+    coreManifestSha256: record.coreManifestSha256,
+    openloopDataVersion: record.openloopDataVersion as number,
+    dshDataVersion: record.dshDataVersion as number,
+  }
+}
+
 function cookieValue(request: IncomingMessage): string | undefined {
   const cookie = request.headers.cookie
   if (typeof cookie !== 'string') return undefined
@@ -166,6 +197,25 @@ function bootstrapScript(): string {
       enumerable: false,
       writable: false,
     })
+    const openloopDataVersion = value.coreManifest.openloopDataVersion
+    const dshDataVersion = value.coreManifest.dshDataVersion
+    if (!Number.isSafeInteger(openloopDataVersion) || openloopDataVersion < 0
+      || !Number.isSafeInteger(dshDataVersion) || dshDataVersion < 0) {
+      throw new Error('Openloop bootstrap data identity is invalid')
+    }
+    const completion = await fetch('${OPENLOOP_BOOTSTRAP_PATH}', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      credentials: 'same-origin',
+      cache: 'no-store',
+      body: JSON.stringify({
+        launchId: value.launchId,
+        coreManifestSha256: value.coreManifestSha256,
+        openloopDataVersion,
+        dshDataVersion,
+      }),
+    })
+    if (!completion.ok) throw new Error('Openloop bootstrap completion failed')
     document.documentElement.dataset.openloopBootstrap = 'ready'
   })()
   globalThis.__DSH_PREBOOT__ = preboot
@@ -204,6 +254,62 @@ async function handleBootstrap(
     })
     return
   }
+  if (request.method === 'PUT') {
+    const session = cookieValue(request)
+    if (session === undefined || !runtime.validateBootstrapSession(session)) {
+      responseJson(response, 401, { error: 'bootstrap session is not current' })
+      return
+    }
+    if (request.headers['content-type']?.split(';', 1)[0]?.trim() !== 'application/json') {
+      responseJson(response, 405, { error: 'method not allowed' })
+      return
+    }
+    let completion: BootstrapCompletionRequest
+    try {
+      completion = parseCompletionRequest(
+        JSON.parse((await readBody(request)).toString('utf8')) as unknown,
+      )
+    } catch {
+      responseJson(response, 400, { error: 'invalid bootstrap completion' })
+      return
+    }
+    const manifest = runtime.coreManifest()
+    const sha256 = runtime.coreManifestSha256()
+    if (manifest === undefined || sha256 === undefined || !SHA256_PATTERN.test(sha256)) {
+      responseJson(response, 503, { error: 'Openloop build identity is unavailable' })
+      return
+    }
+    if (completion.launchId !== runtime.launchId()
+      || completion.coreManifestSha256 !== sha256
+      || completion.openloopDataVersion !== manifest.openloopDataVersion
+      || completion.dshDataVersion !== manifest.dshDataVersion) {
+      responseJson(response, 401, { error: 'bootstrap completion identity is not current' })
+      return
+    }
+    const claim = runtime.claimBootstrapCompletion(session)
+    if (claim !== 'claimed') {
+      responseJson(
+        response,
+        claim === 'completed' ? 410 : claim === 'busy' ? 409 : 401,
+        { error: `bootstrap completion is ${claim}` },
+      )
+      return
+    }
+    try {
+      await desktopBridge.acknowledgeMainWebviewHealth(completion)
+    } catch {
+      runtime.releaseBootstrapCompletion(session)
+      responseJson(response, 503, { error: 'Openloop main WebView health was rejected' })
+      return
+    }
+    if (!runtime.commitBootstrapCompletion(session)) {
+      runtime.releaseBootstrapCompletion(session)
+      responseJson(response, 409, { error: 'bootstrap completion commit failed' })
+      return
+    }
+    responseJson(response, 200, { completed: true })
+    return
+  }
   if (request.method !== 'POST' || request.headers['content-type']?.split(';', 1)[0]?.trim() !== 'application/json') {
     responseJson(response, 405, { error: 'method not allowed' })
     return
@@ -225,17 +331,17 @@ async function handleBootstrap(
     responseJson(response, 503, { error: 'Openloop build identity is unavailable' })
     return
   }
-  const tokenResult = runtime.consumeBootstrapTokenIfMatches(Buffer.from(parsed.token, 'hex'))
-  if (tokenResult !== 'consumed') {
+  const tokenResult = runtime.claimBootstrapTokenIfMatches(Buffer.from(parsed.token, 'hex'))
+  if (tokenResult.status !== 'claimed') {
     responseJson(
       response,
-      tokenResult === 'expired' ? 410 : 401,
-      { error: tokenResult === 'expired' ? 'bootstrap token is expired' : 'bootstrap token is invalid' },
+      tokenResult.status === 'expired' ? 410 : 401,
+      { error: tokenResult.status === 'expired' ? 'bootstrap token is expired' : 'bootstrap token is invalid' },
     )
     return
   }
-  const session = runtime.issueBootstrapSession()
-  if (session.length !== 64) {
+  const session = runtime.issueBootstrapSession(tokenResult.claimId)
+  if (session === undefined || session.length !== 64) {
     responseJson(response, 503, { error: 'Openloop bootstrap session is unavailable' })
     return
   }
@@ -246,17 +352,6 @@ async function handleBootstrap(
     || !Number.isSafeInteger(dshDataVersion)
     || (dshDataVersion as number) < 0) {
     responseJson(response, 503, { error: 'Openloop data identity is unavailable' })
-    return
-  }
-  try {
-    await desktopBridge.acknowledgeMainWebviewHealth({
-      launchId: parsed.launchId,
-      coreManifestSha256: sha256,
-      openloopDataVersion: openloopDataVersion as number,
-      dshDataVersion: dshDataVersion as number,
-    })
-  } catch {
-    responseJson(response, 503, { error: 'Openloop main WebView health was rejected' })
     return
   }
   const body: BootstrapResponse = {

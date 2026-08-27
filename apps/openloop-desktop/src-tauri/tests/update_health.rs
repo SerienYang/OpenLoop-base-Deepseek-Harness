@@ -89,7 +89,7 @@ fn healthy_runtime_sidecar() -> String {
     r#"#!/usr/bin/python3
 import hashlib, hmac, json, os, socket, struct, sys, uuid
 
-assert sys.argv[1:] == ["--health-smoke"]
+assert sys.argv[1:] == []
 frame = b""
 while True:
     chunk = os.read(3, 65536)
@@ -161,7 +161,44 @@ readiness = {
     "origin": "http://127.0.0.1:43123",
     "coreManifestSha256": "__CORE__",
     "healthSmoke": {"method": "GET", "path": "/", "status": 200},
-    "candidateHealth": {"webAsset": True, "bootstrapExchange": True},
+}
+print(json.dumps(readiness, separators=(",", ":")), flush=True)
+"#
+    .replace("__CORE__", CORE_SHA256)
+}
+
+fn runtime_sidecar_without_webview_callback() -> String {
+    r#"#!/usr/bin/python3
+import json, os, struct, uuid
+
+frame = b""
+while True:
+    chunk = os.read(3, 65536)
+    if not chunk:
+        break
+    frame += chunk
+offset = 10
+def field():
+    global offset
+    length = struct.unpack(">I", frame[offset:offset + 4])[0]
+    offset += 4
+    value = frame[offset:offset + length]
+    offset += length
+    return value
+launch_id = str(uuid.UUID(bytes=field()))
+field()
+field()
+field()
+readiness = {
+    "type": "openloop.runtime.ready",
+    "version": 1,
+    "launchId": launch_id,
+    "profile": "openloop",
+    "host": "127.0.0.1",
+    "port": 43123,
+    "origin": "http://127.0.0.1:43123",
+    "coreManifestSha256": "__CORE__",
+    "healthSmoke": {"method": "GET", "path": "/", "status": 200},
 }
 print(json.dumps(readiness, separators=(",", ":")), flush=True)
 "#
@@ -210,7 +247,7 @@ fn accepts_only_exact_private_host_update_arguments() {
 }
 
 #[test]
-fn self_probe_validates_info_plist_and_bundled_sidecar_core_identity() {
+fn self_probe_requires_the_launch_bound_webview_callback() {
     let dsh_home_root = tempdir().expect("DSH_HOME root");
     let dsh_home = dsh_home_root.path().join("Openloop-Test/dsh");
     fs::create_dir_all(&dsh_home).expect("DSH_HOME");
@@ -218,9 +255,13 @@ fn self_probe_validates_info_plist_and_bundled_sidecar_core_identity() {
     let (_root, app) = app_bundle("#!/bin/sh\nexit 0\n", &sidecar);
     let probe = BundleHealthProbe::new(VERSION, IDENTIFIER, CORE_SHA256, 0, 0);
 
-    let report = probe
-        .inspect(&app, PROBE_TIMEOUT, &dsh_home)
-        .expect("valid candidate bundle health");
+    let session = probe
+        .begin(&app, PROBE_TIMEOUT, &dsh_home)
+        .expect("start candidate bundle health");
+    assert!(session.bootstrap_url().contains("#bootstrap="));
+    let report = session
+        .finish()
+        .expect("launch-bound candidate WebView callback");
 
     assert_eq!(report.app_version, VERSION);
     assert_eq!(report.core_manifest_sha256, CORE_SHA256);
@@ -234,7 +275,7 @@ fn self_probe_validates_info_plist_and_bundled_sidecar_core_identity() {
     )
     .expect("replace Info.plist");
     assert!(
-        probe.inspect(&app, PROBE_TIMEOUT, &dsh_home).is_err(),
+        probe.begin(&app, PROBE_TIMEOUT, &dsh_home).is_err(),
         "mismatched build version passed health"
     );
 
@@ -246,9 +287,28 @@ fn self_probe_validates_info_plist_and_bundled_sidecar_core_identity() {
     let wrong_core = sidecar.replace(CORE_SHA256, &"b".repeat(64));
     executable(&app.join("Contents/MacOS/openloop-runtime"), &wrong_core);
     assert!(
-        probe.inspect(&app, PROBE_TIMEOUT, &dsh_home).is_err(),
+        probe.begin(&app, PROBE_TIMEOUT, &dsh_home).is_err(),
         "mismatched sidecar core identity passed health"
     );
+}
+
+#[test]
+fn self_probe_rejects_readiness_without_the_webview_callback() {
+    let dsh_home_root = tempdir().expect("DSH_HOME root");
+    let dsh_home = dsh_home_root.path().join("Openloop-Test/dsh");
+    fs::create_dir_all(&dsh_home).expect("DSH_HOME");
+    let sidecar = runtime_sidecar_without_webview_callback();
+    let (_root, app) = app_bundle("#!/bin/sh\nexit 0\n", &sidecar);
+    let probe = BundleHealthProbe::new(VERSION, IDENTIFIER, CORE_SHA256, 0, 0);
+
+    let session = probe
+        .begin(&app, Duration::from_secs(3), &dsh_home)
+        .expect("runtime readiness without WebView callback");
+    let error = session
+        .finish()
+        .expect_err("missing WebView callback must fail health");
+
+    assert!(error.to_string().contains("callback") || error.to_string().contains("timed out"));
 }
 
 #[test]
@@ -501,9 +561,7 @@ fn candidate_health_rejects_an_app_reached_through_a_symlink_ancestor() {
     let probe = BundleHealthProbe::new(VERSION, IDENTIFIER, CORE_SHA256, 0, 0);
 
     assert!(
-        probe
-            .inspect(&aliased_app, PROBE_TIMEOUT, &dsh_home)
-            .is_err(),
+        probe.begin(&aliased_app, PROBE_TIMEOUT, &dsh_home).is_err(),
         "candidate path with a symlink ancestor passed bundle health"
     );
 

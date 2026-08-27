@@ -148,6 +148,10 @@ pub trait MigrationFilesystem {
     fn before_source_revalidation(&mut self) -> Result<(), MigrationStoreError> {
         Ok(())
     }
+
+    fn before_source_stage(&mut self) -> Result<(), MigrationStoreError> {
+        Ok(())
+    }
 }
 
 pub struct HostMigrationFilesystem;
@@ -194,8 +198,23 @@ pub trait MigrationStore {
         &self,
         account: &CredentialAccount,
     ) -> Result<Option<Zeroizing<Vec<u8>>>, MigrationStoreError>;
-    fn set(&self, account: &CredentialAccount, secret: &[u8]) -> Result<(), MigrationStoreError>;
-    fn delete(&self, account: &CredentialAccount) -> Result<(), MigrationStoreError>;
+    fn set_migration_owned(
+        &self,
+        account: &CredentialAccount,
+        secret: &[u8],
+        transaction_id: Uuid,
+    ) -> Result<(), MigrationStoreError>;
+    fn delete_if_migration_owned(
+        &self,
+        account: &CredentialAccount,
+        transaction_id: Uuid,
+    ) -> Result<MigrationDeleteOutcome, MigrationStoreError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrationDeleteOutcome {
+    Deleted,
+    NotOwned,
 }
 
 impl MigrationStore for KeychainStore {
@@ -207,13 +226,29 @@ impl MigrationStore for KeychainStore {
             .map_err(|_| MigrationStoreError::unavailable())
     }
 
-    fn set(&self, account: &CredentialAccount, secret: &[u8]) -> Result<(), MigrationStoreError> {
-        self.set(account, secret)
+    fn set_migration_owned(
+        &self,
+        account: &CredentialAccount,
+        secret: &[u8],
+        transaction_id: Uuid,
+    ) -> Result<(), MigrationStoreError> {
+        self.set_migration_owned(account, secret, transaction_id)
             .map_err(|_| MigrationStoreError::unavailable())
     }
 
-    fn delete(&self, account: &CredentialAccount) -> Result<(), MigrationStoreError> {
-        self.delete(account)
+    fn delete_if_migration_owned(
+        &self,
+        account: &CredentialAccount,
+        transaction_id: Uuid,
+    ) -> Result<MigrationDeleteOutcome, MigrationStoreError> {
+        self.delete_if_migration_owned(account, transaction_id)
+            .map(|deleted| {
+                if deleted {
+                    MigrationDeleteOutcome::Deleted
+                } else {
+                    MigrationDeleteOutcome::NotOwned
+                }
+            })
             .map_err(|_| MigrationStoreError::unavailable())
     }
 }
@@ -502,7 +537,10 @@ pub fn commit_migration(
         roots.remove_journal()?;
         return Ok(());
     }
-    if journal.state != MigrationState::LegacyStaged {
+    if !matches!(
+        journal.state,
+        MigrationState::LegacyStaged | MigrationState::CommitPrepared
+    ) {
         return Err(MigrationError::invalid(
             "credential migration is not ready for health commit",
         ));
@@ -519,8 +557,10 @@ pub fn commit_migration(
             .ok_or_else(|| MigrationError::invalid("staged legacy credential file disappeared"))?;
         verify_source_identity(&document.identity, &journal.source)?;
         let mut prepared = journal;
-        prepared.state = MigrationState::CommitPrepared;
-        roots.persist_journal(&prepared, None, hook)?;
+        if prepared.state == MigrationState::LegacyStaged {
+            prepared.state = MigrationState::CommitPrepared;
+            roots.persist_journal(&prepared, None, hook)?;
+        }
         hook.reached(MigrationBoundary::BeforeStagedDelete)?;
         roots.remove_required_file(roots.dsh.as_raw_fd(), &staged)?;
         if hook.reached(MigrationBoundary::AfterStagedDelete).is_err() {
@@ -627,7 +667,7 @@ fn migrate_document(
                 hook.reached(MigrationBoundary::BeforeKeychainWrite {
                     reference: reference.clone(),
                 })?;
-                store.set(&account, secret)?;
+                store.set_migration_owned(&account, secret, transaction_id)?;
                 hook.reached(MigrationBoundary::AfterKeychainWrite {
                     reference: reference.clone(),
                 })?;
@@ -667,7 +707,14 @@ fn migrate_document(
             "legacy credential source identity changed",
         ));
     }
-    roots.stage_legacy(transaction_id, document.identity)?;
+    if let Err(error) = filesystem.before_source_stage() {
+        rollback_values(roots, &journal, &document, store)?;
+        return Err(error.into());
+    }
+    if let Err(error) = roots.stage_legacy(transaction_id, document.identity) {
+        rollback_values(roots, &journal, &document, store)?;
+        return Err(error);
+    }
     journal.state = MigrationState::LegacyStaged;
     roots.persist_journal(&journal, None, hook)?;
     Ok(MigrationOutcome::PendingHealth(transaction_id))
@@ -712,17 +759,12 @@ fn rollback_values(
     store: &impl MigrationStore,
 ) -> Result<(), MigrationError> {
     for reference in &journal.transaction_created_refs {
-        let Some(secret) = document.values.get(reference) else {
+        if !document.values.contains_key(reference) {
             continue;
-        };
+        }
         let account = CredentialAccount::new(reference)
             .map_err(|_| MigrationError::invalid("migration journal reference is invalid"))?;
-        if store
-            .resolve(&account)?
-            .is_some_and(|current| current.as_slice() == secret.as_slice())
-        {
-            store.delete(&account)?;
-        }
+        let _ = store.delete_if_migration_owned(&account, journal.transaction_id)?;
     }
     roots.remove_journal()
 }
@@ -958,6 +1000,40 @@ impl SecureRoots {
                 "staged legacy credential file already exists",
             ));
         }
+        let (mut file, metadata) = open_optional_regular(self.dsh.as_raw_fd(), LEGACY_FILE)?
+            .ok_or_else(|| MigrationError::invalid("legacy credential source disappeared"))?;
+        let mode = metadata.st_mode as u32 & 0o7777;
+        if metadata.st_uid != self.expected_owner || mode & 0o077 != 0 || metadata.st_nlink != 1 {
+            return Err(MigrationError::invalid(
+                "legacy credential file ownership or permissions are unsafe",
+            ));
+        }
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take((MAX_LEGACY_FILE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|source| MigrationError::io("revalidate legacy credential file", source))?;
+        if bytes.len() > MAX_LEGACY_FILE_BYTES {
+            return Err(MigrationError::invalid(
+                "legacy credential file is oversized",
+            ));
+        }
+        let descriptor_metadata = descriptor_stat(file.as_raw_fd())
+            .map_err(|source| MigrationError::io("reinspect legacy credential file", source))?;
+        if file_identity(&metadata) != file_identity(&descriptor_metadata) {
+            return Err(MigrationError::invalid(
+                "legacy credential source identity changed",
+            ));
+        }
+        verify_source_identity(
+            &SourceIdentity {
+                device: metadata.st_dev as u64,
+                inode: metadata.st_ino,
+                sha256: Sha256::digest(&bytes).into(),
+                mode,
+            },
+            &expected,
+        )?;
         let actual = stat_at(self.dsh.as_raw_fd(), &source)
             .map_err(|source| MigrationError::io("inspect legacy credential source", source))?;
         verify_entry_identity(&actual, &expected)?;

@@ -17,13 +17,13 @@ use crate::bridge::{
 };
 #[cfg(target_os = "macos")]
 use crate::credentials::{
-    credential_bridge_dispatch_tables_with_legacy,
+    credential_bridge_dispatch_tables_with_migration_status,
     migration::{
         commit_migration, prepare_migration, rollback_migration, MigrationOutcome,
         NoopMigrationHook, ReadOnlyLegacySource,
     },
-    AppKitCredentialDeletionConfirmation, AppKitCredentialSheet, CredentialSheetCoordinator,
-    CredentialSheetGate, KeychainStore,
+    AppKitCredentialDeletionConfirmation, AppKitCredentialSheet, CredentialMigrationStatusHandle,
+    CredentialSheetCoordinator, CredentialSheetGate, KeychainStore,
 };
 use crate::launcher::{
     InstanceAction, LaunchReadinessExpectation, LaunchSecrets, SingleInstance, SupervisedChild,
@@ -369,6 +369,8 @@ fn start_runtime(
         pending_migration,
     }));
     #[cfg(target_os = "macos")]
+    let migration_status = CredentialMigrationStatusHandle::from_outcome(&migration_outcome);
+    #[cfg(target_os = "macos")]
     let dispatch_tables = {
         let sheet_gate = std::sync::Arc::new(CredentialSheetGate::default());
         let writable = migration_outcome != MigrationOutcome::ReadOnlyLegacy;
@@ -393,10 +395,16 @@ fn start_runtime(
                 sheet_gate,
             )) as std::sync::Arc<dyn crate::credentials::CredentialDeletionConfirmation>
         });
-        let mut tables =
-            credential_bridge_dispatch_tables_with_legacy(store, replacement, deletion, legacy)
-                .map_err(|error| format!("credential bridge setup failed: {error}"))?;
+        let mut tables = credential_bridge_dispatch_tables_with_migration_status(
+            store,
+            replacement,
+            deletion,
+            legacy,
+            migration_status.clone(),
+        )
+        .map_err(|error| format!("credential bridge setup failed: {error}"))?;
         let health_state = health.clone();
+        let completed_migration_status = migration_status.clone();
         let expectation = MainWebviewHealthExpectation::new(
             secrets.launch_id,
             CORE_MANIFEST_SHA256,
@@ -418,6 +426,9 @@ fn start_runtime(
             if let Some(migration) = health.pending_migration.as_mut() {
                 migration
                     .commit_migration()
+                    .map_err(|_| BridgeHandlerError::credential_failure())?;
+                completed_migration_status
+                    .complete()
                     .map_err(|_| BridgeHandlerError::credential_failure())?;
             }
             health.pending_migration.take();
@@ -552,7 +563,8 @@ fn write_failure_json(error: &str) {
     }
 }
 
-fn run_health_probe(
+fn start_health_probe(
+    app: &AppHandle,
     manifest: &OpenloopBuildManifest,
     updater_config: &update::channel::UpdateChannelConfig,
 ) -> Result<(), String> {
@@ -573,9 +585,9 @@ fn run_health_probe(
     {
         return Err("trusted test health failure was injected".to_owned());
     }
-    let app = current_app_bundle()?;
-    let mut report = probe
-        .inspect(&app, Duration::from_secs(45), &dsh_home)
+    let app_bundle = current_app_bundle()?;
+    let session = probe
+        .begin(&app_bundle, Duration::from_secs(45), &dsh_home)
         .map_err(|error| error.to_string())?;
     let migration_transaction_id = std::env::var(MIGRATION_TRANSACTION_ENVIRONMENT)
         .ok()
@@ -585,8 +597,40 @@ fn run_health_probe(
                 .map_err(|_| "candidate migration transaction identity is invalid".to_owned())
         })
         .transpose()?;
-    report.set_migration_transaction_id(migration_transaction_id);
-    write_stdout_line(&report.to_json_line().map_err(|error| error.to_string())?)
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "candidate health WebView is missing".to_owned())?;
+    window
+        .hide()
+        .map_err(|error| format!("hide candidate health WebView failed: {error}"))?;
+    window
+        .navigate(
+            Url::parse(session.bootstrap_url())
+                .map_err(|error| format!("candidate health bootstrap URL is invalid: {error}"))?,
+        )
+        .map_err(|error| format!("navigate candidate health WebView failed: {error}"))?;
+    let app = app.clone();
+    std::thread::spawn(move || match session.finish() {
+        Ok(mut report) => {
+            report.set_migration_transaction_id(migration_transaction_id);
+            match report
+                .to_json_line()
+                .map_err(|error| error.to_string())
+                .and_then(|line| write_stdout_line(&line))
+            {
+                Ok(()) => app.exit(0),
+                Err(error) => {
+                    write_failure_json(&error);
+                    app.exit(1);
+                }
+            }
+        }
+        Err(error) => {
+            write_failure_json(&error.to_string());
+            app.exit(1);
+        }
+    });
+    Ok(())
 }
 
 async fn run_update_spike(
@@ -759,15 +803,6 @@ pub fn run() -> i32 {
             return 1;
         }
     };
-    if action == HostAction::HealthProbe {
-        return match run_health_probe(&manifest, &updater_config) {
-            Ok(()) => 0,
-            Err(error) => {
-                write_failure_json(&error);
-                1
-            }
-        };
-    }
     let updater_plugin = tauri_plugin_updater::Builder::new()
         .target("darwin-aarch64")
         .pubkey(updater_config.public_key())
@@ -779,10 +814,14 @@ pub fn run() -> i32 {
     let runtime_manifest = manifest.clone();
     let app = builder
         .setup(move |app| {
+            let updater_config = app.state::<update::channel::UpdateChannelConfig>();
+            if action == HostAction::HealthProbe {
+                start_health_probe(app.handle(), &runtime_manifest, &updater_config)?;
+                return Ok(());
+            }
             if action != HostAction::Normal {
                 return Ok(());
             }
-            let updater_config = app.state::<update::channel::UpdateChannelConfig>();
             if let Some(state) = start_runtime(app.handle(), &updater_config, &runtime_manifest)? {
                 app.manage(state);
             }
@@ -790,6 +829,9 @@ pub fn run() -> i32 {
         })
         .build(tauri::generate_context!())
         .expect("failed to build Openloop desktop application");
+    if action == HostAction::HealthProbe {
+        return app.run_return(|_, _| {});
+    }
     if matches!(action, HostAction::Check | HostAction::Install) {
         return match tauri::async_runtime::block_on(run_update_spike(
             app.handle(),

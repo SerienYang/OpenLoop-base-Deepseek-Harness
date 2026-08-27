@@ -15,7 +15,10 @@ export interface RuntimeBuildIdentity {
   readonly sha256: string
 }
 
-export type BootstrapTokenResult = 'consumed' | 'invalid' | 'expired'
+export type BootstrapTokenClaimResult =
+  | { readonly status: 'claimed'; readonly claimId: string }
+  | { readonly status: 'invalid' | 'expired' }
+export type BootstrapCompletionClaimResult = 'claimed' | 'busy' | 'invalid' | 'completed'
 
 /**
  * Host-only service for one-time launch-secret handoff, bootstrap-session validation, and runtime build identity.
@@ -27,11 +30,13 @@ export interface RuntimeBootstrap {
   readonly getLaunchId: () => string
   readonly socketPath: () => string
   readonly getSocketPath: () => string
-  readonly consumeBootstrapToken: () => Uint8Array | undefined
-  readonly consumeBootstrapTokenIfMatches: (actual: Uint8Array) => BootstrapTokenResult
+  readonly claimBootstrapTokenIfMatches: (actual: Uint8Array) => BootstrapTokenClaimResult
   readonly consumeBridgeSecret: () => Uint8Array | undefined
-  readonly issueBootstrapSession: () => string
+  readonly issueBootstrapSession: (claimId: string) => string | undefined
   readonly validateBootstrapSession: (value: string) => boolean
+  readonly claimBootstrapCompletion: (session: string) => BootstrapCompletionClaimResult
+  readonly releaseBootstrapCompletion: (session: string) => void
+  readonly commitBootstrapCompletion: (session: string) => boolean
   readonly coreManifest: () => Readonly<Record<string, unknown>> | undefined
   readonly coreManifestSha256: () => string | undefined
 }
@@ -54,7 +59,10 @@ export function installRuntimeBootstrap(
   let active = true
   let bootstrapToken: Uint8Array | undefined = Uint8Array.from(secrets.bootstrapToken)
   let bridgeSecret: Uint8Array | undefined = Uint8Array.from(secrets.bridgeSecret)
+  let bootstrapClaim: { readonly id: string } | undefined
   let bootstrapSession: Uint8Array | undefined
+  let completionClaimed = false
+  let completionCommitted = false
   const requireActive = (): void => {
     if (!active) throw new Error('runtime bootstrap service is disposed')
   }
@@ -69,20 +77,15 @@ export function installRuntimeBootstrap(
       return secrets.socketPath
     },
     getSocketPath: () => service.socketPath(),
-    consumeBootstrapToken: () => {
-      requireActive()
-      const value = bootstrapToken
-      bootstrapToken = undefined
-      return value
-    },
-    consumeBootstrapTokenIfMatches: (actual) => {
+    claimBootstrapTokenIfMatches: (actual) => {
       requireActive()
       const expected = bootstrapToken
-      if (expected === undefined) return 'expired'
-      if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return 'invalid'
-      bootstrapToken = undefined
-      expected.fill(0)
-      return 'consumed'
+      if (expected === undefined) return { status: 'expired' }
+      if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+        return { status: 'invalid' }
+      }
+      bootstrapClaim ??= { id: randomBytes(32).toString('hex') }
+      return { status: 'claimed', claimId: bootstrapClaim.id }
     },
     consumeBridgeSecret: () => {
       requireActive()
@@ -90,16 +93,45 @@ export function installRuntimeBootstrap(
       bridgeSecret = undefined
       return value
     },
-    issueBootstrapSession: () => {
+    issueBootstrapSession: (claimId) => {
       requireActive()
-      bootstrapSession?.fill(0)
-      bootstrapSession = randomBytes(32)
+      if (bootstrapClaim?.id !== claimId || completionCommitted) return undefined
+      bootstrapSession ??= randomBytes(32)
       return Buffer.from(bootstrapSession).toString('hex')
     },
     validateBootstrapSession: (value) => {
       requireActive()
       if (bootstrapSession === undefined || !/^[0-9a-f]{64}$/u.test(value)) return false
       return timingSafeEqual(bootstrapSession, Buffer.from(value, 'hex'))
+    },
+    claimBootstrapCompletion: (session) => {
+      requireActive()
+      if (!service.validateBootstrapSession(session)) return 'invalid'
+      if (completionCommitted) return 'completed'
+      if (completionClaimed) return 'busy'
+      completionClaimed = true
+      return 'claimed'
+    },
+    releaseBootstrapCompletion: (session) => {
+      requireActive()
+      if (service.validateBootstrapSession(session) && !completionCommitted) {
+        completionClaimed = false
+      }
+    },
+    commitBootstrapCompletion: (session) => {
+      requireActive()
+      if (!service.validateBootstrapSession(session)
+        || !completionClaimed
+        || completionCommitted
+        || bootstrapToken === undefined) {
+        return false
+      }
+      bootstrapToken.fill(0)
+      bootstrapToken = undefined
+      bootstrapClaim = undefined
+      completionClaimed = false
+      completionCommitted = true
+      return true
     },
     coreManifest: () => {
       requireActive()
@@ -118,8 +150,11 @@ export function installRuntimeBootstrap(
     bridgeSecret?.fill(0)
     bootstrapSession?.fill(0)
     bootstrapToken = undefined
+    bootstrapClaim = undefined
     bridgeSecret = undefined
     bootstrapSession = undefined
+    completionClaimed = false
+    completionCommitted = false
     remove()
   }
 }

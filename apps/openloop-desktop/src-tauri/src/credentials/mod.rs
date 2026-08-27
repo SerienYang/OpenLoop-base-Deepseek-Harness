@@ -4,17 +4,18 @@ use std::{
     ffi::OsString,
     fmt,
     os::unix::ffi::OsStrExt,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
+use core_foundation::data::CFData;
 use security_framework::{
-    item::{ItemClass, ItemSearchOptions},
-    passwords::{
-        delete_generic_password_options, generic_password, set_generic_password_options,
-        PasswordOptions,
+    item::{
+        update_item, ItemAddOptions, ItemAddValue, ItemClass, ItemSearchOptions, ItemUpdateOptions,
+        ItemUpdateValue,
     },
+    passwords::{delete_generic_password_options, generic_password, PasswordOptions},
 };
-use security_framework_sys::base::errSecItemNotFound;
+use security_framework_sys::base::{errSecDuplicateItem, errSecItemNotFound};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
@@ -46,6 +47,7 @@ pub const MAX_CREDENTIAL_DELETION_PLAN_BYTES: usize = 56 * 1024;
 
 const TEST_KEYCHAIN_SERVICE: &str = "ai.openloop.credentials.test.v1";
 const STABLE_KEYCHAIN_SERVICE: &str = "ai.openloop.credentials.v1";
+const USER_MANAGED_KEYCHAIN_MARKER: &str = "openloop-user-managed-v1";
 const KEYCHAIN_SPIKE_PREFIX: &[u8] = b"--openloop-keychain";
 const KEYCHAIN_SPIKE_SET: &str = "--openloop-keychain-spike=set";
 const KEYCHAIN_SPIKE_VERIFY: &str = "--openloop-keychain-spike=verify";
@@ -106,9 +108,26 @@ impl KeychainStore {
 
     pub fn set(&self, account: &CredentialAccount, secret: &[u8]) -> Result<(), CredentialError> {
         validate_secret(secret)?;
-        let options = self.password_options(account);
-        set_generic_password_options(secret, options)
-            .map_err(|error| CredentialError::keychain("set", error.code()))
+        let mut add = ItemAddOptions::new(ItemAddValue::Data {
+            class: ItemClass::generic_password(),
+            data: CFData::from_buffer(secret),
+        });
+        add.set_service(self.service())
+            .set_account_name(account.as_str())
+            .set_comment(USER_MANAGED_KEYCHAIN_MARKER);
+        match add.add() {
+            Ok(()) => Ok(()),
+            Err(error) if error.code() == errSecDuplicateItem => {
+                let search = self.item_search(account);
+                let mut update = ItemUpdateOptions::new();
+                update
+                    .set_value(ItemUpdateValue::Data(CFData::from_buffer(secret)))
+                    .set_comment(USER_MANAGED_KEYCHAIN_MARKER);
+                update_item(&search, &update)
+                    .map_err(|error| CredentialError::keychain("set", error.code()))
+            }
+            Err(error) => Err(CredentialError::keychain("set", error.code())),
+        }
     }
 
     pub fn resolve(
@@ -159,11 +178,53 @@ impl KeychainStore {
         }
     }
 
+    pub(crate) fn set_migration_owned(
+        &self,
+        account: &CredentialAccount,
+        secret: &[u8],
+        transaction_id: uuid::Uuid,
+    ) -> Result<(), CredentialError> {
+        validate_secret(secret)?;
+        let mut options = self.password_options(account);
+        options.set_comment(&migration_marker(transaction_id));
+        security_framework::passwords::set_generic_password_options(secret, options)
+            .map_err(|error| CredentialError::keychain("set", error.code()))
+    }
+
+    pub(crate) fn delete_if_migration_owned(
+        &self,
+        account: &CredentialAccount,
+        transaction_id: uuid::Uuid,
+    ) -> Result<bool, CredentialError> {
+        let mut options = self.password_options(account);
+        options.set_comment(&migration_marker(transaction_id));
+        match delete_generic_password_options(options) {
+            Ok(()) => Ok(true),
+            Err(error) if error.code() == errSecItemNotFound => Ok(false),
+            Err(error) => Err(CredentialError::keychain("delete", error.code())),
+        }
+    }
+
+    fn item_search(&self, account: &CredentialAccount) -> ItemSearchOptions {
+        let mut options = ItemSearchOptions::new();
+        options
+            .class(ItemClass::generic_password())
+            .service(self.service())
+            .account(account.as_str())
+            .cloud_sync(Some(false))
+            .skip_authenticated_items(true);
+        options
+    }
+
     fn password_options(&self, account: &CredentialAccount) -> PasswordOptions {
         let mut options = PasswordOptions::new_generic_password(self.service(), account.as_str());
         options.set_access_synchronized(Some(false));
         options
     }
+}
+
+fn migration_marker(transaction_id: uuid::Uuid) -> String {
+    format!("openloop-migration:{transaction_id}")
 }
 
 pub trait CredentialDeletionStore {
@@ -310,12 +371,84 @@ struct CredentialReferencePayload {
     reference: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CredentialMigrationState {
+    NotRequired,
+    Pending,
+    Incomplete,
+    Completed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialMigrationStatus {
+    pub state: CredentialMigrationState,
+    pub read_only: bool,
+    pub retry_required: bool,
+}
+
+#[derive(Clone)]
+pub struct CredentialMigrationStatusHandle {
+    status: Arc<Mutex<CredentialMigrationStatus>>,
+}
+
+impl CredentialMigrationStatusHandle {
+    pub fn from_outcome(outcome: &migration::MigrationOutcome) -> Self {
+        let status = match outcome {
+            migration::MigrationOutcome::NotNeeded => CredentialMigrationStatus {
+                state: CredentialMigrationState::NotRequired,
+                read_only: false,
+                retry_required: false,
+            },
+            migration::MigrationOutcome::PendingHealth(_) => CredentialMigrationStatus {
+                state: CredentialMigrationState::Pending,
+                read_only: false,
+                retry_required: false,
+            },
+            migration::MigrationOutcome::ReadOnlyLegacy => CredentialMigrationStatus {
+                state: CredentialMigrationState::Incomplete,
+                read_only: true,
+                retry_required: true,
+            },
+        };
+        Self {
+            status: Arc::new(Mutex::new(status)),
+        }
+    }
+
+    pub fn complete(&self) -> Result<(), CredentialError> {
+        *self
+            .status
+            .lock()
+            .map_err(|_| CredentialError::bridge_failed())? = CredentialMigrationStatus {
+            state: CredentialMigrationState::Completed,
+            read_only: false,
+            retry_required: false,
+        };
+        Ok(())
+    }
+
+    fn snapshot(&self) -> Result<CredentialMigrationStatus, CredentialError> {
+        self.status
+            .lock()
+            .map(|status| *status)
+            .map_err(|_| CredentialError::bridge_failed())
+    }
+}
+
 pub fn credential_bridge_dispatch_tables(
     store: KeychainStore,
     replacement: Option<Arc<dyn CredentialReplacement>>,
     confirmation: Option<Arc<dyn CredentialDeletionConfirmation>>,
 ) -> Result<BridgeDispatchTables, CredentialError> {
-    credential_bridge_dispatch_tables_with_legacy(store, replacement, confirmation, None)
+    credential_bridge_dispatch_tables_with_migration_status(
+        store,
+        replacement,
+        confirmation,
+        None,
+        CredentialMigrationStatusHandle::from_outcome(&migration::MigrationOutcome::NotNeeded),
+    )
 }
 
 pub fn credential_bridge_dispatch_tables_with_legacy(
@@ -323,6 +456,27 @@ pub fn credential_bridge_dispatch_tables_with_legacy(
     replacement: Option<Arc<dyn CredentialReplacement>>,
     confirmation: Option<Arc<dyn CredentialDeletionConfirmation>>,
     legacy: Option<migration::ReadOnlyLegacySource>,
+) -> Result<BridgeDispatchTables, CredentialError> {
+    let outcome = if legacy.is_some() {
+        migration::MigrationOutcome::ReadOnlyLegacy
+    } else {
+        migration::MigrationOutcome::NotNeeded
+    };
+    credential_bridge_dispatch_tables_with_migration_status(
+        store,
+        replacement,
+        confirmation,
+        legacy,
+        CredentialMigrationStatusHandle::from_outcome(&outcome),
+    )
+}
+
+pub fn credential_bridge_dispatch_tables_with_migration_status(
+    store: KeychainStore,
+    replacement: Option<Arc<dyn CredentialReplacement>>,
+    confirmation: Option<Arc<dyn CredentialDeletionConfirmation>>,
+    legacy: Option<migration::ReadOnlyLegacySource>,
+    migration_status: CredentialMigrationStatusHandle,
 ) -> Result<BridgeDispatchTables, CredentialError> {
     let writable = legacy.is_none() && replacement.is_some() && confirmation.is_some();
     let mutation_gate = writable.then(|| Arc::new(CredentialSheetGate::default()));
@@ -423,6 +577,18 @@ pub fn credential_bridge_dispatch_tables_with_legacy(
         ))
     });
     browser_safe.insert("unsetCredential".to_owned(), delete);
+    let status: BridgeHandler = Arc::new(move |payload, _cancellation| {
+        if !payload.is_null() {
+            return Err(crate::bridge::server::BridgeHandlerError::invalid_request());
+        }
+        serde_json::to_value(
+            migration_status
+                .snapshot()
+                .map_err(|_| crate::bridge::server::BridgeHandlerError::credential_failure())?,
+        )
+        .map_err(|_| crate::bridge::server::BridgeHandlerError::credential_failure())
+    });
+    browser_safe.insert("getCredentialMigrationStatus".to_owned(), status);
 
     let mut host_only = HashMap::new();
     let resolve_store = store;

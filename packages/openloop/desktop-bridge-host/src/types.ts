@@ -33,8 +33,9 @@ export interface CredentialStatus {
 }
 
 export interface CredentialMigrationStatus {
-  readonly state: 'not-required' | 'pending' | 'failed' | 'completed'
-  readonly message?: string
+  readonly state: 'not-required' | 'pending' | 'incomplete' | 'completed'
+  readonly readOnly: boolean
+  readonly retryRequired: boolean
 }
 
 export interface MainWebviewHealthAcknowledgement {

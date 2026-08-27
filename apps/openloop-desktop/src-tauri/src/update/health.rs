@@ -12,7 +12,7 @@ use std::{
     process::{Child, Command, Output, Stdio},
     sync::{
         mpsc::{self, Receiver, RecvTimeoutError},
-        Arc, Mutex,
+        Arc,
     },
     thread,
     time::{Duration, Instant},
@@ -24,7 +24,7 @@ use uuid::Uuid;
 use crate::{
     bridge::{
         server::{BridgeHandler, BridgeHandlerError},
-        AuthenticatedBridgeDispatcher, BridgeDispatchTables, BridgeListener,
+        AuthenticatedBridgeDispatcher, BridgeDispatchTables, BridgeListener, BridgeServer,
     },
     launcher::{LaunchReadinessExpectation, LaunchSecrets, SupervisedChild},
 };
@@ -209,6 +209,59 @@ pub struct BundleHealthProbe {
     dsh_data_version: u64,
 }
 
+pub struct CandidateWebviewProbe {
+    bootstrap_url: String,
+    completion: Receiver<()>,
+    deadline: Instant,
+    app_version: String,
+    core_manifest_sha256: String,
+    child: SupervisedChild,
+    _bridge: BridgeServer,
+    _directory: ProbeDirectory,
+}
+
+impl CandidateWebviewProbe {
+    pub fn bootstrap_url(&self) -> &str {
+        &self.bootstrap_url
+    }
+
+    pub fn finish(mut self) -> Result<HealthProbeReport, HealthProbeError> {
+        let completion = self
+            .completion
+            .recv_timeout(remaining_health_budget(self.deadline)?)
+            .map_err(|error| match error {
+                RecvTimeoutError::Timeout => HealthProbeError::TimedOut,
+                RecvTimeoutError::Disconnected => {
+                    HealthProbeError::invalid("candidate WebView callback channel disconnected")
+                }
+            });
+        let termination = self
+            .child
+            .terminate_if_verified()
+            .map_err(|source| HealthProbeError::invalid(source.to_string()));
+        completion?;
+        termination?;
+        Ok(HealthProbeReport::new(
+            &self.app_version,
+            &self.core_manifest_sha256,
+            None,
+            AppHealthReadiness {
+                host: true,
+                sidecar: true,
+                bridge: true,
+                data_version: true,
+                main_webview: true,
+            },
+        ))
+    }
+}
+
+impl Drop for CandidateWebviewProbe {
+    fn drop(&mut self) {
+        let _ = self.child.terminate_if_verified();
+    }
+}
+
 impl BundleHealthProbe {
     pub fn new(
         app_version: impl Into<String>,
@@ -226,12 +279,12 @@ impl BundleHealthProbe {
         }
     }
 
-    pub fn inspect(
+    pub fn begin(
         &self,
         app: &Path,
         timeout: Duration,
         dsh_home: &Path,
-    ) -> Result<HealthProbeReport, HealthProbeError> {
+    ) -> Result<CandidateWebviewProbe, HealthProbeError> {
         let deadline = Instant::now() + timeout;
         validate_dsh_home(dsh_home, None)?;
         require_real_directory(app, "candidate app")?;
@@ -272,15 +325,9 @@ impl BundleHealthProbe {
             .map_err(|source| HealthProbeError::io("generate health probe secrets", source))?;
         let listener = BridgeListener::bind(&secrets.socket_path)
             .map_err(|source| HealthProbeError::invalid(source.to_string()))?;
-        let mut child = SupervisedChild::spawn_with_args_and_dsh_home(
-            &sidecar,
-            [OsStr::new("--health-smoke")],
-            &secrets,
-            dsh_home,
-        )
-        .map_err(|source| HealthProbeError::invalid(source.to_string()))?;
-        let observed = Arc::new(Mutex::new((false, false)));
-        let observed_by_handler = observed.clone();
+        let mut child = SupervisedChild::spawn_with_dsh_home(&sidecar, &secrets, dsh_home)
+            .map_err(|source| HealthProbeError::invalid(source.to_string()))?;
+        let (completion_sender, completion) = mpsc::sync_channel(1);
         let expectation = MainWebviewHealthExpectation::new(
             secrets.launch_id,
             &self.core_manifest_sha256,
@@ -290,14 +337,10 @@ impl BundleHealthProbe {
         let handler: BridgeHandler = Arc::new(move |payload, _cancellation| {
             let acknowledgement: MainWebviewHealthAcknowledgement = serde_json::from_value(payload)
                 .map_err(|_| BridgeHandlerError::invalid_request())?;
-            let mut observed = observed_by_handler
-                .lock()
-                .map_err(|_| BridgeHandlerError::invalid_request())?;
-            observed.0 = true;
             expectation
                 .validate(&acknowledgement)
                 .map_err(|_| BridgeHandlerError::invalid_request())?;
-            observed.1 = true;
+            let _ = completion_sender.try_send(());
             Ok(serde_json::Value::Null)
         });
         let mut dispatch_tables = BridgeDispatchTables::unavailable();
@@ -313,7 +356,7 @@ impl BundleHealthProbe {
             dispatch_tables,
         )
         .map_err(|source| HealthProbeError::invalid(source.to_string()))?;
-        let _bridge = listener
+        let bridge = listener
             .serve(dispatcher)
             .map_err(|source| HealthProbeError::invalid(source.to_string()))?;
         let readiness = child
@@ -344,24 +387,21 @@ impl BundleHealthProbe {
             &readiness.core_manifest_sha256,
             "runtime sidecar core manifest identity",
         )?;
-        let candidate = readiness.candidate_health.ok_or_else(|| {
-            HealthProbeError::invalid("runtime sidecar candidate health is missing")
-        })?;
-        let (bridge, data_version) = *observed
-            .lock()
-            .map_err(|_| HealthProbeError::invalid("candidate health state is unavailable"))?;
-        Ok(HealthProbeReport::new(
-            &self.app_version,
-            &self.core_manifest_sha256,
-            None,
-            AppHealthReadiness {
-                host: true,
-                sidecar: true,
-                bridge,
-                data_version,
-                main_webview: candidate.web_asset && candidate.bootstrap_exchange,
-            },
-        ))
+        Ok(CandidateWebviewProbe {
+            bootstrap_url: format!(
+                "{}#bootstrap={}&launch={}",
+                readiness.origin,
+                secrets.bootstrap_token_hex(),
+                secrets.launch_id,
+            ),
+            completion,
+            deadline,
+            app_version: self.app_version.clone(),
+            core_manifest_sha256: self.core_manifest_sha256.clone(),
+            child,
+            _bridge: bridge,
+            _directory: probe_directory,
+        })
     }
 
     pub fn test_failure_injection(

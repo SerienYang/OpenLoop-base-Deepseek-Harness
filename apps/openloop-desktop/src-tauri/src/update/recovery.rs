@@ -59,6 +59,7 @@ pub enum RecoveryBoundary {
     AfterCompanionCommit,
     BeforeHealthRollbackSwap,
     AfterHealthRollbackSwap,
+    AfterCompanionRollback,
 }
 
 #[cfg(not(debug_assertions))]
@@ -73,6 +74,7 @@ enum RecoveryBoundary {
     AfterCompanionCommit,
     BeforeHealthRollbackSwap,
     AfterHealthRollbackSwap,
+    AfterCompanionRollback,
 }
 
 #[cfg(debug_assertions)]
@@ -118,6 +120,9 @@ pub enum RecoveryState {
     Prepared,
     CandidatePublished,
     CommitIntent,
+    RollbackIntent,
+    AppRestored,
+    CompanionRolledBack,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -329,15 +334,23 @@ impl RecoveryTransaction {
             }
         }
 
+        self.persist_journal(RecoveryState::RollbackIntent, hook)?;
         if let Err(restore) = self.health_rollback_swap(hook) {
             return Err(RecoveryError::RestoreFailed {
                 restore,
                 candidate_republish: None,
             });
         }
+        self.persist_journal(RecoveryState::AppRestored, hook)?;
         companion
             .rollback()
             .map_err(|_| RecoveryError::CompanionRollback)?;
+        hook.before(
+            RecoveryBoundary::AfterCompanionRollback,
+            &self.path(&self.installed_name),
+            &self.path(&self.candidate_name),
+        );
+        self.persist_journal(RecoveryState::CompanionRolledBack, hook)?;
         self.remove_journal()?;
         Ok(PublicationOutcome::RolledBack {
             status,
@@ -684,18 +697,21 @@ fn recover_interrupted_update_inner(
 
     match journal.state {
         RecoveryState::Prepared | RecoveryState::CandidatePublished => {
+            transaction.persist_journal(RecoveryState::RollbackIntent, &mut NoopHook)?;
             if published {
                 transaction
-                    .atomic_swap(&transaction.installed_name, &transaction.candidate_name)
+                    .health_rollback_swap(&mut NoopHook)
                     .map_err(|source| RecoveryError::io("restore interrupted update", source))?;
             } else if !original {
                 return Err(RecoveryError::invalid(
                     "interrupted update app identities are ambiguous",
                 ));
             }
+            transaction.persist_journal(RecoveryState::AppRestored, &mut NoopHook)?;
             companion
                 .rollback()
                 .map_err(|_| RecoveryError::CompanionRollback)?;
+            transaction.persist_journal(RecoveryState::CompanionRolledBack, &mut NoopHook)?;
         }
         RecoveryState::CommitIntent => {
             if !published {
@@ -704,14 +720,51 @@ fn recover_interrupted_update_inner(
                 ));
             }
             if companion.commit().is_err() {
+                transaction.persist_journal(RecoveryState::RollbackIntent, &mut NoopHook)?;
                 transaction
-                    .atomic_swap(&transaction.installed_name, &transaction.candidate_name)
+                    .health_rollback_swap(&mut NoopHook)
                     .map_err(|source| {
                         RecoveryError::io("restore update after companion commit failure", source)
                     })?;
+                transaction.persist_journal(RecoveryState::AppRestored, &mut NoopHook)?;
                 companion
                     .rollback()
                     .map_err(|_| RecoveryError::CompanionRollback)?;
+                transaction.persist_journal(RecoveryState::CompanionRolledBack, &mut NoopHook)?;
+            }
+        }
+        RecoveryState::RollbackIntent => {
+            if published {
+                transaction
+                    .health_rollback_swap(&mut NoopHook)
+                    .map_err(|source| RecoveryError::io("resume update rollback", source))?;
+            } else if !original {
+                return Err(RecoveryError::invalid(
+                    "rolling back update no longer owns the app identities",
+                ));
+            }
+            transaction.persist_journal(RecoveryState::AppRestored, &mut NoopHook)?;
+            companion
+                .rollback()
+                .map_err(|_| RecoveryError::CompanionRollback)?;
+            transaction.persist_journal(RecoveryState::CompanionRolledBack, &mut NoopHook)?;
+        }
+        RecoveryState::AppRestored => {
+            if !original {
+                return Err(RecoveryError::invalid(
+                    "restored update no longer owns the app identities",
+                ));
+            }
+            companion
+                .rollback()
+                .map_err(|_| RecoveryError::CompanionRollback)?;
+            transaction.persist_journal(RecoveryState::CompanionRolledBack, &mut NoopHook)?;
+        }
+        RecoveryState::CompanionRolledBack => {
+            if !original {
+                return Err(RecoveryError::invalid(
+                    "rolled back update no longer owns the app identities",
+                ));
             }
         }
     }

@@ -12,9 +12,10 @@ use openloop_desktop_lib::{
     credentials::{
         migration::{
             commit_migration, journal_path, prepare_migration, prepare_migration_with_filesystem,
-            rollback_migration, staged_path, Journal, MigrationBoundary, MigrationFilesystem,
-            MigrationHook, MigrationOutcome, MigrationState, MigrationStore, MigrationStoreError,
-            NoopMigrationHook, PreviousValue, ReadOnlyLegacySource, ReferenceState,
+            rollback_migration, staged_path, Journal, MigrationBoundary, MigrationDeleteOutcome,
+            MigrationFilesystem, MigrationHook, MigrationOutcome, MigrationState, MigrationStore,
+            MigrationStoreError, NoopMigrationHook, PreviousValue, ReadOnlyLegacySource,
+            ReferenceState,
         },
         CredentialAccount, KeychainStore, MAX_SECRET_BYTES,
     },
@@ -34,6 +35,7 @@ use zeroize::Zeroizing;
 #[derive(Clone, Default)]
 struct MemoryStore {
     values: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+    owners: Arc<Mutex<BTreeMap<String, Uuid>>>,
 }
 
 impl MemoryStore {
@@ -45,6 +47,7 @@ impl MemoryStore {
                     .map(|(reference, value)| ((*reference).to_owned(), value.to_vec()))
                     .collect(),
             )),
+            owners: Arc::default(),
         }
     }
 
@@ -61,6 +64,7 @@ impl MemoryStore {
             .lock()
             .expect("memory store")
             .insert(reference.to_owned(), value.to_vec());
+        self.owners.lock().expect("memory owners").remove(reference);
     }
 }
 
@@ -78,23 +82,40 @@ impl MigrationStore for MemoryStore {
             .map(Zeroizing::new))
     }
 
-    fn set(&self, account: &CredentialAccount, secret: &[u8]) -> Result<(), MigrationStoreError> {
-        self.values.lock().expect("memory store").insert(
-            account
-                .as_str()
-                .trim_start_matches("credential:")
-                .to_owned(),
-            secret.to_vec(),
-        );
-        Ok(())
-    }
-
-    fn delete(&self, account: &CredentialAccount) -> Result<(), MigrationStoreError> {
+    fn set_migration_owned(
+        &self,
+        account: &CredentialAccount,
+        secret: &[u8],
+        transaction_id: Uuid,
+    ) -> Result<(), MigrationStoreError> {
+        let reference = account
+            .as_str()
+            .trim_start_matches("credential:")
+            .to_owned();
         self.values
             .lock()
             .expect("memory store")
-            .remove(account.as_str().trim_start_matches("credential:"));
+            .insert(reference.clone(), secret.to_vec());
+        self.owners
+            .lock()
+            .expect("memory owners")
+            .insert(reference, transaction_id);
         Ok(())
+    }
+
+    fn delete_if_migration_owned(
+        &self,
+        account: &CredentialAccount,
+        transaction_id: Uuid,
+    ) -> Result<MigrationDeleteOutcome, MigrationStoreError> {
+        let reference = account.as_str().trim_start_matches("credential:");
+        let mut owners = self.owners.lock().expect("memory owners");
+        if owners.get(reference) != Some(&transaction_id) {
+            return Ok(MigrationDeleteOutcome::NotOwned);
+        }
+        owners.remove(reference);
+        self.values.lock().expect("memory store").remove(reference);
+        Ok(MigrationDeleteOutcome::Deleted)
     }
 }
 
@@ -440,6 +461,79 @@ fn process_death_after_staged_delete_recovers_forward_without_legacy_plaintext()
 }
 
 #[test]
+fn process_death_at_every_commit_boundary_resumes_forward_idempotently() {
+    let (_root, baseline_channel, baseline_dsh) = fixture();
+    write_legacy(&baseline_dsh, b"TOKEN: secret\n");
+    let baseline_store = MemoryStore::default();
+    let baseline = prepare_migration(
+        &baseline_channel,
+        &baseline_dsh,
+        &baseline_store,
+        &mut NoopMigrationHook,
+    )
+    .expect("baseline migration");
+    let baseline_transaction = baseline.transaction_id().expect("baseline transaction");
+    let mut recorder = RecordingHook::default();
+    commit_migration(
+        &baseline_channel,
+        &baseline_dsh,
+        baseline_transaction,
+        &mut recorder,
+    )
+    .expect("record commit boundaries");
+    let crash_boundaries = recorder.boundaries;
+    assert!(crash_boundaries.contains(&MigrationBoundary::BeforeStagedDelete));
+    assert!(crash_boundaries.contains(&MigrationBoundary::AfterStagedDelete));
+    assert!(crash_boundaries.contains(&MigrationBoundary::BeforeStagedDeleteParentFsync));
+    assert!(crash_boundaries.contains(&MigrationBoundary::AfterStagedDeleteParentFsync));
+
+    for boundary in crash_boundaries {
+        let (_root, channel_root, dsh_home) = fixture();
+        write_legacy(&dsh_home, b"TOKEN: secret\n");
+        let store = MemoryStore::default();
+        let outcome = prepare_migration(&channel_root, &dsh_home, &store, &mut NoopMigrationHook)
+            .expect("migration");
+        let transaction_id = outcome.transaction_id().expect("transaction");
+        let mut crash = RecordingHook {
+            boundaries: Vec::new(),
+            crash_at: Some(boundary.clone()),
+        };
+
+        let _ = commit_migration(&channel_root, &dsh_home, transaction_id, &mut crash);
+        let resumed = prepare_migration(&channel_root, &dsh_home, &store, &mut NoopMigrationHook)
+            .unwrap_or_else(|error| panic!("prepare after {boundary:?}: {error}"));
+        if resumed == MigrationOutcome::PendingHealth(transaction_id) {
+            commit_migration(
+                &channel_root,
+                &dsh_home,
+                transaction_id,
+                &mut NoopMigrationHook,
+            )
+            .unwrap_or_else(|error| panic!("resume commit after {boundary:?}: {error}"));
+        }
+        commit_migration(
+            &channel_root,
+            &dsh_home,
+            transaction_id,
+            &mut NoopMigrationHook,
+        )
+        .unwrap_or_else(|error| panic!("idempotent commit after {boundary:?}: {error}"));
+
+        assert!(!dsh_home.join(".credentials.yaml").exists(), "{boundary:?}");
+        assert!(
+            !staged_path(&dsh_home, transaction_id).exists(),
+            "{boundary:?}"
+        );
+        assert!(!journal_path(&channel_root).exists(), "{boundary:?}");
+        assert_eq!(
+            store.get("TOKEN").as_deref(),
+            Some(b"secret".as_slice()),
+            "{boundary:?}"
+        );
+    }
+}
+
+#[test]
 fn commit_exposes_every_durable_and_irreversible_boundary() {
     let (_root, channel_root, dsh_home) = fixture();
     write_legacy(&dsh_home, b"TOKEN: secret\n");
@@ -519,8 +613,14 @@ impl MigrationStore for WriteThenFailStore {
         self.inner.resolve(account)
     }
 
-    fn set(&self, account: &CredentialAccount, secret: &[u8]) -> Result<(), MigrationStoreError> {
-        self.inner.set(account, secret)?;
+    fn set_migration_owned(
+        &self,
+        account: &CredentialAccount,
+        secret: &[u8],
+        transaction_id: Uuid,
+    ) -> Result<(), MigrationStoreError> {
+        self.inner
+            .set_migration_owned(account, secret, transaction_id)?;
         let mut fail = self.fail_once.lock().expect("write failure state");
         if !*fail {
             *fail = true;
@@ -529,8 +629,13 @@ impl MigrationStore for WriteThenFailStore {
         Ok(())
     }
 
-    fn delete(&self, account: &CredentialAccount) -> Result<(), MigrationStoreError> {
-        self.inner.delete(account)
+    fn delete_if_migration_owned(
+        &self,
+        account: &CredentialAccount,
+        transaction_id: Uuid,
+    ) -> Result<MigrationDeleteOutcome, MigrationStoreError> {
+        self.inner
+            .delete_if_migration_owned(account, transaction_id)
     }
 }
 
@@ -627,6 +732,91 @@ fn read_only_fallback_uses_intact_legacy_authority_despite_a_malformed_journal()
 struct ReplacingFilesystem {
     source: std::path::PathBuf,
     replaced: bool,
+}
+
+struct InPlaceModifyingFilesystem {
+    source: std::path::PathBuf,
+}
+
+struct FailingBeforeStageFilesystem;
+
+impl MigrationFilesystem for FailingBeforeStageFilesystem {
+    fn expected_owner(&self) -> u32 {
+        unsafe { libc::geteuid() }
+    }
+
+    fn before_source_stage(&mut self) -> Result<(), MigrationStoreError> {
+        Err(MigrationStoreError::injected_crash())
+    }
+}
+
+#[test]
+fn source_stage_precheck_failure_rolls_back_owned_keys_without_moving_legacy() {
+    let (_root, channel_root, dsh_home) = fixture();
+    write_legacy(&dsh_home, b"TOKEN: original\n");
+    let store = MemoryStore::default();
+
+    let error = prepare_migration_with_filesystem(
+        &channel_root,
+        &dsh_home,
+        &store,
+        &mut FailingBeforeStageFilesystem,
+        &mut NoopMigrationHook,
+    )
+    .expect_err("source stage precheck failure");
+
+    assert!(error.is_injected_crash());
+    assert_eq!(
+        fs::read_to_string(dsh_home.join(".credentials.yaml")).expect("authoritative legacy file"),
+        "TOKEN: original\n"
+    );
+    assert_eq!(store.get("TOKEN"), None);
+    assert!(!journal_path(&channel_root).exists());
+}
+
+impl MigrationFilesystem for InPlaceModifyingFilesystem {
+    fn expected_owner(&self) -> u32 {
+        unsafe { libc::geteuid() }
+    }
+
+    fn before_source_stage(&mut self) -> Result<(), MigrationStoreError> {
+        fs::write(&self.source, b"TOKEN: modified-in-place\n").expect("modify source in place");
+        Ok(())
+    }
+}
+
+#[test]
+fn in_place_source_modification_before_stage_aborts_without_moving_authority() {
+    let (_root, channel_root, dsh_home) = fixture();
+    write_legacy(&dsh_home, b"TOKEN: original\n");
+    let store = MemoryStore::default();
+    let mut filesystem = InPlaceModifyingFilesystem {
+        source: dsh_home.join(".credentials.yaml"),
+    };
+
+    let error = prepare_migration_with_filesystem(
+        &channel_root,
+        &dsh_home,
+        &store,
+        &mut filesystem,
+        &mut NoopMigrationHook,
+    )
+    .expect_err("in-place source modification");
+
+    assert!(error.to_string().contains("identity changed"));
+    assert_eq!(
+        fs::read_to_string(dsh_home.join(".credentials.yaml")).expect("authoritative legacy file"),
+        "TOKEN: modified-in-place\n"
+    );
+    assert!(fs::read_dir(&dsh_home)
+        .expect("DSH_HOME")
+        .all(|entry| !entry
+            .expect("directory entry")
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".credentials-migration-")));
+    assert_eq!(store.get("TOKEN"), None);
+    assert!(!journal_path(&channel_root).exists());
 }
 
 impl MigrationFilesystem for ReplacingFilesystem {
@@ -745,6 +935,70 @@ fn preexisting_and_external_keychain_values_are_never_overwritten_or_deleted() {
     assert_eq!(
         store.get("PREEXISTING_TOKEN").as_deref(),
         Some(b"same".as_slice())
+    );
+}
+
+#[derive(Clone, Default)]
+struct ReplaceBetweenResolveAndDeleteStore {
+    inner: MemoryStore,
+    replace_on_resolve: Arc<Mutex<bool>>,
+}
+
+impl MigrationStore for ReplaceBetweenResolveAndDeleteStore {
+    fn resolve(
+        &self,
+        account: &CredentialAccount,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, MigrationStoreError> {
+        self.inner.resolve(account)
+    }
+
+    fn set_migration_owned(
+        &self,
+        account: &CredentialAccount,
+        secret: &[u8],
+        transaction_id: Uuid,
+    ) -> Result<(), MigrationStoreError> {
+        self.inner
+            .set_migration_owned(account, secret, transaction_id)
+    }
+
+    fn delete_if_migration_owned(
+        &self,
+        account: &CredentialAccount,
+        transaction_id: Uuid,
+    ) -> Result<MigrationDeleteOutcome, MigrationStoreError> {
+        let mut replace = self.replace_on_resolve.lock().expect("replacement gate");
+        if *replace {
+            self.inner.external_set("TOKEN", b"external-replacement");
+            *replace = false;
+        }
+        self.inner
+            .delete_if_migration_owned(account, transaction_id)
+    }
+}
+
+#[test]
+fn rollback_never_deletes_a_replacement_racing_between_ownership_check_and_delete() {
+    let (_root, channel_root, dsh_home) = fixture();
+    write_legacy(&dsh_home, b"TOKEN: secret\n");
+    let store = ReplaceBetweenResolveAndDeleteStore::default();
+    let outcome = prepare_migration(&channel_root, &dsh_home, &store, &mut NoopMigrationHook)
+        .expect("migration");
+    let transaction_id = outcome.transaction_id().expect("transaction");
+    *store.replace_on_resolve.lock().expect("replacement gate") = true;
+
+    rollback_migration(
+        &channel_root,
+        &dsh_home,
+        transaction_id,
+        &store,
+        &mut NoopMigrationHook,
+    )
+    .expect("fail-preserving rollback");
+
+    assert_eq!(
+        store.inner.get("TOKEN").as_deref(),
+        Some(b"external-replacement".as_slice())
     );
 }
 
@@ -871,6 +1125,48 @@ fn real_test_channel_keychain_migration_is_isolated_and_cleanup_safe() {
         .resolve_optional(&account)
         .expect("post rollback")
         .is_none());
+}
+
+#[test]
+fn real_keychain_user_replacement_clears_migration_ownership_before_rollback() {
+    let (_root, channel_root, dsh_home) = fixture();
+    let reference = format!(
+        "OPENLOOP_MIGRATION_REPLACE_TEST_{}_{}",
+        process_id(),
+        Uuid::new_v4().simple()
+    );
+    write_legacy(
+        &dsh_home,
+        format!("{reference}: migration-secret\n").as_bytes(),
+    );
+    let store = KeychainStore::new(ReleaseChannel::Test);
+    let account = CredentialAccount::new(&reference).expect("test account");
+    store.delete(&account).expect("pre-test cleanup");
+
+    let outcome = prepare_migration(&channel_root, &dsh_home, &store, &mut NoopMigrationHook)
+        .expect("real Keychain migration");
+    let transaction_id = outcome.transaction_id().expect("transaction");
+    store
+        .set(&account, b"user-replacement")
+        .expect("user replacement");
+
+    rollback_migration(
+        &channel_root,
+        &dsh_home,
+        transaction_id,
+        &store,
+        &mut NoopMigrationHook,
+    )
+    .expect("ownership-aware rollback");
+
+    assert_eq!(
+        store
+            .resolve(&account)
+            .expect("user replacement remains")
+            .as_slice(),
+        b"user-replacement"
+    );
+    store.delete(&account).expect("post-test cleanup");
 }
 
 fn process_id() -> u32 {

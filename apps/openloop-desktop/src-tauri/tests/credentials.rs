@@ -151,6 +151,26 @@ fn credential_bridge_dispatch_is_strict_and_keeps_resolution_host_only() {
 }
 
 #[test]
+fn credential_migration_status_is_value_only_and_retry_mutation_is_unavailable() {
+    let status = dispatch_credential("getCredentialMigrationStatus", json!(null));
+    assert_eq!(status["ok"], true);
+    assert_eq!(
+        status["result"],
+        json!({
+            "state": "not-required",
+            "readOnly": false,
+            "retryRequired": false,
+        })
+    );
+    assert!(!status.to_string().contains('/'));
+    assert!(!status.to_string().contains("credential:"));
+
+    let retry = dispatch_credential("retryCredentialMigration", json!(null));
+    assert_eq!(retry["ok"], false);
+    assert_eq!(retry["error"]["code"], "method_not_found");
+}
+
+#[test]
 fn native_credential_status_is_read_only_without_both_mutation_presenters() {
     let account = unique_account("native_read_only");
     let _cleanup = KeychainCleanup::new(account.clone());

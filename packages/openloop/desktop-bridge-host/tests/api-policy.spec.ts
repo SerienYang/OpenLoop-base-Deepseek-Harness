@@ -23,6 +23,7 @@ import {
 } from '../src/api-policy.ts'
 import type { DesktopBridgeClient } from '../src/client.ts'
 import OpenloopBrowserApiPolicyService from '../src/index.ts'
+import type { CredentialMigrationStatus } from '../src/types.ts'
 import {
   BROWSER_SAFE_METHODS,
   HOST_ONLY_METHODS,
@@ -395,6 +396,32 @@ describe('OpenLoop browser API policy', () => {
       acknowledgement,
       undefined,
     )
+  })
+
+  it('returns value-only migration status while browser retry remains denied', async () => {
+    const status: CredentialMigrationStatus = {
+      state: 'incomplete',
+      readOnly: true,
+      retryRequired: true,
+    }
+    const call = vi.fn(() => Promise.resolve(status))
+    const ctx = new Context()
+    const remote = new OpenloopDesktopRemoteService(
+      ctx,
+      { call } as unknown as DesktopBridgeClient,
+    )
+
+    await expect(remote.getCredentialMigrationStatus(new AbortController().signal))
+      .resolves.toEqual(status)
+    expect(call).toHaveBeenCalledWith(
+      'getCredentialMigrationStatus',
+      null,
+      expect.any(AbortSignal),
+    )
+    expect(createBrowserApiPolicy(shippedManifest()).allows(
+      'openloopDesktop/retryCredentialMigration',
+      {},
+    )).toBe(false)
   })
 
   it('blocks all four settings actions before the real legacy handlers run', async () => {

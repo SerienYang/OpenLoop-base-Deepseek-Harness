@@ -157,6 +157,12 @@ struct FailCommitCompanion {
     rollbacks: usize,
 }
 
+#[derive(Default)]
+struct FailCommitAndFirstRollbackCompanion {
+    commits: usize,
+    rollbacks: usize,
+}
+
 impl PublicationCompanion for FailCommitCompanion {
     fn commit(&mut self) -> Result<(), String> {
         self.commits += 1;
@@ -166,6 +172,22 @@ impl PublicationCompanion for FailCommitCompanion {
     fn rollback(&mut self) -> Result<(), String> {
         self.rollbacks += 1;
         Ok(())
+    }
+}
+
+impl PublicationCompanion for FailCommitAndFirstRollbackCompanion {
+    fn commit(&mut self) -> Result<(), String> {
+        self.commits += 1;
+        Err("commit failed before irreversible deletion".to_owned())
+    }
+
+    fn rollback(&mut self) -> Result<(), String> {
+        self.rollbacks += 1;
+        if self.rollbacks == 1 {
+            Err("first rollback attempt failed".to_owned())
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -478,6 +500,60 @@ fn process_death_at_each_prehealth_journal_boundary_restores_both_transactions()
 }
 
 #[test]
+fn process_death_at_each_durable_rollback_boundary_resumes_to_one_authority() {
+    let boundaries = [
+        RecoveryBoundary::BeforeJournalFileFsync(RecoveryState::RollbackIntent),
+        RecoveryBoundary::AfterJournalFileFsync(RecoveryState::RollbackIntent),
+        RecoveryBoundary::BeforeJournalParentFsync(RecoveryState::RollbackIntent),
+        RecoveryBoundary::AfterJournalParentFsync(RecoveryState::RollbackIntent),
+        RecoveryBoundary::BeforeHealthRollbackSwap,
+        RecoveryBoundary::AfterHealthRollbackSwap,
+        RecoveryBoundary::BeforeJournalFileFsync(RecoveryState::AppRestored),
+        RecoveryBoundary::AfterJournalFileFsync(RecoveryState::AppRestored),
+        RecoveryBoundary::BeforeJournalParentFsync(RecoveryState::AppRestored),
+        RecoveryBoundary::AfterJournalParentFsync(RecoveryState::AppRestored),
+        RecoveryBoundary::AfterCompanionRollback,
+        RecoveryBoundary::BeforeJournalFileFsync(RecoveryState::CompanionRolledBack),
+        RecoveryBoundary::AfterJournalFileFsync(RecoveryState::CompanionRolledBack),
+        RecoveryBoundary::BeforeJournalParentFsync(RecoveryState::CompanionRolledBack),
+        RecoveryBoundary::AfterJournalParentFsync(RecoveryState::CompanionRolledBack),
+    ];
+
+    for crash_boundary in boundaries {
+        let (fixture, installed, candidate) = transaction_fixture();
+        let transaction = RecoveryTransaction::open(fixture.path(), &installed, &candidate)
+            .expect("transaction")
+            .with_migration_transaction(Some(uuid::Uuid::new_v4()));
+        let mut health =
+            HealthProbe(|_: &Path, _: Duration| HealthStatus::Failed("candidate failed".into()));
+        let mut companion = RecordingCompanion::default();
+        let mut hook = TransactionHook(|boundary, _: &Path, _: &Path| {
+            if boundary == crash_boundary {
+                panic!("injected rollback process death");
+            }
+        });
+
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            let _ =
+                transaction.publish_with_companion_and_hook(&mut health, &mut companion, &mut hook);
+        }))
+        .is_err());
+
+        recover_interrupted_update_with_companion(fixture.path(), &mut companion)
+            .unwrap_or_else(|error| panic!("recover {crash_boundary:?}: {error}"));
+        assert_eq!(marker(&installed), "old", "{crash_boundary:?}");
+        assert_eq!(marker(&candidate), "new", "{crash_boundary:?}");
+        assert_eq!(companion.commits, 0, "{crash_boundary:?}");
+        assert!(
+            companion.rollbacks == 1 || companion.rollbacks == 2,
+            "{crash_boundary:?}: {:?}",
+            companion.rollbacks
+        );
+        assert!(!update_journal_path(fixture.path()).exists());
+    }
+}
+
+#[test]
 fn process_death_after_companion_commit_recovers_forward_idempotently() {
     let (fixture, installed, candidate) = transaction_fixture();
     let transaction = RecoveryTransaction::open(fixture.path(), &installed, &candidate)
@@ -537,6 +613,46 @@ fn restart_commit_failure_before_irreversible_delete_rolls_back_both_transaction
     assert_eq!(marker(&candidate), "new");
     assert_eq!(recovery_companion.commits, 1);
     assert_eq!(recovery_companion.rollbacks, 1);
+    assert!(!update_journal_path(fixture.path()).exists());
+}
+
+#[test]
+fn restart_resumes_companion_rollback_after_the_old_app_was_durably_restored() {
+    let (fixture, installed, candidate) = transaction_fixture();
+    let transaction = RecoveryTransaction::open(fixture.path(), &installed, &candidate)
+        .expect("transaction")
+        .with_migration_transaction(Some(uuid::Uuid::new_v4()));
+    let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
+    let mut initial_companion = RecordingCompanion::default();
+    let mut hook = TransactionHook(|boundary, _: &Path, _: &Path| {
+        if boundary == RecoveryBoundary::AfterJournalParentFsync(RecoveryState::CommitIntent) {
+            panic!("injected death before companion commit");
+        }
+    });
+    assert!(catch_unwind(AssertUnwindSafe(|| {
+        let _ = transaction.publish_with_companion_and_hook(
+            &mut health,
+            &mut initial_companion,
+            &mut hook,
+        );
+    }))
+    .is_err());
+
+    let mut recovery_companion = FailCommitAndFirstRollbackCompanion::default();
+    let first = recover_interrupted_update_with_companion(fixture.path(), &mut recovery_companion)
+        .expect_err("first companion rollback fails after app restore");
+    assert!(matches!(first, RecoveryError::CompanionRollback));
+    assert_eq!(marker(&installed), "old");
+    assert_eq!(marker(&candidate), "new");
+    assert!(update_journal_path(fixture.path()).exists());
+
+    recover_interrupted_update_with_companion(fixture.path(), &mut recovery_companion)
+        .expect("restart resumes companion rollback");
+
+    assert_eq!(marker(&installed), "old");
+    assert_eq!(marker(&candidate), "new");
+    assert_eq!(recovery_companion.commits, 1);
+    assert_eq!(recovery_companion.rollbacks, 2);
     assert!(!update_journal_path(fixture.path()).exists());
 }
 
