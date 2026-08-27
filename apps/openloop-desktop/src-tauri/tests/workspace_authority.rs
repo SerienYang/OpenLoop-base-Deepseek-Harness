@@ -10,8 +10,8 @@ use openloop_desktop_lib::{
     update::channel::ReleaseChannel,
     workspaces::{
         confirmation::{
-            confirm_workspace_revoke, CommittedWorkspaceProjection, RevokeConfirmation,
-            RevokePresentation,
+            confirm_workspace_revoke, CommittedWorkspaceProjection,
+            CommittedWorkspaceProjectionResolver, RevokeConfirmation, RevokePresentation,
         },
         grants::{
             reopen_verified_grant, FileIdentity, GrantStatus, GrantStore, WorkspaceGrant,
@@ -291,18 +291,29 @@ impl RevokeConfirmation for FixedConfirmation {
     }
 }
 
+struct FixedProjection;
+
+impl CommittedWorkspaceProjectionResolver for FixedProjection {
+    fn resolve(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<CommittedWorkspaceProjection>, WorkspaceGrantError> {
+        assert_eq!(workspace_id, "workspace-1");
+        Ok(Some(CommittedWorkspaceProjection {
+            workspace_id: workspace_id.to_owned(),
+            title: "Project Alpha".to_owned(),
+        }))
+    }
+}
+
 #[test]
 fn revoke_confirmation_uses_committed_title_and_cancellation_is_value_only() {
-    let projection = CommittedWorkspaceProjection {
-        workspace_id: "workspace-1".to_owned(),
-        title: "Project Alpha".to_owned(),
-    };
     assert!(
-        !confirm_workspace_revoke(&FixedConfirmation(false), &projection)
+        !confirm_workspace_revoke(&FixedConfirmation(false), &FixedProjection, "workspace-1")
             .expect("cancel confirmation")
     );
     assert!(
-        confirm_workspace_revoke(&FixedConfirmation(true), &projection)
+        confirm_workspace_revoke(&FixedConfirmation(true), &FixedProjection, "workspace-1")
             .expect("approve confirmation")
     );
 }

@@ -25,13 +25,29 @@ pub trait RevokeConfirmation: Send + Sync {
     fn confirm(&self, presentation: &RevokePresentation) -> Result<bool, WorkspaceGrantError>;
 }
 
+pub trait CommittedWorkspaceProjectionResolver: Send + Sync {
+    fn resolve(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<CommittedWorkspaceProjection>, WorkspaceGrantError>;
+}
+
 pub fn confirm_workspace_revoke(
     confirmation: &dyn RevokeConfirmation,
-    committed: &CommittedWorkspaceProjection,
+    resolver: &dyn CommittedWorkspaceProjectionResolver,
+    workspace_id: &str,
 ) -> Result<bool, WorkspaceGrantError> {
-    if committed.workspace_id.trim().is_empty() || committed.title.trim().is_empty() {
+    if workspace_id.trim().is_empty() {
         return Err(WorkspaceGrantError::Corrupt(
-            "committed Workspace projection is incomplete".to_owned(),
+            "Workspace id is empty".to_owned(),
+        ));
+    }
+    let committed = resolver
+        .resolve(workspace_id)?
+        .ok_or_else(|| WorkspaceGrantError::Corrupt("Workspace is not committed".to_owned()))?;
+    if committed.workspace_id != workspace_id || committed.title.trim().is_empty() {
+        return Err(WorkspaceGrantError::Corrupt(
+            "committed Workspace projection is inconsistent".to_owned(),
         ));
     }
     confirmation.confirm(&RevokePresentation {
