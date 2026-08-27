@@ -146,6 +146,43 @@ describe('OpenLoop focused test gate', () => {
     }])
   })
 
+  it('runs browser e2e files through the repository Vitest Web config', async () => {
+    const { runGateTests } = await loadGateModule()
+    const root = fixtureRoot()
+    write(root, 'vitest.web.config.ts', 'export default {}\n')
+    write(root, 'apps/web/tests/boundary.e2e.ts', "it('boundary', () => {})\n")
+    const commands: Array<{ command: string; args: string[] }> = []
+
+    await runGateTests(
+      ['playwright', '--file', 'apps/web/tests/boundary.e2e.ts'],
+      {
+        root,
+        runCommand(command: string, args: string[]) {
+          commands.push({ command, args })
+          return {
+            status: 0,
+            stdout: JSON.stringify({
+              numTotalTests: 1,
+              numPassedTests: 1,
+              numPendingTests: 0,
+            }),
+            stderr: '',
+          }
+        },
+      },
+    )
+
+    expect(commands).toEqual([{
+      command: 'pnpm',
+      args: [
+        'exec', 'vitest', 'run',
+        '--config', 'vitest.web.config.ts',
+        'apps/web/tests/boundary.e2e.ts',
+        '--reporter=json',
+      ],
+    }])
+  })
+
   it('lists a Cargo target before running it', async () => {
     const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
@@ -827,7 +864,7 @@ describe('OpenLoop focused test gate', () => {
     })).rejects.toThrow('target does not exist: tests/missing.e2e.ts')
   })
 
-  it('rejects an all-skipped Playwright result', async () => {
+  it('rejects an all-skipped browser Vitest result', async () => {
     const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     write(root, 'tests/app.spec.ts', "test('app', () => {})\n")
@@ -837,11 +874,12 @@ describe('OpenLoop focused test gate', () => {
       runCommand: () => ({
         status: 0,
         stdout: JSON.stringify({
-          stats: { expected: 0, unexpected: 0, flaky: 0, skipped: 2 },
+          numTotalTests: 2,
+          numPendingTests: 2,
         }),
         stderr: '',
       }),
-    })).rejects.toThrow('Playwright all discovered tests were skipped')
+    })).rejects.toThrow('Vitest all discovered tests were skipped')
   })
 
   it('rejects an all-skipped WDIO result', async () => {
@@ -866,7 +904,7 @@ describe('OpenLoop focused test gate', () => {
     })).rejects.toThrow('WDIO all discovered tests were skipped')
   })
 
-  it('validates both Playwright and WDIO zero-execution summaries', async () => {
+  it('validates both browser Vitest and WDIO zero-execution summaries', async () => {
     const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     write(root, 'tests/app.spec.ts', "test('app', () => {})\n")
@@ -879,11 +917,12 @@ describe('OpenLoop focused test gate', () => {
       runCommand: () => ({
         status: 0,
         stdout: JSON.stringify({
-          stats: { expected: 0, unexpected: 0, flaky: 0, skipped: 0 },
+          numTotalTests: 0,
+          numPendingTests: 0,
         }),
         stderr: '',
       }),
-    })).rejects.toThrow('Playwright executed zero tests')
+    })).rejects.toThrow('Vitest discovered zero tests')
 
     await expect(runGateTests([
       'wdio',

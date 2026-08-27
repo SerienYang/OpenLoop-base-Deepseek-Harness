@@ -436,19 +436,6 @@ function assertCargoResult(result) {
   assertCommandPassed(result, 'Cargo')
 }
 
-function assertPlaywrightResult(result) {
-  const report = parseJsonOutput(result.stdout, 'Playwright')
-  const stats = report.stats ?? {}
-  const executed = Number(stats.expected ?? 0)
-    + Number(stats.unexpected ?? 0)
-    + Number(stats.flaky ?? 0)
-  if (executed === 0 && Number(stats.skipped ?? 0) > 0) {
-    throw new Error('Playwright all discovered tests were skipped')
-  }
-  if (executed === 0) throw new Error('Playwright executed zero tests')
-  assertCommandPassed(result, 'Playwright')
-}
-
 function assertWdioResult(result) {
   const summaries = [...`${result.stdout}\n${result.stderr}`.matchAll(
     /(\d+)\s+passed,\s+(\d+)\s+failed,\s+(\d+)\s+skipped/gu,
@@ -532,9 +519,14 @@ export async function runGateTests(args, dependencies = {}) {
       runCommand,
       root,
       'pnpm',
-      ['exec', 'playwright', 'test', file.relative, '--reporter=json'],
+      [
+        'exec', 'vitest', 'run',
+        '--config', 'vitest.web.config.ts',
+        file.relative,
+        '--reporter=json',
+      ],
     )
-    assertPlaywrightResult(result)
+    assertVitestResult(result)
     return
   }
 
