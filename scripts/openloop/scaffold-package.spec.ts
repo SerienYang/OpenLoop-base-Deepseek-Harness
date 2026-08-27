@@ -68,6 +68,10 @@ function fixtureRoot(): string {
     extends: '../../tsconfig.base.json',
     files: [],
   })
+  writeJson(join(root, 'packages/runtime-diagnostics/invariants/tsconfig.json'), {
+    extends: '../../../tsconfig.base.json',
+    files: [],
+  })
   writeJson(join(root, 'tsconfig.host.json'), { files: [], references: [] })
   writeJson(join(root, 'tsconfig.client.json'), { files: [], references: [] })
   return root
@@ -167,13 +171,31 @@ describe('OpenLoop package scaffolder', () => {
       private: true,
       type: 'module',
       openloop: { face: 'host' },
+      exports: {
+        './invariant': {
+          types: './lib/types/invariant.d.ts',
+          default: './lib/invariant.js',
+        },
+      },
+      peerDependencies: {
+        '@deepseek-ai/dsh-invariants': 'workspace:^',
+      },
+      devDependencies: {
+        '@deepseek-ai/dsh-invariants': 'workspace:^',
+      },
     })
     expect(readFileSync(join(directory, 'src/index.ts'), 'utf8')).toContain('@openloop/window-state')
+    expect(readFileSync(join(directory, 'src/invariant.ts'), 'utf8'))
+      .toContain("ctx.invariants.register('@openloop/window-state'")
     expect(existsSync(join(directory, 'README.md'))).toBe(true)
     expect(readJson(join(directory, 'tsconfig.json'))).toMatchObject({
       extends: '../../../tsconfig.base.json',
       compilerOptions: { rootDir: 'src', outDir: 'lib/types' },
       include: ['src'],
+      references: [
+        { path: '../../../vendor/cordis' },
+        { path: '../../runtime-diagnostics/invariants' },
+      ],
     })
     expect(readJson(join(root, 'tsconfig.host.json')).references).toEqual([
       { path: './packages/openloop/window-state' },
