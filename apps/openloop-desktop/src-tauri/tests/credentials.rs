@@ -472,6 +472,7 @@ fn deletion_plan_payload(reference: &str) -> serde_json::Value {
 
 #[derive(Default)]
 struct RecordingAppKitDeletionBackend {
+    confirmed: bool,
     presentations: Mutex<Vec<CredentialDeletionSheetPresentation>>,
     callback_count: Mutex<usize>,
 }
@@ -490,7 +491,7 @@ impl AppKitCredentialDeletionBackend for RecordingAppKitDeletionBackend {
             .callback_count
             .lock()
             .expect("deletion callback count lock") += 1;
-        completion(Ok(false));
+        completion(Ok(self.confirmed));
         Ok(())
     }
 
@@ -718,6 +719,10 @@ fn bridge_cancel_uses_appkit_confirmation_with_all_labels_and_retains_keychain_i
             .expect("deletion presentation lock")
             .as_slice(),
         &[CredentialDeletionSheetPresentation {
+            target_identity: CredentialAccount::new(reference)
+                .expect("validated deletion account")
+                .as_str()
+                .to_owned(),
             parent_window_label: "main",
             consumer_labels: vec![
                 "Model route: deepseek-official".to_owned(),
@@ -737,50 +742,129 @@ fn bridge_cancel_uses_appkit_confirmation_with_all_labels_and_retains_keychain_i
 }
 
 #[test]
-fn bridge_rejects_unsupported_consumer_label_keys_and_values_before_appkit() {
+fn bridge_approval_displays_and_deletes_only_the_validated_keychain_account() {
+    let account = unique_account("appkit_approve");
+    let retained_account = unique_account("appkit_approve_retained");
+    let _cleanup = KeychainCleanup::new(account.clone());
+    let _retained_cleanup = KeychainCleanup::new(retained_account.clone());
+    let store = KeychainStore::new(ReleaseChannel::Test);
+    store
+        .set(&account, b"deleted-secret")
+        .expect("seed deleted credential");
+    store
+        .set(&retained_account, b"retained-secret")
+        .expect("seed retained credential");
+    let reference = account
+        .as_str()
+        .strip_prefix("credential:")
+        .expect("credential account prefix");
+    let backend = Arc::new(RecordingAppKitDeletionBackend {
+        confirmed: true,
+        ..Default::default()
+    });
+    let confirmation = appkit_deletion_confirmation(backend.clone());
+    let (dispatcher, launch_id, secret, peer) = credential_dispatcher_with_ui(
+        Some(Arc::new(RecordingReplacement::default())),
+        Some(confirmation),
+    );
+    let request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "appkit-approve".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "unsetCredential".to_owned(),
+        payload: deletion_plan_payload(reference),
+    };
+
+    let response = dispatcher
+        .dispatch(
+            peer,
+            sign_request(request, [21; 32], &secret).expect("signed deletion request"),
+        )
+        .expect("deletion response");
+    let response = serde_json::to_value(response).expect("deletion JSON");
+
+    assert_eq!(response["result"], "deleted");
+    assert!(!store.status(&account).expect("deleted credential status"));
+    assert_eq!(
+        store
+            .resolve(&retained_account)
+            .expect("unrelated credential retained")
+            .as_slice(),
+        b"retained-secret"
+    );
+    let presentations = backend
+        .presentations
+        .lock()
+        .expect("deletion presentation lock");
+    assert_eq!(presentations.len(), 1);
+    assert_eq!(
+        presentations[0].target_identity,
+        CredentialAccount::new(reference)
+            .expect("validated deletion account")
+            .as_str()
+    );
+}
+
+#[test]
+fn bridge_rejects_invalid_deletion_targets_and_consumer_labels_before_appkit() {
     let backend = Arc::new(RecordingAppKitDeletionBackend::default());
     let confirmation = appkit_deletion_confirmation(backend.clone());
     let (dispatcher, launch_id, secret, peer) = credential_dispatcher_with_ui(
         Some(Arc::new(RecordingReplacement::default())),
         Some(confirmation),
     );
-    let invalid_consumers = [
+    let invalid_payloads = [
         json!({
-            "ownerId": "model-route:deepseek-official",
-            "kind": "model-route",
-            "display": {
-                "key": "browser.controls.this",
-                "values": { "routeId": "deepseek-official" },
-            },
+            "reference": "INVALID:REFERENCE",
+            "consumers": deletion_plan().consumers,
         }),
         json!({
-            "ownerId": "model-route:deepseek-official",
-            "kind": "model-route",
-            "display": {
-                "key": "openloop.credentials.consumer.model-route",
-                "values": { "browserLabel": "spoof" },
-            },
+            "reference": "SHARED_API_KEY",
+            "targetIdentity": "browser-controlled-label",
+            "consumers": deletion_plan().consumers,
         }),
         json!({
-            "ownerId": "plugin:web-search-deepseek",
-            "kind": "plugin",
-            "display": {
-                "key": "openloop.credentials.consumer.web-search-deepseek",
-                "values": { "label": "spoof" },
-            },
+            "reference": "SHARED_API_KEY",
+            "consumers": [{
+                "ownerId": "model-route:deepseek-official",
+                "kind": "model-route",
+                "display": {
+                    "key": "browser.controls.this",
+                    "values": { "routeId": "deepseek-official" },
+                },
+            }],
+        }),
+        json!({
+            "reference": "SHARED_API_KEY",
+            "consumers": [{
+                "ownerId": "model-route:deepseek-official",
+                "kind": "model-route",
+                "display": {
+                    "key": "openloop.credentials.consumer.model-route",
+                    "values": { "browserLabel": "spoof" },
+                },
+            }],
+        }),
+        json!({
+            "reference": "SHARED_API_KEY",
+            "consumers": [{
+                "ownerId": "plugin:web-search-deepseek",
+                "kind": "plugin",
+                "display": {
+                    "key": "openloop.credentials.consumer.web-search-deepseek",
+                    "values": { "label": "spoof" },
+                },
+            }],
         }),
     ];
 
-    for (index, consumer) in invalid_consumers.into_iter().enumerate() {
+    for (index, payload) in invalid_payloads.into_iter().enumerate() {
         let request = BridgeRequest {
             version: BRIDGE_PROTOCOL_VERSION,
             request_id: format!("injected-label-{index}"),
             launch_id: launch_id.to_string(),
             method: "unsetCredential".to_owned(),
-            payload: json!({
-                "reference": "SHARED_API_KEY",
-                "consumers": [consumer],
-            }),
+            payload,
         };
         let mut nonce = [15; 32];
         nonce[0] = u8::try_from(index).expect("small test index");

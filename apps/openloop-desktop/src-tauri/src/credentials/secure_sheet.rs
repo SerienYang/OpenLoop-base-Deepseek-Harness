@@ -582,6 +582,7 @@ fn cancel_replacement_sheet(window: &tauri::WebviewWindow, session: &NativeCrede
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialDeletionSheetPresentation {
+    pub target_identity: String,
     pub parent_window_label: &'static str,
     pub consumer_labels: Vec<String>,
     pub creates_independent_window_identity: bool,
@@ -647,9 +648,11 @@ impl AppKitCredentialDeletionConfirmation {
     ) -> Result<bool, CredentialError> {
         let _active = self.gate.try_acquire()?;
         let labels = deletion_consumer_labels(plan)?;
+        let account = CredentialAccount::new(&plan.reference)?;
         let (sender, receiver) = mpsc::sync_channel(1);
         self.backend.begin_sheet(
             CredentialDeletionSheetPresentation {
+                target_identity: account.as_str().to_owned(),
                 parent_window_label: MAIN_WINDOW_LABEL,
                 consumer_labels: labels,
                 creates_independent_window_identity: false,
@@ -815,7 +818,8 @@ fn begin_deletion_sheet(
     alert.setAlertStyle(NSAlertStyle::Warning);
     alert.setMessageText(&NSString::from_str("Delete credential?"));
     alert.setInformativeText(&NSString::from_str(&format!(
-        "The following Openloop features use this credential:\n\n- {}",
+        "Target: {}\n\nThe following Openloop features use this credential:\n\n- {}",
+        presentation.target_identity,
         presentation.consumer_labels.join("\n- ")
     )));
     alert.addButtonWithTitle(&NSString::from_str("Delete"));
