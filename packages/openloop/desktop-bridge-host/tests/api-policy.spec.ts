@@ -208,7 +208,7 @@ describe('OpenLoop browser API policy manifest', () => {
     }
   })
 
-  it('lists exactly the 13 browser facade endpoints while denying all six Host-only methods', () => {
+  it('lists exactly the 13 browser facade endpoints while denying all seven Host-only methods', () => {
     const policy = createBrowserApiPolicy(shippedManifest())
 
     expect(BROWSER_SAFE_METHODS.map(method => `openloopDesktop/${method}`).sort()).toEqual([
@@ -369,7 +369,7 @@ describe('OpenLoop browser API policy', () => {
   })
 
   it('normalizes only a null credential bridge result to undefined', async () => {
-    const secret = [1, 2, 255]
+    const secret = { bytes: [1, 2, 255], source: 'keychain' as const }
     const call = vi.fn()
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(secret)
@@ -377,6 +377,24 @@ describe('OpenLoop browser API policy', () => {
 
     await expect(client.resolveCredential('provider:missing')).resolves.toBeUndefined()
     await expect(client.resolveCredential('provider:saved')).resolves.toBe(secret)
+  })
+
+  it('sends main WebView health only through the Host client', async () => {
+    const call = vi.fn(() => Promise.resolve(null))
+    const client = new OpenloopDesktopHostClient({ call } as unknown as DesktopBridgeClient)
+    const acknowledgement = {
+      launchId: '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
+      coreManifestSha256: 'a'.repeat(64),
+      openloopDataVersion: 3,
+      dshDataVersion: 7,
+    }
+
+    await expect(client.acknowledgeMainWebviewHealth(acknowledgement)).resolves.toBeUndefined()
+    expect(call).toHaveBeenCalledWith(
+      'acknowledgeMainWebviewHealth',
+      acknowledgement,
+      undefined,
+    )
   })
 
   it('blocks all four settings actions before the real legacy handlers run', async () => {

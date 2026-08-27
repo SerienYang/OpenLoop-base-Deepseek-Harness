@@ -36,7 +36,17 @@ interface BootstrapWebServer {
   tapIndex(transform: (html: string) => string): () => void
 }
 
+interface BootstrapDesktopBridge {
+  acknowledgeMainWebviewHealth(acknowledgement: {
+    readonly launchId: string
+    readonly coreManifestSha256: string
+    readonly openloopDataVersion: number
+    readonly dshDataVersion: number
+  }): Promise<void>
+}
+
 interface BootstrapHostContext extends Context {
+  readonly desktopBridge: BootstrapDesktopBridge
   readonly webServer: BootstrapWebServer
   readonly runtimeBootstrap: RuntimeBootstrap
 }
@@ -47,7 +57,7 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-export const inject = ['webServer', 'runtimeBootstrap']
+export const inject = ['desktopBridge', 'webServer', 'runtimeBootstrap']
 
 function responseJson(
   response: ServerResponse,
@@ -173,6 +183,7 @@ async function handleBootstrap(
   request: IncomingMessage,
   response: ServerResponse,
   runtime: RuntimeBootstrap,
+  desktopBridge: BootstrapDesktopBridge,
 ): Promise<void> {
   if (request.method === 'GET') {
     const session = cookieValue(request)
@@ -228,6 +239,26 @@ async function handleBootstrap(
     responseJson(response, 503, { error: 'Openloop bootstrap session is unavailable' })
     return
   }
+  const openloopDataVersion = manifest.openloopDataVersion
+  const dshDataVersion = manifest.dshDataVersion
+  if (!Number.isSafeInteger(openloopDataVersion)
+    || (openloopDataVersion as number) < 0
+    || !Number.isSafeInteger(dshDataVersion)
+    || (dshDataVersion as number) < 0) {
+    responseJson(response, 503, { error: 'Openloop data identity is unavailable' })
+    return
+  }
+  try {
+    await desktopBridge.acknowledgeMainWebviewHealth({
+      launchId: parsed.launchId,
+      coreManifestSha256: sha256,
+      openloopDataVersion: openloopDataVersion as number,
+      dshDataVersion: dshDataVersion as number,
+    })
+  } catch {
+    responseJson(response, 503, { error: 'Openloop main WebView health was rejected' })
+    return
+  }
   const body: BootstrapResponse = {
     launchId: parsed.launchId,
     coreManifest: manifest,
@@ -244,7 +275,12 @@ export function apply(ctx: Context): void {
     kind: 'exact',
     path: OPENLOOP_BOOTSTRAP_PATH,
     handler: (request: IncomingMessage, response: ServerResponse) =>
-      handleBootstrap(request, response, bootstrapCtx.runtimeBootstrap),
+      handleBootstrap(
+        request,
+        response,
+        bootstrapCtx.runtimeBootstrap,
+        bootstrapCtx.desktopBridge,
+      ),
   } as const
   bootstrapCtx.effect(
     () => bootstrapCtx.webServer.register(route),

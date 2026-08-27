@@ -37,6 +37,13 @@ export interface CredentialMigrationStatus {
   readonly message?: string
 }
 
+export interface MainWebviewHealthAcknowledgement {
+  readonly launchId: string
+  readonly coreManifestSha256: string
+  readonly openloopDataVersion: number
+  readonly dshDataVersion: number
+}
+
 export interface WorkspaceGrantView {
   readonly workspaceId: string
   readonly name: string
@@ -69,3 +76,8 @@ export interface ApprovedCommand {
 
 /** Mutable bytes so a Host consumer can clear the one-request credential copy. */
 export type SecretBytes = number[]
+
+export interface ResolvedSecretBytes {
+  readonly bytes: SecretBytes
+  readonly source: 'keychain' | 'legacy-file'
+}

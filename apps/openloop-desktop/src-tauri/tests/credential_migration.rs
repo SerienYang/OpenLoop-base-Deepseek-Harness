@@ -14,7 +14,7 @@ use openloop_desktop_lib::{
             commit_migration, journal_path, prepare_migration, prepare_migration_with_filesystem,
             rollback_migration, staged_path, Journal, MigrationBoundary, MigrationFilesystem,
             MigrationHook, MigrationOutcome, MigrationState, MigrationStore, MigrationStoreError,
-            NoopMigrationHook, PreviousValue, ReferenceState,
+            NoopMigrationHook, PreviousValue, ReadOnlyLegacySource, ReferenceState,
         },
         CredentialAccount, KeychainStore, MAX_SECRET_BYTES,
     },
@@ -371,7 +371,8 @@ fn process_death_during_committed_journal_fsync_finishes_without_reconstructing_
             boundaries: Vec::new(),
             crash_at: Some(boundary),
         };
-        assert!(commit_migration(&channel_root, &dsh_home, transaction_id, &mut crash,).is_err());
+        commit_migration(&channel_root, &dsh_home, transaction_id, &mut crash)
+            .expect("irreversible commit failures recover forward");
         assert!(!dsh_home.join(".credentials.yaml").exists());
         assert!(!staged_path(&dsh_home, transaction_id).exists());
 
@@ -382,6 +383,101 @@ fn process_death_during_committed_journal_fsync_finishes_without_reconstructing_
         );
         assert!(!journal_path(&channel_root).exists());
         assert_eq!(store.get("TOKEN").as_deref(), Some(b"secret".as_slice()));
+    }
+}
+
+#[test]
+fn failure_before_staged_delete_remains_fully_rollbackable() {
+    let (_root, channel_root, dsh_home) = fixture();
+    write_legacy(&dsh_home, b"TOKEN: secret\n");
+    let store = MemoryStore::default();
+    let outcome = prepare_migration(&channel_root, &dsh_home, &store, &mut NoopMigrationHook)
+        .expect("migration");
+    let transaction_id = outcome.transaction_id().expect("transaction");
+    let mut crash = RecordingHook {
+        boundaries: Vec::new(),
+        crash_at: Some(MigrationBoundary::BeforeStagedDelete),
+    };
+
+    assert!(commit_migration(&channel_root, &dsh_home, transaction_id, &mut crash).is_err());
+    rollback_migration(
+        &channel_root,
+        &dsh_home,
+        transaction_id,
+        &store,
+        &mut NoopMigrationHook,
+    )
+    .expect("rollback before irreversible deletion");
+
+    assert!(dsh_home.join(".credentials.yaml").is_file());
+    assert!(!staged_path(&dsh_home, transaction_id).exists());
+    assert_eq!(store.get("TOKEN"), None);
+}
+
+#[test]
+fn process_death_after_staged_delete_recovers_forward_without_legacy_plaintext() {
+    let (_root, channel_root, dsh_home) = fixture();
+    write_legacy(&dsh_home, b"TOKEN: secret\n");
+    let store = MemoryStore::default();
+    let outcome = prepare_migration(&channel_root, &dsh_home, &store, &mut NoopMigrationHook)
+        .expect("migration");
+    let transaction_id = outcome.transaction_id().expect("transaction");
+    let mut crash = RecordingHook {
+        boundaries: Vec::new(),
+        crash_at: Some(MigrationBoundary::AfterStagedDelete),
+    };
+
+    let _ = commit_migration(&channel_root, &dsh_home, transaction_id, &mut crash);
+    assert_eq!(
+        prepare_migration(&channel_root, &dsh_home, &store, &mut NoopMigrationHook)
+            .expect("forward recovery after staged deletion"),
+        MigrationOutcome::NotNeeded
+    );
+
+    assert!(!dsh_home.join(".credentials.yaml").exists());
+    assert!(!staged_path(&dsh_home, transaction_id).exists());
+    assert_eq!(store.get("TOKEN").as_deref(), Some(b"secret".as_slice()));
+}
+
+#[test]
+fn commit_exposes_every_durable_and_irreversible_boundary() {
+    let (_root, channel_root, dsh_home) = fixture();
+    write_legacy(&dsh_home, b"TOKEN: secret\n");
+    let store = MemoryStore::default();
+    let outcome = prepare_migration(&channel_root, &dsh_home, &store, &mut NoopMigrationHook)
+        .expect("migration");
+    let transaction_id = outcome.transaction_id().expect("transaction");
+    let mut hook = RecordingHook::default();
+
+    commit_migration(&channel_root, &dsh_home, transaction_id, &mut hook).expect("commit");
+
+    for boundary in [
+        MigrationBoundary::BeforeJournalFileFsync {
+            generation: 7,
+            state: MigrationState::CommitPrepared,
+            reference_state: None,
+        },
+        MigrationBoundary::AfterJournalFileFsync {
+            generation: 7,
+            state: MigrationState::CommitPrepared,
+            reference_state: None,
+        },
+        MigrationBoundary::BeforeJournalParentFsync {
+            generation: 7,
+            state: MigrationState::CommitPrepared,
+            reference_state: None,
+        },
+        MigrationBoundary::AfterJournalParentFsync {
+            generation: 7,
+            state: MigrationState::CommitPrepared,
+            reference_state: None,
+        },
+        MigrationBoundary::BeforeStagedDelete,
+        MigrationBoundary::AfterStagedDelete,
+        MigrationBoundary::BeforeStagedDeleteParentFsync,
+        MigrationBoundary::AfterStagedDeleteParentFsync,
+    ] {
+        assert!(hook.boundaries.contains(&boundary), "missing {boundary:?}");
     }
 }
 
@@ -470,6 +566,62 @@ fn partial_keychain_write_is_removed_before_retry() {
     )
     .expect("idempotent second rollback");
     assert_eq!(store.inner.get("TOKEN"), None);
+}
+
+#[test]
+fn read_only_fallback_reads_the_authoritative_legacy_file_on_every_resolve() {
+    let (_root, channel_root, dsh_home) = fixture();
+    write_legacy(&dsh_home, b"TOKEN: legacy-authority\n");
+    let source =
+        ReadOnlyLegacySource::new(&channel_root, &dsh_home).expect("read-only legacy source");
+    let account = CredentialAccount::new("TOKEN").expect("account");
+
+    assert_eq!(
+        source
+            .resolve(&account)
+            .expect("first legacy resolve")
+            .expect("first legacy value")
+            .as_slice(),
+        b"legacy-authority"
+    );
+
+    write_legacy(&dsh_home, b"TOKEN: rotated-legacy\n");
+    assert_eq!(
+        source
+            .resolve(&account)
+            .expect("second legacy resolve")
+            .expect("second legacy value")
+            .as_slice(),
+        b"rotated-legacy"
+    );
+    assert!(source
+        .resolve(&CredentialAccount::new("MISSING").expect("missing account"))
+        .expect("missing legacy resolve")
+        .is_none());
+}
+
+#[test]
+fn read_only_fallback_uses_intact_legacy_authority_despite_a_malformed_journal() {
+    let (_root, channel_root, dsh_home) = fixture();
+    write_legacy(&dsh_home, b"TOKEN: legacy-authority\n");
+    fs::write(journal_path(&channel_root), b"{not-json").expect("malformed journal");
+    fs::set_permissions(
+        journal_path(&channel_root),
+        fs::Permissions::from_mode(0o600),
+    )
+    .expect("journal permissions");
+    let source =
+        ReadOnlyLegacySource::new(&channel_root, &dsh_home).expect("read-only legacy source");
+    let account = CredentialAccount::new("TOKEN").expect("account");
+
+    assert_eq!(
+        source
+            .resolve(&account)
+            .expect("legacy resolve")
+            .expect("legacy value")
+            .as_slice(),
+        b"legacy-authority"
+    );
 }
 
 struct ReplacingFilesystem {

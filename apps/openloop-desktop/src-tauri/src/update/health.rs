@@ -5,18 +5,29 @@ use std::{
     io::{self, Read},
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
-        unix::ffi::OsStrExt,
         unix::process::CommandExt,
+        unix::{ffi::OsStrExt, fs::DirBuilderExt},
     },
     path::{Component, Path, PathBuf},
     process::{Child, Command, Output, Stdio},
-    sync::mpsc::{self, Receiver, RecvTimeoutError},
+    sync::{
+        mpsc::{self, Receiver, RecvTimeoutError},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::{
+    bridge::{
+        server::{BridgeHandler, BridgeHandlerError},
+        AuthenticatedBridgeDispatcher, BridgeDispatchTables, BridgeListener,
+    },
+    launcher::{LaunchReadinessExpectation, LaunchSecrets, SupervisedChild},
+};
 
 use super::recovery::{CandidateHealth, HealthStatus};
 
@@ -25,6 +36,27 @@ pub const TEST_PROBE_FAILURE_ENVIRONMENT: &str = "OPENLOOP_UPDATE_SPIKE_PROBE_FA
 pub const MIGRATION_TRANSACTION_ENVIRONMENT: &str = "OPENLOOP_MIGRATION_TRANSACTION_ID";
 const MAX_PROBE_OUTPUT: usize = 16 * 1024;
 const PROCESS_REAP_GRACE: Duration = Duration::from_millis(100);
+
+struct ProbeDirectory(PathBuf);
+
+impl ProbeDirectory {
+    fn create() -> Result<Self, HealthProbeError> {
+        let path = std::env::temp_dir().join(format!("ol-health-{}", Uuid::new_v4().simple()));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .map_err(|source| {
+                HealthProbeError::io("create private health probe directory", source)
+            })?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for ProbeDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.0);
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -46,23 +78,68 @@ pub struct AppHealthReadiness {
     pub main_webview: bool,
 }
 
-impl HealthProbeReport {
-    fn healthy(app_version: &str, core_manifest_sha256: &str) -> Self {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MainWebviewHealthAcknowledgement {
+    pub launch_id: Uuid,
+    pub core_manifest_sha256: String,
+    pub openloop_data_version: u64,
+    pub dsh_data_version: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct MainWebviewHealthExpectation {
+    launch_id: Uuid,
+    core_manifest_sha256: String,
+    openloop_data_version: u64,
+    dsh_data_version: u64,
+}
+
+impl MainWebviewHealthExpectation {
+    pub fn new(
+        launch_id: Uuid,
+        core_manifest_sha256: impl Into<String>,
+        openloop_data_version: u64,
+        dsh_data_version: u64,
+    ) -> Self {
         Self {
-            status: "healthy".to_owned(),
-            app_version: app_version.to_owned(),
-            core_manifest_sha256: core_manifest_sha256.to_owned(),
-            migration_transaction_id: None,
-            readiness: AppHealthReadiness {
-                host: true,
-                sidecar: true,
-                bridge: false,
-                data_version: false,
-                main_webview: false,
-            },
+            launch_id,
+            core_manifest_sha256: core_manifest_sha256.into(),
+            openloop_data_version,
+            dsh_data_version,
         }
     }
 
+    pub fn validate(
+        &self,
+        acknowledgement: &MainWebviewHealthAcknowledgement,
+    ) -> Result<(), HealthProbeError> {
+        if acknowledgement.launch_id != self.launch_id {
+            return Err(HealthProbeError::invalid(
+                "main WebView health launch identity does not match",
+            ));
+        }
+        validate_sha256(
+            &acknowledgement.core_manifest_sha256,
+            "main WebView core manifest identity",
+        )?;
+        if acknowledgement.core_manifest_sha256 != self.core_manifest_sha256 {
+            return Err(HealthProbeError::invalid(
+                "main WebView core manifest identity does not match",
+            ));
+        }
+        if acknowledgement.openloop_data_version != self.openloop_data_version
+            || acknowledgement.dsh_data_version != self.dsh_data_version
+        {
+            return Err(HealthProbeError::invalid(
+                "main WebView data version identity does not match",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl HealthProbeReport {
     pub fn new(
         app_version: impl Into<String>,
         core_manifest_sha256: impl Into<String>,
@@ -128,6 +205,8 @@ pub struct BundleHealthProbe {
     app_version: String,
     bundle_identifier: String,
     core_manifest_sha256: String,
+    openloop_data_version: u64,
+    dsh_data_version: u64,
 }
 
 impl BundleHealthProbe {
@@ -135,11 +214,15 @@ impl BundleHealthProbe {
         app_version: impl Into<String>,
         bundle_identifier: impl Into<String>,
         core_manifest_sha256: impl Into<String>,
+        openloop_data_version: u64,
+        dsh_data_version: u64,
     ) -> Self {
         Self {
             app_version: app_version.into(),
             bundle_identifier: bundle_identifier.into(),
             core_manifest_sha256: core_manifest_sha256.into(),
+            openloop_data_version,
+            dsh_data_version,
         }
     }
 
@@ -184,12 +267,64 @@ impl BundleHealthProbe {
 
         let sidecar = macos.join("openloop-runtime");
         require_regular_file(&sidecar, "candidate runtime sidecar", true)?;
-        let mut command = Command::new(&sidecar);
-        command.arg("--health-smoke").env("DSH_HOME", dsh_home);
-        let output = bounded_output(command, remaining_health_budget(deadline)?)?;
-        validate_success_output(&output, "runtime sidecar health smoke")?;
-        let readiness: RuntimeHealthSmoke =
-            parse_single_json_line(&output.stdout, "runtime sidecar health smoke")?;
+        let probe_directory = ProbeDirectory::create()?;
+        let secrets = LaunchSecrets::generate(probe_directory.0.join("bridge.sock"))
+            .map_err(|source| HealthProbeError::io("generate health probe secrets", source))?;
+        let listener = BridgeListener::bind(&secrets.socket_path)
+            .map_err(|source| HealthProbeError::invalid(source.to_string()))?;
+        let mut child = SupervisedChild::spawn_with_args_and_dsh_home(
+            &sidecar,
+            [OsStr::new("--health-smoke")],
+            &secrets,
+            dsh_home,
+        )
+        .map_err(|source| HealthProbeError::invalid(source.to_string()))?;
+        let observed = Arc::new(Mutex::new((false, false)));
+        let observed_by_handler = observed.clone();
+        let expectation = MainWebviewHealthExpectation::new(
+            secrets.launch_id,
+            &self.core_manifest_sha256,
+            self.openloop_data_version,
+            self.dsh_data_version,
+        );
+        let handler: BridgeHandler = Arc::new(move |payload, _cancellation| {
+            let acknowledgement: MainWebviewHealthAcknowledgement = serde_json::from_value(payload)
+                .map_err(|_| BridgeHandlerError::invalid_request())?;
+            let mut observed = observed_by_handler
+                .lock()
+                .map_err(|_| BridgeHandlerError::invalid_request())?;
+            observed.0 = true;
+            expectation
+                .validate(&acknowledgement)
+                .map_err(|_| BridgeHandlerError::invalid_request())?;
+            observed.1 = true;
+            Ok(serde_json::Value::Null)
+        });
+        let mut dispatch_tables = BridgeDispatchTables::unavailable();
+        dispatch_tables
+            .set_host_handler("acknowledgeMainWebviewHealth", handler)
+            .map_err(|source| HealthProbeError::io("configure health bridge", source))?;
+        let dispatcher = AuthenticatedBridgeDispatcher::new(
+            unsafe { libc::geteuid() },
+            child.identity().clone(),
+            sidecar,
+            secrets.launch_id,
+            secrets.bridge_secret.to_vec(),
+            dispatch_tables,
+        )
+        .map_err(|source| HealthProbeError::invalid(source.to_string()))?;
+        let _bridge = listener
+            .serve(dispatcher)
+            .map_err(|source| HealthProbeError::invalid(source.to_string()))?;
+        let readiness = child
+            .wait_readiness(
+                &LaunchReadinessExpectation {
+                    launch_id: secrets.launch_id,
+                    core_manifest_sha256: self.core_manifest_sha256.clone(),
+                },
+                remaining_health_budget(deadline)?,
+            )
+            .map_err(|source| HealthProbeError::invalid(source.to_string()))?;
         if readiness.message_type != "openloop.runtime.ready"
             || readiness.version != 1
             || readiness.profile != "openloop"
@@ -209,9 +344,23 @@ impl BundleHealthProbe {
             &readiness.core_manifest_sha256,
             "runtime sidecar core manifest identity",
         )?;
-        Ok(HealthProbeReport::healthy(
+        let candidate = readiness.candidate_health.ok_or_else(|| {
+            HealthProbeError::invalid("runtime sidecar candidate health is missing")
+        })?;
+        let (bridge, data_version) = *observed
+            .lock()
+            .map_err(|_| HealthProbeError::invalid("candidate health state is unavailable"))?;
+        Ok(HealthProbeReport::new(
             &self.app_version,
             &self.core_manifest_sha256,
+            None,
+            AppHealthReadiness {
+                host: true,
+                sidecar: true,
+                bridge,
+                data_version,
+                main_webview: candidate.web_asset && candidate.bootstrap_exchange,
+            },
         ))
     }
 
@@ -344,28 +493,6 @@ fn validate_dsh_home(path: &Path, data_root_name: Option<&str>) -> Result<(), He
         ));
     }
     require_real_directory(path, "DSH_HOME")
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RuntimeHealthSmoke {
-    #[serde(rename = "type")]
-    message_type: String,
-    version: u8,
-    profile: String,
-    host: String,
-    port: u16,
-    origin: String,
-    core_manifest_sha256: String,
-    health_smoke: RuntimeHealthRequest,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RuntimeHealthRequest {
-    method: String,
-    path: String,
-    status: u16,
 }
 
 fn validate_file_name(value: &str, label: &str) -> Result<(), HealthProbeError> {

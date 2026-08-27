@@ -319,6 +319,7 @@ fn browser_safe_and_host_only_dispatch_tables_are_disjoint_and_complete() {
         HOST_ONLY_METHODS,
         [
             "resolveCredential",
+            "acknowledgeMainWebviewHealth",
             "beginWorkspaceAuthorization",
             "commitWorkspaceAuthorization",
             "abortWorkspaceAuthorization",

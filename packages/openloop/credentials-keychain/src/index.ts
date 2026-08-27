@@ -94,11 +94,12 @@ export class KeychainCredentialProvider extends CredentialProvider {
       return { value: inherited, source: 'environment' }
     }
 
-    const bytes = await this.#bridge.resolveCredential(ref)
-    if (bytes !== undefined) {
+    const resolved = await this.#bridge.resolveCredential(ref)
+    if (resolved !== undefined) {
+      const { bytes } = resolved
       try {
         const value = decodeSecret(bytes)
-        if (value.length > 0) return { value, source: 'keychain' }
+        if (value.length > 0) return { value, source: resolved.source }
       } finally {
         bytes.fill(0)
       }
@@ -123,7 +124,11 @@ export class KeychainCredentialProvider extends CredentialProvider {
     }
     const keychain = await this.#bridge.describeCredential(ref)
     if (keychain.configured) {
-      return { configured: true, source: 'keychain', writable: false }
+      return {
+        configured: true,
+        source: keychain.source === 'legacy-file' ? 'legacy-file' : 'keychain',
+        writable: false,
+      }
     }
     const legacy = await this.#legacy?.describe(ref)
     if (legacy?.configured === true) {

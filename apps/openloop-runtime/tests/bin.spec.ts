@@ -173,6 +173,13 @@ function fakeDependencies(events: string[], output: string[]): RuntimeDependenci
       events.push(`health:${origin}`)
       return { status: 200, contentType: 'text/html; charset=utf-8' }
     },
+    candidateHealthRequest: async (origin, launchId) => {
+      events.push(`candidate-health:${origin}:${launchId}`)
+      return {
+        webAsset: true,
+        bootstrapExchange: true,
+      }
+    },
     setTimeout: handler => setTimeout(handler, 0),
     clearTimeout,
   }
@@ -191,13 +198,17 @@ const MALICIOUS_USER_PATCHES: ReadonlyArray<readonly [string, PatchOptions[]]> =
 ]
 
 describe('Openloop runtime launcher', () => {
-  test('does not read inherited launch secrets for health smoke', () => {
-    const read = vi.fn(() => {
-      throw new Error('health smoke must not consume fd 3')
-    })
+  test('requires inherited launch secrets for supervised health smoke', () => {
+    const secrets = {
+      launchId: '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
+      bootstrapToken: Uint8Array.from([1, 2, 3]),
+      bridgeSecret: Uint8Array.from([4, 5, 6]),
+      socketPath: '/tmp/openloop-runtime.sock',
+    }
+    const read = vi.fn(() => secrets)
 
-    expect(readLaunchSecretsForRuntime({ healthSmoke: true }, read)).toBeUndefined()
-    expect(read).not.toHaveBeenCalled()
+    expect(readLaunchSecretsForRuntime({ healthSmoke: true }, read)).toBe(secrets)
+    expect(read).toHaveBeenCalledOnce()
   })
 
   test('reads inherited launch secrets for a supervised runtime', () => {
@@ -277,7 +288,12 @@ describe('Openloop runtime launcher', () => {
     const output: string[] = []
     const dependencies = fakeDependencies(events, output)
 
-    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies)
+    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies, {
+      launchId: '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
+      bootstrapToken: Uint8Array.from([1, 2, 3]),
+      bridgeSecret: Uint8Array.from([4, 5, 6]),
+      socketPath: '/tmp/openloop-runtime.sock',
+    })
 
     expect(events).toEqual([
       'ensure-profile',
@@ -293,6 +309,7 @@ describe('Openloop runtime launcher', () => {
       'loader-create:hmr',
       'watch',
       'health:http://127.0.0.1:43123',
+      'candidate-health:http://127.0.0.1:43123:8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
       'stop-watch',
       'dispose',
     ])
@@ -300,6 +317,7 @@ describe('Openloop runtime launcher', () => {
     expect(JSON.parse(output[0] as string)).toEqual({
       type: 'openloop.runtime.ready',
       version: 1,
+      launchId: '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
       profile: 'openloop',
       host: '127.0.0.1',
       port: 43123,
@@ -309,6 +327,10 @@ describe('Openloop runtime launcher', () => {
         method: 'GET',
         path: '/',
         status: 200,
+      },
+      candidateHealth: {
+        webAsset: true,
+        bootstrapExchange: true,
       },
     })
   })
@@ -368,7 +390,12 @@ describe('Openloop runtime launcher', () => {
       return async () => {}
     }
 
-    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies)
+    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies, {
+      launchId: '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
+      bootstrapToken: Uint8Array.from([1, 2, 3]),
+      bridgeSecret: Uint8Array.from([4, 5, 6]),
+      socketPath: '/tmp/openloop-runtime.sock',
+    })
 
     expect(bootPatches.at(-1)).toEqual({
       id: 'agent-presets',
@@ -488,13 +515,18 @@ describe('Openloop runtime launcher', () => {
       return await boot(binName, rootConfig, patches, prepare, bareModuleBaseUrl)
     }
 
-    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies)
+    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies, {
+      launchId: '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
+      bootstrapToken: Uint8Array.from([1, 2, 3]),
+      bridgeSecret: Uint8Array.from([4, 5, 6]),
+      socketPath: '/tmp/openloop-runtime.sock',
+    })
 
     expect(bootRows.find(row => row.id === 'bundle')?.config).toEqual({ initial: true })
     expect(hmrRows.find(row => row.id === 'bundle')?.config).toEqual({ hmr: true })
   })
 
-  test('omits Host-only bootstrap patch from health smoke', async () => {
+  test('includes the Host bootstrap patch in supervised health smoke', async () => {
     const events: string[] = []
     const output: string[] = []
     const dependencies = fakeDependencies(events, output)
@@ -505,11 +537,16 @@ describe('Openloop runtime launcher', () => {
       return await boot(binName, rootConfig, patches, prepare, bareModuleBaseUrl)
     }
 
-    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies)
+    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies, {
+      launchId: '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
+      bootstrapToken: Uint8Array.from([1, 2, 3]),
+      bridgeSecret: Uint8Array.from([4, 5, 6]),
+      socketPath: '/tmp/openloop-runtime.sock',
+    })
 
-    expect(bootPatches).not.toContainEqual(expect.objectContaining({
-      insert: [expect.objectContaining({ id: 'openloop-bootstrap' })],
-    }))
+    expect(bootPatches.some(patch =>
+      patch.insert?.some(entry => entry.id === 'openloop-bootstrap') === true,
+    )).toBe(true)
   })
 
   test('zeroizes parsed launch secret bytes after Host bootstrap installation', async () => {

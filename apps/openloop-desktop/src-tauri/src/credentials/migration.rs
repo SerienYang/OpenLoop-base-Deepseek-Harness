@@ -33,6 +33,7 @@ pub enum MigrationState {
     WritingKeychain,
     KeychainVerified,
     LegacyStaged,
+    CommitPrepared,
     Committed,
 }
 
@@ -123,6 +124,10 @@ pub enum MigrationBoundary {
         state: MigrationState,
         reference_state: Option<ReferenceState>,
     },
+    BeforeStagedDelete,
+    AfterStagedDelete,
+    BeforeStagedDeleteParentFsync,
+    AfterStagedDeleteParentFsync,
 }
 
 pub trait MigrationHook {
@@ -280,6 +285,78 @@ struct LegacyDocument {
     values: BTreeMap<String, Zeroizing<Vec<u8>>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReadOnlyLegacySource {
+    channel_root: PathBuf,
+    dsh_home: PathBuf,
+}
+
+impl ReadOnlyLegacySource {
+    pub fn new(channel_root: &Path, dsh_home: &Path) -> Result<Self, MigrationError> {
+        SecureRoots::open(
+            channel_root,
+            dsh_home,
+            HostMigrationFilesystem.expected_owner(),
+        )?;
+        Ok(Self {
+            channel_root: channel_root.to_owned(),
+            dsh_home: dsh_home.to_owned(),
+        })
+    }
+
+    pub fn resolve(
+        &self,
+        account: &CredentialAccount,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, MigrationError> {
+        let roots = SecureRoots::open(
+            &self.channel_root,
+            &self.dsh_home,
+            HostMigrationFilesystem.expected_owner(),
+        )?;
+        let source_exists = roots.entry_exists(roots.dsh.as_raw_fd(), LEGACY_FILE)?;
+        if source_exists {
+            let document = roots.read_legacy(LEGACY_FILE)?.ok_or_else(|| {
+                MigrationError::invalid("legacy credential authority disappeared")
+            })?;
+            return legacy_value(document, account);
+        }
+        let journal = roots.read_journal()?;
+        let staged = journal
+            .as_ref()
+            .map(|value| staged_name(value.transaction_id));
+        let staged_exists = staged
+            .as_deref()
+            .map(|name| roots.entry_exists(roots.dsh.as_raw_fd(), name))
+            .transpose()?
+            .unwrap_or(false);
+        let authority = if staged_exists {
+            staged
+                .as_deref()
+                .expect("staged authority name exists with journal")
+        } else {
+            return Ok(None);
+        };
+        let document = roots
+            .read_legacy(authority)?
+            .ok_or_else(|| MigrationError::invalid("legacy credential authority disappeared"))?;
+        if let Some(journal) = journal.as_ref() {
+            verify_source_identity(&document.identity, &journal.source)?;
+        }
+        legacy_value(document, account)
+    }
+}
+
+fn legacy_value(
+    mut document: LegacyDocument,
+    account: &CredentialAccount,
+) -> Result<Option<Zeroizing<Vec<u8>>>, MigrationError> {
+    let reference = account
+        .as_str()
+        .strip_prefix("credential:")
+        .ok_or_else(|| MigrationError::invalid("credential account is invalid"))?;
+    Ok(document.values.remove(reference))
+}
+
 pub fn journal_path(channel_root: &Path) -> PathBuf {
     channel_root.join(JOURNAL_FILE)
 }
@@ -314,7 +391,20 @@ pub fn prepare_migration_with_filesystem(
     if let Some(journal) = roots.read_journal()? {
         match journal.state {
             MigrationState::Committed => {
+                let staged = staged_name(journal.transaction_id);
+                if roots.entry_exists(roots.dsh.as_raw_fd(), &staged)? {
+                    roots.remove_dsh_file(&staged)?;
+                }
                 roots.remove_journal()?;
+                return Ok(MigrationOutcome::NotNeeded);
+            }
+            MigrationState::CommitPrepared => {
+                if roots
+                    .entry_exists(roots.dsh.as_raw_fd(), &staged_name(journal.transaction_id))?
+                {
+                    return Ok(MigrationOutcome::PendingHealth(journal.transaction_id));
+                }
+                finish_committed(&roots, journal, hook)?;
                 return Ok(MigrationOutcome::NotNeeded);
             }
             MigrationState::LegacyStaged => {
@@ -379,7 +469,9 @@ pub fn rollback_migration(
         && !staged_exists
         && matches!(
             journal.state,
-            MigrationState::LegacyStaged | MigrationState::Committed
+            MigrationState::LegacyStaged
+                | MigrationState::CommitPrepared
+                | MigrationState::Committed
         )
     {
         return finish_committed(&roots, journal, hook);
@@ -426,7 +518,31 @@ pub fn commit_migration(
             .read_legacy(&staged)?
             .ok_or_else(|| MigrationError::invalid("staged legacy credential file disappeared"))?;
         verify_source_identity(&document.identity, &journal.source)?;
-        roots.remove_dsh_file(&staged)?;
+        let mut prepared = journal;
+        prepared.state = MigrationState::CommitPrepared;
+        roots.persist_journal(&prepared, None, hook)?;
+        hook.reached(MigrationBoundary::BeforeStagedDelete)?;
+        roots.remove_required_file(roots.dsh.as_raw_fd(), &staged)?;
+        if hook.reached(MigrationBoundary::AfterStagedDelete).is_err() {
+            return Ok(());
+        }
+        if hook
+            .reached(MigrationBoundary::BeforeStagedDeleteParentFsync)
+            .is_err()
+        {
+            return Ok(());
+        }
+        if sync_directory(roots.dsh.as_raw_fd()).is_err() {
+            return Ok(());
+        }
+        if hook
+            .reached(MigrationBoundary::AfterStagedDeleteParentFsync)
+            .is_err()
+        {
+            return Ok(());
+        }
+        let _ = finish_committed(&roots, prepared, hook);
+        return Ok(());
     }
     finish_committed(&roots, journal, hook)
 }
@@ -979,7 +1095,8 @@ fn journal_generation(journal: &Journal) -> u64 {
         MigrationState::WritingKeychain => 2,
         MigrationState::KeychainVerified => 3,
         MigrationState::LegacyStaged => 4,
-        MigrationState::Committed => 5,
+        MigrationState::CommitPrepared => 5,
+        MigrationState::Committed => 6,
     };
     state
         + journal

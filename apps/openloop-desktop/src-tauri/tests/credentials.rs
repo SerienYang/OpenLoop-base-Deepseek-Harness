@@ -3,6 +3,8 @@
 use std::{
     collections::BTreeMap,
     ffi::OsString,
+    fs,
+    os::unix::fs::PermissionsExt,
     process,
     sync::{mpsc, Arc, Mutex},
     thread,
@@ -19,7 +21,8 @@ use openloop_desktop_lib::{
         server::{AuthenticatedBridgeDispatcher, CancellationToken, PeerIdentity},
     },
     credentials::{
-        credential_bridge_dispatch_tables, delete_credential_with_confirmation,
+        credential_bridge_dispatch_tables, credential_bridge_dispatch_tables_with_legacy,
+        delete_credential_with_confirmation, migration::ReadOnlyLegacySource,
         parse_keychain_spike_action, AppKitCredentialDeletionBackend,
         AppKitCredentialDeletionConfirmation, AppKitCredentialSheet, AppKitCredentialSheetBackend,
         CredentialAccount, CredentialConsumerDisplay, CredentialConsumerLabel,
@@ -35,6 +38,7 @@ use openloop_desktop_lib::{
 };
 use security_framework::passwords::{set_generic_password_options, PasswordOptions};
 use serde_json::json;
+use tempfile::tempdir;
 use uuid::Uuid;
 
 fn unique_account(label: &str) -> CredentialAccount {
@@ -170,6 +174,82 @@ fn native_credential_status_is_read_only_without_both_mutation_presenters() {
     assert_eq!(
         configured["result"],
         json!({ "configured": true, "source": "keychain", "writable": false })
+    );
+}
+
+#[test]
+fn native_read_only_fallback_prefers_legacy_over_partial_keychain_values() {
+    let account = unique_account("legacy_first");
+    let _cleanup = KeychainCleanup::new(account.clone());
+    let reference = account
+        .as_str()
+        .strip_prefix("credential:")
+        .expect("credential account prefix");
+    let store = KeychainStore::new(ReleaseChannel::Test);
+    store
+        .set(&account, b"partial-keychain")
+        .expect("seed partial migration value");
+    let root = tempdir().expect("legacy root");
+    let channel_root = root.path().join("Openloop-Test");
+    let dsh_home = channel_root.join("dsh");
+    fs::create_dir_all(&dsh_home).expect("legacy DSH_HOME");
+    let legacy_path = dsh_home.join(".credentials.yaml");
+    fs::write(&legacy_path, format!("{reference}: legacy-authority\n"))
+        .expect("legacy credential file");
+    fs::set_permissions(&legacy_path, fs::Permissions::from_mode(0o600))
+        .expect("legacy credential permissions");
+    let legacy =
+        ReadOnlyLegacySource::new(&channel_root, &dsh_home).expect("read-only legacy source");
+
+    let executable = std::env::current_exe().expect("test executable");
+    let launch_id = Uuid::new_v4();
+    let secret: Vec<u8> = (0..32).collect();
+    let peer = PeerIdentity {
+        uid: unsafe { libc::geteuid() },
+        pid: process::id(),
+    };
+    let dispatcher = AuthenticatedBridgeDispatcher::new(
+        peer.uid,
+        capture_process_identity(process::id(), &executable).expect("process identity"),
+        executable,
+        launch_id,
+        secret.clone(),
+        credential_bridge_dispatch_tables_with_legacy(store, None, None, Some(legacy))
+            .expect("legacy-first credential tables"),
+    )
+    .expect("credential dispatcher");
+    let dispatch = |request_id: &str, method: &str, nonce: [u8; 32]| {
+        dispatcher
+            .dispatch(
+                peer,
+                sign_request(
+                    BridgeRequest {
+                        version: BRIDGE_PROTOCOL_VERSION,
+                        request_id: request_id.to_owned(),
+                        launch_id: launch_id.to_string(),
+                        method: method.to_owned(),
+                        payload: json!({ "ref": reference }),
+                    },
+                    nonce,
+                    &secret,
+                )
+                .expect("signed fallback request"),
+            )
+            .expect("fallback response")
+            .result
+            .expect("fallback result")
+    };
+
+    assert_eq!(
+        dispatch("legacy-describe", "describeCredential", [21; 32]),
+        json!({ "configured": true, "source": "legacy-file", "writable": false })
+    );
+    assert_eq!(
+        dispatch("legacy-resolve", "resolveCredential", [22; 32]),
+        json!({
+            "bytes": b"legacy-authority",
+            "source": "legacy-file",
+        })
     );
 }
 
@@ -1278,7 +1358,10 @@ fn maximum_secret_resolves_through_a_bounded_bridge_response_frame() {
         read_json_frame(&mut frame.as_slice()).expect("maximum credential round trip");
     assert_eq!(
         decoded.response.result.expect("credential result"),
-        serde_json::to_value(maximum).expect("maximum credential JSON")
+        json!({
+            "bytes": maximum,
+            "source": "keychain",
+        })
     );
 }
 

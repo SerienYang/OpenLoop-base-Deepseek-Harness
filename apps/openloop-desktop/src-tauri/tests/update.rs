@@ -2,6 +2,7 @@ use std::{
     ffi::CString,
     fs,
     os::unix::{ffi::OsStrExt, fs::symlink},
+    panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -13,8 +14,10 @@ use std::{
 use openloop_desktop_lib::update::{
     channel::{ReleaseChannel, UpdateChannelConfig},
     recovery::{
-        CandidateHealth, HealthStatus, PublicationOutcome, RecoveryBoundary, RecoveryError,
-        RecoveryTestHook, RecoveryTransaction,
+        recover_interrupted_update_with_bound_companion, recover_interrupted_update_with_companion,
+        update_journal_path, CandidateHealth, HealthStatus, PublicationCompanion,
+        PublicationOutcome, RecoveryBoundary, RecoveryError, RecoveryState, RecoveryTestHook,
+        RecoveryTransaction,
     },
 };
 use tempfile::tempdir;
@@ -139,6 +142,42 @@ where
 {
     fn before(&mut self, boundary: RecoveryBoundary, left: &Path, right: &Path) {
         (self.0)(boundary, left, right);
+    }
+}
+
+#[derive(Default)]
+struct RecordingCompanion {
+    commits: usize,
+    rollbacks: usize,
+}
+
+#[derive(Default)]
+struct FailCommitCompanion {
+    commits: usize,
+    rollbacks: usize,
+}
+
+impl PublicationCompanion for FailCommitCompanion {
+    fn commit(&mut self) -> Result<(), String> {
+        self.commits += 1;
+        Err("commit failed before irreversible deletion".to_owned())
+    }
+
+    fn rollback(&mut self) -> Result<(), String> {
+        self.rollbacks += 1;
+        Ok(())
+    }
+}
+
+impl PublicationCompanion for RecordingCompanion {
+    fn commit(&mut self) -> Result<(), String> {
+        self.commits += 1;
+        Ok(())
+    }
+
+    fn rollback(&mut self) -> Result<(), String> {
+        self.rollbacks += 1;
+        Ok(())
     }
 }
 
@@ -291,6 +330,214 @@ fn recovery_first_swap_crash_boundary_keeps_both_complete_apps() {
         fs::read_dir(fixture.path()).expect("update root").count(),
         2
     );
+}
+
+#[test]
+fn durable_update_journal_owns_migration_before_swap_and_recovers_together() {
+    let (fixture, installed, candidate) = transaction_fixture();
+    let migration_id = uuid::Uuid::new_v4();
+    let transaction = RecoveryTransaction::open(fixture.path(), &installed, &candidate)
+        .expect("transaction")
+        .with_migration_transaction(Some(migration_id));
+    let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
+    let mut companion = RecordingCompanion::default();
+    let mut hook = TransactionHook(|boundary, _: &Path, _: &Path| {
+        if boundary == RecoveryBoundary::AfterJournalParentFsync(RecoveryState::Prepared) {
+            panic!("injected death after prepared journal fsync");
+        }
+    });
+
+    let crashed = catch_unwind(AssertUnwindSafe(|| {
+        let _ = transaction.publish_with_companion_and_hook(&mut health, &mut companion, &mut hook);
+    }));
+    assert!(crashed.is_err());
+    let journal =
+        fs::read_to_string(update_journal_path(fixture.path())).expect("durable update journal");
+    assert!(journal.contains(&migration_id.to_string()));
+    assert!(journal.contains("\"installedName\":\"Openloop.app\""));
+    assert!(journal.contains("\"candidateName\":\"Openloop-candidate.app\""));
+    assert!(!journal.contains(&fixture.path().display().to_string()));
+
+    recover_interrupted_update_with_bound_companion(fixture.path(), migration_id, &mut companion)
+        .expect("restart recovery");
+
+    assert_eq!(marker(&installed), "old");
+    assert_eq!(marker(&candidate), "new");
+    assert_eq!(companion.rollbacks, 1);
+    assert_eq!(companion.commits, 0);
+    assert!(!update_journal_path(fixture.path()).exists());
+}
+
+#[test]
+fn update_recovery_rejects_a_companion_bound_to_another_migration() {
+    let (fixture, installed, candidate) = transaction_fixture();
+    let migration_id = uuid::Uuid::new_v4();
+    let transaction = RecoveryTransaction::open(fixture.path(), &installed, &candidate)
+        .expect("transaction")
+        .with_migration_transaction(Some(migration_id));
+    let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
+    let mut companion = RecordingCompanion::default();
+    let mut hook = TransactionHook(|boundary, _: &Path, _: &Path| {
+        if boundary == RecoveryBoundary::AfterJournalParentFsync(RecoveryState::Prepared) {
+            panic!("injected death");
+        }
+    });
+    assert!(catch_unwind(AssertUnwindSafe(|| {
+        let _ = transaction.publish_with_companion_and_hook(&mut health, &mut companion, &mut hook);
+    }))
+    .is_err());
+
+    let error = recover_interrupted_update_with_bound_companion(
+        fixture.path(),
+        uuid::Uuid::new_v4(),
+        &mut companion,
+    )
+    .expect_err("mismatched migration companion");
+
+    assert!(error.to_string().contains("migration"));
+    assert_eq!(companion.commits, 0);
+    assert_eq!(companion.rollbacks, 0);
+    assert_eq!(marker(&installed), "old");
+    assert_eq!(marker(&candidate), "new");
+    assert!(update_journal_path(fixture.path()).exists());
+}
+
+#[test]
+fn death_after_app_swap_restores_app_and_companion_from_durable_journal() {
+    let (fixture, installed, candidate) = transaction_fixture();
+    let migration_id = uuid::Uuid::new_v4();
+    let transaction = RecoveryTransaction::open(fixture.path(), &installed, &candidate)
+        .expect("transaction")
+        .with_migration_transaction(Some(migration_id));
+    let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
+    let mut companion = RecordingCompanion::default();
+    let mut hook = TransactionHook(|boundary, _: &Path, _: &Path| {
+        if boundary == RecoveryBoundary::AfterCandidatePublishSwap {
+            panic!("injected death after app swap");
+        }
+    });
+
+    let crashed = catch_unwind(AssertUnwindSafe(|| {
+        let _ = transaction.publish_with_companion_and_hook(&mut health, &mut companion, &mut hook);
+    }));
+    assert!(crashed.is_err());
+    assert_eq!(marker(&installed), "new");
+    assert_eq!(marker(&candidate), "old");
+
+    recover_interrupted_update_with_companion(fixture.path(), &mut companion)
+        .expect("restart recovery");
+
+    assert_eq!(marker(&installed), "old");
+    assert_eq!(marker(&candidate), "new");
+    assert_eq!(companion.rollbacks, 1);
+    assert_eq!(companion.commits, 0);
+    assert!(!update_journal_path(fixture.path()).exists());
+}
+
+#[test]
+fn process_death_at_each_prehealth_journal_boundary_restores_both_transactions() {
+    let boundaries = [
+        RecoveryBoundary::BeforeJournalFileFsync(RecoveryState::Prepared),
+        RecoveryBoundary::AfterJournalFileFsync(RecoveryState::Prepared),
+        RecoveryBoundary::BeforeJournalParentFsync(RecoveryState::Prepared),
+        RecoveryBoundary::AfterJournalParentFsync(RecoveryState::Prepared),
+        RecoveryBoundary::BeforeCandidatePublishSwap,
+        RecoveryBoundary::AfterCandidatePublishSwap,
+        RecoveryBoundary::BeforeJournalFileFsync(RecoveryState::CandidatePublished),
+        RecoveryBoundary::AfterJournalFileFsync(RecoveryState::CandidatePublished),
+        RecoveryBoundary::BeforeJournalParentFsync(RecoveryState::CandidatePublished),
+        RecoveryBoundary::AfterJournalParentFsync(RecoveryState::CandidatePublished),
+    ];
+
+    for crash_boundary in boundaries {
+        let (fixture, installed, candidate) = transaction_fixture();
+        let transaction = RecoveryTransaction::open(fixture.path(), &installed, &candidate)
+            .expect("transaction")
+            .with_migration_transaction(Some(uuid::Uuid::new_v4()));
+        let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
+        let mut companion = RecordingCompanion::default();
+        let mut hook = TransactionHook(|boundary, _: &Path, _: &Path| {
+            if boundary == crash_boundary {
+                panic!("injected update process death");
+            }
+        });
+
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            let _ =
+                transaction.publish_with_companion_and_hook(&mut health, &mut companion, &mut hook);
+        }))
+        .is_err());
+
+        recover_interrupted_update_with_companion(fixture.path(), &mut companion)
+            .unwrap_or_else(|error| panic!("recover {crash_boundary:?}: {error}"));
+        assert_eq!(marker(&installed), "old", "{crash_boundary:?}");
+        assert_eq!(marker(&candidate), "new", "{crash_boundary:?}");
+        assert_eq!(companion.rollbacks, 1, "{crash_boundary:?}");
+        assert_eq!(companion.commits, 0, "{crash_boundary:?}");
+    }
+}
+
+#[test]
+fn process_death_after_companion_commit_recovers_forward_idempotently() {
+    let (fixture, installed, candidate) = transaction_fixture();
+    let transaction = RecoveryTransaction::open(fixture.path(), &installed, &candidate)
+        .expect("transaction")
+        .with_migration_transaction(Some(uuid::Uuid::new_v4()));
+    let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
+    let mut companion = RecordingCompanion::default();
+    let mut hook = TransactionHook(|boundary, _: &Path, _: &Path| {
+        if boundary == RecoveryBoundary::AfterCompanionCommit {
+            panic!("injected death after companion commit");
+        }
+    });
+
+    assert!(catch_unwind(AssertUnwindSafe(|| {
+        let _ = transaction.publish_with_companion_and_hook(&mut health, &mut companion, &mut hook);
+    }))
+    .is_err());
+    assert_eq!(companion.commits, 1);
+
+    recover_interrupted_update_with_companion(fixture.path(), &mut companion)
+        .expect("forward recovery");
+
+    assert_eq!(marker(&installed), "new");
+    assert_eq!(marker(&candidate), "old");
+    assert_eq!(companion.commits, 2);
+    assert_eq!(companion.rollbacks, 0);
+    assert!(!update_journal_path(fixture.path()).exists());
+}
+
+#[test]
+fn restart_commit_failure_before_irreversible_delete_rolls_back_both_transactions() {
+    let (fixture, installed, candidate) = transaction_fixture();
+    let transaction = RecoveryTransaction::open(fixture.path(), &installed, &candidate)
+        .expect("transaction")
+        .with_migration_transaction(Some(uuid::Uuid::new_v4()));
+    let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
+    let mut initial_companion = RecordingCompanion::default();
+    let mut hook = TransactionHook(|boundary, _: &Path, _: &Path| {
+        if boundary == RecoveryBoundary::AfterJournalParentFsync(RecoveryState::CommitIntent) {
+            panic!("injected death before companion commit");
+        }
+    });
+    assert!(catch_unwind(AssertUnwindSafe(|| {
+        let _ = transaction.publish_with_companion_and_hook(
+            &mut health,
+            &mut initial_companion,
+            &mut hook,
+        );
+    }))
+    .is_err());
+
+    let mut recovery_companion = FailCommitCompanion::default();
+    recover_interrupted_update_with_companion(fixture.path(), &mut recovery_companion)
+        .expect("reversible commit failure rollback");
+
+    assert_eq!(marker(&installed), "old");
+    assert_eq!(marker(&candidate), "new");
+    assert_eq!(recovery_companion.commits, 1);
+    assert_eq!(recovery_companion.rollbacks, 1);
+    assert!(!update_journal_path(fixture.path()).exists());
 }
 
 #[test]

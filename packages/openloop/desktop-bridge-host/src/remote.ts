@@ -8,8 +8,9 @@ import type {
   ApprovedCommand,
   CredentialMigrationStatus,
   CredentialStatus,
+  MainWebviewHealthAcknowledgement,
   PendingWorkspaceGrant,
-  SecretBytes,
+  ResolvedSecretBytes,
   UpdateStatus,
   WorkspaceFileHandle,
   WorkspaceGrantView,
@@ -36,6 +37,7 @@ export const BROWSER_SAFE_METHODS = [
 
 export const HOST_ONLY_METHODS = [
   'resolveCredential',
+  'acknowledgeMainWebviewHealth',
   'beginWorkspaceAuthorization',
   'commitWorkspaceAuthorization',
   'abortWorkspaceAuthorization',
@@ -203,13 +205,27 @@ export class OpenloopDesktopHostClient {
     this.#client = client
   }
 
-  async resolveCredential(ref: string, signal?: AbortSignal): Promise<SecretBytes | undefined> {
-    const result = await this.#client.call<SecretBytes | null>(
+  async resolveCredential(
+    ref: string,
+    signal?: AbortSignal,
+  ): Promise<ResolvedSecretBytes | undefined> {
+    const result = await this.#client.call<ResolvedSecretBytes | null>(
       'resolveCredential',
       { ref },
       signal,
     )
     return result ?? undefined
+  }
+
+  async acknowledgeMainWebviewHealth(
+    acknowledgement: MainWebviewHealthAcknowledgement,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.#client.call<null>(
+      'acknowledgeMainWebviewHealth',
+      acknowledgement,
+      signal,
+    )
   }
 
   /**

@@ -34,7 +34,10 @@ function bridge(
       source: 'keychain' as const,
       writable: true,
     })),
-    resolveCredential: vi.fn(() => Promise.resolve([...new TextEncoder().encode('still-present')])),
+    resolveCredential: vi.fn(() => Promise.resolve({
+      bytes: [...new TextEncoder().encode('still-present')],
+      source: 'keychain' as const,
+    })),
     openCredentialReplacement: vi.fn(() => Promise.resolve('cancelled' as const)),
     deleteCredentialWithConfirmation: vi.fn(() => Promise.resolve(outcome)),
   }

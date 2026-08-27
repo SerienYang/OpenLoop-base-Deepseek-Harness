@@ -1,5 +1,8 @@
 import type { CredentialInfo, CredentialProvider } from '@deepseek-ai/dsh-credentials'
-import type { CredentialStatus } from '@openloop/desktop-bridge-host/types'
+import type {
+  CredentialStatus,
+  ResolvedSecretBytes,
+} from '@openloop/desktop-bridge-host/types'
 import type {
   CredentialDeletionPlan,
   CredentialConsumerRegistry,
@@ -8,7 +11,7 @@ import { openloopCredentialRef } from './limits.ts'
 
 /** Authenticated Host-only bridge methods required by this package. */
 export interface KeychainCredentialBridge {
-  resolveCredential(reference: string, signal?: AbortSignal): Promise<number[] | undefined>
+  resolveCredential(reference: string, signal?: AbortSignal): Promise<ResolvedSecretBytes | undefined>
   describeCredential(reference: string, signal?: AbortSignal): Promise<CredentialStatus>
   openCredentialReplacement(
     reference: string,
@@ -60,7 +63,11 @@ export class OpenloopCredentialOperations implements CredentialBrowserOperations
       signal,
     )
     return nativeInfo.configured
-      ? { configured: true, source: 'keychain', writable: nativeInfo.writable }
+      ? {
+        configured: true,
+        source: nativeInfo.source === 'legacy-file' ? 'legacy-file' : 'keychain',
+        writable: nativeInfo.writable,
+      }
       : { configured: false, writable: nativeInfo.writable }
   }
 

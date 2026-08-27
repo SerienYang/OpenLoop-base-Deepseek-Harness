@@ -81,6 +81,10 @@ export interface RuntimeReadiness {
     path: '/'
     status: 200
   }
+  candidateHealth?: {
+    webAsset: true
+    bootstrapExchange: true
+  }
 }
 
 interface RuntimeProcess {
@@ -99,6 +103,11 @@ interface RuntimeProcess {
 interface HealthResponse {
   status: number
   contentType: string
+}
+
+interface CandidateHealthResponse {
+  webAsset: boolean
+  bootstrapExchange: boolean
 }
 
 type RuntimeProfile = Pick<Profile, 'name' | 'dir' | 'layers' | 'patchPath' | 'patches'>
@@ -143,6 +152,11 @@ export interface RuntimeDependencies {
     release?: () => Promise<void> | void,
   ) => () => void
   healthRequest(origin: string): Promise<HealthResponse>
+  candidateHealthRequest(
+    origin: string,
+    launchId: string,
+    bootstrapTokenHex: string,
+  ): Promise<CandidateHealthResponse>
   setTimeout(handler: () => void, timeout: number): ReturnType<typeof setTimeout>
   clearTimeout(timer: ReturnType<typeof setTimeout>): void
 }
@@ -269,10 +283,10 @@ function parseRuntimeArgs(argv: readonly string[]): RuntimeOptions {
 }
 
 export function readLaunchSecretsForRuntime(
-  options: RuntimeOptions,
+  _options: RuntimeOptions,
   read: () => LaunchSecrets = readLaunchSecretsFromFd,
 ): LaunchSecrets | undefined {
-  return options.healthSmoke ? undefined : read()
+  return read()
 }
 
 function filterHostBootstrapPatches(
@@ -458,6 +472,12 @@ export async function runOpenloopRuntime(
   dependencies: RuntimeDependencies = defaultDependencies,
   launchSecrets?: RuntimeLaunchSecrets,
 ): Promise<RuntimeReadiness> {
+  const candidateLaunch = options.healthSmoke && launchSecrets !== undefined
+    ? {
+      launchId: launchSecrets.launchId,
+      bootstrapTokenHex: Buffer.from(launchSecrets.bootstrapToken).toString('hex'),
+    }
+    : undefined
   const core = dependencies.loadCoreManifest(dependencies.coreManifestPath)
   const profileDir = dependencies.ensureOpenloopProfile(options.home)
   const rootConfig = join(profileDir, 'cordis.yml')
@@ -573,6 +593,21 @@ export async function runOpenloopRuntime(
         `${BIN_NAME}: health GET ${origin}/ returned ${String(health.status)} ${health.contentType || '(no content-type)'}`,
       )
     }
+    let candidateHealth: RuntimeReadiness['candidateHealth']
+    if (candidateLaunch !== undefined) {
+      const checked = await dependencies.candidateHealthRequest(
+        origin,
+        candidateLaunch.launchId,
+        candidateLaunch.bootstrapTokenHex,
+      )
+      if (!checked.webAsset || !checked.bootstrapExchange) {
+        throw new Error(`${BIN_NAME}: candidate Web asset or bootstrap exchange is unhealthy`)
+      }
+      candidateHealth = {
+        webAsset: true,
+        bootstrapExchange: true,
+      }
+    }
     const readiness: RuntimeReadiness = {
       type: 'openloop.runtime.ready',
       version: 1,
@@ -587,6 +622,7 @@ export async function runOpenloopRuntime(
         path: '/',
         status: 200,
       },
+      ...(candidateHealth === undefined ? {} : { candidateHealth }),
     }
     dependencies.process.stdout.write(`${JSON.stringify(readiness)}\n`)
 
@@ -637,6 +673,34 @@ const defaultDependencies: RuntimeDependencies = {
       status: response.status,
       contentType: response.headers.get('content-type') ?? '',
     }
+  },
+  candidateHealthRequest: async (origin, launchId, bootstrapTokenHex) => {
+    const index = await fetch(`${origin}/`, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(5_000),
+    })
+    const html = await index.text()
+    const webAsset = index.status === 200
+      && /^text\/html(?:\s*;|$)/iu.test(index.headers.get('content-type') ?? '')
+      && html.includes('__DSH_PREBOOT__')
+      && html.includes('/api/openloop/bootstrap')
+    const bootstrap = await fetch(`${origin}/api/openloop/bootstrap`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify({ launchId, token: bootstrapTokenHex }),
+      signal: AbortSignal.timeout(5_000),
+    })
+    let bootstrapExchange = false
+    if (bootstrap.ok) {
+      const value: unknown = await bootstrap.json()
+      bootstrapExchange = typeof value === 'object'
+        && value !== null
+        && !Array.isArray(value)
+        && (value as Record<string, unknown>).launchId === launchId
+    }
+    return { webAsset, bootstrapExchange }
   },
   setTimeout,
   clearTimeout,

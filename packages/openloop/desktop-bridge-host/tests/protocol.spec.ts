@@ -333,6 +333,7 @@ describe('authenticated desktop bridge protocol', () => {
     ])
     expect(HOST_ONLY_METHODS).toEqual([
       'resolveCredential',
+      'acknowledgeMainWebviewHealth',
       'beginWorkspaceAuthorization',
       'commitWorkspaceAuthorization',
       'abortWorkspaceAuthorization',

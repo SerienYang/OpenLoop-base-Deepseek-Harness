@@ -2,7 +2,7 @@ use std::{
     ffi::{OsStr, OsString},
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -11,13 +11,16 @@ use tauri_plugin_updater::UpdaterExt;
 
 #[cfg(not(target_os = "macos"))]
 use crate::bridge::BridgeDispatchTables;
-use crate::bridge::{AuthenticatedBridgeDispatcher, BridgeListener, BridgeServer};
+use crate::bridge::{
+    server::{BridgeHandler, BridgeHandlerError},
+    AuthenticatedBridgeDispatcher, BridgeListener, BridgeServer,
+};
 #[cfg(target_os = "macos")]
 use crate::credentials::{
-    credential_bridge_dispatch_tables,
+    credential_bridge_dispatch_tables_with_legacy,
     migration::{
         commit_migration, prepare_migration, rollback_migration, MigrationOutcome,
-        NoopMigrationHook,
+        NoopMigrationHook, ReadOnlyLegacySource,
     },
     AppKitCredentialDeletionConfirmation, AppKitCredentialSheet, CredentialSheetCoordinator,
     CredentialSheetGate, KeychainStore,
@@ -35,10 +38,14 @@ use crate::update::{
     },
     health::{
         ensure_channel_dsh_home, required_dsh_home, BundleHealthProbe, CandidateProcessHealth,
+        MainWebviewHealthAcknowledgement, MainWebviewHealthExpectation,
         MIGRATION_TRANSACTION_ENVIRONMENT, TEST_PROBE_FAILURE_ENVIRONMENT,
     },
     lease::UpdateLease,
-    recovery::{PublicationOutcome, RecoveryTransaction},
+    recovery::{
+        pending_update_migration_transaction_id, recover_interrupted_update,
+        recover_interrupted_update_with_bound_companion, PublicationOutcome, RecoveryTransaction,
+    },
 };
 
 pub mod bridge;
@@ -174,10 +181,14 @@ struct RuntimeProcessState {
     _update_lease: UpdateLease,
     _bridge: BridgeServer,
     #[cfg(target_os = "macos")]
-    launch_id: uuid::Uuid,
-    #[cfg(target_os = "macos")]
-    pending_migration: Mutex<Option<PendingCredentialMigration>>,
+    _health: Arc<Mutex<RuntimeHealthState>>,
     child: Mutex<SupervisedChild>,
+}
+
+#[cfg(target_os = "macos")]
+struct RuntimeHealthState {
+    acknowledged: bool,
+    pending_migration: Option<PendingCredentialMigration>,
 }
 
 #[cfg(target_os = "macos")]
@@ -202,10 +213,6 @@ impl PendingCredentialMigration {
             transaction_id: Some(transaction_id),
             store,
         }
-    }
-
-    fn transaction_id(&self) -> Option<uuid::Uuid> {
-        self.transaction_id
     }
 
     fn commit_migration(&mut self) -> Result<(), String> {
@@ -258,31 +265,6 @@ impl Drop for PendingCredentialMigration {
     }
 }
 
-#[cfg(target_os = "macos")]
-#[tauri::command]
-fn acknowledge_main_webview_health(
-    launch_id: uuid::Uuid,
-    migration_transaction_id: Option<uuid::Uuid>,
-    state: tauri::State<'_, RuntimeProcessState>,
-) -> Result<(), String> {
-    if launch_id != state.launch_id {
-        return Err("main WebView health launch identity does not match".to_owned());
-    }
-    let mut pending = state
-        .pending_migration
-        .lock()
-        .map_err(|_| "credential migration health state is unavailable".to_owned())?;
-    match pending.as_mut() {
-        Some(migration) if migration.transaction_id() == migration_transaction_id => {
-            migration.commit_migration()?;
-            pending.take();
-            Ok(())
-        }
-        None if migration_transaction_id.is_none() => Ok(()),
-        _ => Err("main WebView health migration identity does not match".to_owned()),
-    }
-}
-
 fn find_runtime_executable(executable: &Path, resource_dir: &Path) -> Option<PathBuf> {
     let executable_dir = executable.parent()?;
     let candidates = [
@@ -311,6 +293,7 @@ fn runtime_executable(app: &AppHandle) -> Result<PathBuf, String> {
 fn start_runtime(
     app: &AppHandle,
     updater_config: &update::channel::UpdateChannelConfig,
+    manifest: &OpenloopBuildManifest,
 ) -> Result<Option<RuntimeProcessState>, String> {
     let dsh_home = channel_dsh_home(app, updater_config)?;
     let channel_root = dsh_home
@@ -329,6 +312,11 @@ fn start_runtime(
     let (migration_outcome, pending_migration, migration_lease) = {
         let migration_lease = UpdateLease::exclusive(channel_root)
             .map_err(|error| format!("credential migration lease acquisition failed: {error}"))?;
+        let installed = current_app_bundle()?;
+        let update_root = installed
+            .parent()
+            .ok_or_else(|| "installed app has no recovery root".to_owned())?;
+        recover_interrupted_publication(update_root, channel_root, &dsh_home, store)?;
         let migration_outcome =
             prepare_migration(channel_root, &dsh_home, &store, &mut NoopMigrationHook)
                 .unwrap_or(MigrationOutcome::ReadOnlyLegacy);
@@ -376,9 +364,22 @@ fn start_runtime(
     let mut child = SupervisedChild::spawn_with_dsh_home(&executable, &secrets, &dsh_home)
         .map_err(|error| error.to_string())?;
     #[cfg(target_os = "macos")]
+    let health = Arc::new(Mutex::new(RuntimeHealthState {
+        acknowledged: false,
+        pending_migration,
+    }));
+    #[cfg(target_os = "macos")]
     let dispatch_tables = {
         let sheet_gate = std::sync::Arc::new(CredentialSheetGate::default());
         let writable = migration_outcome != MigrationOutcome::ReadOnlyLegacy;
+        let legacy = if migration_outcome == MigrationOutcome::ReadOnlyLegacy {
+            Some(
+                ReadOnlyLegacySource::new(channel_root, &dsh_home)
+                    .map_err(|error| format!("legacy credential fallback setup failed: {error}"))?,
+            )
+        } else {
+            None
+        };
         let replacement = writable.then(|| {
             std::sync::Arc::new(CredentialSheetCoordinator::with_gate(
                 std::sync::Arc::new(AppKitCredentialSheet::new(app.clone())),
@@ -392,8 +393,41 @@ fn start_runtime(
                 sheet_gate,
             )) as std::sync::Arc<dyn crate::credentials::CredentialDeletionConfirmation>
         });
-        credential_bridge_dispatch_tables(store, replacement, deletion)
-            .map_err(|error| format!("credential bridge setup failed: {error}"))?
+        let mut tables =
+            credential_bridge_dispatch_tables_with_legacy(store, replacement, deletion, legacy)
+                .map_err(|error| format!("credential bridge setup failed: {error}"))?;
+        let health_state = health.clone();
+        let expectation = MainWebviewHealthExpectation::new(
+            secrets.launch_id,
+            CORE_MANIFEST_SHA256,
+            manifest.openloop_data_version,
+            manifest.dsh_data_version,
+        );
+        let handler: BridgeHandler = Arc::new(move |payload, _cancellation| {
+            let acknowledgement: MainWebviewHealthAcknowledgement = serde_json::from_value(payload)
+                .map_err(|_| BridgeHandlerError::invalid_request())?;
+            expectation
+                .validate(&acknowledgement)
+                .map_err(|_| BridgeHandlerError::invalid_request())?;
+            let mut health = health_state
+                .lock()
+                .map_err(|_| BridgeHandlerError::credential_failure())?;
+            if health.acknowledged {
+                return Err(BridgeHandlerError::invalid_request());
+            }
+            if let Some(migration) = health.pending_migration.as_mut() {
+                migration
+                    .commit_migration()
+                    .map_err(|_| BridgeHandlerError::credential_failure())?;
+            }
+            health.pending_migration.take();
+            health.acknowledged = true;
+            Ok(serde_json::Value::Null)
+        });
+        tables
+            .set_host_handler("acknowledgeMainWebviewHealth", handler)
+            .map_err(|error| format!("main WebView health bridge setup failed: {error}"))?;
+        tables
     };
     #[cfg(not(target_os = "macos"))]
     let dispatch_tables = BridgeDispatchTables::unavailable();
@@ -430,11 +464,29 @@ fn start_runtime(
         _update_lease: update_lease,
         _bridge: bridge,
         #[cfg(target_os = "macos")]
-        launch_id: secrets.launch_id,
-        #[cfg(target_os = "macos")]
-        pending_migration: Mutex::new(pending_migration),
+        _health: health,
         child: Mutex::new(child),
     }))
+}
+
+#[cfg(target_os = "macos")]
+fn recover_interrupted_publication(
+    update_root: &Path,
+    channel_root: &Path,
+    dsh_home: &Path,
+    store: KeychainStore,
+) -> Result<(), String> {
+    let transaction_id = pending_update_migration_transaction_id(update_root)
+        .map_err(|error| format!("inspect interrupted update failed: {error}"))?;
+    if let Some(transaction_id) = transaction_id {
+        let mut migration =
+            PendingCredentialMigration::new(channel_root, dsh_home, transaction_id, store);
+        recover_interrupted_update_with_bound_companion(update_root, transaction_id, &mut migration)
+            .map_err(|error| format!("recover interrupted update failed: {error}"))
+    } else {
+        recover_interrupted_update(update_root)
+            .map_err(|error| format!("recover interrupted update failed: {error}"))
+    }
 }
 
 fn channel_dsh_home(
@@ -511,6 +563,8 @@ fn run_health_probe(
         &manifest.app_version,
         updater_config.bundle_identifier(),
         CORE_MANIFEST_SHA256,
+        manifest.openloop_data_version,
+        manifest.dsh_data_version,
     );
     let injected = std::env::var(TEST_PROBE_FAILURE_ENVIRONMENT).ok();
     if probe
@@ -547,6 +601,20 @@ async fn run_update_spike(
         .ok_or_else(|| "Openloop channel data root is unavailable".to_owned())?;
     let _update_lease = UpdateLease::exclusive(channel_root)
         .map_err(|error| format!("exclusive update lease acquisition failed: {error}"))?;
+    let installed = current_app_bundle()?;
+    let update_root = installed
+        .parent()
+        .ok_or_else(|| "installed app has no recovery root".to_owned())?;
+    #[cfg(target_os = "macos")]
+    recover_interrupted_publication(
+        update_root,
+        channel_root,
+        &dsh_home,
+        KeychainStore::new(updater_config.channel()),
+    )?;
+    #[cfg(not(target_os = "macos"))]
+    recover_interrupted_update(update_root)
+        .map_err(|error| format!("recover interrupted update failed: {error}"))?;
     let update = app
         .updater()
         .map_err(|error| format!("create signed updater failed: {error}"))?
@@ -578,7 +646,6 @@ async fn run_update_spike(
         .json_line()
         .map_err(|error| error.to_string());
     };
-    let installed = current_app_bundle()?;
     let current = update.current_version.clone();
     let available = update.version.clone();
     download_policy
@@ -590,10 +657,7 @@ async fn run_update_spike(
         .map_err(|error| format!("signed update download or verification failed: {error}"))?;
     let candidate = stage_verified_archive(&archive, &installed)
         .map_err(|error| format!("verified update staging failed: {error}"))?;
-    let root = installed
-        .parent()
-        .ok_or_else(|| "installed app has no recovery root".to_owned())?;
-    let transaction = RecoveryTransaction::open(root, &installed, candidate.path())
+    let transaction = RecoveryTransaction::open(update_root, &installed, candidate.path())
         .map_err(|error| format!("open candidate recovery transaction failed: {error}"))?;
     #[cfg(target_os = "macos")]
     let publication_outcome = {
@@ -605,6 +669,7 @@ async fn run_update_spike(
         });
         let mut health = CandidateProcessHealth::new(&update.version, dsh_home)
             .with_migration_transaction(migration.transaction_id());
+        let transaction = transaction.with_migration_transaction(migration.transaction_id());
         if let Some(companion) = pending_migration.as_mut() {
             transaction.publish_with_companion(&mut health, companion)
         } else {
@@ -707,26 +772,18 @@ pub fn run() -> i32 {
         .target("darwin-aarch64")
         .pubkey(updater_config.public_key())
         .build();
-    #[cfg(target_os = "macos")]
-    let builder = tauri::Builder::default()
-        .plugin(updater_plugin)
-        .manage(updater_config)
-        .invoke_handler(tauri::generate_handler![
-            build_manifest,
-            acknowledge_main_webview_health
-        ]);
-    #[cfg(not(target_os = "macos"))]
     let builder = tauri::Builder::default()
         .plugin(updater_plugin)
         .manage(updater_config)
         .invoke_handler(tauri::generate_handler![build_manifest]);
+    let runtime_manifest = manifest.clone();
     let app = builder
         .setup(move |app| {
             if action != HostAction::Normal {
                 return Ok(());
             }
             let updater_config = app.state::<update::channel::UpdateChannelConfig>();
-            if let Some(state) = start_runtime(app.handle(), &updater_config)? {
+            if let Some(state) = start_runtime(app.handle(), &updater_config, &runtime_manifest)? {
                 app.manage(state);
             }
             Ok(())

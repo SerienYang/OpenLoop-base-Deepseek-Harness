@@ -22,6 +22,13 @@ function secret(value: string): number[] {
   return [...new TextEncoder().encode(value)]
 }
 
+function resolved(value: string | number[], source: 'keychain' | 'legacy-file' = 'keychain') {
+  return {
+    bytes: typeof value === 'string' ? secret(value) : value,
+    source,
+  } as const
+}
+
 function bridge(
   overrides: Partial<KeychainCredentialBridge> = {},
 ): KeychainCredentialBridge {
@@ -59,7 +66,7 @@ describe('Keychain credential provider', () => {
       source: 'keychain' as const,
       writable: true,
     }))
-    const resolveCredential = vi.fn(() => Promise.resolve(secret('keychain-value')))
+    const resolveCredential = vi.fn(() => Promise.resolve(resolved('keychain-value')))
     const keychain = bridge({
       describeCredential,
       resolveCredential,
@@ -95,7 +102,7 @@ describe('Keychain credential provider', () => {
         source: 'keychain' as const,
         writable: true,
       })),
-      resolveCredential: vi.fn(() => Promise.resolve(secret('keychain-value'))),
+      resolveCredential: vi.fn(() => Promise.resolve(resolved('keychain-value'))),
     })
     const credentials = provider({ keychain })
 
@@ -140,10 +147,35 @@ describe('Keychain credential provider', () => {
     })
   })
 
+  it('preserves the native legacy-file source for a legacy-first bridge resolution', async () => {
+    const bytes = secret('legacy-authority')
+    const credentials = provider({
+      keychain: bridge({
+        resolveCredential: vi.fn(() => Promise.resolve(resolved(bytes, 'legacy-file'))),
+        describeCredential: vi.fn(() => Promise.resolve({
+          configured: true,
+          source: 'legacy-file' as const,
+          writable: false,
+        })),
+      }),
+    })
+
+    await expect(credentials.resolve(REF)).resolves.toEqual({
+      value: 'legacy-authority',
+      source: 'legacy-file',
+    })
+    await expect(credentials.describe(REF)).resolves.toEqual({
+      configured: true,
+      source: 'legacy-file',
+      writable: false,
+    })
+    expect(bytes).toEqual(new Array(bytes.length).fill(0))
+  })
+
   it('resolves through the bridge on every call and does not cache plaintext', async () => {
     const resolveCredential = vi.fn()
-      .mockResolvedValueOnce(secret('first-value'))
-      .mockResolvedValueOnce(secret('rotated-value'))
+      .mockResolvedValueOnce(resolved('first-value'))
+      .mockResolvedValueOnce(resolved('rotated-value'))
     const credentials = provider({ keychain: bridge({ resolveCredential }) })
 
     await expect(credentials.resolve(REF)).resolves.toMatchObject({ value: 'first-value' })
@@ -158,7 +190,7 @@ describe('Keychain credential provider', () => {
     const overlongText = `${boundaryText}c`
     const overlong = credentialRef(overlongText)
     const nonAscii = 'UNICOD\u00c9_KEY' as CredentialRef
-    const resolveCredential = vi.fn(() => Promise.resolve(secret('keychain-value')))
+    const resolveCredential = vi.fn(() => Promise.resolve(resolved('keychain-value')))
     const credentials = provider({
       process: { [overlongText]: 'environment-value' },
       keychain: bridge({ resolveCredential }),
@@ -192,7 +224,7 @@ describe('Keychain credential provider', () => {
     vi.stubGlobal('TextDecoder', InspectingTextDecoder)
     const credentials = provider({
       keychain: bridge({
-        resolveCredential: vi.fn(() => Promise.resolve(bytes)),
+        resolveCredential: vi.fn(() => Promise.resolve(resolved(bytes))),
       }),
     })
 
@@ -212,8 +244,8 @@ describe('Keychain credential provider', () => {
     const maximum = new Array<number>(MAX_OPENLOOP_SECRET_BYTES).fill(65)
     const oversized = new Array<number>(MAX_OPENLOOP_SECRET_BYTES + 1).fill(65)
     const resolveCredential = vi.fn()
-      .mockResolvedValueOnce(maximum)
-      .mockResolvedValueOnce(oversized)
+      .mockResolvedValueOnce(resolved(maximum))
+      .mockResolvedValueOnce(resolved(oversized))
     const credentials = provider({ keychain: bridge({ resolveCredential }) })
 
     await expect(credentials.resolve(REF)).resolves.toMatchObject({

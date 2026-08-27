@@ -1,6 +1,6 @@
 import { Readable } from 'node:stream'
 import { Context } from '@deepseek-ai/cordis'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { installRuntimeBootstrap } from '@openloop/runtime-bootstrap'
 import {
   OPENLOOP_BOOTSTRAP_PATH,
@@ -44,7 +44,98 @@ function request(
   }) as unknown as BootstrapHostRoute['request']
 }
 
+function installDesktopBridge(
+  ctx: Context,
+  acknowledgeMainWebviewHealth = vi.fn(() => Promise.resolve()),
+): void {
+  ctx.provide('desktopBridge', { acknowledgeMainWebviewHealth } as never)
+}
+
 describe('Openloop bootstrap Host route', () => {
+  test('acknowledges the real main WebView through the authenticated Host bridge after token exchange', async () => {
+    let route: BootstrapHostRoute | undefined
+    const acknowledgeMainWebviewHealth = vi.fn(() => Promise.resolve())
+    const ctx = new Context()
+    ctx.provide('webServer', {
+      register: (value: BootstrapHostRoute) => {
+        route = value
+        return () => {}
+      },
+      tapIndex: () => () => {},
+    })
+    installDesktopBridge(ctx, acknowledgeMainWebviewHealth)
+    installRuntimeBootstrap(ctx, {
+      launchId: 'launch-id',
+      bootstrapToken: Uint8Array.from([0xab, 0xcd]),
+      bridgeSecret: Uint8Array.from([1, 2]),
+      socketPath: '/tmp/openloop.sock',
+    }, {
+      manifest: {
+        appVersion: '0.1.0',
+        channel: 'test',
+        openloopDataVersion: 3,
+        dshDataVersion: 7,
+      },
+      sha256: 'a'.repeat(64),
+    })
+    apply(ctx)
+
+    const response = responseRecorder()
+    await route?.handler(
+      request(JSON.stringify({ launchId: 'launch-id', token: 'abcd' })),
+      response.response,
+    )
+
+    expect(response.state.status).toBe(200)
+    expect(acknowledgeMainWebviewHealth).toHaveBeenCalledOnce()
+    expect(acknowledgeMainWebviewHealth).toHaveBeenCalledWith({
+      launchId: 'launch-id',
+      coreManifestSha256: 'a'.repeat(64),
+      openloopDataVersion: 3,
+      dshDataVersion: 7,
+    })
+  })
+
+  test('does not report bootstrap success when native WebView health acknowledgment fails', async () => {
+    let route: BootstrapHostRoute | undefined
+    const ctx = new Context()
+    ctx.provide('webServer', {
+      register: (value: BootstrapHostRoute) => {
+        route = value
+        return () => {}
+      },
+      tapIndex: () => () => {},
+    })
+    installDesktopBridge(ctx, {
+      acknowledgeMainWebviewHealth: vi.fn(() =>
+        Promise.reject(new Error('native health rejected'))),
+    }.acknowledgeMainWebviewHealth)
+    installRuntimeBootstrap(ctx, {
+      launchId: 'launch-id',
+      bootstrapToken: Uint8Array.from([0xab, 0xcd]),
+      bridgeSecret: Uint8Array.from([1, 2]),
+      socketPath: '/tmp/openloop.sock',
+    }, {
+      manifest: {
+        appVersion: '0.1.0',
+        channel: 'test',
+        openloopDataVersion: 3,
+        dshDataVersion: 7,
+      },
+      sha256: 'a'.repeat(64),
+    })
+    apply(ctx)
+
+    const response = responseRecorder()
+    await route?.handler(
+      request(JSON.stringify({ launchId: 'launch-id', token: 'abcd' })),
+      response.response,
+    )
+
+    expect(response.state.status).toBe(503)
+    expect(response.state.body).not.toContain('native health rejected')
+  })
+
   test('consumes the launch-bound token once and returns a no-store HttpOnly cookie', async () => {
     let route: BootstrapHostRoute | undefined
     let tap: ((html: string) => string) | undefined
@@ -59,13 +150,19 @@ describe('Openloop bootstrap Host route', () => {
         return () => {}
       },
     })
+    installDesktopBridge(ctx)
     installRuntimeBootstrap(ctx, {
       launchId: 'launch-id',
       bootstrapToken: Uint8Array.from([0xab, 0xcd]),
       bridgeSecret: Uint8Array.from([1, 2]),
       socketPath: '/tmp/openloop.sock',
     }, {
-      manifest: { appVersion: '0.1.0', channel: 'test' },
+      manifest: {
+        appVersion: '0.1.0',
+        channel: 'test',
+        openloopDataVersion: 0,
+        dshDataVersion: 0,
+      },
       sha256: 'a'.repeat(64),
     })
     apply(ctx)
@@ -87,7 +184,12 @@ describe('Openloop bootstrap Host route', () => {
     )
     expect(JSON.parse(first.state.body)).toEqual({
       launchId: 'launch-id',
-      coreManifest: { appVersion: '0.1.0', channel: 'test' },
+      coreManifest: {
+        appVersion: '0.1.0',
+        channel: 'test',
+        openloopDataVersion: 0,
+        dshDataVersion: 0,
+      },
       coreManifestSha256: 'a'.repeat(64),
     })
 
@@ -120,13 +222,19 @@ describe('Openloop bootstrap Host route', () => {
       },
       tapIndex: () => () => {},
     })
+    installDesktopBridge(ctx)
     installRuntimeBootstrap(ctx, {
       launchId: 'launch-id',
       bootstrapToken: Uint8Array.from([0xab, 0xcd]),
       bridgeSecret: Uint8Array.from([1, 2]),
       socketPath: '/tmp/openloop.sock',
     }, {
-      manifest: { appVersion: '0.1.0', channel: 'test' },
+      manifest: {
+        appVersion: '0.1.0',
+        channel: 'test',
+        openloopDataVersion: 0,
+        dshDataVersion: 0,
+      },
       sha256: 'a'.repeat(64),
     })
     apply(ctx)
@@ -146,13 +254,19 @@ describe('Openloop bootstrap Host route', () => {
       },
       tapIndex: () => () => {},
     })
+    installDesktopBridge(ctx)
     installRuntimeBootstrap(ctx, {
       launchId: 'launch-id',
       bootstrapToken: Uint8Array.from([0xab, 0xcd]),
       bridgeSecret: Uint8Array.from([1, 2]),
       socketPath: '/tmp/openloop.sock',
     }, {
-      manifest: { appVersion: '0.1.0', channel: 'test' },
+      manifest: {
+        appVersion: '0.1.0',
+        channel: 'test',
+        openloopDataVersion: 0,
+        dshDataVersion: 0,
+      },
       sha256: 'a'.repeat(64),
     })
     apply(ctx)
@@ -182,13 +296,19 @@ describe('Openloop bootstrap Host route', () => {
       },
       tapIndex: () => () => {},
     })
+    installDesktopBridge(ctx)
     installRuntimeBootstrap(ctx, {
       launchId: 'launch-id',
       bootstrapToken: Uint8Array.from([0xab, 0xcd]),
       bridgeSecret: Uint8Array.from([1, 2]),
       socketPath: '/tmp/openloop.sock',
     }, {
-      manifest: { appVersion: '0.1.0', channel: 'test' },
+      manifest: {
+        appVersion: '0.1.0',
+        channel: 'test',
+        openloopDataVersion: 0,
+        dshDataVersion: 0,
+      },
       sha256: 'a'.repeat(64),
     })
     apply(ctx)

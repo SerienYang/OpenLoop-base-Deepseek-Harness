@@ -315,14 +315,38 @@ pub fn credential_bridge_dispatch_tables(
     replacement: Option<Arc<dyn CredentialReplacement>>,
     confirmation: Option<Arc<dyn CredentialDeletionConfirmation>>,
 ) -> Result<BridgeDispatchTables, CredentialError> {
-    let writable = replacement.is_some() && confirmation.is_some();
+    credential_bridge_dispatch_tables_with_legacy(store, replacement, confirmation, None)
+}
+
+pub fn credential_bridge_dispatch_tables_with_legacy(
+    store: KeychainStore,
+    replacement: Option<Arc<dyn CredentialReplacement>>,
+    confirmation: Option<Arc<dyn CredentialDeletionConfirmation>>,
+    legacy: Option<migration::ReadOnlyLegacySource>,
+) -> Result<BridgeDispatchTables, CredentialError> {
+    let writable = legacy.is_none() && replacement.is_some() && confirmation.is_some();
     let mutation_gate = writable.then(|| Arc::new(CredentialSheetGate::default()));
     let mut browser_safe = HashMap::new();
+    let describe_legacy = legacy.clone();
     let describe: BridgeHandler = Arc::new(move |payload, _cancellation| {
         let request: CredentialReferencePayload = serde_json::from_value(payload)
             .map_err(|_| crate::bridge::server::BridgeHandlerError::invalid_request())?;
         let account = CredentialAccount::new(&request.reference)
             .map_err(|_| crate::bridge::server::BridgeHandlerError::invalid_request())?;
+        if describe_legacy
+            .as_ref()
+            .map(|source| source.resolve(&account))
+            .transpose()
+            .map_err(|_| crate::bridge::server::BridgeHandlerError::credential_failure())?
+            .flatten()
+            .is_some()
+        {
+            return Ok(json!({
+                "configured": true,
+                "source": "legacy-file",
+                "writable": false,
+            }));
+        }
         let configured = store
             .status(&account)
             .map_err(|_| crate::bridge::server::BridgeHandlerError::credential_failure())?;
@@ -402,20 +426,39 @@ pub fn credential_bridge_dispatch_tables(
 
     let mut host_only = HashMap::new();
     let resolve_store = store;
+    let resolve_legacy = legacy;
     let resolve: BridgeHandler = Arc::new(move |payload, _cancellation| {
         let request: CredentialReferencePayload = serde_json::from_value(payload)
             .map_err(|_| crate::bridge::server::BridgeHandlerError::invalid_request())?;
         let account = CredentialAccount::new(&request.reference)
             .map_err(|_| crate::bridge::server::BridgeHandlerError::invalid_request())?;
-        let secret = resolve_store
-            .resolve_optional(&account)
-            .map_err(|_| crate::bridge::server::BridgeHandlerError::credential_failure())?;
+        let legacy_secret = resolve_legacy
+            .as_ref()
+            .map(|source| source.resolve(&account))
+            .transpose()
+            .map_err(|_| crate::bridge::server::BridgeHandlerError::credential_failure())?
+            .flatten();
+        let (secret, source) = if let Some(secret) = legacy_secret {
+            (Some(secret), "legacy-file")
+        } else {
+            (
+                resolve_store
+                    .resolve_optional(&account)
+                    .map_err(|_| crate::bridge::server::BridgeHandlerError::credential_failure())?,
+                "keychain",
+            )
+        };
         if let Some(bytes) = secret.as_deref() {
             validate_secret(bytes)
                 .map_err(|_| crate::bridge::server::BridgeHandlerError::credential_failure())?;
         }
         Ok(secret
-            .map(|bytes| Value::Array(bytes.iter().map(|byte| Value::from(*byte)).collect()))
+            .map(|bytes| {
+                json!({
+                    "bytes": bytes.iter().map(|byte| Value::from(*byte)).collect::<Vec<_>>(),
+                    "source": source,
+                })
+            })
             .unwrap_or(Value::Null))
     });
     host_only.insert("resolveCredential".to_owned(), resolve);
