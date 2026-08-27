@@ -309,13 +309,13 @@ function entryKeyOf(entry: StoredEntry): number {
  * factory) must not take down siblings. Assembly errors (missing providers)
  * rethrow — a miswired shell must fail loud, not degrade into fallbacks.
  * Every catch reports through `onEntryError` (the ledger's supervision
- * seam); for shadowing kinds the report abdicates the entry, the outlet
- * re-renders onto the cell's next survivor, and this boundary's crash face
- * only shows until that re-render lands (permanently once the cell is dry —
- * the outlet then owns the crash face).
+ * seam). A contextual occurrence stays locally failed and renders its caller
+ * fallback, so one data-specific row cannot retire the shared renderer for
+ * every sibling occurrence. Other shadowing entries abdicate as before.
  */
 class SlotErrorBoundary extends Component<
-  { slotKey: string; onEntryError: (error: unknown) => void; children: ReactNode }, { failed: boolean }
+  { slotKey: string; onEntryError: (error: unknown) => void; fallback?: ReactNode; children: ReactNode },
+  { failed: boolean }
 > {
   override state = { failed: false }
   static getDerivedStateFromError(error: unknown): { failed: boolean } {
@@ -327,7 +327,9 @@ class SlotErrorBoundary extends Component<
     this.props.onEntryError(error)
   }
   override render(): ReactNode {
-    if (this.state.failed) return <div data-slot-error={this.props.slotKey} />
+    if (this.state.failed) {
+      return <div data-slot-error={this.props.slotKey}>{this.props.fallback}</div>
+    }
     return this.props.children
   }
 }
@@ -615,7 +617,9 @@ function RootEntry({ entry, ownerProps, slotKey, slotInjected, hookContext, hasH
   return renderEntry(slotKey, Comp, kit, standard, injected, slotInjected, ownerProps, hookContext, hasHookContext)
 }
 
-function StrictSessionEntry({ slotKey, entry, ownerProps, slotInjected, hookContext, hasHookContext, onEntryError }: {
+function StrictSessionEntry({
+  slotKey, entry, ownerProps, slotInjected, hookContext, hasHookContext, onEntryError, fallback,
+}: {
   slotKey: string
   entry: StoredEntry
   ownerProps: object
@@ -623,13 +627,14 @@ function StrictSessionEntry({ slotKey, entry, ownerProps, slotInjected, hookCont
   hookContext: unknown
   hasHookContext: boolean
   onEntryError: (error: unknown) => void
+  fallback?: ReactNode
 }) {
   const info = useSessionMaybeProvideInfo()
   if (info.sessionId === undefined) return null
   // Per-session remount rides this key; per-entry remount rides the outer
   // element's entry-identity key (the outlet's guarded() call).
   return (
-    <SlotErrorBoundary slotKey={slotKey} key={info.sessionId} onEntryError={onEntryError}>
+    <SlotErrorBoundary slotKey={slotKey} key={info.sessionId} onEntryError={onEntryError} fallback={fallback}>
       <SessionEntry
         entry={entry}
         ownerProps={ownerProps}
@@ -707,12 +712,15 @@ function renderOutletContent(
   const guarded = (entry: StoredEntry, key?: string | number, owner: object = ownerProps) => {
     const hasHookContext = opts !== undefined && Object.hasOwn(opts, 'hookContext')
     const hookContext = opts?.hookContext
-    // Shadowing kinds abdicate on crash (the cell falls to its next
-    // survivor); chain reports without abdicating — election alternatives
-    // resolve at select time, and retiring a crashed elected entry would
-    // change the static crash face.
+    const occurrenceFallback = hasHookContext ? opts.fallback : undefined
+    // Contextual outlets are repeated data-driven occurrences of one shared
+    // renderer. Keep a row-specific failure inside that occurrence instead
+    // of retiring the renderer for every row. Non-contextual shadowing kinds
+    // still fall to the next survivor; chains preserve their election model.
     const onEntryError = (error: unknown) => {
-      host.reportEntryError(slotKey, entry, error, { abdicate: spec.kind !== 'chain' })
+      host.reportEntryError(slotKey, entry, error, {
+        abdicate: spec.kind !== 'chain' && !hasHookContext,
+      })
     }
     return spec.scope === 'session'
       ? (
@@ -724,11 +732,17 @@ function renderOutletContent(
           hookContext={hookContext}
           hasHookContext={hasHookContext}
           onEntryError={onEntryError}
+          fallback={occurrenceFallback}
           key={key}
         />
       )
       : (
-        <SlotErrorBoundary slotKey={slotKey} key={key} onEntryError={onEntryError}>
+        <SlotErrorBoundary
+          slotKey={slotKey}
+          key={key}
+          onEntryError={onEntryError}
+          fallback={occurrenceFallback}
+        >
           {spec.scope === 'session-maybe'
             ? (
               <SessionMaybeEntry
