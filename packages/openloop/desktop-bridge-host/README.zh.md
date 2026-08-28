@@ -22,7 +22,9 @@ payload 检查。`session.create` 必须具有 own `workspaceId`，且只能额�
 OpenLoop 首发 profile 拒绝通用设置面与凭据面。这些方法可寻址任意 namespace、
 模型提供方 endpoint、凭据引用和 shell 默认值；在后续任务为获准的设置流程提供
 专用 Host facade 之前，对应的上游 Client owner 均保持禁用。上游 Workspace 管理
-owner 同样禁用，只保留启动流程需要的 `workspace.list` 基线读取。
+owner 同样禁用。Openloop client runtime adapter 只使用版本化
+`openloopDesktop/*` Workspace facade；所有 legacy `workspace.*` 方法在启动和
+重连期间也保持拒绝。
 
 OpenLoop 会让两个浏览器 dispatcher 都 required-inject 此服务。如果 provider
 已开始卸载而路由 effect 尚未完成清理，dispatcher 仍会认领并拒绝请求，不会短暂

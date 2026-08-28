@@ -5625,6 +5625,9 @@ importers:
       '@openloop/credentials-keychain':
         specifier: workspace:*
         version: link:../credentials-keychain
+      '@openloop/desktop-bridge-client':
+        specifier: workspace:*
+        version: link:../desktop-bridge-client
       '@openloop/desktop-bridge-host':
         specifier: workspace:*
         version: link:../desktop-bridge-host
@@ -5680,6 +5683,30 @@ importers:
       '@deepseek-ai/dsh-typert-protocol':
         specifier: workspace:^
         version: link:../../typert/protocol
+      '@openloop/desktop-bridge-host':
+        specifier: workspace:*
+        version: link:../desktop-bridge-host
+
+  packages/openloop/desktop-bridge-client:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-api-remotes':
+        specifier: workspace:^
+        version: link:../../api/remotes
+      '@deepseek-ai/dsh-client-runtime':
+        specifier: workspace:^
+        version: link:../../client/runtime
+      '@deepseek-ai/dsh-invariants':
+        specifier: workspace:^
+        version: link:../../runtime-diagnostics/invariants
+      '@deepseek-ai/dsh-typert-protocol':
+        specifier: workspace:^
+        version: link:../../typert/protocol
+      '@deepseek-ai/dsh-typert-registry':
+        specifier: workspace:^
+        version: link:../../typert/registry
       '@openloop/desktop-bridge-host':
         specifier: workspace:*
         version: link:../desktop-bridge-host
@@ -9526,6 +9553,9 @@ importers:
       '@openloop/credentials-keychain':
         specifier: workspace:^
         version: link:../../packages/openloop/credentials-keychain
+      '@openloop/desktop-bridge-client':
+        specifier: workspace:^
+        version: link:../../packages/openloop/desktop-bridge-client
       '@openloop/desktop-bridge-host':
         specifier: workspace:^
         version: link:../../packages/openloop/desktop-bridge-host

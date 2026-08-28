@@ -28,7 +28,9 @@ Those methods can address arbitrary namespaces, provider endpoints, credential
 references, and shell defaults. Their upstream Client owners are disabled
 until later tasks provide purpose-built Host facades for approved settings
 flows. The upstream workspace management owner is disabled for the same
-reason; only the startup `workspace.list` baseline remains reachable.
+reason. The Openloop client runtime adapter uses only the versioned
+`openloopDesktop/*` Workspace facade; every legacy `workspace.*` method stays
+denied, including startup and reconnect.
 
 OpenLoop makes both browser dispatchers require this service. If the provider
 starts unloading before their route effects have finished disposing, they

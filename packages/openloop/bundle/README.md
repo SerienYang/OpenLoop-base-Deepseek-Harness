@@ -25,8 +25,10 @@ The first-release profile disables the inherited `cordis-client-runner` and
 `ui-cordis` rows, so only the static signed Client roster is loaded. It also
 disables the upstream settings, permission, agent-preset, and workspace Client
 owners whose broad Host calls are outside the first policy. Those surfaces
-remain absent until dedicated Host facades replace them in later tasks; the
-runtime keeps the read-only `workspace.list` baseline needed during startup.
+remain absent until dedicated Host facades replace them in later tasks. The
+Openloop Desktop Bridge client supplies a profile-selected runtime adapter, so
+the shared client runtime never constructs its legacy Workspace runtime or
+calls any `workspace.*` method.
 
 `ensureOpenloopProfile()` creates the `openloop` profile only when its
 `package.json` is absent. Once that manifest exists, the profile and all sibling

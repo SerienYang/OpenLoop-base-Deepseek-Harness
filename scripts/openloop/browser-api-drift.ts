@@ -1025,7 +1025,8 @@ export async function collectOpenloopBrowserApiSurface(
     rows.push({ id, packageName })
     const packageRoot = dirname(manifest.path)
     const sourceRoot = join(packageRoot, 'src', 'client')
-    if (packageName.startsWith('@deepseek-ai/dsh-')
+    if ((packageName.startsWith('@deepseek-ai/dsh-')
+      || packageName.startsWith('@openloop/'))
       && relative(root, packageRoot) !== '..'
       && !relative(root, packageRoot).startsWith(`..${sep}`)
       && existsSync(sourceRoot)) {

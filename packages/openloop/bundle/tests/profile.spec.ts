@@ -167,6 +167,20 @@ describe('OpenLoop profile', () => {
     })
   })
 
+  it('selects the path-free Workspace adapter before the shared client runtime starts', () => {
+    const entries = openloopEntries()
+
+    expect(entries.find(entry => entry.id === 'desktop-bridge-client')).toEqual({
+      id: 'desktop-bridge-client',
+      name: '@openloop/desktop-bridge-client',
+    })
+    expect(entries.find(entry => entry.id === 'client-runtime')).toMatchObject({
+      id: 'client-runtime',
+      name: '@deepseek-ai/dsh-client-runtime',
+      inject: ['workspaceRuntimeAdapter'],
+    })
+  })
+
   it('replaces only the Openloop filesystem provider and removes process-backed search', () => {
     const entries = openloopEntries()
 
