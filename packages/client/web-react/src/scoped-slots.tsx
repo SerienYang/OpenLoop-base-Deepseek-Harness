@@ -313,10 +313,15 @@ function entryKeyOf(entry: StoredEntry): number {
  * fallback, so one data-specific row cannot retire the shared renderer for
  * every sibling occurrence. Other shadowing entries abdicate as before.
  */
-class SlotErrorBoundary extends Component<
-  { slotKey: string; onEntryError: (error: unknown) => void; fallback?: ReactNode; children: ReactNode },
-  { failed: boolean }
-> {
+interface SlotErrorBoundaryProps {
+  readonly slotKey: string
+  readonly onEntryError: (error: unknown) => void
+  readonly fallback?: ReactNode
+  readonly resetKey?: unknown
+  readonly children: ReactNode
+}
+
+class SlotErrorBoundary extends Component<SlotErrorBoundaryProps, { failed: boolean }> {
   override state = { failed: false }
   static getDerivedStateFromError(error: unknown): { failed: boolean } {
     if (error instanceof SlotAssemblyError) throw error
@@ -325,6 +330,11 @@ class SlotErrorBoundary extends Component<
   override componentDidCatch(error: unknown): void {
     console.error(`slot entry crashed in '${this.props.slotKey}':`, error)
     this.props.onEntryError(error)
+  }
+  override componentDidUpdate(previousProps: Readonly<SlotErrorBoundaryProps>): void {
+    if (this.state.failed && !Object.is(previousProps.resetKey, this.props.resetKey)) {
+      this.setState({ failed: false })
+    }
   }
   override render(): ReactNode {
     if (this.state.failed) {
@@ -583,7 +593,13 @@ function SessionMaybeEntry({
     setState({ adopted, epoch })
   }
   return (
-    <SlotErrorBoundary slotKey={slotKey} key={epoch} onEntryError={onEntryError} fallback={fallback}>
+    <SlotErrorBoundary
+      slotKey={slotKey}
+      key={epoch}
+      onEntryError={onEntryError}
+      fallback={fallback}
+      resetKey={info.sessionId}
+    >
       <SessionMaybeEntryBody
         entry={entry}
         ownerProps={ownerProps}

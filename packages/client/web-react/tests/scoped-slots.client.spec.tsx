@@ -1120,6 +1120,37 @@ describe('session-maybe adoption identity', () => {
     expect(view.container.querySelector('[data-slot-error]')).toBeNull()
   })
 
+  it('recovers a failed contextual entry when a blank incarnation adopts its first session', async () => {
+    const h = makeHost()
+    h.addSession('s1')
+    h.declare('k.keyed', { kind: 'keyed', scope: 'session-maybe' })
+    h.add('k.keyed', {
+      component: ({ sessionId }: { sessionId?: string }) => {
+        if (sessionId === undefined) throw new Error('blank row boom')
+        return <span>{sessionId}</span>
+      },
+      options: { key: 'row' },
+    })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { view } = mountRoot(
+      h,
+      { 'k.keyed': { kind: 'keyed', scope: 'session-maybe' } },
+      renderSlot => renderSlot('k.keyed', {}, {
+        entryKey: 'row',
+        hookContext: 'adopting-row',
+        fallback: <i>recovered</i>,
+      }),
+    )
+    await act(async () => {})
+    expect(view.container.textContent).toBe('recovered')
+
+    act(() => { h.current.set('s1') })
+    spy.mockRestore()
+
+    expect(view.container.textContent).toBe('s1')
+    expect(view.container.querySelector('[data-slot-error]')).toBeNull()
+  })
+
   it('remounts into a fresh blank incarnation on session loss, then adopts anew', () => {
     const h = makeHost()
     h.addSession('s1')
