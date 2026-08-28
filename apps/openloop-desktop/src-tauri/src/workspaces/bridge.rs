@@ -107,7 +107,7 @@ pub fn install_workspace_authority_handlers(
         let Some(path) = selection else {
             return Ok(json!({ "outcome": "cancelled" }));
         };
-        cancellation
+        let (pending_grant_id, canonical_path) = cancellation
             .commit_if_active(|| {
                 let mut registry = begin_registry
                     .lock()
@@ -119,13 +119,34 @@ pub fn install_workspace_authority_handlers(
                     .candidate(launch_id, pending_grant_id, "_pending")
                     .map_err(|_| BridgeHandlerError::workspace_failure())?
                     .canonical_path;
-                Ok(json!({
-                    "outcome": "pending",
-                    "pendingGrantId": pending_grant_id,
-                    "path": canonical_path,
-                }))
+                Ok((pending_grant_id, canonical_path))
             })
-            .ok_or_else(BridgeHandlerError::invalid_request)?
+            .ok_or_else(BridgeHandlerError::invalid_request)??;
+        let cancellation_registry = Arc::downgrade(&begin_registry);
+        let subscription = cancellation.subscribe(move || {
+            let Some(registry) = cancellation_registry.upgrade() else {
+                return;
+            };
+            if let Ok(mut registry) = registry.lock() {
+                let _ = registry.abort(launch_id, pending_grant_id);
+            };
+        });
+        begin_registry
+            .lock()
+            .map_err(|_| BridgeHandlerError::workspace_failure())?
+            .attach_cancellation(launch_id, pending_grant_id, subscription)
+            .map_err(|_| {
+                if cancellation.is_cancelled() {
+                    BridgeHandlerError::invalid_request()
+                } else {
+                    BridgeHandlerError::workspace_failure()
+                }
+            })?;
+        Ok(json!({
+            "outcome": "pending",
+            "pendingGrantId": pending_grant_id,
+            "path": canonical_path,
+        }))
     });
     tables
         .set_host_handler("beginWorkspaceAuthorization", begin)

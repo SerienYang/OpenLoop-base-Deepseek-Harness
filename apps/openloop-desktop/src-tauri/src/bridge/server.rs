@@ -345,15 +345,26 @@ struct RequestRegistry {
     pre_cancelled: HashMap<String, Instant>,
 }
 
-struct ActiveRequestGuard<'a> {
-    inner: &'a DispatcherInner,
+struct ActiveRequestGuard {
+    inner: Arc<DispatcherInner>,
     request_id: String,
+    cancellation: CancellationToken,
+    delivered: bool,
 }
 
-impl Drop for ActiveRequestGuard<'_> {
+impl ActiveRequestGuard {
+    fn mark_delivered(&mut self) {
+        self.delivered = true;
+    }
+}
+
+impl Drop for ActiveRequestGuard {
     fn drop(&mut self) {
         if let Ok(mut requests) = self.inner.requests.lock() {
             requests.active.remove(&self.request_id);
+        }
+        if !self.delivered {
+            self.cancellation.cancel();
         }
     }
 }
@@ -394,6 +405,18 @@ impl AuthenticatedBridgeDispatcher {
         peer: PeerIdentity,
         envelope: AuthenticatedBridgeRequest,
     ) -> io::Result<BridgeResponse> {
+        let (response, mut active) = self.dispatch_for_delivery(peer, envelope)?;
+        if let Some(active) = active.as_mut() {
+            active.mark_delivered();
+        }
+        Ok(response)
+    }
+
+    fn dispatch_for_delivery(
+        &self,
+        peer: PeerIdentity,
+        envelope: AuthenticatedBridgeRequest,
+    ) -> io::Result<(BridgeResponse, Option<ActiveRequestGuard>)> {
         self.authorize_peer(peer)?;
         let request = super::protocol::verify_request(
             &envelope,
@@ -402,13 +425,18 @@ impl AuthenticatedBridgeDispatcher {
             &self.inner.nonces,
         )?;
         if request.method == "$cancel" {
-            return self.cancel(request.request_id.clone(), &request.payload);
+            return self
+                .cancel(request.request_id.clone(), &request.payload)
+                .map(|response| (response, None));
         }
         let Some(handler) = self.inner.tables.handler(&request.method) else {
-            return Ok(BridgeResponse::failure(
-                &request.request_id,
-                "method_not_found",
-                "desktop bridge method is unavailable",
+            return Ok((
+                BridgeResponse::failure(
+                    &request.request_id,
+                    "method_not_found",
+                    "desktop bridge method is unavailable",
+                ),
+                None,
             ));
         };
         let cancellation = CancellationToken::new();
@@ -419,10 +447,13 @@ impl AuthenticatedBridgeDispatcher {
                 .lock()
                 .map_err(|_| invalid("bridge active-request lock is poisoned"))?;
             if requests.active.contains_key(&request.request_id) {
-                return Ok(BridgeResponse::failure(
-                    &request.request_id,
-                    "duplicate_request",
-                    "desktop bridge request id is already active",
+                return Ok((
+                    BridgeResponse::failure(
+                        &request.request_id,
+                        "duplicate_request",
+                        "desktop bridge request id is already active",
+                    ),
+                    None,
                 ));
             }
             requests
@@ -435,15 +466,18 @@ impl AuthenticatedBridgeDispatcher {
                 .active
                 .insert(request.request_id.clone(), cancellation.clone());
         }
-        let _active = ActiveRequestGuard {
-            inner: &self.inner,
+        let active = ActiveRequestGuard {
+            inner: self.inner.clone(),
             request_id: request.request_id.clone(),
+            cancellation: cancellation.clone(),
+            delivered: false,
         };
         let result = handler(request.payload.clone(), cancellation);
-        Ok(match result {
+        let response = match result {
             Ok(value) => BridgeResponse::success(&request.request_id, value),
             Err(error) => BridgeResponse::failure(&request.request_id, error.code, error.message),
-        })
+        };
+        Ok((response, Some(active)))
     }
 
     fn authorize_peer(&self, peer: PeerIdentity) -> io::Result<()> {
@@ -459,10 +493,11 @@ impl AuthenticatedBridgeDispatcher {
         &self,
         peer: PeerIdentity,
         envelope: AuthenticatedBridgeRequest,
-    ) -> io::Result<AuthenticatedBridgeResponse> {
+    ) -> io::Result<(AuthenticatedBridgeResponse, Option<ActiveRequestGuard>)> {
         let nonce = decode_nonce(&envelope.nonce)?;
-        let response = self.dispatch(peer, envelope)?;
-        sign_response(response, nonce, &self.inner.secret)
+        let (response, active) = self.dispatch_for_delivery(peer, envelope)?;
+        let response = sign_response(response, nonce, &self.inner.secret)?;
+        Ok((response, active))
     }
 
     fn cancel(&self, request_id: String, payload: &Value) -> io::Result<BridgeResponse> {
@@ -509,10 +544,14 @@ impl AuthenticatedBridgeDispatcher {
     }
 
     fn cancel_all(&self) {
-        if let Ok(requests) = self.inner.requests.lock() {
-            for cancellation in requests.active.values() {
-                cancellation.cancel();
-            }
+        let cancellations = self
+            .inner
+            .requests
+            .lock()
+            .map(|requests| requests.active.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for cancellation in cancellations {
+            cancellation.cancel();
         }
     }
 }
@@ -769,9 +808,13 @@ fn serve_connection(
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let envelope: AuthenticatedBridgeRequest = read_json_frame(&mut stream)?;
-    let mut response = dispatcher.dispatch_signed(peer, envelope)?;
+    let (mut response, mut active) = dispatcher.dispatch_signed(peer, envelope)?;
     write_and_scrub_response(&mut stream, &mut response)?;
-    stream.flush()
+    stream.flush()?;
+    if let Some(active) = active.as_mut() {
+        active.mark_delivered();
+    }
+    Ok(())
 }
 
 fn write_and_scrub_response<W: Write>(
@@ -875,6 +918,7 @@ mod tests {
     use std::{
         fs,
         io::{self, Read, Write},
+        os::fd::AsRawFd,
         os::unix::fs::PermissionsExt,
         os::unix::net::UnixStream,
         path::Path,
@@ -889,7 +933,9 @@ mod tests {
         capture_process_identity, write_and_scrub_response, AuthenticatedBridgeDispatcher,
         BridgeDispatchTables, BridgeListener, CancellationToken, ProcessIdentity,
     };
-    use crate::bridge::protocol::{sign_response, BridgeResponse};
+    use crate::bridge::protocol::{
+        sign_request, sign_response, BridgeRequest, BridgeResponse, BRIDGE_PROTOCOL_VERSION,
+    };
 
     fn current_process() -> (ProcessIdentity, std::path::PathBuf) {
         let executable = std::env::current_exe().expect("current test executable");
@@ -1027,6 +1073,86 @@ mod tests {
             drop(subscription);
             assert_eq!(callback_count.load(std::sync::atomic::Ordering::SeqCst), 1);
         }
+    }
+
+    #[test]
+    fn cancellation_after_handler_completion_releases_owned_pending_resource_before_delivery() {
+        let launch_id = Uuid::new_v4();
+        let secret = vec![7; 32];
+        let pending = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let handler_pending = pending.clone();
+        let handler: super::BridgeHandler =
+            std::sync::Arc::new(move |_payload, cancellation: CancellationToken| {
+                let descriptor = fs::File::open("/").expect("open pending directory descriptor");
+                let callback_pending = std::sync::Arc::downgrade(&handler_pending);
+                let subscription = cancellation.subscribe(move || {
+                    let Some(pending) = callback_pending.upgrade() else {
+                        return;
+                    };
+                    *pending.lock().expect("pending callback lock") = None;
+                });
+                *handler_pending.lock().expect("pending handler lock") =
+                    Some((descriptor, subscription));
+                Ok(serde_json::Value::Null)
+            });
+        let mut browser_safe = std::collections::HashMap::new();
+        browser_safe.insert("getAppInfo".to_owned(), handler);
+        let (identity, executable) = current_process();
+        let dispatcher = AuthenticatedBridgeDispatcher::new(
+            unsafe { libc::geteuid() },
+            identity,
+            executable,
+            launch_id,
+            secret.clone(),
+            BridgeDispatchTables::new(browser_safe, std::collections::HashMap::new())
+                .expect("dispatch tables"),
+        )
+        .expect("bridge dispatcher");
+        let request = BridgeRequest {
+            version: BRIDGE_PROTOCOL_VERSION,
+            request_id: "pending-request".to_owned(),
+            launch_id: launch_id.to_string(),
+            method: "getAppInfo".to_owned(),
+            payload: serde_json::Value::Null,
+        };
+        let (_response, active) = dispatcher
+            .dispatch_for_delivery(
+                super::PeerIdentity {
+                    uid: unsafe { libc::geteuid() },
+                    pid: std::process::id(),
+                },
+                sign_request(request, [10; 32], &secret).expect("signed pending request"),
+            )
+            .expect("deferred response");
+        let descriptor = pending
+            .lock()
+            .expect("pending assertion lock")
+            .as_ref()
+            .expect("pending resource")
+            .0
+            .as_raw_fd();
+        let cancel = BridgeRequest {
+            version: BRIDGE_PROTOCOL_VERSION,
+            request_id: "cancel-request".to_owned(),
+            launch_id: launch_id.to_string(),
+            method: "$cancel".to_owned(),
+            payload: serde_json::json!({ "requestId": "pending-request" }),
+        };
+
+        let response = dispatcher
+            .dispatch(
+                super::PeerIdentity {
+                    uid: unsafe { libc::geteuid() },
+                    pid: std::process::id(),
+                },
+                sign_request(cancel, [11; 32], &secret).expect("signed cancellation"),
+            )
+            .expect("cancellation response");
+
+        assert!(response.ok);
+        assert!(pending.lock().expect("pending assertion lock").is_none());
+        assert_eq!(unsafe { libc::fcntl(descriptor, libc::F_GETFD) }, -1);
+        drop(active);
     }
 
     fn assert_closed_promptly(mut stream: UnixStream) {

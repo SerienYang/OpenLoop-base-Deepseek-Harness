@@ -3,19 +3,22 @@
 use std::{
     collections::VecDeque,
     fs,
+    io::Write,
+    net::Shutdown,
     os::unix::fs::{symlink, PermissionsExt},
     path::{Path, PathBuf},
     process,
     sync::{mpsc, Arc, Barrier, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use openloop_desktop_lib::{
     bridge::{
-        protocol::{sign_request, BridgeRequest, BRIDGE_PROTOCOL_VERSION},
+        protocol::{encode_frame, sign_request, BridgeRequest, BRIDGE_PROTOCOL_VERSION},
         server::{
-            AuthenticatedBridgeDispatcher, BridgeDispatchTables, CancellationToken, PeerIdentity,
+            AuthenticatedBridgeDispatcher, BridgeDispatchTables, BridgeListener, CancellationToken,
+            PeerIdentity,
         },
     },
     launcher::capture_process_identity,
@@ -112,6 +115,24 @@ fn dispatch_workspace(
 fn secure_root(path: &Path) {
     fs::create_dir_all(path).expect("create secure root");
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("secure permissions");
+}
+
+fn open_descriptor_count() -> usize {
+    fs::read_dir("/dev/fd")
+        .expect("read process descriptors")
+        .filter_map(Result::ok)
+        .count()
+}
+
+fn wait_until(timeout: Duration, predicate: impl Fn() -> bool) {
+    let deadline = Instant::now() + timeout;
+    while !predicate() {
+        assert!(
+            Instant::now() < deadline,
+            "condition was not met before timeout"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
 }
 
 fn grant(path: &Path, workspace_id: &str, generation: u64) -> WorkspaceGrant {
@@ -787,6 +808,105 @@ fn reauthorization_pending_grant_must_match_old_identity_or_registry_path() {
         .is_ok());
 }
 
+#[test]
+fn commit_workspace_authorization_revalidates_moved_and_replaced_pending_paths() {
+    for replace_original_path in [false, true] {
+        let root = tempdir().expect("root");
+        let channel = root.path().join("channel");
+        let workspace = root.path().join("workspace");
+        let moved = root.path().join("moved-workspace");
+        secure_root(&channel);
+        secure_root(&workspace);
+        let store = GrantStore::open(&channel, ReleaseChannel::Test).expect("store");
+        let journal = WorkspaceJournal::open(&channel, ReleaseChannel::Test).expect("journal");
+        let launch_id = Uuid::new_v4();
+        let registry = Arc::new(Mutex::new(PendingGrantRegistry::new(launch_id)));
+        let mut tables = BridgeDispatchTables::unavailable();
+        install_workspace_authority_handlers(
+            &mut tables,
+            launch_id,
+            store.clone(),
+            journal.clone(),
+            registry.clone(),
+            Arc::new(SequencePicker {
+                outcomes: Mutex::new(VecDeque::from([Some(workspace.clone())])),
+            }),
+            Arc::new(FixedConfirmation(true)),
+        )
+        .expect("authority handlers");
+        let executable = std::env::current_exe().expect("test executable");
+        let secret: Vec<u8> = (0..32).collect();
+        let peer = PeerIdentity {
+            uid: unsafe { libc::geteuid() },
+            pid: process::id(),
+        };
+        let dispatcher = AuthenticatedBridgeDispatcher::new(
+            peer.uid,
+            capture_process_identity(process::id(), &executable).expect("process identity"),
+            executable,
+            launch_id,
+            secret.clone(),
+            tables,
+        )
+        .expect("Workspace dispatcher");
+        let pending = dispatch_workspace(
+            &dispatcher,
+            launch_id,
+            &secret,
+            peer,
+            1,
+            "beginWorkspaceAuthorization",
+            serde_json::Value::Null,
+        );
+        let pending_id = pending["result"]["pendingGrantId"]
+            .as_str()
+            .expect("pending grant id");
+        let operation_id = Uuid::new_v4();
+        journal
+            .write(
+                WorkspaceTransaction {
+                    version: 1,
+                    generation: 1,
+                    operation_id,
+                    kind: WorkspaceTransactionKind::Add,
+                    workspace_id: Some("workspace-1".to_owned()),
+                    expected_catalog_generation: 0,
+                    expected_grant_generation: 0,
+                    stage: "registry-committed".to_owned(),
+                },
+                0,
+            )
+            .expect("registry-committed journal");
+
+        fs::rename(&workspace, &moved).expect("move selected Workspace");
+        if replace_original_path {
+            secure_root(&workspace);
+        }
+
+        let committed = dispatch_workspace(
+            &dispatcher,
+            launch_id,
+            &secret,
+            peer,
+            2,
+            "commitWorkspaceAuthorization",
+            serde_json::json!({
+                "pendingGrantId": pending_id,
+                "workspaceId": "workspace-1",
+                "expectedGrantGeneration": 0,
+                "operationId": operation_id,
+            }),
+        );
+
+        assert_eq!(committed["ok"], false);
+        assert_eq!(committed["error"]["code"], "workspace_failure");
+        assert!(store
+            .get("workspace-1")
+            .expect("read rejected grant")
+            .is_none());
+    }
+}
+
 struct FixedConfirmation(bool);
 
 impl RevokeConfirmation for FixedConfirmation {
@@ -1114,6 +1234,117 @@ impl RevokeConfirmation for CancellationOnlyConfirmation {
         cancellation.wait();
         Ok(false)
     }
+}
+
+struct ReleasedDirectoryPicker {
+    path: PathBuf,
+    entered: Mutex<Option<mpsc::Sender<()>>>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl WorkspaceDirectoryPicker for ReleasedDirectoryPicker {
+    fn pick(&self) -> Result<Option<PathBuf>, WorkspaceGrantError> {
+        Err(WorkspaceGrantError::PromptUnavailable)
+    }
+
+    fn pick_cancellable(
+        &self,
+        _cancellation: &CancellationToken,
+    ) -> Result<Option<PathBuf>, WorkspaceGrantError> {
+        if let Some(entered) = self.entered.lock().expect("picker entered lock").take() {
+            entered.send(()).expect("report picker entry");
+        }
+        self.release
+            .lock()
+            .expect("picker release lock")
+            .recv()
+            .expect("release picker");
+        Ok(Some(self.path.clone()))
+    }
+}
+
+#[test]
+fn disconnected_begin_request_releases_pending_grant_and_descriptor_before_delivery() {
+    let root = tempdir().expect("root");
+    let channel = root.path().join("channel");
+    let workspace = root.path().join("workspace");
+    let socket_root = root.path().join("socket");
+    secure_root(&channel);
+    secure_root(&workspace);
+    secure_root(&socket_root);
+    let store = GrantStore::open(&channel, ReleaseChannel::Test).expect("store");
+    let journal = WorkspaceJournal::open(&channel, ReleaseChannel::Test).expect("journal");
+    let launch_id = Uuid::new_v4();
+    let registry = Arc::new(Mutex::new(PendingGrantRegistry::new(launch_id)));
+    let (picker_entered_tx, picker_entered_rx) = mpsc::channel();
+    let (release_picker_tx, release_picker_rx) = mpsc::channel();
+    let mut tables = BridgeDispatchTables::unavailable();
+    install_workspace_authority_handlers(
+        &mut tables,
+        launch_id,
+        store,
+        journal,
+        registry.clone(),
+        Arc::new(ReleasedDirectoryPicker {
+            path: workspace,
+            entered: Mutex::new(Some(picker_entered_tx)),
+            release: Mutex::new(release_picker_rx),
+        }),
+        Arc::new(FixedConfirmation(true)),
+    )
+    .expect("authority handlers");
+    let executable = std::env::current_exe().expect("test executable");
+    let secret: Vec<u8> = (0..32).collect();
+    let peer = PeerIdentity {
+        uid: unsafe { libc::geteuid() },
+        pid: process::id(),
+    };
+    let dispatcher = AuthenticatedBridgeDispatcher::new(
+        peer.uid,
+        capture_process_identity(process::id(), &executable).expect("process identity"),
+        executable,
+        launch_id,
+        secret.clone(),
+        tables,
+    )
+    .expect("Workspace dispatcher");
+    let descriptor_baseline = open_descriptor_count();
+    let socket_path = socket_root.join("bridge.sock");
+    let server = BridgeListener::bind(&socket_path)
+        .expect("bridge listener")
+        .serve(dispatcher)
+        .expect("bridge server");
+    let request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "disconnected-begin".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "beginWorkspaceAuthorization".to_owned(),
+        payload: serde_json::Value::Null,
+    };
+    let envelope = sign_request(request, [31; 32], &secret).expect("signed begin request");
+    let mut stream =
+        std::os::unix::net::UnixStream::connect(&socket_path).expect("connect Workspace bridge");
+    stream
+        .write_all(&encode_frame(&envelope).expect("begin request frame"))
+        .expect("write begin request");
+    picker_entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("picker entered");
+    stream
+        .shutdown(Shutdown::Both)
+        .expect("disconnect before picker returns");
+    drop(stream);
+    release_picker_tx.send(()).expect("release picker");
+
+    wait_until(Duration::from_secs(1), || {
+        registry.lock().expect("registry").pending_count() == 0
+    });
+    drop(server);
+    wait_until(Duration::from_secs(1), || {
+        open_descriptor_count() <= descriptor_baseline
+    });
+    assert_eq!(registry.lock().expect("registry").pending_count(), 0);
+    assert!(open_descriptor_count() <= descriptor_baseline);
 }
 
 #[test]

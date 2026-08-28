@@ -20,7 +20,7 @@ use objc2_foundation::{MainThreadMarker, NSThread};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
-use crate::bridge::server::CancellationToken;
+use crate::bridge::server::{CancellationSubscription, CancellationToken};
 
 use super::grants::{
     reopen_verified_grant, FileIdentity, GrantStatus, LaunchGrant, WorkspaceGrant,
@@ -30,6 +30,7 @@ use super::grants::{
 struct PendingGrant {
     grant: WorkspaceGrant,
     descriptor: OwnedFd,
+    cancellation: Option<CancellationSubscription>,
 }
 
 pub trait WorkspaceDirectoryPicker: Send + Sync {
@@ -307,9 +308,32 @@ impl PendingGrantRegistry {
         let verified = reopen_verified_grant(&candidate)?;
         let (grant, descriptor) = verified.into_parts();
         let pending_id = Uuid::new_v4();
-        self.pending
-            .insert(pending_id, PendingGrant { grant, descriptor });
+        self.pending.insert(
+            pending_id,
+            PendingGrant {
+                grant,
+                descriptor,
+                cancellation: None,
+            },
+        );
         Ok(pending_id)
+    }
+
+    pub(crate) fn attach_cancellation(
+        &mut self,
+        launch_id: Uuid,
+        pending_id: Uuid,
+        cancellation: CancellationSubscription,
+    ) -> Result<(), WorkspaceGrantError> {
+        if launch_id != self.launch_id {
+            return Err(WorkspaceGrantError::LaunchMismatch);
+        }
+        let pending = self
+            .pending
+            .get_mut(&pending_id)
+            .ok_or(WorkspaceGrantError::InvalidPendingGrant)?;
+        pending.cancellation = Some(cancellation);
+        Ok(())
     }
 
     pub fn commit(
@@ -328,6 +352,8 @@ impl PendingGrantRegistry {
         if workspace_id.is_empty() {
             return Err(WorkspaceGrantError::InvalidPendingGrant);
         }
+        verify_pending_grant(&pending)?;
+        pending.cancellation = None;
         pending.grant.workspace_id = workspace_id.to_owned();
         let grant = pending.grant.clone();
         self.committed.insert(workspace_id.to_owned(), pending);
@@ -350,6 +376,7 @@ impl PendingGrantRegistry {
             .pending
             .get(&pending_id)
             .ok_or(WorkspaceGrantError::InvalidPendingGrant)?;
+        verify_pending_grant(pending)?;
         let mut grant = pending.grant.clone();
         grant.workspace_id = workspace_id.to_owned();
         Ok(grant)
@@ -405,8 +432,38 @@ impl PendingGrantRegistry {
             };
             self.committed.insert(
                 grant.workspace_id.clone(),
-                PendingGrant { grant, descriptor },
+                PendingGrant {
+                    grant,
+                    descriptor,
+                    cancellation: None,
+                },
             );
         }
     }
+}
+
+fn verify_pending_grant(pending: &PendingGrant) -> Result<(), WorkspaceGrantError> {
+    let reopened = reopen_verified_grant(&pending.grant)?;
+    if reopened.grant().identity != pending.grant.identity {
+        return Err(WorkspaceGrantError::InvalidPendingGrant);
+    }
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(pending.descriptor.as_raw_fd(), metadata.as_mut_ptr()) } < 0 {
+        return Err(WorkspaceGrantError::Io(
+            "inspect pending Workspace descriptor",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let metadata = unsafe { metadata.assume_init() };
+    if metadata.st_mode as u32 & libc::S_IFMT as u32 != libc::S_IFDIR as u32
+        || (FileIdentity {
+            volume_id: metadata.st_dev as u64,
+            file_id: metadata.st_ino,
+        }) != pending.grant.identity
+        || metadata.st_uid != unsafe { libc::geteuid() }
+        || metadata.st_mode as u32 & 0o002 != 0
+    {
+        return Err(WorkspaceGrantError::InvalidPendingGrant);
+    }
+    Ok(())
 }
