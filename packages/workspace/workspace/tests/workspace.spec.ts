@@ -15,10 +15,12 @@ import WorkspaceRegistry, {
   WorkspaceGenerationConflictError,
   WorkspaceMoveInvalidError,
   WorkspaceOrderInvalidError,
+  workspaceDomainSpec,
+  workspaceDomainState,
 } from '../src/index.ts'
 import type { WorkspaceDomainState, WorkspaceRecord } from '../src/index.ts'
 
-const DOMAIN_VERSION = 3
+const DOMAIN_VERSION = 2
 
 const header = (id: string, cwd?: string, createdAt = 0): SessionHeader => ({
   version: 0,
@@ -364,6 +366,20 @@ describe('WorkspaceRegistry lifecycle and bootstrap', () => {
 })
 
 describe('WorkspaceRegistry create and lookup', () => {
+  it('keeps the Workspace domain on durable version 2 while defaulting generation', () => {
+    expect(workspaceDomainSpec.version).toBe(2)
+    expect(workspaceDomainState.parse({
+      initialized: true,
+      workspaceIds: [],
+      archivedSessionIds: [],
+    })).toEqual({
+      initialized: true,
+      workspaceIds: [],
+      archivedSessionIds: [],
+      generation: 0,
+    })
+  })
+
   it('guards structural mutations with a durable monotonic catalog generation', async () => {
     const firstDir = await makeDir('generation-first')
     const secondDir = await makeDir('generation-second')

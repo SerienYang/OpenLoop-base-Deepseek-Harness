@@ -55,6 +55,7 @@ export const HOST_ONLY_METHODS = [
   'restoreWorkspaceGrantReady',
   'confirmWorkspaceRevoke',
   'markWorkspaceGrantRevoking',
+  'markWorkspaceGrantReauthorizing',
   'deleteWorkspaceGrant',
   'readWorkspaceTransaction',
   'prepareWorkspaceTransaction',
@@ -338,7 +339,8 @@ export class OpenloopDesktopHostClient {
   commitWorkspaceAuthorization(
     pendingGrantId: string,
     workspaceId: string,
-    expectedGrantGeneration?: number,
+    expectedGrantGeneration: number,
+    operationId: string,
     expectedCanonicalPath?: string,
     signal?: AbortSignal,
   ): Promise<CommittedWorkspaceGrant> {
@@ -348,6 +350,7 @@ export class OpenloopDesktopHostClient {
         pendingGrantId,
         workspaceId,
         expectedGrantGeneration,
+        operationId,
         ...(expectedCanonicalPath === undefined ? {} : { expectedCanonicalPath }),
       },
       signal,
@@ -372,11 +375,16 @@ export class OpenloopDesktopHostClient {
   markWorkspaceGrantNeedsAuthorization(
     workspaceId: string,
     expectedGrantGeneration: number,
+    operationId?: string,
     signal?: AbortSignal,
   ): Promise<number> {
     return this.#client.call(
       'markWorkspaceGrantNeedsAuthorization',
-      { expectedGrantGeneration, workspaceId },
+      {
+        expectedGrantGeneration,
+        workspaceId,
+        ...(operationId === undefined ? {} : { operationId }),
+      },
       signal,
     )
   }
@@ -384,11 +392,12 @@ export class OpenloopDesktopHostClient {
   restoreWorkspaceGrantReady(
     workspaceId: string,
     expectedGrantGeneration: number,
+    operationId: string,
     signal?: AbortSignal,
   ): Promise<number> {
     return this.#client.call(
       'restoreWorkspaceGrantReady',
-      { expectedGrantGeneration, workspaceId },
+      { expectedGrantGeneration, operationId, workspaceId },
       signal,
     )
   }
@@ -404,11 +413,25 @@ export class OpenloopDesktopHostClient {
   markWorkspaceGrantRevoking(
     workspaceId: string,
     expectedGrantGeneration: number,
+    operationId: string,
     signal?: AbortSignal,
   ): Promise<number> {
     return this.#client.call<number>(
       'markWorkspaceGrantRevoking',
-      { expectedGrantGeneration, workspaceId },
+      { expectedGrantGeneration, operationId, workspaceId },
+      signal,
+    )
+  }
+
+  markWorkspaceGrantReauthorizing(
+    workspaceId: string,
+    expectedGrantGeneration: number,
+    operationId: string,
+    signal?: AbortSignal,
+  ): Promise<number> {
+    return this.#client.call<number>(
+      'markWorkspaceGrantReauthorizing',
+      { expectedGrantGeneration, operationId, workspaceId },
       signal,
     )
   }
@@ -416,11 +439,12 @@ export class OpenloopDesktopHostClient {
   deleteWorkspaceGrant(
     workspaceId: string,
     expectedGrantGeneration: number,
+    operationId: string,
     signal?: AbortSignal,
   ): Promise<number> {
     return this.#client.call<number>(
       'deleteWorkspaceGrant',
-      { expectedGrantGeneration, workspaceId },
+      { expectedGrantGeneration, operationId, workspaceId },
       signal,
     )
   }

@@ -344,6 +344,7 @@ describe('authenticated desktop bridge protocol', () => {
       'restoreWorkspaceGrantReady',
       'confirmWorkspaceRevoke',
       'markWorkspaceGrantRevoking',
+      'markWorkspaceGrantReauthorizing',
       'deleteWorkspaceGrant',
       'readWorkspaceTransaction',
       'prepareWorkspaceTransaction',

@@ -64,6 +64,10 @@ pub struct WorkspaceGrant {
     pub version: u8,
     pub generation: u64,
     pub operation_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_operation_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_status: Option<GrantStatus>,
     pub workspace_id: String,
     pub canonical_path: PathBuf,
     pub display_path: PathBuf,
@@ -335,6 +339,134 @@ impl GrantStore {
         Ok(snapshot.generation)
     }
 
+    pub fn begin_operation(
+        &self,
+        workspace_id: &str,
+        expected_status: GrantStatus,
+        next_status: GrantStatus,
+        expected_generation: u64,
+        operation_id: Uuid,
+    ) -> Result<u64, WorkspaceGrantError> {
+        let _lock = lock_workspace_root(self.root.as_raw_fd())?;
+        let mut snapshot = self.load_locked()?;
+        assert_generation(&snapshot, expected_generation)?;
+        let grant = snapshot
+            .grants
+            .iter_mut()
+            .find(|grant| grant.workspace_id == workspace_id)
+            .ok_or_else(|| WorkspaceGrantError::MissingWorkspaceGrant(workspace_id.to_owned()))?;
+        if grant.status != expected_status {
+            return Err(WorkspaceGrantError::StatusConflict {
+                expected: expected_status,
+                actual: grant.status,
+            });
+        }
+        snapshot.generation = next_generation(snapshot.generation)?;
+        grant.generation = snapshot.generation;
+        grant.status = next_status;
+        grant.previous_operation_id = Some(grant.operation_id);
+        grant.previous_status = Some(expected_status);
+        grant.operation_id = operation_id;
+        atomic_write_json_at(self.root.as_raw_fd(), &self.filename, &snapshot)?;
+        Ok(snapshot.generation)
+    }
+
+    pub fn rollback_operation(
+        &self,
+        workspace_id: &str,
+        expected_status: GrantStatus,
+        expected_generation: u64,
+        operation_id: Uuid,
+    ) -> Result<u64, WorkspaceGrantError> {
+        let _lock = lock_workspace_root(self.root.as_raw_fd())?;
+        let mut snapshot = self.load_locked()?;
+        assert_generation(&snapshot, expected_generation)?;
+        let grant = snapshot
+            .grants
+            .iter_mut()
+            .find(|grant| grant.workspace_id == workspace_id)
+            .ok_or_else(|| WorkspaceGrantError::MissingWorkspaceGrant(workspace_id.to_owned()))?;
+        if grant.status != expected_status || grant.operation_id != operation_id {
+            return Err(WorkspaceGrantError::InvalidPendingGrant);
+        }
+        let previous_operation_id = grant
+            .previous_operation_id
+            .take()
+            .ok_or(WorkspaceGrantError::InvalidPendingGrant)?;
+        let previous_status = grant
+            .previous_status
+            .take()
+            .ok_or(WorkspaceGrantError::InvalidPendingGrant)?;
+        snapshot.generation = next_generation(snapshot.generation)?;
+        grant.generation = snapshot.generation;
+        grant.status = previous_status;
+        grant.operation_id = previous_operation_id;
+        atomic_write_json_at(self.root.as_raw_fd(), &self.filename, &snapshot)?;
+        Ok(snapshot.generation)
+    }
+
+    pub fn finish_operation(
+        &self,
+        workspace_id: &str,
+        expected_status: GrantStatus,
+        next_status: GrantStatus,
+        expected_generation: u64,
+        operation_id: Uuid,
+    ) -> Result<u64, WorkspaceGrantError> {
+        let _lock = lock_workspace_root(self.root.as_raw_fd())?;
+        let mut snapshot = self.load_locked()?;
+        assert_generation(&snapshot, expected_generation)?;
+        let grant = snapshot
+            .grants
+            .iter_mut()
+            .find(|grant| grant.workspace_id == workspace_id)
+            .ok_or_else(|| WorkspaceGrantError::MissingWorkspaceGrant(workspace_id.to_owned()))?;
+        if grant.status != expected_status || grant.operation_id != operation_id {
+            return Err(WorkspaceGrantError::InvalidPendingGrant);
+        }
+        snapshot.generation = next_generation(snapshot.generation)?;
+        grant.generation = snapshot.generation;
+        grant.status = next_status;
+        grant.previous_operation_id = None;
+        grant.previous_status = None;
+        atomic_write_json_at(self.root.as_raw_fd(), &self.filename, &snapshot)?;
+        Ok(snapshot.generation)
+    }
+
+    pub fn delete_operation(
+        &self,
+        workspace_id: &str,
+        expected_status: GrantStatus,
+        expected_generation: u64,
+        operation_id: Uuid,
+    ) -> Result<u64, WorkspaceGrantError> {
+        let _lock = lock_workspace_root(self.root.as_raw_fd())?;
+        let mut snapshot = self.load_locked()?;
+        assert_generation(&snapshot, expected_generation)?;
+        let Some(index) = snapshot
+            .grants
+            .iter()
+            .position(|grant| grant.workspace_id == workspace_id)
+        else {
+            return Err(WorkspaceGrantError::MissingWorkspaceGrant(
+                workspace_id.to_owned(),
+            ));
+        };
+        if snapshot.grants[index].operation_id != operation_id {
+            return Err(WorkspaceGrantError::InvalidPendingGrant);
+        }
+        if snapshot.grants[index].status != expected_status {
+            return Err(WorkspaceGrantError::StatusConflict {
+                expected: expected_status,
+                actual: snapshot.grants[index].status,
+            });
+        }
+        snapshot.grants.remove(index);
+        snapshot.generation = next_generation(snapshot.generation)?;
+        atomic_write_json_at(self.root.as_raw_fd(), &self.filename, &snapshot)?;
+        Ok(snapshot.generation)
+    }
+
     pub fn delete(
         &self,
         workspace_id: &str,
@@ -403,6 +535,17 @@ fn parse_snapshot(bytes: &[u8]) -> Result<GrantSnapshot, WorkspaceGrantError> {
         if !ids.insert(grant.workspace_id.clone()) {
             return Err(WorkspaceGrantError::DuplicateWorkspaceId(
                 grant.workspace_id.clone(),
+            ));
+        }
+        let transitional = matches!(
+            grant.status,
+            GrantStatus::Revoking | GrantStatus::Reauthorizing
+        );
+        if grant.previous_operation_id.is_some() != grant.previous_status.is_some()
+            || (!transitional && grant.previous_operation_id.is_some())
+        {
+            return Err(WorkspaceGrantError::Corrupt(
+                "Workspace grant operation rollback fields are inconsistent".to_owned(),
             ));
         }
     }

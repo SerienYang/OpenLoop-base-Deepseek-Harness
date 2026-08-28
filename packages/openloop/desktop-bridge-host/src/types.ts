@@ -92,6 +92,7 @@ export interface CommittedWorkspaceGrant {
 export interface WorkspaceGrantInspection {
   readonly exists: boolean
   readonly generation?: number
+  readonly operationId?: string
   readonly identityValid: boolean
   readonly status?: WorkspaceGrantView['state'] | 'reauthorizing'
 }

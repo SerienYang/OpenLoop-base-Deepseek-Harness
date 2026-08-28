@@ -47,7 +47,7 @@ pub const BROWSER_SAFE_METHODS: [&str; 13] = [
     "revealWorkspace",
 ];
 
-pub const HOST_ONLY_METHODS: [&str; 20] = [
+pub const HOST_ONLY_METHODS: [&str; 21] = [
     "resolveCredential",
     "getCandidateCredentialHealthPlan",
     "acknowledgeMainWebviewHealth",
@@ -60,6 +60,7 @@ pub const HOST_ONLY_METHODS: [&str; 20] = [
     "restoreWorkspaceGrantReady",
     "confirmWorkspaceRevoke",
     "markWorkspaceGrantRevoking",
+    "markWorkspaceGrantReauthorizing",
     "deleteWorkspaceGrant",
     "readWorkspaceTransaction",
     "prepareWorkspaceTransaction",

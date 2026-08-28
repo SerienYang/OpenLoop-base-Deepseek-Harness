@@ -112,6 +112,8 @@ fn grant(path: &Path, workspace_id: &str, generation: u64) -> WorkspaceGrant {
         version: 1,
         generation,
         operation_id: Uuid::new_v4(),
+        previous_operation_id: None,
+        previous_status: None,
         workspace_id: workspace_id.to_owned(),
         canonical_path: canonical.clone(),
         display_path: canonical,
@@ -791,12 +793,13 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
         .as_str()
         .expect("pending id");
     assert_eq!(registry.lock().expect("registry").pending_count(), 1);
+    let operation_id = Uuid::new_v4();
     journal
         .write(
             WorkspaceTransaction {
                 version: 1,
                 generation: 1,
-                operation_id: Uuid::new_v4(),
+                operation_id,
                 kind: WorkspaceTransactionKind::Add,
                 workspace_id: Some("workspace-1".to_owned()),
                 expected_catalog_generation: 0,
@@ -818,6 +821,7 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
             "pendingGrantId": pending_id,
             "workspaceId": "workspace-1",
             "expectedGrantGeneration": 0,
+            "operationId": operation_id,
         }),
     );
     assert_eq!(
@@ -828,14 +832,12 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
     assert!(!serialized.contains(workspace.to_string_lossy().as_ref()));
     assert!(!serialized.contains("pendingGrantId"));
     assert!(!serialized.contains("identity"));
-    assert_eq!(
-        store
-            .get("workspace-1")
-            .expect("read grant")
-            .expect("committed grant")
-            .status,
-        GrantStatus::Ready
-    );
+    let committed_grant = store
+        .get("workspace-1")
+        .expect("read grant")
+        .expect("committed grant");
+    assert_eq!(committed_grant.status, GrantStatus::Ready);
+    assert_eq!(committed_grant.operation_id, operation_id);
     assert!(registry
         .lock()
         .expect("registry")
@@ -856,6 +858,7 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
         serde_json::json!({
             "exists": true,
             "generation": 1,
+            "operationId": operation_id,
             "identityValid": true,
             "status": "ready",
         })
@@ -875,26 +878,86 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
         }),
     );
     assert_eq!(needs_authorization["result"], 2);
-    let restored = dispatch_workspace(
+    assert_eq!(
+        store
+            .update_status(
+                "workspace-1",
+                GrantStatus::NeedsAuthorization,
+                GrantStatus::Ready,
+                2,
+            )
+            .expect("restore ready for transaction test"),
+        3
+    );
+
+    journal.clear(1).expect("clear add transaction");
+    let reauthorize_operation_id = Uuid::new_v4();
+    journal
+        .write(
+            WorkspaceTransaction {
+                version: 1,
+                generation: 1,
+                operation_id: reauthorize_operation_id,
+                kind: WorkspaceTransactionKind::Reauthorize,
+                workspace_id: Some("workspace-1".to_owned()),
+                expected_catalog_generation: 1,
+                expected_grant_generation: 3,
+                stage: "reauthorize-prepared".to_owned(),
+            },
+            0,
+        )
+        .expect("reauthorize-prepared journal");
+    let reauthorizing = dispatch_workspace(
         &dispatcher,
         launch_id,
         &secret,
         peer,
         7,
+        "markWorkspaceGrantReauthorizing",
+        serde_json::json!({
+            "workspaceId": "workspace-1",
+            "expectedGrantGeneration": 3,
+            "operationId": reauthorize_operation_id,
+        }),
+    );
+    assert_eq!(reauthorizing["result"], 4);
+    let frozen = store
+        .get("workspace-1")
+        .expect("frozen grant")
+        .expect("frozen record");
+    assert_eq!(frozen.status, GrantStatus::Reauthorizing);
+    assert_eq!(frozen.operation_id, reauthorize_operation_id);
+    assert_eq!(frozen.previous_operation_id, Some(operation_id));
+    assert_eq!(frozen.previous_status, Some(GrantStatus::Ready));
+    let restored = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        8,
         "restoreWorkspaceGrantReady",
         serde_json::json!({
             "workspaceId": "workspace-1",
-            "expectedGrantGeneration": 2,
+            "expectedGrantGeneration": 4,
+            "operationId": reauthorize_operation_id,
         }),
     );
-    assert_eq!(restored["result"], 3);
+    assert_eq!(restored["result"], 5);
+    let restored_grant = store
+        .get("workspace-1")
+        .expect("restored grant")
+        .expect("restored record");
+    assert_eq!(restored_grant.status, GrantStatus::Ready);
+    assert_eq!(restored_grant.operation_id, operation_id);
+    assert_eq!(restored_grant.previous_operation_id, None);
+    assert_eq!(restored_grant.previous_status, None);
 
     let confirmed = dispatch_workspace(
         &dispatcher,
         launch_id,
         &secret,
         peer,
-        8,
+        9,
         "confirmWorkspaceRevoke",
         serde_json::json!({
             "workspaceId": "workspace-1",
@@ -914,32 +977,59 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
         }]
     );
 
+    journal.clear(1).expect("clear reauthorization transaction");
+    let revoke_operation_id = Uuid::new_v4();
+    let revoke_transaction = WorkspaceTransaction {
+        version: 1,
+        generation: 1,
+        operation_id: revoke_operation_id,
+        kind: WorkspaceTransactionKind::Revoke,
+        workspace_id: Some("workspace-1".to_owned()),
+        expected_catalog_generation: 1,
+        expected_grant_generation: 5,
+        stage: "revoke-prepared".to_owned(),
+    };
+    journal
+        .write(revoke_transaction.clone(), 0)
+        .expect("revoke-prepared journal");
     let revoking = dispatch_workspace(
         &dispatcher,
         launch_id,
         &secret,
         peer,
-        9,
+        10,
         "markWorkspaceGrantRevoking",
         serde_json::json!({
             "workspaceId": "workspace-1",
-            "expectedGrantGeneration": 3,
+            "expectedGrantGeneration": 5,
+            "operationId": revoke_operation_id,
         }),
     );
-    assert_eq!(revoking["result"], 4);
+    assert_eq!(revoking["result"], 6);
+    journal
+        .write(
+            WorkspaceTransaction {
+                generation: 2,
+                stage: "registry-deleted".to_owned(),
+                ..revoke_transaction
+            },
+            1,
+        )
+        .expect("registry-deleted journal");
     let deleted = dispatch_workspace(
         &dispatcher,
         launch_id,
         &secret,
         peer,
-        10,
+        11,
         "deleteWorkspaceGrant",
         serde_json::json!({
             "workspaceId": "workspace-1",
-            "expectedGrantGeneration": 4,
+            "expectedGrantGeneration": 6,
+            "operationId": revoke_operation_id,
         }),
     );
-    assert_eq!(deleted["result"], 5);
+    assert_eq!(deleted["result"], 7);
     assert!(store.get("workspace-1").expect("deleted grant").is_none());
     assert!(registry
         .lock()

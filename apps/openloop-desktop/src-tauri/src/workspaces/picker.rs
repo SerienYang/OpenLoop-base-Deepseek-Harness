@@ -147,6 +147,8 @@ impl PendingGrantRegistry {
             version: 1,
             generation: 0,
             operation_id: Uuid::new_v4(),
+            previous_operation_id: None,
+            previous_status: None,
             workspace_id: String::new(),
             canonical_path: canonical.clone(),
             display_path: PathBuf::from(path),

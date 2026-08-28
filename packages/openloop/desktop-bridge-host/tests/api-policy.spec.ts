@@ -165,6 +165,7 @@ describe('OpenLoop browser API policy manifest', () => {
       'host.openPath',
       'workspace.create',
       'workspace.delete',
+      'workspace.list',
       'llm.discoverModels',
       'settings.mutate',
       'settings.openDocument',
@@ -194,7 +195,6 @@ describe('OpenLoop browser API policy manifest', () => {
     }
     for (const allowed of [
       'session.list',
-      'workspace.list',
       'commands/list',
       'commands/execute',
       'goals/edit',
@@ -206,6 +206,22 @@ describe('OpenLoop browser API policy manifest', () => {
       'HEAD /api/session.export',
     ]) {
       expect([allowed, policy.allows(allowed, {})]).toEqual([allowed, true])
+    }
+  })
+
+  it('blocks every legacy Workspace API in the OpenLoop browser profile', () => {
+    const policy = createBrowserApiPolicy(shippedManifest())
+
+    for (const method of [
+      'workspace.list',
+      'workspace.create',
+      'workspace.rename',
+      'workspace.delete',
+      'workspace.insertBefore',
+      'workspace.archiveSession',
+      'workspace.unarchiveSession',
+    ]) {
+      expect([method, policy.allows(method, {})]).toEqual([method, false])
     }
   })
 

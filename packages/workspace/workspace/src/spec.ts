@@ -67,7 +67,7 @@ export type WorkspaceDomainState = z.infer<typeof workspaceDomainState>
  */
 export const workspaceDomainSpec = defineDomain({
   name: 'workspace',
-  version: 3,
+  version: 2,
   global: {
     schema: workspaceDomainState,
     initial: {

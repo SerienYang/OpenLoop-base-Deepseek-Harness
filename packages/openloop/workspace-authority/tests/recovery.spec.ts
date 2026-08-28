@@ -23,15 +23,16 @@ function transaction(
 function port(overrides: Partial<WorkspaceRecoveryPort> = {}): WorkspaceRecoveryPort {
   return {
     catalogGeneration: vi.fn(async () => 1),
+    grantGeneration: vi.fn(async () => 1),
     workspaceExists: vi.fn(async () => true),
     inspectGrant: vi.fn(async () => ({
       exists: true,
       generation: 1,
+      operationId: 'operation-1',
       identityValid: true,
       status: 'revoking' as const,
     })),
     restoreGrantReady: vi.fn(async () => 2),
-    markGrantRevoking: vi.fn(async () => 2),
     markNeedsAuthorization: vi.fn(async () => 2),
     deleteGrant: vi.fn(async () => 2),
     discardPendingGrant: vi.fn(async () => {}),
@@ -71,12 +72,22 @@ describe('Workspace transaction recovery', () => {
   })
 
   it('restores a revoke-prepared grant only while registry and identity remain valid', async () => {
-    const valid = port()
+    const valid = port({
+      grantGeneration: vi.fn(async () => 2),
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 2,
+        operationId: 'operation-1',
+        identityValid: true,
+        status: 'revoking' as const,
+      })),
+    })
     await expect(recoverWorkspaceTransaction(
       transaction('revoke', 'revoke-prepared'),
       valid,
     )).resolves.toBe('rolled-back')
-    expect(valid.restoreGrantReady).toHaveBeenCalledWith('workspace-1', 1)
+    expect(valid.restoreGrantReady)
+      .toHaveBeenCalledWith('workspace-1', 2, 'operation-1')
     expect(valid.abortTransaction).toHaveBeenCalledWith({
       operationId: 'operation-1',
       generation: 1,
@@ -86,22 +97,39 @@ describe('Workspace transaction recovery', () => {
     const invalid = port({
       inspectGrant: vi.fn(async () => ({
         exists: true,
-        generation: 1,
+        generation: 2,
+        operationId: 'operation-1',
         identityValid: false,
         status: 'revoking' as const,
       })),
+      grantGeneration: vi.fn(async () => 2),
     })
     await recoverWorkspaceTransaction(transaction('revoke', 'revoke-prepared'), invalid)
-    expect(invalid.markNeedsAuthorization).toHaveBeenCalledWith('workspace-1', 1)
+    expect(invalid.markNeedsAuthorization)
+      .toHaveBeenCalledWith('workspace-1', 2, 'operation-1')
   })
 
   it('finishes grant deletion after registry-deleted', async () => {
-    const value = port({ catalogGeneration: vi.fn(async () => 2) })
+    const value = port({
+      catalogGeneration: vi.fn(async () => 2),
+      grantGeneration: vi.fn(async () => 2),
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 2,
+        operationId: 'operation-1',
+        identityValid: true,
+        status: 'revoking' as const,
+      })),
+    })
     await expect(recoverWorkspaceTransaction(
       transaction('revoke', 'registry-deleted'),
       value,
     )).resolves.toBe('completed')
-    expect(value.deleteGrant).toHaveBeenCalledWith('workspace-1', 1)
+    expect(value.deleteGrant).toHaveBeenCalledWith(
+      'workspace-1',
+      2,
+      'operation-1',
+    )
     expect(value.advanceTransaction).toHaveBeenCalledWith({
       operationId: 'operation-1',
       generation: 1,
@@ -122,6 +150,7 @@ describe('Workspace transaction recovery', () => {
         exists: false,
         identityValid: false,
       })),
+      grantGeneration: vi.fn(async () => 3),
     })
     await expect(recoverWorkspaceTransaction(
       transaction('revoke', 'grant-deleted'),
@@ -131,31 +160,53 @@ describe('Workspace transaction recovery', () => {
   })
 
   it('recovers reauthorize-prepared according to old identity validity', async () => {
-    const valid = port()
+    const valid = port({
+      grantGeneration: vi.fn(async () => 2),
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 2,
+        operationId: 'operation-1',
+        identityValid: true,
+        status: 'reauthorizing' as const,
+      })),
+    })
     await expect(recoverWorkspaceTransaction(
       transaction('reauthorize', 'reauthorize-prepared'),
       valid,
     )).resolves.toBe('rolled-back')
     expect(valid.discardPendingGrant).toHaveBeenCalledWith('operation-1')
-    expect(valid.restoreGrantReady).toHaveBeenCalledWith('workspace-1', 1)
+    expect(valid.restoreGrantReady)
+      .toHaveBeenCalledWith('workspace-1', 2, 'operation-1')
 
     const invalid = port({
       inspectGrant: vi.fn(async () => ({
         exists: true,
-        generation: 1,
+        generation: 2,
+        operationId: 'operation-1',
         identityValid: false,
         status: 'reauthorizing' as const,
       })),
+      grantGeneration: vi.fn(async () => 2),
     })
     await recoverWorkspaceTransaction(
       transaction('reauthorize', 'reauthorize-prepared'),
       invalid,
     )
-    expect(invalid.markNeedsAuthorization).toHaveBeenCalledWith('workspace-1', 1)
+    expect(invalid.markNeedsAuthorization)
+      .toHaveBeenCalledWith('workspace-1', 2, 'operation-1')
   })
 
   it('uses a committed new grant as the completion fact', async () => {
-    const value = port()
+    const value = port({
+      grantGeneration: vi.fn(async () => 3),
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 3,
+        operationId: 'operation-1',
+        identityValid: true,
+        status: 'ready' as const,
+      })),
+    })
     await expect(recoverWorkspaceTransaction(
       transaction('reauthorize', 'grant-committed'),
       value,
@@ -164,6 +215,88 @@ describe('Workspace transaction recovery', () => {
       operationId: 'operation-1',
       generation: 1,
       stage: 'grant-committed',
+    })
+  })
+
+  it('finishes reauthorization when the matching replacement grant committed first', async () => {
+    const value = port({
+      grantGeneration: vi.fn(async () => 3),
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 3,
+        operationId: 'operation-1',
+        identityValid: true,
+        status: 'ready' as const,
+      })),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('reauthorize', 'reauthorize-prepared'),
+      value,
+    )).resolves.toBe('completed')
+    expect(value.restoreGrantReady).not.toHaveBeenCalled()
+    expect(value.advanceTransaction).toHaveBeenCalledWith({
+      operationId: 'operation-1',
+      generation: 1,
+      stage: 'reauthorize-prepared',
+    }, 'grant-committed')
+  })
+
+  it('finishes an add whose matching grant committed before its journal advance', async () => {
+    const value = port({
+      grantGeneration: vi.fn(async () => 2),
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 2,
+        operationId: 'operation-1',
+        identityValid: true,
+        status: 'ready' as const,
+      })),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('add', 'registry-committed'),
+      value,
+    )).resolves.toBe('completed')
+    expect(value.markNeedsAuthorization).not.toHaveBeenCalled()
+    expect(value.advanceTransaction).toHaveBeenCalledWith({
+      operationId: 'operation-1',
+      generation: 1,
+      stage: 'registry-committed',
+    }, 'grant-committed')
+  })
+
+  it('rejects a grant from another operation instead of guessing across the crash window', async () => {
+    const value = port({
+      grantGeneration: vi.fn(async () => 2),
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 2,
+        operationId: 'other-operation',
+        identityValid: true,
+        status: 'ready' as const,
+      })),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('add', 'registry-committed'),
+      value,
+    )).resolves.toBe('stale-generation')
+    expect(value.markNeedsAuthorization).not.toHaveBeenCalled()
+    expect(value.completeTransaction).not.toHaveBeenCalled()
+  })
+
+  it('reports authorization-failed as needs-authorization after clearing its journal', async () => {
+    const value = port()
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('add', 'authorization-failed'),
+      value,
+    )).resolves.toBe('needs-authorization')
+    expect(value.completeTransaction).toHaveBeenCalledWith({
+      operationId: 'operation-1',
+      generation: 1,
+      stage: 'authorization-failed',
     })
   })
 

@@ -19,8 +19,7 @@
     "subagent.history",
     "subagent.interrupt",
     "subagent.list",
-    "subagent.prompt",
-    "workspace.list"
+    "subagent.prompt"
   ],
   "typertRemoteEndpoints": [
     "commands/execute",

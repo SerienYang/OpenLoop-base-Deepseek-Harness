@@ -16,6 +16,72 @@ function transaction(): WorkspaceTransaction {
 }
 
 describe('WorkspaceAuthorityService recovery lifecycle', () => {
+  it('serves grant projections through the Cordis service proxy', async () => {
+    const ctx = new Context()
+    ctx.provide('workspaceRegistry', {
+      catalogGeneration: () => 0,
+      createExpected: vi.fn(),
+      deleteExpected: vi.fn(),
+      get: () => undefined,
+      list: () => [{
+        id: 'workspace-1',
+        title: 'Project Alpha',
+        path: '/host/project',
+      }],
+    } as never)
+    ctx.provide('desktopBridge', {
+      readWorkspaceTransaction: vi.fn(async () => null),
+      inspectWorkspaceGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 1,
+        identityValid: true,
+        operationId: 'operation-1',
+        status: 'ready',
+      })),
+    } as never)
+
+    const fiber = ctx.plugin(WorkspaceAuthorityService)
+    await fiber
+
+    await expect(ctx.workspaceAuthority.list()).resolves.toEqual([{
+      workspaceId: 'workspace-1',
+      name: 'Project Alpha',
+      state: 'ready',
+    }])
+    await fiber.dispose()
+  })
+
+  it('fails closed when a registry row has no complete Host grant projection', async () => {
+    const ctx = new Context()
+    ctx.provide('workspaceRegistry', {
+      catalogGeneration: () => 0,
+      createExpected: vi.fn(),
+      deleteExpected: vi.fn(),
+      get: () => undefined,
+      list: () => [{
+        id: 'workspace-1',
+        title: 'Project Alpha',
+        path: '/host/project',
+      }],
+    } as never)
+    ctx.provide('desktopBridge', {
+      readWorkspaceTransaction: vi.fn(async () => null),
+      inspectWorkspaceGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 1,
+        identityValid: true,
+      })),
+    } as never)
+
+    const fiber = ctx.plugin(WorkspaceAuthorityService)
+    await fiber
+
+    await expect(ctx.workspaceAuthority.list()).rejects.toThrow(
+      'Workspace grant "workspace-1" is incomplete',
+    )
+    await fiber.dispose()
+  })
+
   it('finishes durable recovery before publishing the service or accepting new operations', async () => {
     const events: string[] = []
     let releaseJournal!: (value: WorkspaceTransaction | null) => void
@@ -41,6 +107,7 @@ describe('WorkspaceAuthorityService recovery lifecycle', () => {
         events.push('inspect-grant')
         return { exists: false, identityValid: false }
       }),
+      getWorkspaceGrantGeneration: vi.fn(async () => 0),
       markWorkspaceGrantNeedsAuthorization: vi.fn(),
       restoreWorkspaceGrantReady: vi.fn(),
       deleteWorkspaceGrant: vi.fn(),
@@ -69,6 +136,7 @@ describe('WorkspaceAuthorityService recovery lifecycle', () => {
     expect(ctx.workspaceAuthority).toBeInstanceOf(WorkspaceAuthorityService)
     expect(events).toEqual([
       'read-journal',
+      'inspect-grant',
       'advance:authorization-failed',
       'complete',
     ])

@@ -20,6 +20,7 @@ struct CommitGrantInput {
     pending_grant_id: Uuid,
     workspace_id: String,
     expected_grant_generation: u64,
+    operation_id: Uuid,
     expected_canonical_path: Option<PathBuf>,
 }
 
@@ -34,6 +35,15 @@ struct PendingGrantInput {
 struct WorkspaceGrantMutationInput {
     workspace_id: String,
     expected_grant_generation: u64,
+    operation_id: Option<Uuid>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceGrantOperationInput {
+    workspace_id: String,
+    expected_grant_generation: u64,
+    operation_id: Uuid,
 }
 
 #[derive(Deserialize)]
@@ -122,7 +132,7 @@ pub fn install_workspace_authority_handlers(
         .map_err(|error| error.to_string())?;
 
     let commit_store = store.clone();
-    let commit_journal = journal;
+    let commit_journal = journal.clone();
     let commit_registry = registry.clone();
     let commit: BridgeHandler = Arc::new(move |payload, cancellation| {
         let input: CommitGrantInput =
@@ -139,15 +149,22 @@ pub fn install_workspace_authority_handlers(
                     .read()
                     .map_err(|_| BridgeHandlerError::workspace_failure())?
                     .ok_or_else(BridgeHandlerError::workspace_failure)?;
-                let grant = match (transaction.kind, transaction.stage.as_str()) {
+                if transaction.operation_id != input.operation_id {
+                    return Err(BridgeHandlerError::invalid_request());
+                }
+                let mut grant = match (transaction.kind, transaction.stage.as_str()) {
                     (WorkspaceTransactionKind::Add, "registry-committed")
                         if transaction.workspace_id.as_deref() == Some(&input.workspace_id)
+                            && transaction.expected_grant_generation
+                                == input.expected_grant_generation
                             && input.expected_canonical_path.is_none() =>
                     {
                         registry.candidate(launch_id, input.pending_grant_id, &input.workspace_id)
                     }
                     (WorkspaceTransactionKind::Reauthorize, "reauthorize-prepared")
-                        if transaction.workspace_id.as_deref() == Some(&input.workspace_id) =>
+                        if transaction.workspace_id.as_deref() == Some(&input.workspace_id)
+                            && transaction.expected_grant_generation.checked_add(1)
+                                == Some(input.expected_grant_generation) =>
                     {
                         let old_grant = commit_store
                             .get(&input.workspace_id)
@@ -163,6 +180,9 @@ pub fn install_workspace_authority_handlers(
                     _ => Err(super::grants::WorkspaceGrantError::InvalidPendingGrant),
                 }
                 .map_err(|_| BridgeHandlerError::workspace_failure())?;
+                grant.operation_id = input.operation_id;
+                grant.previous_operation_id = None;
+                grant.previous_status = None;
                 commit_store
                     .commit(grant, input.expected_grant_generation)
                     .map_err(|_| BridgeHandlerError::workspace_failure())?;
@@ -234,6 +254,7 @@ pub fn install_workspace_authority_handlers(
             Some(grant) => json!({
                 "exists": true,
                 "generation": grant.generation,
+                "operationId": grant.operation_id,
                 "identityValid": identity_valid,
                 "status": grant.status,
             }),
@@ -257,14 +278,28 @@ pub fn install_workspace_authority_handlers(
                     .get(&input.workspace_id)
                     .map_err(|_| BridgeHandlerError::workspace_failure())?
                     .ok_or_else(BridgeHandlerError::workspace_failure)?;
-                let generation = needs_authorization_store
-                    .update_status(
+                let generation = if let Some(operation_id) = input.operation_id {
+                    needs_authorization_store.finish_operation(
+                        &input.workspace_id,
+                        current.status,
+                        GrantStatus::NeedsAuthorization,
+                        input.expected_grant_generation,
+                        operation_id,
+                    )
+                } else if matches!(
+                    current.status,
+                    GrantStatus::Revoking | GrantStatus::Reauthorizing
+                ) {
+                    Err(super::grants::WorkspaceGrantError::InvalidPendingGrant)
+                } else {
+                    needs_authorization_store.update_status(
                         &input.workspace_id,
                         current.status,
                         GrantStatus::NeedsAuthorization,
                         input.expected_grant_generation,
                     )
-                    .map_err(|_| BridgeHandlerError::workspace_failure())?;
+                }
+                .map_err(|_| BridgeHandlerError::workspace_failure())?;
                 Ok(json!(generation))
             })
             .ok_or_else(BridgeHandlerError::invalid_request)?
@@ -275,8 +310,9 @@ pub fn install_workspace_authority_handlers(
 
     let restore_store = store.clone();
     let restore_registry = registry.clone();
+    let restore_journal = journal.clone();
     let restore: BridgeHandler = Arc::new(move |payload, cancellation| {
-        let input: WorkspaceGrantMutationInput =
+        let input: WorkspaceGrantOperationInput =
             serde_json::from_value(payload).map_err(|_| BridgeHandlerError::invalid_request())?;
         cancellation
             .commit_if_active(|| {
@@ -288,16 +324,32 @@ pub fn install_workspace_authority_handlers(
                 {
                     return Err(BridgeHandlerError::workspace_failure());
                 }
-                let current = restore_store
-                    .get(&input.workspace_id)
+                let transaction = restore_journal
+                    .read()
                     .map_err(|_| BridgeHandlerError::workspace_failure())?
                     .ok_or_else(BridgeHandlerError::workspace_failure)?;
+                let expected_status = match (transaction.kind, transaction.stage.as_str()) {
+                    (WorkspaceTransactionKind::Revoke, "revoke-prepared")
+                    | (WorkspaceTransactionKind::Revoke, "registry-deleted")
+                        if transaction.workspace_id.as_deref() == Some(&input.workspace_id)
+                            && transaction.operation_id == input.operation_id =>
+                    {
+                        GrantStatus::Revoking
+                    }
+                    (WorkspaceTransactionKind::Reauthorize, "reauthorize-prepared")
+                        if transaction.workspace_id.as_deref() == Some(&input.workspace_id)
+                            && transaction.operation_id == input.operation_id =>
+                    {
+                        GrantStatus::Reauthorizing
+                    }
+                    _ => return Err(BridgeHandlerError::invalid_request()),
+                };
                 let generation = restore_store
-                    .update_status(
+                    .rollback_operation(
                         &input.workspace_id,
-                        current.status,
-                        GrantStatus::Ready,
+                        expected_status,
                         input.expected_grant_generation,
+                        input.operation_id,
                     )
                     .map_err(|_| BridgeHandlerError::workspace_failure())?;
                 Ok(json!(generation))
@@ -334,21 +386,31 @@ pub fn install_workspace_authority_handlers(
         .map_err(|error| error.to_string())?;
 
     let revoking_store = store.clone();
+    let revoking_journal = journal.clone();
     let mark_revoking: BridgeHandler = Arc::new(move |payload, cancellation| {
-        let input: WorkspaceGrantMutationInput =
+        let input: WorkspaceGrantOperationInput =
             serde_json::from_value(payload).map_err(|_| BridgeHandlerError::invalid_request())?;
         cancellation
             .commit_if_active(|| {
-                let current = revoking_store
-                    .get(&input.workspace_id)
+                let transaction = revoking_journal
+                    .read()
                     .map_err(|_| BridgeHandlerError::workspace_failure())?
                     .ok_or_else(BridgeHandlerError::workspace_failure)?;
+                if transaction.kind != WorkspaceTransactionKind::Revoke
+                    || transaction.stage != "revoke-prepared"
+                    || transaction.workspace_id.as_deref() != Some(&input.workspace_id)
+                    || transaction.operation_id != input.operation_id
+                    || transaction.expected_grant_generation != input.expected_grant_generation
+                {
+                    return Err(BridgeHandlerError::invalid_request());
+                }
                 let generation = revoking_store
-                    .update_status(
+                    .begin_operation(
                         &input.workspace_id,
-                        current.status,
+                        GrantStatus::Ready,
                         GrantStatus::Revoking,
                         input.expected_grant_generation,
+                        input.operation_id,
                     )
                     .map_err(|_| BridgeHandlerError::workspace_failure())?;
                 Ok(json!(generation))
@@ -359,18 +421,77 @@ pub fn install_workspace_authority_handlers(
         .set_host_handler("markWorkspaceGrantRevoking", mark_revoking)
         .map_err(|error| error.to_string())?;
 
-    let delete_store = store;
-    let delete_registry = registry;
-    let delete: BridgeHandler = Arc::new(move |payload, cancellation| {
-        let input: WorkspaceGrantMutationInput =
+    let reauthorizing_store = store.clone();
+    let reauthorizing_journal = journal.clone();
+    let mark_reauthorizing: BridgeHandler = Arc::new(move |payload, cancellation| {
+        let input: WorkspaceGrantOperationInput =
             serde_json::from_value(payload).map_err(|_| BridgeHandlerError::invalid_request())?;
         cancellation
             .commit_if_active(|| {
+                let transaction = reauthorizing_journal
+                    .read()
+                    .map_err(|_| BridgeHandlerError::workspace_failure())?
+                    .ok_or_else(BridgeHandlerError::workspace_failure)?;
+                if transaction.kind != WorkspaceTransactionKind::Reauthorize
+                    || transaction.stage != "reauthorize-prepared"
+                    || transaction.workspace_id.as_deref() != Some(&input.workspace_id)
+                    || transaction.operation_id != input.operation_id
+                    || transaction.expected_grant_generation != input.expected_grant_generation
+                {
+                    return Err(BridgeHandlerError::invalid_request());
+                }
+                let current = reauthorizing_store
+                    .get(&input.workspace_id)
+                    .map_err(|_| BridgeHandlerError::workspace_failure())?
+                    .ok_or_else(BridgeHandlerError::workspace_failure)?;
+                if matches!(
+                    current.status,
+                    GrantStatus::Revoking | GrantStatus::Reauthorizing
+                ) {
+                    return Err(BridgeHandlerError::invalid_request());
+                }
+                let generation = reauthorizing_store
+                    .begin_operation(
+                        &input.workspace_id,
+                        current.status,
+                        GrantStatus::Reauthorizing,
+                        input.expected_grant_generation,
+                        input.operation_id,
+                    )
+                    .map_err(|_| BridgeHandlerError::workspace_failure())?;
+                Ok(json!(generation))
+            })
+            .ok_or_else(BridgeHandlerError::invalid_request)?
+    });
+    tables
+        .set_host_handler("markWorkspaceGrantReauthorizing", mark_reauthorizing)
+        .map_err(|error| error.to_string())?;
+
+    let delete_store = store;
+    let delete_registry = registry;
+    let delete_journal = journal;
+    let delete: BridgeHandler = Arc::new(move |payload, cancellation| {
+        let input: WorkspaceGrantOperationInput =
+            serde_json::from_value(payload).map_err(|_| BridgeHandlerError::invalid_request())?;
+        cancellation
+            .commit_if_active(|| {
+                let transaction = delete_journal
+                    .read()
+                    .map_err(|_| BridgeHandlerError::workspace_failure())?
+                    .ok_or_else(BridgeHandlerError::workspace_failure)?;
+                if transaction.kind != WorkspaceTransactionKind::Revoke
+                    || transaction.stage != "registry-deleted"
+                    || transaction.workspace_id.as_deref() != Some(&input.workspace_id)
+                    || transaction.operation_id != input.operation_id
+                {
+                    return Err(BridgeHandlerError::invalid_request());
+                }
                 let generation = delete_store
-                    .delete(
+                    .delete_operation(
                         &input.workspace_id,
                         GrantStatus::Revoking,
                         input.expected_grant_generation,
+                        input.operation_id,
                     )
                     .map_err(|_| BridgeHandlerError::workspace_failure())?;
                 delete_registry

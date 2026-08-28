@@ -40,6 +40,12 @@ export interface WorkspaceRegistryPort {
 
 export interface NativeWorkspaceAuthorityPort {
   grantGeneration: () => Promise<number>
+  inspectWorkspaceGrant: (workspaceId: string) => Promise<{
+    readonly exists: boolean
+    readonly generation?: number
+    readonly operationId?: string
+    readonly status?: WorkspaceGrantView['state']
+  }>
   beginWorkspaceAuthorization: () => Promise<
     | {
       readonly outcome: 'pending'
@@ -52,6 +58,7 @@ export interface NativeWorkspaceAuthorityPort {
     pendingGrantId: string,
     workspaceId: string,
     expectedGrantGeneration: number,
+    operationId: string,
     expectedCanonicalPath?: string,
   ) => Promise<Omit<WorkspaceGrantView, 'name'>>
   abortWorkspaceAuthorization: (pendingGrantId: string) => Promise<void>
@@ -59,8 +66,26 @@ export interface NativeWorkspaceAuthorityPort {
     workspaceId: string,
     title: string,
   ) => Promise<'confirmed' | 'cancelled'>
-  markGrantRevoking: (workspaceId: string, expectedGrantGeneration: number) => Promise<number>
-  deleteWorkspaceGrant: (workspaceId: string, expectedGrantGeneration: number) => Promise<number>
+  markGrantRevoking: (
+    workspaceId: string,
+    expectedGrantGeneration: number,
+    operationId: string,
+  ) => Promise<number>
+  markGrantReauthorizing: (
+    workspaceId: string,
+    expectedGrantGeneration: number,
+    operationId: string,
+  ) => Promise<number>
+  restoreGrantReady: (
+    workspaceId: string,
+    expectedGrantGeneration: number,
+    operationId: string,
+  ) => Promise<number>
+  deleteWorkspaceGrant: (
+    workspaceId: string,
+    expectedGrantGeneration: number,
+    operationId: string,
+  ) => Promise<number>
   prepareWorkspaceTransaction: (input: {
     readonly kind: WorkspaceTransaction['kind']
     readonly workspaceId?: string
@@ -139,21 +164,33 @@ export class WorkspaceAuthority {
           pending.pendingGrantId,
           workspace.workspaceId,
           expectedGrantGeneration,
+          transaction.operationId,
         )
       } catch (error) {
-        await this.#registry.markNeedsAuthorization(workspace.workspaceId)
-        transaction = await this.#native.advanceWorkspaceTransaction(
-          transaction.operationId,
-          transaction.generation,
-          transaction.stage,
-          'authorization-failed',
-        )
-        await this.#native.completeWorkspaceTransaction(
-          transaction.operationId,
-          transaction.generation,
-          transaction.stage,
-        )
-        throw error
+        const grant = await this.#native.inspectWorkspaceGrant(workspace.workspaceId)
+        const grantGeneration = await this.#native.grantGeneration()
+        if (grant.exists
+          && grant.operationId === transaction.operationId
+          && grant.generation === expectedGrantGeneration + 1
+          && grant.status === 'ready'
+          && grantGeneration === expectedGrantGeneration + 1) {
+          view = { workspaceId: workspace.workspaceId, state: 'ready' }
+        } else {
+          if (grant.exists || grantGeneration !== expectedGrantGeneration) throw error
+          await this.#registry.markNeedsAuthorization(workspace.workspaceId)
+          transaction = await this.#native.advanceWorkspaceTransaction(
+            transaction.operationId,
+            transaction.generation,
+            transaction.stage,
+            'authorization-failed',
+          )
+          await this.#native.completeWorkspaceTransaction(
+            transaction.operationId,
+            transaction.generation,
+            transaction.stage,
+          )
+          throw error
+        }
       }
       transaction = await this.#native.advanceWorkspaceTransaction(
         transaction.operationId,
@@ -198,6 +235,7 @@ export class WorkspaceAuthority {
     const revokingGeneration = await this.#native.markGrantRevoking(
       workspaceId,
       expectedGrantGeneration,
+      transaction.operationId,
     )
     await this.#registry.deleteExpected(workspaceId, expectedCatalogGeneration)
     transaction = await this.#native.advanceWorkspaceTransaction(
@@ -206,7 +244,11 @@ export class WorkspaceAuthority {
       transaction.stage,
       'registry-deleted',
     )
-    await this.#native.deleteWorkspaceGrant(workspaceId, revokingGeneration)
+    await this.#native.deleteWorkspaceGrant(
+      workspaceId,
+      revokingGeneration,
+      transaction.operationId,
+    )
     transaction = await this.#native.advanceWorkspaceTransaction(
       transaction.operationId,
       transaction.generation,
@@ -228,8 +270,6 @@ export class WorkspaceAuthority {
     }
     const expectedCatalogGeneration = this.#registry.catalogGeneration()
     const expectedGrantGeneration = await this.#native.grantGeneration()
-    const pending = await this.#native.beginWorkspaceAuthorization()
-    if (pending.outcome === 'cancelled') return 'cancelled'
     let transaction = await this.#native.prepareWorkspaceTransaction({
       kind: 'reauthorize',
       workspaceId,
@@ -237,11 +277,46 @@ export class WorkspaceAuthority {
       expectedGrantGeneration,
       stage: 'reauthorize-prepared',
     })
+    const reauthorizingGeneration = await this.#native.markGrantReauthorizing(
+      workspaceId,
+      expectedGrantGeneration,
+      transaction.operationId,
+    )
+    let pending: Awaited<ReturnType<NativeWorkspaceAuthorityPort['beginWorkspaceAuthorization']>>
+    try {
+      pending = await this.#native.beginWorkspaceAuthorization()
+    } catch (error) {
+      await this.#native.restoreGrantReady(
+        workspaceId,
+        reauthorizingGeneration,
+        transaction.operationId,
+      )
+      await this.#native.abortWorkspaceTransaction(
+        transaction.operationId,
+        transaction.generation,
+        transaction.stage,
+      )
+      throw error
+    }
+    if (pending.outcome === 'cancelled') {
+      await this.#native.restoreGrantReady(
+        workspaceId,
+        reauthorizingGeneration,
+        transaction.operationId,
+      )
+      await this.#native.abortWorkspaceTransaction(
+        transaction.operationId,
+        transaction.generation,
+        transaction.stage,
+      )
+      return 'cancelled'
+    }
     try {
       const view = await this.#native.commitWorkspaceAuthorization(
         pending.pendingGrantId,
         workspaceId,
-        expectedGrantGeneration,
+        reauthorizingGeneration,
+        transaction.operationId,
         workspace.canonicalPath,
       )
       transaction = await this.#native.advanceWorkspaceTransaction(
@@ -258,6 +333,38 @@ export class WorkspaceAuthority {
       return { ...view, name: workspace.name }
     } catch (error) {
       await this.#native.abortWorkspaceAuthorization(pending.pendingGrantId)
+      const grant = await this.#native.inspectWorkspaceGrant(workspaceId)
+      const grantGeneration = await this.#native.grantGeneration()
+      if (grant.exists
+        && grant.operationId === transaction.operationId
+        && grant.generation === reauthorizingGeneration + 1
+        && grant.status === 'ready'
+        && grantGeneration === reauthorizingGeneration + 1) {
+        transaction = await this.#native.advanceWorkspaceTransaction(
+          transaction.operationId,
+          transaction.generation,
+          transaction.stage,
+          'grant-committed',
+        )
+        await this.#native.completeWorkspaceTransaction(
+          transaction.operationId,
+          transaction.generation,
+          transaction.stage,
+        )
+        return { workspaceId, name: workspace.name, state: 'ready' }
+      }
+      if (!grant.exists
+        || grant.operationId !== transaction.operationId
+        || grant.generation !== reauthorizingGeneration
+        || grant.status !== 'reauthorizing'
+        || grantGeneration !== reauthorizingGeneration) {
+        throw error
+      }
+      await this.#native.restoreGrantReady(
+        workspaceId,
+        reauthorizingGeneration,
+        transaction.operationId,
+      )
       await this.#native.abortWorkspaceTransaction(
         transaction.operationId,
         transaction.generation,

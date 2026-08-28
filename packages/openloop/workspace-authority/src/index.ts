@@ -55,6 +55,7 @@ function registryPort(registry: WorkspaceRegistry): WorkspaceRegistryPort {
 function nativePort(bridge: OpenloopDesktopHostClient): NativeWorkspaceAuthorityPort {
   return {
     grantGeneration: () => bridge.getWorkspaceGrantGeneration(),
+    inspectWorkspaceGrant: workspaceId => bridge.inspectWorkspaceGrant(workspaceId),
     beginWorkspaceAuthorization: async () => {
       const selection = await bridge.beginWorkspaceAuthorization()
       return selection.outcome === 'cancelled'
@@ -69,21 +70,39 @@ function nativePort(bridge: OpenloopDesktopHostClient): NativeWorkspaceAuthority
       pendingGrantId,
       workspaceId,
       expectedGrantGeneration,
+      operationId,
       expectedCanonicalPath,
     ) => bridge.commitWorkspaceAuthorization(
       pendingGrantId,
       workspaceId,
       expectedGrantGeneration,
+      operationId,
       expectedCanonicalPath,
     ),
     abortWorkspaceAuthorization: pendingGrantId =>
       bridge.abortWorkspaceAuthorization(pendingGrantId),
     confirmWorkspaceRevoke: (workspaceId, title) =>
       bridge.confirmWorkspaceRevoke(workspaceId, title),
-    markGrantRevoking: (workspaceId, expectedGrantGeneration) =>
-      bridge.markWorkspaceGrantRevoking(workspaceId, expectedGrantGeneration),
-    deleteWorkspaceGrant: (workspaceId, expectedGrantGeneration) =>
-      bridge.deleteWorkspaceGrant(workspaceId, expectedGrantGeneration),
+    markGrantRevoking: (workspaceId, expectedGrantGeneration, operationId) =>
+      bridge.markWorkspaceGrantRevoking(
+        workspaceId,
+        expectedGrantGeneration,
+        operationId,
+      ),
+    markGrantReauthorizing: (workspaceId, expectedGrantGeneration, operationId) =>
+      bridge.markWorkspaceGrantReauthorizing(
+        workspaceId,
+        expectedGrantGeneration,
+        operationId,
+      ),
+    restoreGrantReady: (workspaceId, expectedGrantGeneration, operationId) =>
+      bridge.restoreWorkspaceGrantReady(
+        workspaceId,
+        expectedGrantGeneration,
+        operationId,
+      ),
+    deleteWorkspaceGrant: (workspaceId, expectedGrantGeneration, operationId) =>
+      bridge.deleteWorkspaceGrant(workspaceId, expectedGrantGeneration, operationId),
     prepareWorkspaceTransaction: input =>
       bridge.prepareWorkspaceTransaction(input),
     advanceWorkspaceTransaction: (
@@ -112,23 +131,27 @@ function recoveryPort(
 ): WorkspaceRecoveryPort {
   return {
     catalogGeneration: () => Promise.resolve(registry.catalogGeneration()),
+    grantGeneration: () => bridge.getWorkspaceGrantGeneration(),
     workspaceExists: workspaceId =>
       Promise.resolve(registry.get(WorkspaceId(workspaceId)) !== undefined),
     inspectGrant: workspaceId => bridge.inspectWorkspaceGrant(workspaceId),
-    restoreGrantReady: (workspaceId, expectedGrantGeneration) =>
-      bridge.restoreWorkspaceGrantReady(workspaceId, expectedGrantGeneration),
-    markGrantRevoking: (workspaceId, expectedGrantGeneration) =>
-      bridge.markWorkspaceGrantRevoking(workspaceId, expectedGrantGeneration),
-    markNeedsAuthorization: async (workspaceId, expectedGrantGeneration) => {
+    restoreGrantReady: (workspaceId, expectedGrantGeneration, operationId) =>
+      bridge.restoreWorkspaceGrantReady(
+        workspaceId,
+        expectedGrantGeneration,
+        operationId,
+      ),
+    markNeedsAuthorization: async (workspaceId, expectedGrantGeneration, operationId) => {
       if (registry.get(WorkspaceId(workspaceId)) === undefined) return undefined
       if (expectedGrantGeneration === undefined) return undefined
       return await bridge.markWorkspaceGrantNeedsAuthorization(
         workspaceId,
         expectedGrantGeneration,
+        operationId,
       )
     },
-    deleteGrant: (workspaceId, expectedGrantGeneration) =>
-      bridge.deleteWorkspaceGrant(workspaceId, expectedGrantGeneration),
+    deleteGrant: (workspaceId, expectedGrantGeneration, operationId) =>
+      bridge.deleteWorkspaceGrant(workspaceId, expectedGrantGeneration, operationId),
     // Pending grants are launch-local and the native registry starts empty after a restart.
     discardPendingGrant: async () => {},
     advanceTransaction: (
@@ -155,22 +178,22 @@ function recoveryPort(
 
 export class WorkspaceAuthorityService extends Service {
   static inject = inject
-  readonly #authority: WorkspaceAuthority
-  readonly #registry: WorkspaceRegistry
-  readonly #bridge: OpenloopDesktopHostClient
+  private readonly authority: WorkspaceAuthority
+  private readonly registry: WorkspaceRegistry
+  private readonly bridge: OpenloopDesktopHostClient
 
   constructor(ctx: Context) {
     super(ctx, 'workspaceAuthority')
-    this.#registry = ctx.workspaceRegistry
-    this.#bridge = ctx.desktopBridge
-    this.#authority = new WorkspaceAuthority(registryPort(this.#registry), nativePort(this.#bridge))
+    this.registry = ctx.workspaceRegistry
+    this.bridge = ctx.desktopBridge
+    this.authority = new WorkspaceAuthority(registryPort(this.registry), nativePort(this.bridge))
   }
 
   protected async [Service.init](): Promise<void> {
-    const transaction = await this.#bridge.readWorkspaceTransaction()
+    const transaction = await this.bridge.readWorkspaceTransaction()
     const outcome = await recoverWorkspaceTransaction(
       transaction ?? undefined,
-      recoveryPort(this.#registry, this.#bridge),
+      recoveryPort(this.registry, this.bridge),
     )
     if (outcome === 'stale-generation') {
       throw new Error('Workspace transaction recovery found stale durable state')
@@ -178,8 +201,11 @@ export class WorkspaceAuthorityService extends Service {
   }
 
   async list() {
-    return await Promise.all(this.#registry.list().map(async (workspace) => {
-      const grant = await this.#bridge.inspectWorkspaceGrant(workspace.id)
+    return await Promise.all(this.registry.list().map(async (workspace) => {
+      const grant = await this.bridge.inspectWorkspaceGrant(workspace.id)
+      if (grant.exists && (grant.generation === undefined || grant.status === undefined)) {
+        throw new Error(`Workspace grant ${JSON.stringify(workspace.id)} is incomplete`)
+      }
       return {
         workspaceId: workspace.id,
         name: workspace.title,
@@ -191,15 +217,15 @@ export class WorkspaceAuthorityService extends Service {
   }
 
   add() {
-    return this.#authority.add()
+    return this.authority.add()
   }
 
   revoke(workspaceId: string) {
-    return this.#authority.revoke(workspaceId)
+    return this.authority.revoke(workspaceId)
   }
 
   reauthorize(workspaceId: string) {
-    return this.#authority.reauthorize(workspaceId)
+    return this.authority.reauthorize(workspaceId)
   }
 }
 
