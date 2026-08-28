@@ -5628,6 +5628,9 @@ importers:
       '@openloop/desktop-bridge-host':
         specifier: workspace:*
         version: link:../desktop-bridge-host
+      '@openloop/file-broker':
+        specifier: workspace:*
+        version: link:../file-broker
       '@openloop/runtime-bootstrap':
         specifier: workspace:^
         version: link:../runtime-bootstrap
@@ -5711,6 +5714,18 @@ importers:
       '@openloop/runtime-bootstrap':
         specifier: workspace:^
         version: link:../runtime-bootstrap
+
+  packages/openloop/file-broker:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-invariants':
+        specifier: workspace:^
+        version: link:../../runtime-diagnostics/invariants
+      '@openloop/desktop-bridge-host':
+        specifier: workspace:*
+        version: link:../desktop-bridge-host
 
   packages/openloop/runtime-bootstrap:
     devDependencies:

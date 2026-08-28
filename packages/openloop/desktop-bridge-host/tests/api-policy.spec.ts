@@ -225,7 +225,7 @@ describe('OpenLoop browser API policy manifest', () => {
     }
   })
 
-  it('lists exactly the 13 browser facade endpoints while denying all eight Host-only methods', () => {
+  it('lists exactly the 13 browser facade endpoints while denying all Host-only methods', () => {
     const policy = createBrowserApiPolicy(shippedManifest())
 
     expect(BROWSER_SAFE_METHODS.map(method => `openloopDesktop/${method}`).sort()).toEqual([

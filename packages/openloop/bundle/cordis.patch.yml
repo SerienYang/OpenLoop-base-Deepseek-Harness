@@ -49,3 +49,7 @@
     - id: workspace-authority
       name: '@openloop/workspace-authority'
       inject: [workspaceRegistry, desktopBridge]
+- insert:
+    - id: file-broker
+      name: '@openloop/file-broker'
+      inject: [desktopBridge]

@@ -27,6 +27,8 @@ use crate::credentials::{
     CredentialMigrationStatusHandle, CredentialSheetCoordinator, CredentialSheetGate,
     KeychainStore,
 };
+#[cfg(target_os = "macos")]
+use crate::files::{install_file_broker_handlers, FileBroker};
 use crate::launcher::{
     InstanceAction, LaunchReadinessExpectation, LaunchSecrets, SingleInstance, SupervisedChild,
 };
@@ -63,6 +65,8 @@ pub mod bridge;
 pub mod browser;
 #[cfg(target_os = "macos")]
 pub mod credentials;
+#[cfg(target_os = "macos")]
+pub mod files;
 pub mod launcher;
 pub mod spikes;
 pub mod update;
@@ -427,6 +431,12 @@ fn start_runtime(
         let mut pending_grants = PendingGrantRegistry::new(secrets.launch_id);
         pending_grants.inject_launch_grants(launch_grants);
         let pending_grants = Arc::new(Mutex::new(pending_grants));
+        let file_broker = Arc::new(FileBroker::new(
+            secrets.launch_id,
+            workspace_grants.clone(),
+            workspace_journal.clone(),
+            pending_grants.clone(),
+        ));
         install_workspace_authority_handlers(
             &mut tables,
             secrets.launch_id,
@@ -436,6 +446,7 @@ fn start_runtime(
             Arc::new(AppKitWorkspaceDirectoryPicker::new(app.clone())),
             Arc::new(AppKitWorkspaceRevokeConfirmation::new(app.clone())),
         )?;
+        install_file_broker_handlers(&mut tables, file_broker)?;
         install_workspace_transaction_handlers(&mut tables, workspace_journal)?;
         let health_plan = match migration_outcome.transaction_id() {
             Some(transaction_id) => {

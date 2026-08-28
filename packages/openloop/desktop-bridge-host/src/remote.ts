@@ -14,7 +14,11 @@ import type {
   ResolvedSecretBytes,
   UpdateStatus,
   WorkspaceAuthorizationSelection,
+  WorkspaceDirectoryChunk,
   WorkspaceFileHandle,
+  WorkspaceFileReadChunk,
+  WorkspaceFileStat,
+  WorkspaceFileVersion,
   WorkspaceGrantInspection,
   WorkspaceGrantView,
   WorkspaceProcessHandle,
@@ -63,6 +67,15 @@ export const HOST_ONLY_METHODS = [
   'abortWorkspaceTransaction',
   'completeWorkspaceTransaction',
   'openWorkspaceFile',
+  'openWorkspaceRoot',
+  'statWorkspaceFile',
+  'listWorkspaceFiles',
+  'readWorkspaceFile',
+  'createWorkspaceFile',
+  'beginWorkspaceAtomicWrite',
+  'writeWorkspaceFileChunk',
+  'commitWorkspaceAtomicWrite',
+  'closeWorkspaceFile',
   'spawnWorkspaceProcess',
 ] as const
 
@@ -517,7 +530,7 @@ export class OpenloopDesktopHostClient {
   openWorkspaceFile(
     workspaceId: string,
     relativePath: string,
-    mode: string,
+    mode: 'read' | 'list',
     signal?: AbortSignal,
   ): Promise<WorkspaceFileHandle> {
     return this.#client.call<WorkspaceFileHandle>(
@@ -525,6 +538,108 @@ export class OpenloopDesktopHostClient {
       { mode, relativePath, workspaceId },
       signal,
     )
+  }
+
+  openWorkspaceRoot(
+    workspaceId: string,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceFileHandle> {
+    return this.#client.call<WorkspaceFileHandle>(
+      'openWorkspaceRoot',
+      { workspaceId },
+      signal,
+    )
+  }
+
+  statWorkspaceFile(
+    handleId: string,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceFileStat> {
+    return this.#client.call<WorkspaceFileStat>('statWorkspaceFile', { handleId }, signal)
+  }
+
+  listWorkspaceFiles(
+    handleId: string,
+    offset: number,
+    maxEntries: number,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceDirectoryChunk> {
+    return this.#client.call<WorkspaceDirectoryChunk>(
+      'listWorkspaceFiles',
+      { handleId, maxEntries, offset },
+      signal,
+    )
+  }
+
+  readWorkspaceFile(
+    handleId: string,
+    offset: number,
+    maxBytes: number,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceFileReadChunk> {
+    return this.#client.call<WorkspaceFileReadChunk>(
+      'readWorkspaceFile',
+      { handleId, maxBytes, offset },
+      signal,
+    )
+  }
+
+  createWorkspaceFile(
+    workspaceId: string,
+    relativePath: string,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceFileHandle> {
+    return this.#client.call<WorkspaceFileHandle>(
+      'createWorkspaceFile',
+      { relativePath, workspaceId },
+      signal,
+    )
+  }
+
+  beginWorkspaceAtomicWrite(
+    workspaceId: string,
+    relativePath: string,
+    createIfAbsent: boolean,
+    expectedVersion?: string,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceFileHandle> {
+    return this.#client.call<WorkspaceFileHandle>(
+      'beginWorkspaceAtomicWrite',
+      {
+        createIfAbsent,
+        relativePath,
+        workspaceId,
+        ...(expectedVersion === undefined ? {} : { expectedVersion }),
+      },
+      signal,
+    )
+  }
+
+  writeWorkspaceFileChunk(
+    handleId: string,
+    bytes: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    return this.#client.call<void>(
+      'writeWorkspaceFileChunk',
+      { bytes, handleId },
+      signal,
+    )
+  }
+
+  commitWorkspaceAtomicWrite(
+    handleId: string,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceFileVersion> {
+    return this.#client.call<WorkspaceFileVersion>(
+      'commitWorkspaceAtomicWrite',
+      { handleId },
+      signal,
+    )
+  }
+
+  closeWorkspaceFile(handleId: string, signal?: AbortSignal): Promise<void> {
+    return this.#client.call<void>('closeWorkspaceFile', { handleId }, signal)
   }
 
   spawnWorkspaceProcess(

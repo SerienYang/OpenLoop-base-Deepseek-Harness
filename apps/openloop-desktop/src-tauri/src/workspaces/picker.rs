@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     os::{
-        fd::{AsRawFd, OwnedFd, RawFd},
+        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::fs::{MetadataExt, PermissionsExt},
     },
     path::{Path, PathBuf},
@@ -441,6 +441,26 @@ impl PendingGrantRegistry {
         self.committed
             .get(workspace_id)
             .map(|grant| grant.descriptor.as_raw_fd())
+    }
+
+    pub fn duplicate_committed_descriptor(
+        &self,
+        workspace_id: &str,
+    ) -> Result<OwnedFd, WorkspaceGrantError> {
+        let descriptor = self
+            .committed
+            .get(workspace_id)
+            .ok_or_else(|| WorkspaceGrantError::MissingWorkspaceGrant(workspace_id.to_owned()))?
+            .descriptor
+            .as_raw_fd();
+        let duplicated = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 0) };
+        if duplicated < 0 {
+            return Err(WorkspaceGrantError::Io(
+                "duplicate committed Workspace descriptor",
+                std::io::Error::last_os_error(),
+            ));
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
     }
 
     pub fn revoke_committed(&mut self, workspace_id: &str) {

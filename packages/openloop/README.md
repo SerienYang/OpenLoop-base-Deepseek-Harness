@@ -36,6 +36,11 @@ generation-conflict, and recovery contracts. Its browser view contains only
 the DSH Workspace id, display name, and public state; canonical paths,
 filesystem identities, descriptors, and pending grant ids remain Host-only.
 
+`@openloop/file-broker` is the Host-only Workspace file boundary. It accepts
+only Workspace ids and normalized relative paths, while native operations walk
+from the retained verified root descriptor and return launch-local opaque
+handles.
+
 Create packages through the root command:
 
 ```sh

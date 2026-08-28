@@ -352,6 +352,15 @@ describe('authenticated desktop bridge protocol', () => {
       'abortWorkspaceTransaction',
       'completeWorkspaceTransaction',
       'openWorkspaceFile',
+      'openWorkspaceRoot',
+      'statWorkspaceFile',
+      'listWorkspaceFiles',
+      'readWorkspaceFile',
+      'createWorkspaceFile',
+      'beginWorkspaceAtomicWrite',
+      'writeWorkspaceFileChunk',
+      'commitWorkspaceAtomicWrite',
+      'closeWorkspaceFile',
       'spawnWorkspaceProcess',
     ])
     expect(BROWSER_SAFE_METHODS.some(method => HOST_ONLY_METHODS.includes(

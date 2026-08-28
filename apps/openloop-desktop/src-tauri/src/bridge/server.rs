@@ -47,7 +47,7 @@ pub const BROWSER_SAFE_METHODS: [&str; 13] = [
     "revealWorkspace",
 ];
 
-pub const HOST_ONLY_METHODS: [&str; 21] = [
+pub const HOST_ONLY_METHODS: [&str; 30] = [
     "resolveCredential",
     "getCandidateCredentialHealthPlan",
     "acknowledgeMainWebviewHealth",
@@ -68,6 +68,15 @@ pub const HOST_ONLY_METHODS: [&str; 21] = [
     "abortWorkspaceTransaction",
     "completeWorkspaceTransaction",
     "openWorkspaceFile",
+    "openWorkspaceRoot",
+    "statWorkspaceFile",
+    "listWorkspaceFiles",
+    "readWorkspaceFile",
+    "createWorkspaceFile",
+    "beginWorkspaceAtomicWrite",
+    "writeWorkspaceFileChunk",
+    "commitWorkspaceAtomicWrite",
+    "closeWorkspaceFile",
     "spawnWorkspaceProcess",
 ];
 
@@ -232,6 +241,13 @@ impl BridgeHandlerError {
         Self {
             code: "workspace_failure",
             message: "desktop Workspace operation failed",
+        }
+    }
+
+    pub fn file_failure() -> Self {
+        Self {
+            code: "file_failure",
+            message: "desktop Workspace file operation failed",
         }
     }
 }

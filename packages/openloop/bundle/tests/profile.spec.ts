@@ -160,6 +160,11 @@ describe('OpenLoop profile', () => {
       .toEqual(['webRuntime', 'browserApiPolicy'])
     expect(entries.find(entry => entry.id === 'typert-gateway')?.inject)
       .toEqual(['browserApiPolicy'])
+    expect(entries.find(entry => entry.id === 'file-broker')).toEqual({
+      id: 'file-broker',
+      name: '@openloop/file-broker',
+      inject: ['desktopBridge'],
+    })
   })
 
   it('replaces only the Openloop credential provider and wires built-in consumers to its registry', () => {

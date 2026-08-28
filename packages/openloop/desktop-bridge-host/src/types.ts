@@ -156,6 +156,35 @@ export type WorkspaceTransaction =
 
 export interface WorkspaceFileHandle {
   readonly handleId: string
+  readonly kind: 'regular' | 'directory'
+  readonly version?: string
+}
+
+export interface WorkspaceFileStat {
+  readonly kind: WorkspaceFileHandle['kind']
+  readonly size: number
+  readonly version?: string
+}
+
+export interface WorkspaceDirectoryEntry {
+  readonly name: string
+  readonly kind: WorkspaceFileHandle['kind']
+}
+
+export interface WorkspaceDirectoryChunk {
+  readonly entries: readonly WorkspaceDirectoryEntry[]
+  readonly nextOffset: number
+  readonly eof: boolean
+}
+
+export interface WorkspaceFileReadChunk {
+  readonly bytes: string
+  readonly nextOffset: number
+  readonly eof: boolean
+}
+
+export interface WorkspaceFileVersion {
+  readonly version: string
 }
 
 export interface WorkspaceProcessHandle {

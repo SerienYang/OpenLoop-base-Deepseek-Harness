@@ -1,0 +1,803 @@
+pub mod openat;
+
+use std::{
+    collections::HashMap,
+    error::Error,
+    ffi::CString,
+    fmt, io,
+    os::fd::{AsRawFd, OwnedFd, RawFd},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+use crate::{
+    bridge::server::{BridgeDispatchTables, BridgeHandler, BridgeHandlerError},
+    workspaces::{
+        grants::{FileIdentity, GrantStatus, GrantStore},
+        journal::WorkspaceJournal,
+        picker::PendingGrantRegistry,
+    },
+};
+
+use self::openat::{
+    checked_regular_version, create_regular_at, descriptor_stat, inspect_directory_descriptor,
+    inspect_regular_descriptor, inspect_supported_descriptor, list_directory, open_beneath,
+    read_at, rename_exclusive_at, resolve_parent, stable_regular_identity, stat_at, swap_at,
+    sync_descriptor, unlink_at, write_all,
+};
+
+pub const MAX_FILE_CHUNK_BYTES: usize = 32 * 1024;
+const MAX_ATOMIC_WRITE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_LIST_ENTRIES: usize = 128;
+const DEFAULT_HANDLE_TTL: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Debug)]
+pub enum FileBrokerError {
+    InvalidPath,
+    InvalidHandle,
+    GrantUnavailable,
+    UnsafeFile,
+    WrongHandleKind,
+    ChunkTooLarge,
+    InvalidOffset,
+    AlreadyExists,
+    VersionConflict,
+    Io(io::Error),
+}
+
+impl fmt::Display for FileBrokerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidPath => formatter.write_str("Workspace relative path is invalid"),
+            Self::InvalidHandle => formatter.write_str("Workspace file handle is invalid"),
+            Self::GrantUnavailable => formatter.write_str("Workspace grant is not ready"),
+            Self::UnsafeFile => formatter.write_str("Workspace file type or link count is unsafe"),
+            Self::WrongHandleKind => {
+                formatter.write_str("Workspace file handle has the wrong kind")
+            }
+            Self::ChunkTooLarge => formatter.write_str("Workspace file chunk exceeds its limit"),
+            Self::InvalidOffset => formatter.write_str("Workspace file offset is invalid"),
+            Self::AlreadyExists => formatter.write_str("Workspace file already exists"),
+            Self::VersionConflict => formatter.write_str("Workspace file version changed"),
+            Self::Io(source) => write!(formatter, "Workspace file operation failed: {source}"),
+        }
+    }
+}
+
+impl Error for FileBrokerError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io(source) => Some(source),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FileKind {
+    Regular,
+    Directory,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileHandleView {
+    pub handle_id: String,
+    pub kind: FileKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileStat {
+    pub kind: FileKind,
+    pub size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryEntry {
+    pub name: String,
+    pub kind: FileKind,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadChunk {
+    pub bytes: Vec<u8>,
+    pub next_offset: u64,
+    pub eof: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AtomicWriteOptions {
+    pub create_if_absent: bool,
+    pub expected_version: Option<String>,
+}
+
+#[derive(Clone)]
+struct GrantBinding {
+    workspace_id: String,
+    generation: u64,
+    identity: FileIdentity,
+}
+
+enum HandleValue {
+    Open(OwnedFd),
+    Atomic(AtomicWriteHandle),
+}
+
+struct HandleRecord {
+    binding: GrantBinding,
+    expires_at: Instant,
+    value: HandleValue,
+}
+
+struct AtomicWriteHandle {
+    parent: OwnedFd,
+    temporary: CString,
+    target: CString,
+    file: OwnedFd,
+    create_if_absent: bool,
+    expected_version: Option<String>,
+    initial_version: Option<String>,
+    bytes_written: u64,
+    temporary_exists: bool,
+}
+
+impl Drop for AtomicWriteHandle {
+    fn drop(&mut self) {
+        if self.temporary_exists {
+            let _ = unlink_at(self.parent.as_raw_fd(), &self.temporary);
+        }
+    }
+}
+
+struct ReadyRoot {
+    descriptor: OwnedFd,
+    binding: GrantBinding,
+}
+
+pub struct FileBroker {
+    _launch_id: Uuid,
+    store: GrantStore,
+    journal: WorkspaceJournal,
+    grants: Arc<Mutex<PendingGrantRegistry>>,
+    handle_ttl: Duration,
+    handles: Mutex<HashMap<Uuid, HandleRecord>>,
+}
+
+impl FileBroker {
+    pub fn new(
+        launch_id: Uuid,
+        store: GrantStore,
+        journal: WorkspaceJournal,
+        grants: Arc<Mutex<PendingGrantRegistry>>,
+    ) -> Self {
+        Self::with_handle_ttl(launch_id, store, journal, grants, DEFAULT_HANDLE_TTL)
+    }
+
+    pub fn with_handle_ttl(
+        launch_id: Uuid,
+        store: GrantStore,
+        journal: WorkspaceJournal,
+        grants: Arc<Mutex<PendingGrantRegistry>>,
+        handle_ttl: Duration,
+    ) -> Self {
+        Self {
+            _launch_id: launch_id,
+            store,
+            journal,
+            grants,
+            handle_ttl,
+            handles: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn open(
+        &self,
+        workspace_id: &str,
+        relative_path: &str,
+    ) -> Result<FileHandleView, FileBrokerError> {
+        let root = self.ready_root(workspace_id, None)?;
+        let descriptor = open_beneath(root.descriptor.as_raw_fd(), relative_path)?;
+        let stat = inspect_supported_descriptor(descriptor.as_raw_fd())?;
+        self.insert_handle(root.binding, HandleValue::Open(descriptor), stat)
+    }
+
+    pub fn create(
+        &self,
+        workspace_id: &str,
+        relative_path: &str,
+    ) -> Result<FileHandleView, FileBrokerError> {
+        let root = self.ready_root(workspace_id, None)?;
+        let target = resolve_parent(root.descriptor.as_raw_fd(), relative_path)?;
+        if let Some(metadata) = stat_at(target.parent.as_raw_fd(), &target.leaf)? {
+            checked_regular_version(&metadata)?;
+            return Err(FileBrokerError::AlreadyExists);
+        }
+        let descriptor = create_regular_at(target.parent.as_raw_fd(), &target.leaf)?;
+        if let Err(error) = sync_descriptor(descriptor.as_raw_fd())
+            .and_then(|()| sync_descriptor(target.parent.as_raw_fd()))
+        {
+            let _ = unlink_at(target.parent.as_raw_fd(), &target.leaf);
+            return Err(error);
+        }
+        let stat = inspect_regular_descriptor(descriptor.as_raw_fd())?;
+        self.insert_handle(root.binding, HandleValue::Open(descriptor), stat)
+    }
+
+    pub fn stat(&self, handle_id: &str) -> Result<FileStat, FileBrokerError> {
+        let (id, binding) = self.handle_binding(handle_id)?;
+        self.ready_root(&binding.workspace_id, Some(&binding))?;
+        self.with_open_handle(id, inspect_supported_descriptor)
+    }
+
+    pub fn list(&self, handle_id: &str) -> Result<Vec<DirectoryEntry>, FileBrokerError> {
+        let (id, binding) = self.handle_binding(handle_id)?;
+        self.ready_root(&binding.workspace_id, Some(&binding))?;
+        self.with_open_handle(id, |descriptor| {
+            inspect_directory_descriptor(descriptor)?;
+            list_directory(descriptor).map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|(name, kind)| DirectoryEntry { name, kind })
+                    .collect()
+            })
+        })
+    }
+
+    pub fn read(
+        &self,
+        handle_id: &str,
+        offset: u64,
+        maximum: usize,
+    ) -> Result<ReadChunk, FileBrokerError> {
+        if maximum == 0 || maximum > MAX_FILE_CHUNK_BYTES {
+            return Err(FileBrokerError::ChunkTooLarge);
+        }
+        let (id, binding) = self.handle_binding(handle_id)?;
+        self.ready_root(&binding.workspace_id, Some(&binding))?;
+        self.with_open_handle(id, |descriptor| {
+            let stat = inspect_regular_descriptor(descriptor)?;
+            let bytes = read_at(descriptor, offset, maximum)?;
+            let next_offset = offset
+                .checked_add(bytes.len() as u64)
+                .ok_or(FileBrokerError::InvalidOffset)?;
+            Ok(ReadChunk {
+                eof: next_offset >= stat.size,
+                bytes,
+                next_offset,
+            })
+        })
+    }
+
+    pub fn begin_atomic_write(
+        &self,
+        workspace_id: &str,
+        relative_path: &str,
+        options: AtomicWriteOptions,
+    ) -> Result<FileHandleView, FileBrokerError> {
+        let root = self.ready_root(workspace_id, None)?;
+        let target = resolve_parent(root.descriptor.as_raw_fd(), relative_path)?;
+        let initial_version = match stat_at(target.parent.as_raw_fd(), &target.leaf)? {
+            Some(metadata) => Some(checked_regular_version(&metadata)?),
+            None => None,
+        };
+        if options.create_if_absent {
+            if initial_version.is_some() {
+                return Err(FileBrokerError::AlreadyExists);
+            }
+            if options.expected_version.is_some() {
+                return Err(FileBrokerError::VersionConflict);
+            }
+        } else {
+            let current = initial_version
+                .as_ref()
+                .ok_or(FileBrokerError::VersionConflict)?;
+            if options
+                .expected_version
+                .as_ref()
+                .is_some_and(|expected| expected != current)
+            {
+                return Err(FileBrokerError::VersionConflict);
+            }
+        }
+
+        let (temporary, file) = self.create_temporary(target.parent.as_raw_fd())?;
+        let stat = inspect_regular_descriptor(file.as_raw_fd())?;
+        self.insert_handle(
+            root.binding,
+            HandleValue::Atomic(AtomicWriteHandle {
+                parent: target.parent,
+                temporary,
+                target: target.leaf,
+                file,
+                create_if_absent: options.create_if_absent,
+                expected_version: options.expected_version,
+                initial_version,
+                bytes_written: 0,
+                temporary_exists: true,
+            }),
+            stat,
+        )
+    }
+
+    pub fn write_chunk(&self, handle_id: &str, bytes: &[u8]) -> Result<(), FileBrokerError> {
+        if bytes.len() > MAX_FILE_CHUNK_BYTES {
+            return Err(FileBrokerError::ChunkTooLarge);
+        }
+        let (id, binding) = self.handle_binding(handle_id)?;
+        self.ready_root(&binding.workspace_id, Some(&binding))?;
+        let mut handles = self
+            .handles
+            .lock()
+            .map_err(|_| FileBrokerError::InvalidHandle)?;
+        let handle = handles.get_mut(&id).ok_or(FileBrokerError::InvalidHandle)?;
+        let HandleValue::Atomic(write) = &mut handle.value else {
+            return Err(FileBrokerError::WrongHandleKind);
+        };
+        inspect_regular_descriptor(write.file.as_raw_fd())?;
+        let next_size = write
+            .bytes_written
+            .checked_add(bytes.len() as u64)
+            .ok_or(FileBrokerError::ChunkTooLarge)?;
+        if next_size > MAX_ATOMIC_WRITE_BYTES {
+            return Err(FileBrokerError::ChunkTooLarge);
+        }
+        write_all(write.file.as_raw_fd(), bytes)?;
+        write.bytes_written = next_size;
+        Ok(())
+    }
+
+    pub fn commit_atomic_write(&self, handle_id: &str) -> Result<String, FileBrokerError> {
+        let id = parse_handle_id(handle_id)?;
+        let record = self
+            .handles
+            .lock()
+            .map_err(|_| FileBrokerError::InvalidHandle)?
+            .remove(&id)
+            .ok_or(FileBrokerError::InvalidHandle)?;
+        if Instant::now() >= record.expires_at {
+            return Err(FileBrokerError::InvalidHandle);
+        }
+        self.ready_root(&record.binding.workspace_id, Some(&record.binding))?;
+        let HandleValue::Atomic(mut write) = record.value else {
+            return Err(FileBrokerError::WrongHandleKind);
+        };
+        inspect_regular_descriptor(write.file.as_raw_fd())?;
+        sync_descriptor(write.file.as_raw_fd())?;
+
+        if write.create_if_absent {
+            if stat_at(write.parent.as_raw_fd(), &write.target)?.is_some() {
+                return Err(FileBrokerError::AlreadyExists);
+            }
+            rename_exclusive_at(write.parent.as_raw_fd(), &write.temporary, &write.target)?;
+            write.temporary_exists = false;
+        } else {
+            let current_metadata = stat_at(write.parent.as_raw_fd(), &write.target)?
+                .ok_or(FileBrokerError::VersionConflict)?;
+            let current = checked_regular_version(&current_metadata)?;
+            let current_identity = stable_regular_identity(&current_metadata)?;
+            if Some(&current) != write.initial_version.as_ref()
+                || write
+                    .expected_version
+                    .as_ref()
+                    .is_some_and(|expected| expected != &current)
+            {
+                return Err(FileBrokerError::VersionConflict);
+            }
+            swap_at(write.parent.as_raw_fd(), &write.temporary, &write.target)?;
+            let displaced = stat_at(write.parent.as_raw_fd(), &write.temporary)?
+                .ok_or(FileBrokerError::VersionConflict)
+                .and_then(|metadata| stable_regular_identity(&metadata))?;
+            if displaced != current_identity {
+                let rollback = swap_at(write.parent.as_raw_fd(), &write.temporary, &write.target);
+                return match rollback {
+                    Ok(()) => Err(FileBrokerError::VersionConflict),
+                    Err(error) => Err(error),
+                };
+            }
+            unlink_at(write.parent.as_raw_fd(), &write.temporary)?;
+            write.temporary_exists = false;
+        }
+        sync_descriptor(write.parent.as_raw_fd())?;
+        let metadata =
+            stat_at(write.parent.as_raw_fd(), &write.target)?.ok_or(FileBrokerError::Io(
+                io::Error::new(io::ErrorKind::NotFound, "committed Workspace file vanished"),
+            ))?;
+        checked_regular_version(&metadata)
+    }
+
+    pub fn close(&self, handle_id: &str) -> Result<(), FileBrokerError> {
+        let id = parse_handle_id(handle_id)?;
+        self.handles
+            .lock()
+            .map_err(|_| FileBrokerError::InvalidHandle)?
+            .remove(&id)
+            .ok_or(FileBrokerError::InvalidHandle)?;
+        Ok(())
+    }
+
+    fn create_temporary(&self, parent: RawFd) -> Result<(CString, OwnedFd), FileBrokerError> {
+        for _ in 0..16 {
+            let name = CString::new(format!(".openloop-write-{}.tmp", Uuid::new_v4()))
+                .map_err(|_| FileBrokerError::UnsafeFile)?;
+            match create_regular_at(parent, &name) {
+                Ok(file) => return Ok((name, file)),
+                Err(FileBrokerError::AlreadyExists) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(FileBrokerError::AlreadyExists)
+    }
+
+    fn ready_root(
+        &self,
+        workspace_id: &str,
+        expected: Option<&GrantBinding>,
+    ) -> Result<ReadyRoot, FileBrokerError> {
+        if workspace_id.is_empty() {
+            return Err(FileBrokerError::GrantUnavailable);
+        }
+        let grant = self
+            .store
+            .get(workspace_id)
+            .map_err(|_| FileBrokerError::GrantUnavailable)?
+            .ok_or(FileBrokerError::GrantUnavailable)?;
+        if grant.status != GrantStatus::Ready
+            || expected.is_some_and(|binding| {
+                binding.workspace_id != workspace_id
+                    || binding.generation != grant.generation
+                    || binding.identity != grant.identity
+            })
+        {
+            return Err(FileBrokerError::GrantUnavailable);
+        }
+        if self
+            .journal
+            .read()
+            .map_err(|_| FileBrokerError::GrantUnavailable)?
+            .is_some_and(|transaction| transaction.workspace_id.as_deref() == Some(workspace_id))
+        {
+            return Err(FileBrokerError::GrantUnavailable);
+        }
+        let descriptor = self
+            .grants
+            .lock()
+            .map_err(|_| FileBrokerError::GrantUnavailable)?
+            .duplicate_committed_descriptor(workspace_id)
+            .map_err(|_| FileBrokerError::GrantUnavailable)?;
+        let metadata = descriptor_stat(descriptor.as_raw_fd())?;
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
+            || metadata.st_dev as u64 != grant.identity.volume_id
+            || metadata.st_ino != grant.identity.file_id
+            || metadata.st_uid != unsafe { libc::geteuid() }
+            || metadata.st_mode & 0o002 != 0
+        {
+            return Err(FileBrokerError::GrantUnavailable);
+        }
+        Ok(ReadyRoot {
+            descriptor,
+            binding: GrantBinding {
+                workspace_id: workspace_id.to_owned(),
+                generation: grant.generation,
+                identity: grant.identity,
+            },
+        })
+    }
+
+    fn insert_handle(
+        &self,
+        binding: GrantBinding,
+        value: HandleValue,
+        stat: FileStat,
+    ) -> Result<FileHandleView, FileBrokerError> {
+        let handle_id = Uuid::new_v4();
+        self.handles
+            .lock()
+            .map_err(|_| FileBrokerError::InvalidHandle)?
+            .insert(
+                handle_id,
+                HandleRecord {
+                    binding,
+                    expires_at: Instant::now() + self.handle_ttl,
+                    value,
+                },
+            );
+        Ok(FileHandleView {
+            handle_id: handle_id.to_string(),
+            kind: stat.kind,
+            version: stat.version,
+        })
+    }
+
+    fn handle_binding(&self, handle_id: &str) -> Result<(Uuid, GrantBinding), FileBrokerError> {
+        let id = parse_handle_id(handle_id)?;
+        let now = Instant::now();
+        let mut handles = self
+            .handles
+            .lock()
+            .map_err(|_| FileBrokerError::InvalidHandle)?;
+        handles.retain(|_, handle| now < handle.expires_at);
+        let binding = handles
+            .get(&id)
+            .ok_or(FileBrokerError::InvalidHandle)?
+            .binding
+            .clone();
+        Ok((id, binding))
+    }
+
+    fn with_open_handle<T>(
+        &self,
+        id: Uuid,
+        operation: impl FnOnce(RawFd) -> Result<T, FileBrokerError>,
+    ) -> Result<T, FileBrokerError> {
+        let handles = self
+            .handles
+            .lock()
+            .map_err(|_| FileBrokerError::InvalidHandle)?;
+        let handle = handles.get(&id).ok_or(FileBrokerError::InvalidHandle)?;
+        let HandleValue::Open(descriptor) = &handle.value else {
+            return Err(FileBrokerError::WrongHandleKind);
+        };
+        operation(descriptor.as_raw_fd())
+    }
+}
+
+fn parse_handle_id(handle_id: &str) -> Result<Uuid, FileBrokerError> {
+    Uuid::parse_str(handle_id).map_err(|_| FileBrokerError::InvalidHandle)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OpenInput {
+    workspace_id: String,
+    relative_path: String,
+    mode: OpenMode,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum OpenMode {
+    Read,
+    List,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HandleInput {
+    handle_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReadInput {
+    handle_id: String,
+    offset: u64,
+    max_bytes: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ListInput {
+    handle_id: String,
+    offset: usize,
+    max_entries: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BeginAtomicWriteInput {
+    workspace_id: String,
+    relative_path: String,
+    create_if_absent: bool,
+    expected_version: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WriteChunkInput {
+    handle_id: String,
+    bytes: String,
+}
+
+pub fn install_file_broker_handlers(
+    tables: &mut BridgeDispatchTables,
+    broker: Arc<FileBroker>,
+) -> Result<(), String> {
+    install_handler(
+        tables,
+        "openWorkspaceFile",
+        broker.clone(),
+        |broker, payload| {
+            let input: OpenInput = serde_json::from_value(payload)
+                .map_err(|_| BridgeHandlerError::invalid_request())?;
+            let handle = bridge_file(broker.open(&input.workspace_id, &input.relative_path))?;
+            let valid_kind = matches!(
+                (input.mode, handle.kind),
+                (OpenMode::Read, FileKind::Regular) | (OpenMode::List, FileKind::Directory)
+            );
+            if !valid_kind {
+                let _ = broker.close(&handle.handle_id);
+                return Err(BridgeHandlerError::file_failure());
+            }
+            serde_json::to_value(handle).map_err(|_| BridgeHandlerError::file_failure())
+        },
+    )?;
+    install_handler(
+        tables,
+        "openWorkspaceRoot",
+        broker.clone(),
+        |broker, payload| {
+            let input: WorkspaceInput = serde_json::from_value(payload)
+                .map_err(|_| BridgeHandlerError::invalid_request())?;
+            serde_json::to_value(bridge_file(broker.open(&input.workspace_id, "."))?)
+                .map_err(|_| BridgeHandlerError::file_failure())
+        },
+    )?;
+    install_handler(
+        tables,
+        "statWorkspaceFile",
+        broker.clone(),
+        |broker, payload| {
+            let input: HandleInput = serde_json::from_value(payload)
+                .map_err(|_| BridgeHandlerError::invalid_request())?;
+            serde_json::to_value(bridge_file(broker.stat(&input.handle_id))?)
+                .map_err(|_| BridgeHandlerError::file_failure())
+        },
+    )?;
+    install_handler(
+        tables,
+        "listWorkspaceFiles",
+        broker.clone(),
+        |broker, payload| {
+            let input: ListInput = serde_json::from_value(payload)
+                .map_err(|_| BridgeHandlerError::invalid_request())?;
+            if input.max_entries == 0 || input.max_entries > MAX_LIST_ENTRIES {
+                return Err(BridgeHandlerError::invalid_request());
+            }
+            let entries = bridge_file(broker.list(&input.handle_id))?;
+            if input.offset > entries.len() {
+                return Err(BridgeHandlerError::invalid_request());
+            }
+            let end = input
+                .offset
+                .saturating_add(input.max_entries)
+                .min(entries.len());
+            Ok(json!({
+                "entries": &entries[input.offset..end],
+                "nextOffset": end,
+                "eof": end == entries.len(),
+            }))
+        },
+    )?;
+    install_handler(
+        tables,
+        "readWorkspaceFile",
+        broker.clone(),
+        |broker, payload| {
+            let input: ReadInput = serde_json::from_value(payload)
+                .map_err(|_| BridgeHandlerError::invalid_request())?;
+            let chunk = bridge_file(broker.read(&input.handle_id, input.offset, input.max_bytes))?;
+            Ok(json!({
+                "bytes": BASE64.encode(chunk.bytes),
+                "nextOffset": chunk.next_offset,
+                "eof": chunk.eof,
+            }))
+        },
+    )?;
+    install_handler(
+        tables,
+        "createWorkspaceFile",
+        broker.clone(),
+        |broker, payload| {
+            let input: CreateInput = serde_json::from_value(payload)
+                .map_err(|_| BridgeHandlerError::invalid_request())?;
+            serde_json::to_value(bridge_file(
+                broker.create(&input.workspace_id, &input.relative_path),
+            )?)
+            .map_err(|_| BridgeHandlerError::file_failure())
+        },
+    )?;
+    install_handler(
+        tables,
+        "beginWorkspaceAtomicWrite",
+        broker.clone(),
+        |broker, payload| {
+            let input: BeginAtomicWriteInput = serde_json::from_value(payload)
+                .map_err(|_| BridgeHandlerError::invalid_request())?;
+            serde_json::to_value(bridge_file(broker.begin_atomic_write(
+                &input.workspace_id,
+                &input.relative_path,
+                AtomicWriteOptions {
+                    create_if_absent: input.create_if_absent,
+                    expected_version: input.expected_version,
+                },
+            ))?)
+            .map_err(|_| BridgeHandlerError::file_failure())
+        },
+    )?;
+    install_handler(
+        tables,
+        "writeWorkspaceFileChunk",
+        broker.clone(),
+        |broker, payload| {
+            let input: WriteChunkInput = serde_json::from_value(payload)
+                .map_err(|_| BridgeHandlerError::invalid_request())?;
+            let maximum_encoded = MAX_FILE_CHUNK_BYTES.div_ceil(3) * 4;
+            if input.bytes.len() > maximum_encoded {
+                return Err(BridgeHandlerError::invalid_request());
+            }
+            let bytes = BASE64
+                .decode(&input.bytes)
+                .map_err(|_| BridgeHandlerError::invalid_request())?;
+            if bytes.len() > MAX_FILE_CHUNK_BYTES || BASE64.encode(&bytes) != input.bytes {
+                return Err(BridgeHandlerError::invalid_request());
+            }
+            bridge_file(broker.write_chunk(&input.handle_id, &bytes))?;
+            Ok(Value::Null)
+        },
+    )?;
+    install_handler(
+        tables,
+        "commitWorkspaceAtomicWrite",
+        broker.clone(),
+        |broker, payload| {
+            let input: HandleInput = serde_json::from_value(payload)
+                .map_err(|_| BridgeHandlerError::invalid_request())?;
+            Ok(json!({
+                "version": bridge_file(broker.commit_atomic_write(&input.handle_id))?
+            }))
+        },
+    )?;
+    install_handler(tables, "closeWorkspaceFile", broker, |broker, payload| {
+        let input: HandleInput =
+            serde_json::from_value(payload).map_err(|_| BridgeHandlerError::invalid_request())?;
+        bridge_file(broker.close(&input.handle_id))?;
+        Ok(Value::Null)
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceInput {
+    workspace_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateInput {
+    workspace_id: String,
+    relative_path: String,
+}
+
+fn install_handler(
+    tables: &mut BridgeDispatchTables,
+    method: &'static str,
+    broker: Arc<FileBroker>,
+    operation: impl Fn(&FileBroker, Value) -> Result<Value, BridgeHandlerError> + Send + Sync + 'static,
+) -> Result<(), String> {
+    let handler: BridgeHandler = Arc::new(move |payload, cancellation| {
+        if cancellation.is_cancelled() {
+            return Err(BridgeHandlerError::invalid_request());
+        }
+        operation(&broker, payload)
+    });
+    tables
+        .set_host_handler(method, handler)
+        .map_err(|error| error.to_string())
+}
+
+fn bridge_file<T>(result: Result<T, FileBrokerError>) -> Result<T, BridgeHandlerError> {
+    result.map_err(|_| BridgeHandlerError::file_failure())
+}
