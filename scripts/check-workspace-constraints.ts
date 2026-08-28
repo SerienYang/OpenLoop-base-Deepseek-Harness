@@ -21,6 +21,7 @@ import { collectProjectReferenceFaceViolations } from './project-reference-faces
 import {
   collectDshWorkspaceNamingViolations,
   collectOpenLoopWorkspaceViolations,
+  OPENLOOP_FORBIDDEN_PROCESS_PACKAGES,
 } from './openloop/workspace-conventions.ts'
 
 const root = resolve(import.meta.dirname, '..')
@@ -1204,32 +1205,6 @@ export function collectOpenLoopDshPrivateImportViolations(scanRoot: string): str
   return errors
 }
 
-const openLoopProcessPackages = new Set([
-  '@deepseek-ai/dsh-agent-tool-presentation',
-  '@deepseek-ai/dsh-bash-sandbox',
-  '@deepseek-ai/dsh-code-runtime-worker-thread',
-  '@deepseek-ai/dsh-lsp-stdio',
-  '@deepseek-ai/dsh-mcp-client',
-  '@deepseek-ai/dsh-pwsh-sandbox',
-  '@deepseek-ai/dsh-subagent-acp',
-  '@deepseek-ai/dsh-subagent-claude-code',
-  '@deepseek-ai/dsh-subagent-codex',
-  '@deepseek-ai/dsh-subagent-dsh-sdk',
-  '@deepseek-ai/dsh-subprocess-local',
-  '@deepseek-ai/dsh-terminal',
-  '@deepseek-ai/dsh-terminal-bash',
-  '@deepseek-ai/dsh-tool-bash',
-  '@deepseek-ai/dsh-tool-bash-persistent',
-  '@deepseek-ai/dsh-tool-cordis',
-  '@deepseek-ai/dsh-tool-fs-search',
-  '@deepseek-ai/dsh-tool-lsp',
-  '@deepseek-ai/dsh-tool-pwsh',
-  '@deepseek-ai/dsh-tool-terminal',
-  '@deepseek-ai/dsh-tool-workflow',
-  '@deepseek-ai/dsh-tool-ralph',
-  '@deepseek-ai/dsh-workflow-worker-thread',
-])
-
 function readEntryPatches(path: string): PatchOptions[] {
   const parsed = yaml.load(readFileSync(path, 'utf8'), { schema: entryListSchema })
   if (!Array.isArray(parsed)) throw new Error(`${path}: expected a patch list`)
@@ -1246,7 +1221,7 @@ function nestedEntries(entries: readonly EntryOptions[]): EntryOptions[] {
 }
 
 function processRowViolation(row: EntryOptions, label: string): string | undefined {
-  if (typeof row.name !== 'string' || !openLoopProcessPackages.has(row.name)) return undefined
+  if (typeof row.name !== 'string' || !OPENLOOP_FORBIDDEN_PROCESS_PACKAGES.has(row.name)) return undefined
   if (row.name === '@deepseek-ai/dsh-mcp-client'
     && (row.config as Readonly<Record<string, unknown>> | undefined)?.['transport'] === 'streamable-http') {
     return undefined

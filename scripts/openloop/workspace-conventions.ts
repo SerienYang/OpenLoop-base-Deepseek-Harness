@@ -270,15 +270,30 @@ const workspaceExecutionForbiddenModules = new Set([
   'node-pty',
 ])
 
-const unapprovedOpenLoopProcessProviders = new Set([
+export const OPENLOOP_FORBIDDEN_PROCESS_PACKAGES = new Set([
+  '@deepseek-ai/dsh-agent-tool-presentation',
+  '@deepseek-ai/dsh-bash-sandbox',
+  '@deepseek-ai/dsh-code-runtime-worker-thread',
+  '@deepseek-ai/dsh-lsp-stdio',
   '@deepseek-ai/dsh-mcp-client',
+  '@deepseek-ai/dsh-pwsh-sandbox',
   '@deepseek-ai/dsh-subagent-acp',
   '@deepseek-ai/dsh-subagent-claude-code',
   '@deepseek-ai/dsh-subagent-codex',
   '@deepseek-ai/dsh-subagent-dsh-sdk',
   '@deepseek-ai/dsh-subprocess-local',
+  '@deepseek-ai/dsh-terminal',
   '@deepseek-ai/dsh-terminal-bash',
-  '@deepseek-ai/dsh-lsp-stdio',
+  '@deepseek-ai/dsh-tool-bash',
+  '@deepseek-ai/dsh-tool-bash-persistent',
+  '@deepseek-ai/dsh-tool-cordis',
+  '@deepseek-ai/dsh-tool-fs-search',
+  '@deepseek-ai/dsh-tool-lsp',
+  '@deepseek-ai/dsh-tool-pwsh',
+  '@deepseek-ai/dsh-tool-ralph',
+  '@deepseek-ai/dsh-tool-terminal',
+  '@deepseek-ai/dsh-tool-workflow',
+  '@deepseek-ai/dsh-workflow-worker-thread',
 ])
 
 function sourceFiles(directory: string): string[] {
@@ -356,7 +371,7 @@ function unapprovedProcessProviderViolations(root: string): string[] {
     .sort((left, right) => left.name.localeCompare(right.name))
     .flatMap(entry => sourceFiles(join(packagesRoot, entry.name, 'src')))
     .flatMap(path => importedModules(path)
-      .filter(entry => unapprovedOpenLoopProcessProviders.has(entry.value))
+      .filter(entry => OPENLOOP_FORBIDDEN_PROCESS_PACKAGES.has(entry.value))
       .map(entry =>
         `${relative(root, path).split(sep).join('/')}:${String(entry.line)}: `
         + `Openloop code must not import unapproved process provider ${JSON.stringify(entry.value)}`))

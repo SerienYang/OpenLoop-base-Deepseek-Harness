@@ -361,7 +361,20 @@ describe('OpenLoop profile', () => {
     const defaultSearch = entries.find(entry => entry.id === 'tool-fs-search')
     expect(defaultSearch?.name).toBe('@deepseek-ai/dsh-tool-fs-search')
     expect(defaultSearch?.disabled).toBe(true)
+    expect(entries.find(entry => entry.id === 'code-runtime')).toMatchObject({
+      id: 'code-runtime',
+      name: '@deepseek-ai/dsh-code-runtime-worker-thread',
+    })
+    expect(entries.find(entry => entry.id === 'code-runtime')?.disabled).not.toBe(true)
+    expect(entries.find(entry => entry.id === 'subprocess')).toMatchObject({
+      id: 'subprocess',
+      name: '@deepseek-ai/dsh-subprocess-local',
+    })
     expect(entries.find(entry => entry.id === 'subprocess')?.disabled).not.toBe(true)
+    expect(entries.find(entry => entry.id === 'bash-sandbox')).toMatchObject({
+      id: 'bash-sandbox',
+      name: '@deepseek-ai/dsh-bash-sandbox',
+    })
     expect(entries.find(entry => entry.id === 'bash-sandbox')?.disabled).not.toBe(true)
     expect(entries.find(entry => entry.id === 'sandbox-workspace')).toBeUndefined()
   })

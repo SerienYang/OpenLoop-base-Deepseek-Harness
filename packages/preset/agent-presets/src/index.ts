@@ -191,7 +191,14 @@ export class AgentPresets extends Service {
    * every running session on the preset it was composed from.
    */
   get defaultId(): string {
-    return this.settings?.get().default ?? this.config.default
+    const configured = this.settings?.get().default
+    if (configured === undefined
+      || this.config.allowedPresetIds === undefined
+      || this.config.allowedPresetIds === false
+      || this.config.allowedPresetIds.includes(configured)) {
+      return configured ?? this.config.default
+    }
+    return this.config.default
   }
 
   /**
