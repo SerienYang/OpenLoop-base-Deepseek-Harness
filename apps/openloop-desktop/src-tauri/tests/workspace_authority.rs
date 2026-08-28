@@ -6,29 +6,38 @@ use std::{
     os::unix::fs::{symlink, PermissionsExt},
     path::{Path, PathBuf},
     process,
-    sync::{Arc, Barrier, Mutex},
+    sync::{mpsc, Arc, Barrier, Mutex},
     thread,
+    time::Duration,
 };
 
 use openloop_desktop_lib::{
     bridge::{
         protocol::{sign_request, BridgeRequest, BRIDGE_PROTOCOL_VERSION},
-        server::{AuthenticatedBridgeDispatcher, BridgeDispatchTables, PeerIdentity},
+        server::{
+            AuthenticatedBridgeDispatcher, BridgeDispatchTables, CancellationToken, PeerIdentity,
+        },
     },
     launcher::capture_process_identity,
     update::channel::ReleaseChannel,
     workspaces::{
         bridge::{install_workspace_authority_handlers, install_workspace_transaction_handlers},
         confirmation::{
-            confirm_workspace_revoke, CommittedWorkspaceProjection,
-            CommittedWorkspaceProjectionResolver, RevokeConfirmation, RevokePresentation,
+            confirm_workspace_revoke, AppKitWorkspaceRevokeConfirmation,
+            AppKitWorkspaceRevokeConfirmationBackend, CommittedWorkspaceProjection,
+            CommittedWorkspaceProjectionResolver, RevokeConfirmation,
+            RevokeConfirmationCancellation, RevokeConfirmationCompletion, RevokePresentation,
         },
         grants::{
             reopen_verified_grant, FileIdentity, GrantStatus, GrantStore, WorkspaceGrant,
             WorkspaceGrantError,
         },
         journal::{WorkspaceJournal, WorkspaceTransaction, WorkspaceTransactionKind},
-        picker::{PendingGrantRegistry, WorkspaceDirectoryPicker},
+        picker::{
+            AppKitWorkspaceDirectoryPicker, AppKitWorkspaceDirectoryPickerBackend,
+            DirectoryPickerCancellation, DirectoryPickerCompletion, PendingGrantRegistry,
+            WorkspaceDirectoryPicker,
+        },
     },
 };
 use tempfile::tempdir;
@@ -800,6 +809,426 @@ impl WorkspaceDirectoryPicker for SequencePicker {
             .pop_front()
             .ok_or(WorkspaceGrantError::PromptUnavailable)
     }
+}
+
+struct BlockingDirectoryPickerBackend {
+    entered: Mutex<Option<mpsc::Sender<()>>>,
+    completion: Arc<Mutex<Option<DirectoryPickerCompletion>>>,
+    presentations: Arc<Mutex<usize>>,
+    cancellations: Arc<Mutex<usize>>,
+}
+
+impl AppKitWorkspaceDirectoryPickerBackend for BlockingDirectoryPickerBackend {
+    fn begin_sheet(
+        &self,
+        completion: DirectoryPickerCompletion,
+    ) -> Result<DirectoryPickerCancellation, WorkspaceGrantError> {
+        *self.presentations.lock().expect("picker presentation lock") += 1;
+        *self.completion.lock().expect("picker completion lock") = Some(completion);
+        if let Some(entered) = self.entered.lock().expect("picker entered lock").take() {
+            entered.send(()).expect("report picker entry");
+        }
+        let active_completion = self.completion.clone();
+        let cancellations = self.cancellations.clone();
+        Ok(Box::new(move || {
+            *cancellations.lock().expect("picker cancellation lock") += 1;
+            let completion = active_completion
+                .lock()
+                .expect("picker completion lock")
+                .take();
+            if let Some(completion) = completion {
+                completion(Ok(None));
+            }
+        }))
+    }
+}
+
+#[test]
+fn picker_cancellation_releases_an_open_blocking_backend() {
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let backend = Arc::new(BlockingDirectoryPickerBackend {
+        entered: Mutex::new(Some(entered_tx)),
+        completion: Arc::new(Mutex::new(None)),
+        presentations: Arc::new(Mutex::new(0)),
+        cancellations: Arc::new(Mutex::new(0)),
+    });
+    let picker = Arc::new(AppKitWorkspaceDirectoryPicker::with_backend(
+        backend.clone(),
+    ));
+    let cancellation = CancellationToken::default();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    {
+        let picker = picker.clone();
+        let cancellation = cancellation.clone();
+        thread::spawn(move || {
+            finished_tx
+                .send(picker.pick_cancellable(&cancellation))
+                .expect("report picker outcome");
+        });
+    }
+    entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("picker opened");
+
+    cancellation.cancel();
+
+    assert_eq!(
+        finished_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("cancellation must release picker")
+            .expect("picker cancellation outcome"),
+        None
+    );
+    assert_eq!(
+        *backend
+            .cancellations
+            .lock()
+            .expect("picker cancellation lock"),
+        1
+    );
+    assert!(backend
+        .completion
+        .lock()
+        .expect("picker completion lock")
+        .is_none());
+}
+
+#[test]
+fn picker_cancellation_before_presentation_skips_the_backend() {
+    let backend = Arc::new(BlockingDirectoryPickerBackend {
+        entered: Mutex::new(None),
+        completion: Arc::new(Mutex::new(None)),
+        presentations: Arc::new(Mutex::new(0)),
+        cancellations: Arc::new(Mutex::new(0)),
+    });
+    let picker = AppKitWorkspaceDirectoryPicker::with_backend(backend.clone());
+    let cancellation = CancellationToken::default();
+    cancellation.cancel();
+
+    assert_eq!(
+        picker
+            .pick_cancellable(&cancellation)
+            .expect("pre-cancelled picker"),
+        None
+    );
+    assert_eq!(
+        *backend
+            .presentations
+            .lock()
+            .expect("picker presentation lock"),
+        0
+    );
+    assert_eq!(
+        *backend
+            .cancellations
+            .lock()
+            .expect("picker cancellation lock"),
+        0
+    );
+}
+
+struct BlockingRevokeConfirmationBackend {
+    entered: Mutex<Option<mpsc::Sender<()>>>,
+    completion: Arc<Mutex<Option<RevokeConfirmationCompletion>>>,
+    presentations: Arc<Mutex<usize>>,
+    cancellations: Arc<Mutex<usize>>,
+}
+
+impl AppKitWorkspaceRevokeConfirmationBackend for BlockingRevokeConfirmationBackend {
+    fn begin_sheet(
+        &self,
+        _presentation: RevokePresentation,
+        completion: RevokeConfirmationCompletion,
+    ) -> Result<RevokeConfirmationCancellation, WorkspaceGrantError> {
+        *self
+            .presentations
+            .lock()
+            .expect("confirmation presentation lock") += 1;
+        *self
+            .completion
+            .lock()
+            .expect("confirmation completion lock") = Some(completion);
+        if let Some(entered) = self
+            .entered
+            .lock()
+            .expect("confirmation entered lock")
+            .take()
+        {
+            entered.send(()).expect("report confirmation entry");
+        }
+        let active_completion = self.completion.clone();
+        let cancellations = self.cancellations.clone();
+        Ok(Box::new(move || {
+            *cancellations
+                .lock()
+                .expect("confirmation cancellation lock") += 1;
+            let completion = active_completion
+                .lock()
+                .expect("confirmation completion lock")
+                .take();
+            if let Some(completion) = completion {
+                completion(Ok(false));
+            }
+        }))
+    }
+}
+
+#[test]
+fn revoke_confirmation_cancellation_before_presentation_returns_cancelled_once() {
+    let backend = Arc::new(BlockingRevokeConfirmationBackend {
+        entered: Mutex::new(None),
+        completion: Arc::new(Mutex::new(None)),
+        presentations: Arc::new(Mutex::new(0)),
+        cancellations: Arc::new(Mutex::new(0)),
+    });
+    let confirmation = AppKitWorkspaceRevokeConfirmation::with_backend(backend.clone());
+    let cancellation = CancellationToken::default();
+    cancellation.cancel();
+
+    assert!(!confirmation
+        .confirm_cancellable(
+            &RevokePresentation {
+                workspace_id: "workspace-1".to_owned(),
+                title: "Project Alpha".to_owned(),
+            },
+            &cancellation,
+        )
+        .expect("pre-cancelled confirmation"));
+    assert_eq!(
+        *backend
+            .cancellations
+            .lock()
+            .expect("confirmation cancellation lock"),
+        0
+    );
+    assert_eq!(
+        *backend
+            .presentations
+            .lock()
+            .expect("confirmation presentation lock"),
+        0
+    );
+    assert!(backend
+        .completion
+        .lock()
+        .expect("confirmation completion lock")
+        .is_none());
+}
+
+#[test]
+fn revoke_confirmation_cancellation_releases_an_open_blocking_backend() {
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let backend = Arc::new(BlockingRevokeConfirmationBackend {
+        entered: Mutex::new(Some(entered_tx)),
+        completion: Arc::new(Mutex::new(None)),
+        presentations: Arc::new(Mutex::new(0)),
+        cancellations: Arc::new(Mutex::new(0)),
+    });
+    let confirmation = Arc::new(AppKitWorkspaceRevokeConfirmation::with_backend(
+        backend.clone(),
+    ));
+    let cancellation = CancellationToken::default();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    {
+        let confirmation = confirmation.clone();
+        let cancellation = cancellation.clone();
+        thread::spawn(move || {
+            finished_tx
+                .send(confirmation.confirm_cancellable(
+                    &RevokePresentation {
+                        workspace_id: "workspace-1".to_owned(),
+                        title: "Project Alpha".to_owned(),
+                    },
+                    &cancellation,
+                ))
+                .expect("report confirmation outcome");
+        });
+    }
+    entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("confirmation opened");
+
+    cancellation.cancel();
+
+    assert!(!finished_rx
+        .recv_timeout(Duration::from_millis(250))
+        .expect("cancellation must release confirmation")
+        .expect("confirmation cancellation outcome"));
+    assert_eq!(
+        *backend
+            .cancellations
+            .lock()
+            .expect("confirmation cancellation lock"),
+        1
+    );
+    assert!(backend
+        .completion
+        .lock()
+        .expect("confirmation completion lock")
+        .is_none());
+}
+
+struct CancellationOnlyPicker {
+    entered: Mutex<Option<mpsc::Sender<()>>>,
+}
+
+impl WorkspaceDirectoryPicker for CancellationOnlyPicker {
+    fn pick(&self) -> Result<Option<PathBuf>, WorkspaceGrantError> {
+        Err(WorkspaceGrantError::PromptUnavailable)
+    }
+
+    fn pick_cancellable(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<PathBuf>, WorkspaceGrantError> {
+        if let Some(entered) = self.entered.lock().expect("picker entered lock").take() {
+            entered.send(()).expect("report picker entry");
+        }
+        cancellation.wait();
+        Ok(None)
+    }
+}
+
+struct CancellationOnlyConfirmation {
+    entered: Mutex<Option<mpsc::Sender<()>>>,
+}
+
+impl RevokeConfirmation for CancellationOnlyConfirmation {
+    fn confirm(&self, _presentation: &RevokePresentation) -> Result<bool, WorkspaceGrantError> {
+        Err(WorkspaceGrantError::PromptUnavailable)
+    }
+
+    fn confirm_cancellable(
+        &self,
+        _presentation: &RevokePresentation,
+        cancellation: &CancellationToken,
+    ) -> Result<bool, WorkspaceGrantError> {
+        if let Some(entered) = self
+            .entered
+            .lock()
+            .expect("confirmation entered lock")
+            .take()
+        {
+            entered.send(()).expect("report confirmation entry");
+        }
+        cancellation.wait();
+        Ok(false)
+    }
+}
+
+#[test]
+fn bridge_cancellation_reaches_workspace_picker_and_revoke_confirmation() {
+    let root = tempdir().expect("root");
+    let channel = root.path().join("channel");
+    secure_root(&channel);
+    let store = GrantStore::open(&channel, ReleaseChannel::Test).expect("store");
+    let journal = WorkspaceJournal::open(&channel, ReleaseChannel::Test).expect("journal");
+    let launch_id = Uuid::new_v4();
+    let (picker_entered_tx, picker_entered_rx) = mpsc::channel();
+    let (confirmation_entered_tx, confirmation_entered_rx) = mpsc::channel();
+    let mut tables = BridgeDispatchTables::unavailable();
+    install_workspace_authority_handlers(
+        &mut tables,
+        launch_id,
+        store,
+        journal,
+        Arc::new(Mutex::new(PendingGrantRegistry::new(launch_id))),
+        Arc::new(CancellationOnlyPicker {
+            entered: Mutex::new(Some(picker_entered_tx)),
+        }),
+        Arc::new(CancellationOnlyConfirmation {
+            entered: Mutex::new(Some(confirmation_entered_tx)),
+        }),
+    )
+    .expect("authority handlers");
+    let executable = std::env::current_exe().expect("test executable");
+    let secret: Vec<u8> = (0..32).collect();
+    let peer = PeerIdentity {
+        uid: unsafe { libc::geteuid() },
+        pid: process::id(),
+    };
+    let dispatcher = Arc::new(
+        AuthenticatedBridgeDispatcher::new(
+            peer.uid,
+            capture_process_identity(process::id(), &executable).expect("process identity"),
+            executable,
+            launch_id,
+            secret.clone(),
+            tables,
+        )
+        .expect("Workspace dispatcher"),
+    );
+
+    let picker_request = {
+        let dispatcher = dispatcher.clone();
+        let secret = secret.clone();
+        thread::spawn(move || {
+            dispatch_workspace(
+                &dispatcher,
+                launch_id,
+                &secret,
+                peer,
+                1,
+                "beginWorkspaceAuthorization",
+                serde_json::Value::Null,
+            )
+        })
+    };
+    picker_entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("picker request entered");
+    let picker_cancel = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        2,
+        "$cancel",
+        serde_json::json!({ "requestId": "workspace-request-1" }),
+    );
+    assert_eq!(picker_cancel["result"], serde_json::Value::Null);
+    assert_eq!(
+        picker_request.join().expect("picker request thread")["result"],
+        serde_json::json!({ "outcome": "cancelled" }),
+    );
+
+    let confirmation_request = {
+        let dispatcher = dispatcher.clone();
+        let secret = secret.clone();
+        thread::spawn(move || {
+            dispatch_workspace(
+                &dispatcher,
+                launch_id,
+                &secret,
+                peer,
+                3,
+                "confirmWorkspaceRevoke",
+                serde_json::json!({
+                    "workspaceId": "workspace-1",
+                    "title": "Project Alpha",
+                }),
+            )
+        })
+    };
+    confirmation_entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("confirmation request entered");
+    let confirmation_cancel = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        4,
+        "$cancel",
+        serde_json::json!({ "requestId": "workspace-request-3" }),
+    );
+    assert_eq!(confirmation_cancel["result"], serde_json::Value::Null);
+    assert_eq!(
+        confirmation_request
+            .join()
+            .expect("confirmation request thread")["result"],
+        "cancelled",
+    );
 }
 
 #[derive(Default)]

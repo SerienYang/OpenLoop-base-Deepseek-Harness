@@ -102,7 +102,7 @@ pub fn install_workspace_authority_handlers(
             return Err(BridgeHandlerError::invalid_request());
         }
         let selection = picker
-            .pick()
+            .pick_cancellable(&cancellation)
             .map_err(|_| BridgeHandlerError::workspace_failure())?;
         let Some(path) = selection else {
             return Ok(json!({ "outcome": "cancelled" }));
@@ -381,17 +381,20 @@ pub fn install_workspace_authority_handlers(
         .set_host_handler("restoreWorkspaceGrantReady", restore)
         .map_err(|error| error.to_string())?;
 
-    let confirm: BridgeHandler = Arc::new(move |payload, _cancellation| {
+    let confirm: BridgeHandler = Arc::new(move |payload, cancellation| {
         let input: ConfirmRevokeInput =
             serde_json::from_value(payload).map_err(|_| BridgeHandlerError::invalid_request())?;
         if input.workspace_id.is_empty() || input.title.trim().is_empty() {
             return Err(BridgeHandlerError::invalid_request());
         }
         let confirmed = confirmation
-            .confirm(&RevokePresentation {
-                workspace_id: input.workspace_id,
-                title: input.title,
-            })
+            .confirm_cancellable(
+                &RevokePresentation {
+                    workspace_id: input.workspace_id,
+                    title: input.title,
+                },
+                &cancellation,
+            )
             .map_err(|_| BridgeHandlerError::workspace_failure())?;
         Ok(json!(if confirmed { "confirmed" } else { "cancelled" }))
     });

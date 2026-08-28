@@ -6,7 +6,11 @@ use std::{
         unix::fs::{MetadataExt, PermissionsExt},
     },
     path::{Path, PathBuf},
-    sync::mpsc,
+    ptr,
+    sync::{
+        atomic::{AtomicPtr, Ordering},
+        mpsc, Arc, Mutex,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -15,6 +19,8 @@ use objc2_app_kit::{NSModalResponseOK, NSOpenPanel, NSWindow};
 use objc2_foundation::{MainThreadMarker, NSThread};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
+
+use crate::bridge::server::CancellationToken;
 
 use super::grants::{
     reopen_verified_grant, FileIdentity, GrantStatus, LaunchGrant, WorkspaceGrant,
@@ -28,21 +34,82 @@ struct PendingGrant {
 
 pub trait WorkspaceDirectoryPicker: Send + Sync {
     fn pick(&self) -> Result<Option<PathBuf>, WorkspaceGrantError>;
+
+    fn pick_cancellable(
+        &self,
+        _cancellation: &CancellationToken,
+    ) -> Result<Option<PathBuf>, WorkspaceGrantError> {
+        self.pick()
+    }
+}
+
+pub type DirectoryPickerCompletion =
+    Box<dyn FnOnce(Result<Option<PathBuf>, WorkspaceGrantError>) + Send + 'static>;
+pub type DirectoryPickerCancellation = Box<dyn FnOnce() + Send + 'static>;
+
+pub trait AppKitWorkspaceDirectoryPickerBackend: Send + Sync {
+    fn begin_sheet(
+        &self,
+        completion: DirectoryPickerCompletion,
+    ) -> Result<DirectoryPickerCancellation, WorkspaceGrantError>;
 }
 
 #[derive(Clone)]
 pub struct AppKitWorkspaceDirectoryPicker {
+    backend: Arc<dyn AppKitWorkspaceDirectoryPickerBackend>,
+}
+
+struct Objc2AppKitWorkspaceDirectoryPickerBackend {
     app: AppHandle,
 }
 
 impl AppKitWorkspaceDirectoryPicker {
     pub fn new(app: AppHandle) -> Self {
-        Self { app }
+        Self::with_backend(Arc::new(Objc2AppKitWorkspaceDirectoryPickerBackend { app }))
+    }
+
+    pub fn with_backend(backend: Arc<dyn AppKitWorkspaceDirectoryPickerBackend>) -> Self {
+        Self { backend }
     }
 }
 
 impl WorkspaceDirectoryPicker for AppKitWorkspaceDirectoryPicker {
     fn pick(&self) -> Result<Option<PathBuf>, WorkspaceGrantError> {
+        self.pick_with_cancellation(&CancellationToken::default())
+    }
+
+    fn pick_cancellable(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<PathBuf>, WorkspaceGrantError> {
+        self.pick_with_cancellation(cancellation)
+    }
+}
+
+impl AppKitWorkspaceDirectoryPicker {
+    fn pick_with_cancellation(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<PathBuf>, WorkspaceGrantError> {
+        if cancellation.is_cancelled() {
+            return Ok(None);
+        }
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let cancel_sheet = self.backend.begin_sheet(Box::new(move |result| {
+            let _ = sender.send(result);
+        }))?;
+        let _cancellation = cancellation.subscribe(cancel_sheet);
+        receiver
+            .recv()
+            .map_err(|_| WorkspaceGrantError::PromptUnavailable)?
+    }
+}
+
+impl AppKitWorkspaceDirectoryPickerBackend for Objc2AppKitWorkspaceDirectoryPickerBackend {
+    fn begin_sheet(
+        &self,
+        completion: DirectoryPickerCompletion,
+    ) -> Result<DirectoryPickerCancellation, WorkspaceGrantError> {
         if NSThread::isMainThread_class() {
             return Err(WorkspaceGrantError::PromptUnavailable);
         }
@@ -51,40 +118,104 @@ impl WorkspaceDirectoryPicker for AppKitWorkspaceDirectoryPicker {
             .get_webview_window("main")
             .ok_or(WorkspaceGrantError::PromptUnavailable)?;
         let scheduled_window = window.clone();
-        let (sender, receiver) = mpsc::sync_channel(1);
-        window
+        let session = Arc::new(NativeDirectoryPickerSession::new(completion));
+        let scheduled_session = session.clone();
+        if window
             .run_on_main_thread(move || {
-                let result = begin_directory_sheet(&scheduled_window, sender);
-                if let Err((sender, error)) = result {
-                    let _ = sender.send(Err(error));
+                if begin_directory_sheet(&scheduled_window, scheduled_session.clone()).is_err() {
+                    complete_directory_sheet(
+                        &scheduled_session,
+                        Err(WorkspaceGrantError::PromptUnavailable),
+                    );
                 }
             })
-            .map_err(|_| WorkspaceGrantError::PromptUnavailable)?;
-        receiver
-            .recv()
-            .map_err(|_| WorkspaceGrantError::PromptUnavailable)?
+            .is_err()
+        {
+            complete_directory_sheet(&session, Err(WorkspaceGrantError::PromptUnavailable));
+            return Err(WorkspaceGrantError::PromptUnavailable);
+        }
+        let app = self.app.clone();
+        let session = Arc::downgrade(&session);
+        Ok(Box::new(move || {
+            let Some(session) = session.upgrade() else {
+                return;
+            };
+            let Some(window) = app.get_webview_window("main") else {
+                complete_directory_sheet(&session, Ok(None));
+                return;
+            };
+            let scheduled_session = session.clone();
+            if window
+                .run_on_main_thread(move || {
+                    cancel_directory_sheet(&scheduled_session);
+                })
+                .is_err()
+            {
+                complete_directory_sheet(&session, Ok(None));
+            }
+        }))
     }
 }
 
-type PickerSender = mpsc::SyncSender<Result<Option<PathBuf>, WorkspaceGrantError>>;
+struct NativeDirectoryPickerSession {
+    completion: Mutex<Option<DirectoryPickerCompletion>>,
+    panel: AtomicPtr<NSOpenPanel>,
+}
+
+impl NativeDirectoryPickerSession {
+    fn new(completion: DirectoryPickerCompletion) -> Self {
+        Self {
+            completion: Mutex::new(Some(completion)),
+            panel: AtomicPtr::new(ptr::null_mut()),
+        }
+    }
+
+    fn is_pending(&self) -> bool {
+        match self.completion.lock() {
+            Ok(completion) => completion.is_some(),
+            Err(poisoned) => poisoned.into_inner().is_some(),
+        }
+    }
+}
+
+fn complete_directory_sheet(
+    session: &NativeDirectoryPickerSession,
+    result: Result<Option<PathBuf>, WorkspaceGrantError>,
+) {
+    let callback = match session.completion.lock() {
+        Ok(mut callback) => callback.take(),
+        Err(poisoned) => poisoned.into_inner().take(),
+    };
+    if let Some(callback) = callback {
+        callback(result);
+    }
+}
 
 fn begin_directory_sheet(
     window: &tauri::WebviewWindow,
-    sender: PickerSender,
-) -> Result<(), (PickerSender, WorkspaceGrantError)> {
+    session: Arc<NativeDirectoryPickerSession>,
+) -> Result<(), WorkspaceGrantError> {
+    if !session.is_pending() {
+        return Ok(());
+    }
     let Some(mtm) = MainThreadMarker::new() else {
-        return Err((sender, WorkspaceGrantError::PromptUnavailable));
+        return Err(WorkspaceGrantError::PromptUnavailable);
     };
-    let parent = match parent_ns_window(window) {
-        Ok(parent) => parent,
-        Err(error) => return Err((sender, error)),
-    };
+    let parent = parent_ns_window(window)?;
     let panel = NSOpenPanel::openPanel(mtm);
     panel.setCanChooseDirectories(true);
     panel.setCanChooseFiles(false);
     panel.setAllowsMultipleSelection(false);
     let retained_panel = panel.clone();
+    session.panel.store(
+        (&*panel as *const NSOpenPanel).cast_mut(),
+        Ordering::Release,
+    );
+    let completion_session = session.clone();
     let completion = RcBlock::new(move |response| {
+        completion_session
+            .panel
+            .store(ptr::null_mut(), Ordering::Release);
         let result = if response == NSModalResponseOK {
             retained_panel
                 .URLs()
@@ -96,11 +227,25 @@ fn begin_directory_sheet(
         } else {
             Ok(None)
         };
-        let _ = sender.send(result);
+        complete_directory_sheet(&completion_session, result);
         drop(retained_panel.clone());
     });
     panel.beginSheetModalForWindow_completionHandler(parent, &completion);
     Ok(())
+}
+
+fn cancel_directory_sheet(session: &NativeDirectoryPickerSession) {
+    debug_assert!(NSThread::isMainThread_class());
+    if !session.is_pending() {
+        return;
+    }
+    let panel = session.panel.swap(ptr::null_mut(), Ordering::AcqRel);
+    if !panel.is_null() {
+        // SAFETY: the pointer belongs to the retained NSOpenPanel and all
+        // access is serialized on the AppKit main thread.
+        unsafe { (&*panel).cancel(None) };
+    }
+    complete_directory_sheet(session, Ok(None));
 }
 
 fn parent_ns_window(window: &tauri::WebviewWindow) -> Result<&NSWindow, WorkspaceGrantError> {

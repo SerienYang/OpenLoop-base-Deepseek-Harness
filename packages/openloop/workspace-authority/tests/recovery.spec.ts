@@ -187,6 +187,19 @@ const reauthorizeRecoveryMatrix = (
     absentOutcome: 'completed',
   },
   {
+    label: 'owned replacement grant',
+    grantGeneration: 3,
+    grant: {
+      exists: true,
+      generation: 3,
+      operationId: 'operation-1',
+      identityValid: true,
+      status: 'ready' as const,
+    },
+    presentOutcome: 'completed',
+    absentOutcome: 'completed',
+  },
+  {
     label: 'original stable grant',
     grantGeneration: 1,
     grant: {
@@ -484,6 +497,39 @@ describe('Workspace transaction recovery', () => {
       generation: 2,
       stage: 'registry-deleted',
     }, 'grant-deleted')
+  })
+
+  it('deletes an original stable grant after revoke registry deletion committed first', async () => {
+    const value = portAfterCommittedCatalogDeletion({
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 1,
+        operationId: 'prior-operation',
+        identityValid: true,
+        status: 'ready' as const,
+      })),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('revoke', 'revoke-prepared'),
+      value,
+    )).resolves.toBe('completed')
+    expect(value.deleteGrant).toHaveBeenCalledWith('workspace-1', 1)
+    expect(value.advanceTransaction).toHaveBeenNthCalledWith(1, {
+      operationId: 'operation-1',
+      generation: 1,
+      stage: 'revoke-prepared',
+    }, 'registry-deleted')
+    expect(value.advanceTransaction).toHaveBeenNthCalledWith(2, {
+      operationId: 'operation-1',
+      generation: 2,
+      stage: 'registry-deleted',
+    }, 'grant-deleted')
+    expect(value.completeTransaction).toHaveBeenCalledWith({
+      operationId: 'operation-1',
+      generation: 3,
+      stage: 'grant-deleted',
+    })
   })
 
   it('finishes a legacy revoke from registry-deleted without a grant mutation', async () => {
@@ -925,6 +971,35 @@ describe('Workspace transaction recovery', () => {
     expect(value.abortTransaction).toHaveBeenCalled()
   })
 
+  it('deletes its committed replacement after reauthorize-prepared loses the registry row', async () => {
+    const value = portAfterCommittedCatalogDeletion({
+      grantGeneration: vi.fn(async () => 3),
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 3,
+        operationId: 'operation-1',
+        identityValid: true,
+        status: 'ready' as const,
+      })),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('reauthorize', 'reauthorize-prepared'),
+      value,
+    )).resolves.toBe('completed')
+    expect(value.deleteGrant).toHaveBeenCalledWith(
+      'workspace-1',
+      3,
+      'operation-1',
+    )
+    expect(value.abortTransaction).toHaveBeenCalledWith({
+      operationId: 'operation-1',
+      generation: 1,
+      stage: 'reauthorize-prepared',
+    })
+    expect(value.completeTransaction).not.toHaveBeenCalled()
+  })
+
   it.each(reauthorizeRecoveryMatrix)(
     'reauthorize grant-committed matrix: workspace $workspaceExists with $label -> $outcome',
     async ({ workspaceExists, grantGeneration, grant, outcome, label }) => {
@@ -948,10 +1023,10 @@ describe('Workspace transaction recovery', () => {
       } else {
         expect(value.completeTransaction).not.toHaveBeenCalled()
       }
-      if (!workspaceExists && label === 'owned new grant') {
+      if (!workspaceExists && (label === 'owned new grant' || label === 'owned replacement grant')) {
         expect(value.deleteGrant).toHaveBeenCalledWith(
           'workspace-1',
-          2,
+          label === 'owned new grant' ? 2 : 3,
           'operation-1',
         )
       } else {
