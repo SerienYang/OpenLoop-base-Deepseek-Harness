@@ -85,7 +85,7 @@ function isOriginalUnfrozenGrant(
     && grant.status !== 'reauthorizing'
 }
 
-function isReusableAddGrant(
+function isStableOriginalAddGrant(
   transaction: WorkspaceTransaction,
   grant: WorkspaceGrantRecoveryState,
   currentGrantGeneration: number,
@@ -95,7 +95,9 @@ function isReusableAddGrant(
     && currentGrantGeneration === transaction.expectedGrantGeneration
     && grant.operationId !== undefined
     && grant.operationId !== transaction.operationId
-    && grant.status === 'ready'
+    && grant.status !== undefined
+    && grant.status !== 'revoking'
+    && grant.status !== 'reauthorizing'
 }
 
 function versionOf(transaction: WorkspaceTransaction): TransactionVersion {
@@ -324,14 +326,37 @@ export async function recoverWorkspaceTransaction(
       await port.abortTransaction(versionOf(transaction))
       return 'rolled-back'
     }
-    if (!workspaceExists) return 'stale-generation'
     const grant = await port.inspectGrant(workspaceId)
-    if (!isMatchingGrant(
+    const isOwnedNewGrant = isMatchingGrant(
+      transaction,
+      grant,
+      transaction.expectedGrantGeneration + 1,
+      'ready',
+    ) && currentGrantGeneration === transaction.expectedGrantGeneration + 1
+    if (!workspaceExists) {
+      if (currentCatalogGeneration !== transaction.expectedCatalogGeneration + 1) {
+        return 'stale-generation'
+      }
+      if (!grant.exists) {
+        await port.completeTransaction(versionOf(transaction))
+        return 'completed'
+      }
+      if (!isOwnedNewGrant) return 'stale-generation'
+      await port.deleteGrant(
+        workspaceId,
+        grantGeneration(workspaceId, grant),
+        transaction.operationId,
+      )
+      await port.completeTransaction(versionOf(transaction))
+      return 'completed'
+    }
+    const isOwnedReplacementGrant = isMatchingGrant(
       transaction,
       grant,
       transaction.expectedGrantGeneration + 2,
       'ready',
-    )) return 'stale-generation'
+    ) && currentGrantGeneration === transaction.expectedGrantGeneration + 2
+    if (!isOwnedNewGrant && !isOwnedReplacementGrant) return 'stale-generation'
     await port.completeTransaction(versionOf(transaction))
     return 'completed'
   }
@@ -360,15 +385,17 @@ export async function recoverWorkspaceTransaction(
       await advanceAndComplete(port, addTransaction, 'grant-committed')
       return 'completed'
     }
-    if (isReusableAddGrant(transaction, grant, currentGrantGeneration)) {
-      if (grant.identityValid) {
+    if (isStableOriginalAddGrant(transaction, grant, currentGrantGeneration)) {
+      if (grant.status === 'ready' && grant.identityValid) {
         await advanceAndComplete(port, addTransaction, 'grant-committed')
         return 'completed'
       }
-      await port.markNeedsAuthorization(
-        workspaceId,
-        grantGeneration(workspaceId, grant),
-      )
+      if (grant.status !== 'needs-authorization') {
+        await port.markNeedsAuthorization(
+          workspaceId,
+          grantGeneration(workspaceId, grant),
+        )
+      }
       await advanceAndComplete(port, addTransaction, 'authorization-failed')
       return 'needs-authorization'
     }

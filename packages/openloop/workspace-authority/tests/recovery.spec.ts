@@ -3,7 +3,11 @@ import {
   recoverWorkspaceTransaction,
   type WorkspaceRecoveryPort,
 } from '../src/recovery.ts'
-import type { TransactionVersion, WorkspaceTransaction } from '../src/types.ts'
+import type {
+  PersistedGrantStatus,
+  TransactionVersion,
+  WorkspaceTransaction,
+} from '../src/types.ts'
 
 function transaction(
   kind: WorkspaceTransaction['kind'],
@@ -65,6 +69,180 @@ function portAfterCommittedCatalogDeletion(
     ...overrides,
   })
 }
+
+const stableDuplicateGrantCases = (
+  ['prepared', 'registry-committed'] as const
+).flatMap(stage => ([
+  ['ready-valid', 'ready', true, 'completed', false],
+  ['ready-invalid', 'ready', false, 'needs-authorization', true],
+  ['needs-authorization', 'needs-authorization', false, 'needs-authorization', false],
+  ['missing', 'missing', false, 'needs-authorization', true],
+  ['permission-denied', 'permission-denied', false, 'needs-authorization', true],
+  ['identity-mismatch', 'identity-mismatch', false, 'needs-authorization', true],
+] as const).map(([label, status, identityValid, outcome, marksNeedsAuthorization]) => ({
+  stage,
+  label,
+  status,
+  identityValid,
+  outcome,
+  marksNeedsAuthorization,
+})))
+
+const addRecoveryMatrix = (
+  [true, false] as const
+).flatMap(workspaceExists => ([
+  {
+    label: 'grant absent',
+    grantGeneration: 1,
+    grant: { exists: false, identityValid: false },
+    presentOutcome: 'needs-authorization',
+  },
+  {
+    label: 'owned new grant',
+    grantGeneration: 2,
+    grant: {
+      exists: true,
+      generation: 2,
+      operationId: 'operation-1',
+      identityValid: true,
+      status: 'ready' as const,
+    },
+    presentOutcome: 'completed',
+  },
+  {
+    label: 'original stable grant',
+    grantGeneration: 1,
+    grant: {
+      exists: true,
+      generation: 1,
+      operationId: 'prior-operation',
+      identityValid: true,
+      status: 'ready' as const,
+    },
+    presentOutcome: 'completed',
+  },
+  {
+    label: 'revoking grant',
+    grantGeneration: 1,
+    grant: {
+      exists: true,
+      generation: 1,
+      operationId: 'prior-operation',
+      identityValid: true,
+      status: 'revoking' as const,
+    },
+    presentOutcome: 'stale-generation',
+  },
+  {
+    label: 'reauthorizing grant',
+    grantGeneration: 1,
+    grant: {
+      exists: true,
+      generation: 1,
+      operationId: 'prior-operation',
+      identityValid: true,
+      status: 'reauthorizing' as const,
+    },
+    presentOutcome: 'stale-generation',
+  },
+  {
+    label: 'foreign generation',
+    grantGeneration: 3,
+    grant: {
+      exists: true,
+      generation: 3,
+      operationId: 'prior-operation',
+      identityValid: true,
+      status: 'ready' as const,
+    },
+    presentOutcome: 'stale-generation',
+  },
+] as const).map(value => ({
+  ...value,
+  workspaceExists,
+  outcome: workspaceExists ? value.presentOutcome : 'stale-generation',
+})))
+
+const reauthorizeRecoveryMatrix = (
+  [true, false] as const
+).flatMap(workspaceExists => ([
+  {
+    label: 'grant absent',
+    grantGeneration: 3,
+    grant: { exists: false, identityValid: false },
+    presentOutcome: 'stale-generation',
+    absentOutcome: 'completed',
+  },
+  {
+    label: 'owned new grant',
+    grantGeneration: 2,
+    grant: {
+      exists: true,
+      generation: 2,
+      operationId: 'operation-1',
+      identityValid: true,
+      status: 'ready' as const,
+    },
+    presentOutcome: 'completed',
+    absentOutcome: 'completed',
+  },
+  {
+    label: 'original stable grant',
+    grantGeneration: 1,
+    grant: {
+      exists: true,
+      generation: 1,
+      operationId: 'prior-operation',
+      identityValid: true,
+      status: 'ready' as const,
+    },
+    presentOutcome: 'stale-generation',
+    absentOutcome: 'stale-generation',
+  },
+  {
+    label: 'reauthorizing grant',
+    grantGeneration: 2,
+    grant: {
+      exists: true,
+      generation: 2,
+      operationId: 'operation-1',
+      identityValid: true,
+      status: 'reauthorizing' as const,
+    },
+    presentOutcome: 'stale-generation',
+    absentOutcome: 'stale-generation',
+  },
+  {
+    label: 'revoking grant',
+    grantGeneration: 2,
+    grant: {
+      exists: true,
+      generation: 2,
+      operationId: 'operation-1',
+      identityValid: true,
+      status: 'revoking' as const,
+    },
+    presentOutcome: 'stale-generation',
+    absentOutcome: 'stale-generation',
+  },
+  {
+    label: 'foreign generation',
+    grantGeneration: 4,
+    grant: {
+      exists: true,
+      generation: 4,
+      operationId: 'other-operation',
+      identityValid: true,
+      status: 'ready' as const,
+    },
+    presentOutcome: 'stale-generation',
+    absentOutcome: 'stale-generation',
+  },
+] as const).map(value => ({
+  ...value,
+  workspaceExists,
+  outcome: workspaceExists ? value.presentOutcome : value.absentOutcome,
+})))
 
 describe('Workspace transaction recovery', () => {
   it('has no action when no durable transaction exists', async () => {
@@ -531,6 +709,66 @@ describe('Workspace transaction recovery', () => {
     }, 'authorization-failed')
   })
 
+  it.each(stableDuplicateGrantCases)(
+    'settles duplicate-path add at $stage for stable $label grant',
+    async ({
+      stage,
+      status,
+      identityValid,
+      outcome,
+      marksNeedsAuthorization,
+    }) => {
+      const value = port({
+        catalogGeneration: vi.fn(async () => 2),
+        inspectGrant: vi.fn(async () => ({
+          exists: true,
+          generation: 1,
+          operationId: 'prior-operation',
+          identityValid,
+          status: status as PersistedGrantStatus,
+        })),
+      })
+
+      await expect(recoverWorkspaceTransaction(
+        transaction('add', stage),
+        value,
+      )).resolves.toBe(outcome)
+      if (marksNeedsAuthorization) {
+        expect(value.markNeedsAuthorization).toHaveBeenCalledWith('workspace-1', 1)
+      } else {
+        expect(value.markNeedsAuthorization).not.toHaveBeenCalled()
+      }
+      expect(value.advanceTransaction).toHaveBeenLastCalledWith({
+        operationId: 'operation-1',
+        generation: stage === 'prepared' ? 2 : 1,
+        stage: 'registry-committed',
+      }, outcome === 'completed' ? 'grant-committed' : 'authorization-failed')
+      expect(value.completeTransaction).toHaveBeenCalled()
+    },
+  )
+
+  it.each(addRecoveryMatrix)(
+    'add registry-committed matrix: workspace $workspaceExists with $label -> $outcome',
+    async ({ workspaceExists, grantGeneration, grant, outcome }) => {
+      const value = port({
+        catalogGeneration: vi.fn(async () => 2),
+        grantGeneration: vi.fn(async () => grantGeneration),
+        workspaceExists: vi.fn(async () => workspaceExists),
+        inspectGrant: vi.fn(async () => grant),
+      })
+
+      await expect(recoverWorkspaceTransaction(
+        transaction('add', 'registry-committed'),
+        value,
+      )).resolves.toBe(outcome)
+      if (outcome === 'stale-generation') {
+        expect(value.completeTransaction).not.toHaveBeenCalled()
+      } else {
+        expect(value.completeTransaction).toHaveBeenCalled()
+      }
+    },
+  )
+
   it('rejects a duplicate-path grant when the grant store generation drifted', async () => {
     const value = port({
       grantGeneration: vi.fn(async () => 2),
@@ -686,6 +924,41 @@ describe('Workspace transaction recovery', () => {
     expect(value.deleteGrant).not.toHaveBeenCalled()
     expect(value.abortTransaction).toHaveBeenCalled()
   })
+
+  it.each(reauthorizeRecoveryMatrix)(
+    'reauthorize grant-committed matrix: workspace $workspaceExists with $label -> $outcome',
+    async ({ workspaceExists, grantGeneration, grant, outcome, label }) => {
+      const value = port({
+        catalogGeneration: vi.fn(async () => workspaceExists ? 1 : 2),
+        grantGeneration: vi.fn(async () => grantGeneration),
+        workspaceExists: vi.fn(async () => workspaceExists),
+        inspectGrant: vi.fn(async () => grant),
+      })
+
+      await expect(recoverWorkspaceTransaction(
+        transaction('reauthorize', 'grant-committed'),
+        value,
+      )).resolves.toBe(outcome)
+      if (outcome === 'completed') {
+        expect(value.completeTransaction).toHaveBeenCalledWith({
+          operationId: 'operation-1',
+          generation: 1,
+          stage: 'grant-committed',
+        })
+      } else {
+        expect(value.completeTransaction).not.toHaveBeenCalled()
+      }
+      if (!workspaceExists && label === 'owned new grant') {
+        expect(value.deleteGrant).toHaveBeenCalledWith(
+          'workspace-1',
+          2,
+          'operation-1',
+        )
+      } else {
+        expect(value.deleteGrant).not.toHaveBeenCalled()
+      }
+    },
+  )
 
   it('marks add registry rows and advances to terminal before completion', async () => {
     const value = port({

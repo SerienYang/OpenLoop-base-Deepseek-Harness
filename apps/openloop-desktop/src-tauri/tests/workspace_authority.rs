@@ -823,6 +823,8 @@ fn recovery_dispatcher(
     launch_id: Uuid,
 ) -> (AuthenticatedBridgeDispatcher, Vec<u8>, PeerIdentity) {
     let mut tables = BridgeDispatchTables::unavailable();
+    install_workspace_transaction_handlers(&mut tables, journal.clone())
+        .expect("transaction handlers");
     install_workspace_authority_handlers(
         &mut tables,
         launch_id,
@@ -971,6 +973,108 @@ fn reauthorization_recovery_deletes_unfrozen_and_owned_orphan_grants() {
         .get("workspace-1")
         .expect("deleted frozen grant")
         .is_none());
+}
+
+#[test]
+fn grant_committed_reauthorization_recovery_deletes_only_its_owned_new_orphan() {
+    let root = tempdir().expect("root");
+    let channel = root.path().join("channel");
+    let workspace = root.path().join("workspace");
+    secure_root(&channel);
+    secure_root(&workspace);
+    let store = GrantStore::open(&channel, ReleaseChannel::Test).expect("store");
+    let operation_id = Uuid::new_v4();
+    let mut orphan = grant(&workspace, "workspace-1", 0);
+    orphan.operation_id = operation_id;
+    store.commit(orphan, 0).expect("commit orphan");
+    let journal = WorkspaceJournal::open(&channel, ReleaseChannel::Test).expect("journal");
+    journal
+        .write(
+            WorkspaceTransaction {
+                version: 1,
+                generation: 1,
+                operation_id,
+                kind: WorkspaceTransactionKind::Reauthorize,
+                workspace_id: Some("workspace-1".to_owned()),
+                expected_catalog_generation: 1,
+                expected_grant_generation: 0,
+                stage: "grant-committed".to_owned(),
+            },
+            0,
+        )
+        .expect("grant-committed journal");
+    let launch_id = Uuid::new_v4();
+    let (dispatcher, secret, peer) = recovery_dispatcher(store.clone(), journal.clone(), launch_id);
+
+    let rejected = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        1,
+        "deleteWorkspaceGrant",
+        serde_json::json!({
+            "workspaceId": "workspace-1",
+            "expectedGrantGeneration": 1,
+            "operationId": Uuid::new_v4(),
+        }),
+    );
+    assert_eq!(rejected["ok"], false);
+    assert!(store
+        .get("workspace-1")
+        .expect("preserved orphan")
+        .is_some());
+
+    let rejected = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        2,
+        "deleteWorkspaceGrant",
+        serde_json::json!({
+            "workspaceId": "workspace-1",
+            "expectedGrantGeneration": 2,
+            "operationId": operation_id,
+        }),
+    );
+    assert_eq!(rejected["ok"], false);
+    assert!(store
+        .get("workspace-1")
+        .expect("preserved generation")
+        .is_some());
+
+    let deleted = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        3,
+        "deleteWorkspaceGrant",
+        serde_json::json!({
+            "workspaceId": "workspace-1",
+            "expectedGrantGeneration": 1,
+            "operationId": operation_id,
+        }),
+    );
+    assert_eq!(deleted["result"], 2);
+    assert!(store.get("workspace-1").expect("deleted orphan").is_none());
+
+    let completed = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        4,
+        "completeWorkspaceTransaction",
+        serde_json::json!({
+            "operationId": operation_id,
+            "expectedGeneration": 1,
+            "expectedStage": "grant-committed",
+        }),
+    );
+    assert_eq!(completed["result"], serde_json::Value::Null);
+    assert!(journal.read().expect("completed journal").is_none());
 }
 
 #[test]

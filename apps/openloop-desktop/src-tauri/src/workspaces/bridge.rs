@@ -536,6 +536,21 @@ pub fn install_workspace_authority_handlers(
                             operation_id,
                         )
                     }
+                    (
+                        WorkspaceTransactionKind::Reauthorize,
+                        "grant-committed",
+                        Some(operation_id),
+                    ) if transaction.operation_id == operation_id
+                        && transaction.expected_grant_generation.checked_add(1)
+                            == Some(input.expected_grant_generation) =>
+                    {
+                        delete_store.delete_operation(
+                            &input.workspace_id,
+                            GrantStatus::Ready,
+                            input.expected_grant_generation,
+                            operation_id,
+                        )
+                    }
                     (WorkspaceTransactionKind::Reauthorize, "reauthorize-prepared", None)
                         if transaction.expected_grant_generation
                             == input.expected_grant_generation =>
