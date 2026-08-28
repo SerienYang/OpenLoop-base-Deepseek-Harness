@@ -524,37 +524,7 @@ pub fn install_workspace_authority_handlers(
                             operation_id,
                         )
                     }
-                    (
-                        WorkspaceTransactionKind::Reauthorize,
-                        "reauthorize-prepared",
-                        Some(operation_id),
-                    ) if transaction.operation_id == operation_id
-                        && transaction.expected_grant_generation.checked_add(1)
-                            == Some(input.expected_grant_generation) =>
-                    {
-                        delete_store.delete_operation(
-                            &input.workspace_id,
-                            GrantStatus::Reauthorizing,
-                            input.expected_grant_generation,
-                            operation_id,
-                        )
-                    }
-                    (
-                        WorkspaceTransactionKind::Reauthorize,
-                        "grant-committed",
-                        Some(operation_id),
-                    ) if transaction.operation_id == operation_id
-                        && transaction.expected_grant_generation.checked_add(1)
-                            == Some(input.expected_grant_generation) =>
-                    {
-                        delete_store.delete_operation(
-                            &input.workspace_id,
-                            GrantStatus::Ready,
-                            input.expected_grant_generation,
-                            operation_id,
-                        )
-                    }
-                    (WorkspaceTransactionKind::Reauthorize, "reauthorize-prepared", None)
+                    (WorkspaceTransactionKind::Revoke, "registry-deleted", None)
                         if transaction.expected_grant_generation
                             == input.expected_grant_generation =>
                     {
@@ -562,16 +532,33 @@ pub fn install_workspace_authority_handlers(
                             .get(&input.workspace_id)
                             .map_err(|_| BridgeHandlerError::workspace_failure())?
                             .ok_or_else(BridgeHandlerError::workspace_failure)?;
-                        if matches!(
-                            current.status,
-                            GrantStatus::Revoking | GrantStatus::Reauthorizing
-                        ) {
+                        if current.generation != input.expected_grant_generation
+                            || matches!(
+                                current.status,
+                                GrantStatus::Revoking | GrantStatus::Reauthorizing
+                            )
+                        {
                             return Err(BridgeHandlerError::invalid_request());
                         }
                         delete_store.delete(
                             &input.workspace_id,
                             current.status,
                             input.expected_grant_generation,
+                        )
+                    }
+                    (
+                        WorkspaceTransactionKind::Reauthorize,
+                        "reauthorize-prepared" | "grant-committed",
+                        Some(operation_id),
+                    ) if transaction.operation_id == operation_id
+                        && transaction.expected_grant_generation.checked_add(2)
+                            == Some(input.expected_grant_generation) =>
+                    {
+                        delete_store.delete_operation(
+                            &input.workspace_id,
+                            GrantStatus::Ready,
+                            input.expected_grant_generation,
+                            operation_id,
                         )
                     }
                     _ => return Err(BridgeHandlerError::invalid_request()),

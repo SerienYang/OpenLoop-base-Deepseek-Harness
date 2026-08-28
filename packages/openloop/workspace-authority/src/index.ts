@@ -12,7 +12,11 @@ import {
   recoverWorkspaceTransaction,
   type WorkspaceRecoveryPort,
 } from './recovery.ts'
-import type { TransactionVersion, WorkspaceTransaction } from './types.ts'
+import type {
+  PersistedGrantStatus,
+  TransactionVersion,
+  WorkspaceTransaction,
+} from './types.ts'
 
 export * from './types.ts'
 export * from './authority.ts'
@@ -243,17 +247,20 @@ export class WorkspaceAuthorityService extends Service {
       if (grant.exists && (grant.generation === undefined || grant.status === undefined)) {
         throw new Error(`Workspace grant ${JSON.stringify(workspace.id)} is incomplete`)
       }
+      let state: PersistedGrantStatus = 'needs-authorization'
+      if (grant.exists && grant.status !== undefined) {
+        state = grant.status
+        if (grant.status === 'ready') {
+          state = !grant.identityValid && grant.effectiveStatus === 'ready'
+            ? 'identity-mismatch'
+            : grant.effectiveStatus
+              ?? (!grant.identityValid ? 'identity-mismatch' : grant.status)
+        }
+      }
       return {
         workspaceId: workspace.id,
         name: workspace.title,
-        state: grant.exists && grant.status !== undefined
-          ? !grant.identityValid && grant.effectiveStatus === 'ready'
-            ? 'identity-mismatch' as const
-            : grant.effectiveStatus
-              ?? (grant.status === 'ready' && !grant.identityValid
-                ? 'identity-mismatch' as const
-                : grant.status)
-          : 'needs-authorization' as const,
+        state,
       }
     }))
   }

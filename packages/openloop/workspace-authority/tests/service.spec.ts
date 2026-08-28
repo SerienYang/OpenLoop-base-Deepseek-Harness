@@ -117,41 +117,47 @@ describe('WorkspaceAuthorityService recovery lifecycle', () => {
     await fiber.dispose()
   })
 
-  it('lists the effective identity failure without hiding the persisted transaction status', async () => {
-    const ctx = new Context()
-    ctx.provide('workspaceRegistry', {
-      catalogGeneration: () => 0,
-      createExpected: vi.fn(),
-      deleteExpected: vi.fn(),
-      get: () => undefined,
-      list: () => [{
-        id: 'workspace-1',
-        title: 'Project Alpha',
-        path: '/host/project',
-      }],
-    } as never)
-    ctx.provide('desktopBridge', {
-      readWorkspaceTransaction: vi.fn(async () => null),
-      inspectWorkspaceGrant: vi.fn(async () => ({
-        exists: true,
-        generation: 1,
-        identityValid: false,
-        operationId: 'operation-1',
-        status: 'revoking',
-        effectiveStatus: 'identity-mismatch',
-      })),
-    } as never)
+  it.each([
+    ['revoking', 'ready'],
+    ['reauthorizing', 'ready'],
+  ] as const)(
+    'lists persisted %s instead of its %s effective status through the service proxy',
+    async (status, effectiveStatus) => {
+      const ctx = new Context()
+      ctx.provide('workspaceRegistry', {
+        catalogGeneration: () => 0,
+        createExpected: vi.fn(),
+        deleteExpected: vi.fn(),
+        get: () => undefined,
+        list: () => [{
+          id: 'workspace-1',
+          title: 'Project Alpha',
+          path: '/host/project',
+        }],
+      } as never)
+      ctx.provide('desktopBridge', {
+        readWorkspaceTransaction: vi.fn(async () => null),
+        inspectWorkspaceGrant: vi.fn(async () => ({
+          exists: true,
+          generation: 1,
+          identityValid: true,
+          operationId: 'operation-1',
+          status,
+          effectiveStatus,
+        })),
+      } as never)
 
-    const fiber = ctx.plugin(WorkspaceAuthorityService)
-    await fiber
+      const fiber = ctx.plugin(WorkspaceAuthorityService)
+      await fiber
 
-    await expect(ctx.workspaceAuthority.list()).resolves.toEqual([{
-      workspaceId: 'workspace-1',
-      name: 'Project Alpha',
-      state: 'identity-mismatch',
-    }])
-    await fiber.dispose()
-  })
+      await expect(ctx.workspaceAuthority.list()).resolves.toEqual([{
+        workspaceId: 'workspace-1',
+        name: 'Project Alpha',
+        state: status,
+      }])
+      await fiber.dispose()
+    },
+  )
 
   it('never lists ready when native identity is invalid', async () => {
     const ctx = new Context()
