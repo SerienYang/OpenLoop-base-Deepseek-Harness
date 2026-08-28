@@ -334,24 +334,51 @@ pub(crate) fn swap_at(
     Ok(())
 }
 
-pub(crate) fn list_directory(
+pub(crate) struct DirectoryVisit {
+    pub(crate) eof: bool,
+    pub(crate) visited: usize,
+}
+
+pub(crate) fn visit_directory(
     descriptor: RawFd,
-) -> Result<Vec<(String, FileKind)>, FileBrokerError> {
-    let duplicate = duplicate_descriptor(descriptor)?;
-    let directory = unsafe { libc::fdopendir(duplicate.as_raw_fd()) };
+    offset: usize,
+    maximum: usize,
+    mut visitor: impl FnMut(String, FileKind) -> Result<bool, FileBrokerError>,
+) -> Result<DirectoryVisit, FileBrokerError> {
+    let current = c".";
+    let reopened = unsafe {
+        libc::openat(
+            descriptor,
+            current.as_ptr(),
+            libc::O_RDONLY
+                | libc::O_CLOEXEC
+                | libc::O_NOFOLLOW
+                | libc::O_NONBLOCK
+                | libc::O_DIRECTORY,
+        )
+    };
+    if reopened < 0 {
+        return Err(open_error(io::Error::last_os_error()));
+    }
+    let reopened = unsafe { OwnedFd::from_raw_fd(reopened) };
+    let directory = unsafe { libc::fdopendir(reopened.as_raw_fd()) };
     if directory.is_null() {
         return Err(FileBrokerError::Io(io::Error::last_os_error()));
     }
-    std::mem::forget(duplicate);
+    std::mem::forget(reopened);
     let directory = DirectoryStream(directory);
-    let mut entries = Vec::new();
+    let mut visited = 0;
+    let mut delivered = 0;
     loop {
         unsafe { *libc::__error() = 0 };
         let entry = unsafe { libc::readdir(directory.0) };
         if entry.is_null() {
             let error = io::Error::last_os_error();
             if error.raw_os_error() == Some(0) {
-                break;
+                if visited < offset {
+                    return Err(FileBrokerError::InvalidOffset);
+                }
+                return Ok(DirectoryVisit { eof: true, visited });
             }
             return Err(FileBrokerError::Io(error));
         }
@@ -371,10 +398,25 @@ pub(crate) fn list_directory(
         if kind == FileKind::Regular && metadata.st_nlink != 1 {
             return Err(FileBrokerError::UnsafeFile);
         }
-        entries.push((name, kind));
+        if visited < offset {
+            visited += 1;
+            continue;
+        }
+        if delivered == maximum {
+            return Ok(DirectoryVisit {
+                eof: false,
+                visited,
+            });
+        }
+        if !visitor(name, kind)? {
+            return Ok(DirectoryVisit {
+                eof: false,
+                visited,
+            });
+        }
+        visited += 1;
+        delivered += 1;
     }
-    entries.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(entries)
 }
 
 struct DirectoryStream(*mut libc::DIR);

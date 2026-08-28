@@ -26,6 +26,7 @@ use super::grants::{
     reopen_verified_grant, FileIdentity, GrantStatus, LaunchGrant, WorkspaceGrant,
     WorkspaceGrantError,
 };
+use super::operations::WorkspaceOperationGate;
 
 struct PendingGrant {
     grant: WorkspaceGrant,
@@ -264,6 +265,7 @@ pub struct PendingGrantRegistry {
     launch_id: Uuid,
     pending: HashMap<Uuid, PendingGrant>,
     committed: HashMap<String, PendingGrant>,
+    operation_gate: Arc<WorkspaceOperationGate>,
 }
 
 impl PendingGrantRegistry {
@@ -272,7 +274,12 @@ impl PendingGrantRegistry {
             launch_id,
             pending: HashMap::new(),
             committed: HashMap::new(),
+            operation_gate: Arc::new(WorkspaceOperationGate::default()),
         }
+    }
+
+    pub fn operation_gate(&self) -> Arc<WorkspaceOperationGate> {
+        self.operation_gate.clone()
     }
 
     pub fn begin(&mut self, path: &Path) -> Result<Uuid, WorkspaceGrantError> {

@@ -97,6 +97,10 @@ pub fn install_workspace_authority_handlers(
     picker: Arc<dyn WorkspaceDirectoryPicker>,
     confirmation: Arc<dyn RevokeConfirmation>,
 ) -> Result<(), String> {
+    let operation_gate = registry
+        .lock()
+        .map_err(|_| "Workspace operation gate is unavailable".to_owned())?
+        .operation_gate();
     let begin_registry = registry.clone();
     let begin: BridgeHandler = Arc::new(move |payload, cancellation| {
         if !payload.is_null() {
@@ -432,11 +436,15 @@ pub fn install_workspace_authority_handlers(
 
     let revoking_store = store.clone();
     let revoking_journal = journal.clone();
+    let revoking_gate = operation_gate.clone();
     let mark_revoking: BridgeHandler = Arc::new(move |payload, cancellation| {
         let input: WorkspaceGrantOperationInput =
             serde_json::from_value(payload).map_err(|_| BridgeHandlerError::invalid_request())?;
         cancellation
             .commit_if_active(|| {
+                let _blocked = revoking_gate
+                    .block_new_operations(&input.workspace_id)
+                    .map_err(|_| BridgeHandlerError::workspace_failure())?;
                 let transaction = revoking_journal
                     .read()
                     .map_err(|_| BridgeHandlerError::workspace_failure())?
@@ -478,11 +486,15 @@ pub fn install_workspace_authority_handlers(
 
     let reauthorizing_store = store.clone();
     let reauthorizing_journal = journal.clone();
+    let reauthorizing_gate = operation_gate.clone();
     let mark_reauthorizing: BridgeHandler = Arc::new(move |payload, cancellation| {
         let input: WorkspaceGrantOperationInput =
             serde_json::from_value(payload).map_err(|_| BridgeHandlerError::invalid_request())?;
         cancellation
             .commit_if_active(|| {
+                let _blocked = reauthorizing_gate
+                    .block_new_operations(&input.workspace_id)
+                    .map_err(|_| BridgeHandlerError::workspace_failure())?;
                 let transaction = reauthorizing_journal
                     .read()
                     .map_err(|_| BridgeHandlerError::workspace_failure())?
@@ -525,11 +537,15 @@ pub fn install_workspace_authority_handlers(
     let delete_store = store;
     let delete_registry = registry;
     let delete_journal = journal;
+    let delete_gate = operation_gate;
     let delete: BridgeHandler = Arc::new(move |payload, cancellation| {
         let input: WorkspaceGrantMutationInput =
             serde_json::from_value(payload).map_err(|_| BridgeHandlerError::invalid_request())?;
         cancellation
             .commit_if_active(|| {
+                let _blocked = delete_gate
+                    .block_new_operations(&input.workspace_id)
+                    .map_err(|_| BridgeHandlerError::workspace_failure())?;
                 let transaction = delete_journal
                     .read()
                     .map_err(|_| BridgeHandlerError::workspace_failure())?

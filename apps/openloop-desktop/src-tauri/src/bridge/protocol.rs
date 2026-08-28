@@ -13,6 +13,7 @@ use zeroize::{Zeroize, Zeroizing};
 pub const BRIDGE_PROTOCOL_VERSION: u8 = 1;
 pub const MAX_BRIDGE_FRAME_BYTES: usize = 64 * 1024;
 pub const BRIDGE_NONCE_BYTES: usize = 32;
+const MAX_BRIDGE_REQUEST_ID_BYTES: usize = 128;
 const MAX_NONCES: usize = 4096;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const REQUEST_DOMAIN: &[u8] = b"openloop.bridge.request.v1\0";
@@ -337,6 +338,7 @@ fn canonical_response_bytes(
 fn validate_request(request: &BridgeRequest) -> io::Result<()> {
     if request.version != BRIDGE_PROTOCOL_VERSION
         || request.request_id.is_empty()
+        || request.request_id.len() > MAX_BRIDGE_REQUEST_ID_BYTES
         || request.launch_id.is_empty()
         || request.method.is_empty()
     {
@@ -346,7 +348,10 @@ fn validate_request(request: &BridgeRequest) -> io::Result<()> {
 }
 
 fn validate_response(response: &BridgeResponse) -> io::Result<()> {
-    if response.version != BRIDGE_PROTOCOL_VERSION || response.request_id.is_empty() {
+    if response.version != BRIDGE_PROTOCOL_VERSION
+        || response.request_id.is_empty()
+        || response.request_id.len() > MAX_BRIDGE_REQUEST_ID_BYTES
+    {
         return Err(invalid("bridge response fields are invalid"));
     }
     match (&response.ok, &response.result, &response.error) {
@@ -354,6 +359,17 @@ fn validate_response(response: &BridgeResponse) -> io::Result<()> {
         (false, None, Some(error)) if !error.code.is_empty() => Ok(()),
         _ => Err(invalid("bridge response result shape is invalid")),
     }
+}
+
+pub(crate) fn success_result_fits_bridge_frame(result: &Value) -> bool {
+    let worst_request_id = "\0".repeat(MAX_BRIDGE_REQUEST_ID_BYTES);
+    let envelope = AuthenticatedBridgeResponse {
+        response: BridgeResponse::success(worst_request_id, result.clone()),
+        nonce: "0".repeat(BRIDGE_NONCE_BYTES * 2),
+        mac: "0".repeat(64),
+    };
+    serde_json::to_vec(&envelope)
+        .is_ok_and(|body| !body.is_empty() && body.len() <= MAX_BRIDGE_FRAME_BYTES)
 }
 
 fn canonical_json(value: &Value) -> io::Result<String> {

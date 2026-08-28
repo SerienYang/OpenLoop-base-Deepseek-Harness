@@ -13,8 +13,12 @@ use std::{
     },
     path::{Path, PathBuf},
     process,
-    sync::{Arc, Mutex},
-    time::Duration,
+    sync::{
+        mpsc::{self, Receiver, SyncSender},
+        Arc, Mutex,
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
 use openloop_desktop_lib::{
@@ -24,21 +28,133 @@ use openloop_desktop_lib::{
     },
     files::{
         install_file_broker_handlers, openat::inspect_regular_descriptor, AtomicWriteOptions,
-        FileBroker, FileBrokerError, FileKind, MAX_FILE_CHUNK_BYTES,
+        FileBroker, FileBrokerError, FileBrokerHooks, FileKind, MAX_FILE_CHUNK_BYTES,
     },
     launcher::capture_process_identity,
     update::channel::ReleaseChannel,
     workspaces::{
+        bridge::install_workspace_authority_handlers,
+        confirmation::{RevokeConfirmation, RevokePresentation},
         grants::GrantStore,
         journal::{WorkspaceJournal, WorkspaceTransaction, WorkspaceTransactionKind},
-        picker::PendingGrantRegistry,
+        picker::{PendingGrantRegistry, WorkspaceDirectoryPicker},
     },
 };
 use tempfile::TempDir;
 use uuid::Uuid;
 
+struct BlockingWriteHook {
+    entered: SyncSender<()>,
+    release: Mutex<Receiver<()>>,
+}
+
+struct HardlinkWriteHook;
+
+impl FileBrokerHooks for HardlinkWriteHook {
+    fn before_atomic_write(&self, parent: i32, temporary: &std::ffi::CStr) {
+        let attacker = CString::new("attacker-write-link.txt").expect("attacker name");
+        assert_eq!(
+            unsafe { libc::linkat(parent, temporary.as_ptr(), parent, attacker.as_ptr(), 0,) },
+            0,
+            "inject hardlink before write"
+        );
+    }
+}
+
+struct HardlinkPublishHook;
+
+impl FileBrokerHooks for HardlinkPublishHook {
+    fn before_atomic_publish(&self, parent: i32, temporary: &std::ffi::CStr) {
+        let attacker = CString::new("attacker-publish-link.txt").expect("attacker name");
+        assert_eq!(
+            unsafe { libc::linkat(parent, temporary.as_ptr(), parent, attacker.as_ptr(), 0,) },
+            0,
+            "inject hardlink before publish"
+        );
+    }
+}
+
+struct RollbackRaceHook {
+    workspace: Mutex<Option<PathBuf>>,
+}
+
+impl FileBrokerHooks for RollbackRaceHook {
+    fn before_atomic_swap(
+        &self,
+        _parent: i32,
+        _temporary: &std::ffi::CStr,
+        _target: &std::ffi::CStr,
+    ) {
+        let workspace = self
+            .workspace
+            .lock()
+            .expect("hook workspace")
+            .clone()
+            .expect("hook workspace configured");
+        fs::rename(
+            workspace.join("document.txt"),
+            workspace.join("preserved-original.txt"),
+        )
+        .expect("preserve original before race");
+        fs::write(workspace.join("document.txt"), b"attacker").expect("race target");
+    }
+
+    fn before_atomic_rollback(
+        &self,
+        _parent: i32,
+        _temporary: &std::ffi::CStr,
+        _target: &std::ffi::CStr,
+    ) {
+        let workspace = self
+            .workspace
+            .lock()
+            .expect("hook workspace")
+            .clone()
+            .expect("hook workspace configured");
+        fs::rename(
+            workspace.join("document.txt"),
+            workspace.join("preserved-staged.txt"),
+        )
+        .expect("move staged inode before rollback");
+    }
+}
+
+impl FileBrokerHooks for BlockingWriteHook {
+    fn before_atomic_write(&self, _parent: i32, _temporary: &std::ffi::CStr) {
+        self.entered.send(()).expect("announce blocked write");
+        self.release
+            .lock()
+            .expect("release receiver")
+            .recv()
+            .expect("release blocked write");
+    }
+}
+
+struct NoopPicker;
+
+impl WorkspaceDirectoryPicker for NoopPicker {
+    fn pick(
+        &self,
+    ) -> Result<Option<PathBuf>, openloop_desktop_lib::workspaces::grants::WorkspaceGrantError>
+    {
+        Ok(None)
+    }
+}
+
+struct ConfirmRevoke;
+
+impl RevokeConfirmation for ConfirmRevoke {
+    fn confirm(
+        &self,
+        _presentation: &RevokePresentation,
+    ) -> Result<bool, openloop_desktop_lib::workspaces::grants::WorkspaceGrantError> {
+        Ok(true)
+    }
+}
+
 struct Harness {
     _root: TempDir,
+    launch_id: Uuid,
     workspace: PathBuf,
     store: GrantStore,
     journal: WorkspaceJournal,
@@ -48,6 +164,10 @@ struct Harness {
 
 impl Harness {
     fn new(ttl: Duration) -> Self {
+        Self::with_hooks(ttl, Arc::new(()))
+    }
+
+    fn with_hooks(ttl: Duration, hooks: Arc<dyn FileBrokerHooks>) -> Self {
         let root = tempfile::tempdir().expect("temp root");
         let channel = root.path().join("channel");
         let workspace = root.path().join("workspace");
@@ -64,15 +184,17 @@ impl Harness {
             .expect("committed descriptor");
         store.commit(grant, 0).expect("persisted grant");
         let registry = Arc::new(Mutex::new(registry));
-        let broker = Arc::new(FileBroker::with_handle_ttl(
+        let broker = Arc::new(FileBroker::with_handle_ttl_and_hooks(
             launch_id,
             store.clone(),
             journal.clone(),
             registry.clone(),
             ttl,
+            hooks,
         ));
         Self {
             _root: root,
+            launch_id,
             workspace,
             store,
             journal,
@@ -82,11 +204,130 @@ impl Harness {
     }
 }
 
+#[test]
+fn revocation_waits_for_active_write_and_old_handle_cannot_write_afterward() {
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let harness = Harness::with_hooks(
+        Duration::from_secs(60),
+        Arc::new(BlockingWriteHook {
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        }),
+    );
+    fs::write(harness.workspace.join("document.txt"), b"before").expect("fixture");
+    let current = harness
+        .broker
+        .open("workspace-1", "document.txt")
+        .expect("open current");
+    let write = harness
+        .broker
+        .begin_atomic_write(
+            "workspace-1",
+            "document.txt",
+            AtomicWriteOptions {
+                create_if_absent: false,
+                expected_version: current.version,
+            },
+        )
+        .expect("begin write");
+
+    let writer_broker = harness.broker.clone();
+    let writer_handle = write.handle_id.clone();
+    let writer = thread::spawn(move || writer_broker.write_chunk(&writer_handle, b"after"));
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("write reached I/O hook");
+
+    let operation_id = Uuid::new_v4();
+    harness
+        .journal
+        .write(
+            WorkspaceTransaction {
+                version: 1,
+                generation: 1,
+                operation_id,
+                kind: WorkspaceTransactionKind::Revoke,
+                workspace_id: Some("workspace-1".to_owned()),
+                expected_catalog_generation: 1,
+                expected_grant_generation: 1,
+                stage: "revoke-prepared".to_owned(),
+            },
+            0,
+        )
+        .expect("prepare revoke");
+    let gate = harness.registry.lock().expect("registry").operation_gate();
+    let (dispatcher, launch_id, secret, peer) = broker_and_authority_dispatcher(&harness);
+    let revoke = thread::spawn(move || {
+        let response = dispatch_file(
+            &dispatcher,
+            launch_id,
+            &secret,
+            peer,
+            91,
+            "markWorkspaceGrantRevoking",
+            serde_json::json!({
+                "workspaceId": "workspace-1",
+                "expectedGrantGeneration": 1,
+                "operationId": operation_id,
+            }),
+        );
+        assert_eq!(response["ok"], true);
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !gate.is_blocking("workspace-1") && Instant::now() < deadline {
+        thread::yield_now();
+    }
+    let blocked_active_write = gate.is_blocking("workspace-1") && !revoke.is_finished();
+
+    release_tx.send(()).expect("release write");
+    writer
+        .join()
+        .expect("writer thread")
+        .expect("write completed");
+    revoke.join().expect("revoke thread");
+    assert!(
+        blocked_active_write,
+        "revoke handler must wait for active file I/O"
+    );
+
+    assert!(matches!(
+        harness.broker.write_chunk(&write.handle_id, b"late"),
+        Err(FileBrokerError::GrantUnavailable)
+    ));
+}
+
+fn broker_and_authority_dispatcher(
+    harness: &Harness,
+) -> (AuthenticatedBridgeDispatcher, Uuid, Vec<u8>, PeerIdentity) {
+    let mut tables = BridgeDispatchTables::unavailable();
+    install_workspace_authority_handlers(
+        &mut tables,
+        harness.launch_id,
+        harness.store.clone(),
+        harness.journal.clone(),
+        harness.registry.clone(),
+        Arc::new(NoopPicker),
+        Arc::new(ConfirmRevoke),
+    )
+    .expect("Workspace authority handlers");
+    install_file_broker_handlers(&mut tables, harness.broker.clone())
+        .expect("file broker handlers");
+    authenticated_dispatcher(tables)
+}
+
 fn broker_dispatcher(
     broker: Arc<FileBroker>,
 ) -> (AuthenticatedBridgeDispatcher, Uuid, Vec<u8>, PeerIdentity) {
     let mut tables = BridgeDispatchTables::unavailable();
     install_file_broker_handlers(&mut tables, broker).expect("file broker handlers");
+    authenticated_dispatcher(tables)
+}
+
+fn authenticated_dispatcher(
+    tables: BridgeDispatchTables,
+) -> (AuthenticatedBridgeDispatcher, Uuid, Vec<u8>, PeerIdentity) {
     let executable = std::env::current_exe().expect("test executable");
     let launch_id = Uuid::new_v4();
     let secret: Vec<u8> = (0..32).collect();
@@ -183,8 +424,9 @@ fn broker_reads_stats_lists_and_creates_regular_files_in_bounded_chunks() {
     assert_eq!(
         harness
             .broker
-            .list(&directory.handle_id)
+            .list(&directory.handle_id, 0, 128)
             .expect("list directory")
+            .entries
             .into_iter()
             .map(|entry| entry.name)
             .collect::<Vec<_>>(),
@@ -457,6 +699,138 @@ fn atomic_write_uses_descriptor_relative_temp_fsync_rename_and_version_cas() {
 }
 
 #[test]
+fn atomic_write_detects_hardlink_added_during_write_and_preserves_attacker_link() {
+    let harness = Harness::with_hooks(Duration::from_secs(60), Arc::new(HardlinkWriteHook));
+    fs::write(harness.workspace.join("document.txt"), b"before").expect("fixture");
+    let current = harness
+        .broker
+        .open("workspace-1", "document.txt")
+        .expect("open current");
+    let write = harness
+        .broker
+        .begin_atomic_write(
+            "workspace-1",
+            "document.txt",
+            AtomicWriteOptions {
+                create_if_absent: false,
+                expected_version: current.version,
+            },
+        )
+        .expect("begin write");
+
+    assert!(matches!(
+        harness.broker.write_chunk(&write.handle_id, b"after"),
+        Err(FileBrokerError::UnsafeFile)
+    ));
+    harness
+        .broker
+        .close(&write.handle_id)
+        .expect("close rejected write");
+    assert_eq!(
+        fs::read(harness.workspace.join("document.txt")).expect("target unchanged"),
+        b"before"
+    );
+    assert_eq!(
+        fs::read(harness.workspace.join("attacker-write-link.txt"))
+            .expect("attacker hardlink preserved"),
+        b"after"
+    );
+}
+
+#[test]
+fn atomic_write_detects_hardlink_added_before_publish_and_does_not_publish() {
+    let harness = Harness::with_hooks(Duration::from_secs(60), Arc::new(HardlinkPublishHook));
+    fs::write(harness.workspace.join("document.txt"), b"before").expect("fixture");
+    let current = harness
+        .broker
+        .open("workspace-1", "document.txt")
+        .expect("open current");
+    let write = harness
+        .broker
+        .begin_atomic_write(
+            "workspace-1",
+            "document.txt",
+            AtomicWriteOptions {
+                create_if_absent: false,
+                expected_version: current.version,
+            },
+        )
+        .expect("begin write");
+    harness
+        .broker
+        .write_chunk(&write.handle_id, b"after")
+        .expect("stage bytes");
+
+    assert!(matches!(
+        harness.broker.commit_atomic_write(&write.handle_id),
+        Err(FileBrokerError::UnsafeFile)
+    ));
+    assert_eq!(
+        fs::read(harness.workspace.join("document.txt")).expect("target unchanged"),
+        b"before"
+    );
+    assert_eq!(
+        fs::read(harness.workspace.join("attacker-publish-link.txt"))
+            .expect("attacker hardlink preserved"),
+        b"after"
+    );
+}
+
+#[test]
+fn failed_swap_rollback_preserves_staged_displaced_and_attacker_files() {
+    let hook = Arc::new(RollbackRaceHook {
+        workspace: Mutex::new(None),
+    });
+    let harness = Harness::with_hooks(Duration::from_secs(60), hook.clone());
+    *hook.workspace.lock().expect("hook workspace") = Some(harness.workspace.clone());
+    fs::write(harness.workspace.join("document.txt"), b"before").expect("fixture");
+    let current = harness
+        .broker
+        .open("workspace-1", "document.txt")
+        .expect("open current");
+    let write = harness
+        .broker
+        .begin_atomic_write(
+            "workspace-1",
+            "document.txt",
+            AtomicWriteOptions {
+                create_if_absent: false,
+                expected_version: current.version,
+            },
+        )
+        .expect("begin raced write");
+    harness
+        .broker
+        .write_chunk(&write.handle_id, b"after")
+        .expect("stage bytes");
+
+    assert!(harness
+        .broker
+        .commit_atomic_write(&write.handle_id)
+        .is_err());
+    assert_eq!(
+        fs::read(harness.workspace.join("preserved-original.txt")).expect("original preserved"),
+        b"before"
+    );
+    assert_eq!(
+        fs::read(harness.workspace.join("preserved-staged.txt")).expect("staged preserved"),
+        b"after"
+    );
+    let temporary_contents = fs::read_dir(&harness.workspace)
+        .expect("workspace entries")
+        .filter_map(Result::ok)
+        .find_map(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(".openloop-write-"))
+                .then(|| fs::read(entry.path()).expect("preserved displaced temp"))
+        })
+        .expect("displaced temp remains");
+    assert_eq!(temporary_contents, b"attacker");
+}
+
+#[test]
 fn atomic_write_rejects_stale_versions_existing_create_and_final_symlink() {
     let harness = Harness::new(Duration::from_secs(60));
     fs::write(harness.workspace.join("document.txt"), b"before").expect("fixture");
@@ -618,4 +992,67 @@ fn bridge_exposes_only_opaque_handles_and_enforces_the_chunk_limit() {
     );
     assert_eq!(oversized["ok"], false);
     assert_eq!(oversized["error"]["code"], "file_failure");
+}
+
+#[test]
+fn bridge_directory_pages_fit_the_frame_with_long_control_character_names() {
+    let harness = Harness::new(Duration::from_secs(60));
+    let mut expected_names = (0..128)
+        .map(|index| format!("{index:03}-{}", "\n\"\\\u{0007}".repeat(60)))
+        .collect::<Vec<_>>();
+    for name in &expected_names {
+        fs::write(harness.workspace.join(name), b"value").expect("long-name fixture");
+    }
+    let (dispatcher, launch_id, secret, peer) = broker_dispatcher(harness.broker.clone());
+    let opened = dispatch_file(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        100,
+        "openWorkspaceRoot",
+        serde_json::json!({ "workspaceId": "workspace-1" }),
+    );
+    let handle_id = opened["result"]["handleId"]
+        .as_str()
+        .expect("directory handle");
+
+    let mut offset = 0;
+    let mut sequence = 101;
+    let mut listed = Vec::new();
+    loop {
+        let page = dispatch_file(
+            &dispatcher,
+            launch_id,
+            &secret,
+            peer,
+            sequence,
+            "listWorkspaceFiles",
+            serde_json::json!({
+                "handleId": handle_id,
+                "offset": offset,
+                "maxEntries": 128,
+            }),
+        );
+        assert_eq!(page["ok"], true);
+        assert!(
+            serde_json::to_vec(&page).expect("page JSON").len() < MAX_BRIDGE_FRAME_BYTES,
+            "directory page must fit below the bridge frame limit"
+        );
+        listed.extend(
+            page["result"]["entries"]
+                .as_array()
+                .expect("directory entries")
+                .iter()
+                .map(|entry| entry["name"].as_str().expect("entry name").to_owned()),
+        );
+        offset = page["result"]["nextOffset"].as_u64().expect("next offset") as usize;
+        sequence += 1;
+        if page["result"]["eof"] == true {
+            break;
+        }
+    }
+    expected_names.sort();
+    listed.sort();
+    assert_eq!(listed, expected_names);
 }

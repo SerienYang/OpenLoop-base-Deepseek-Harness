@@ -3,7 +3,7 @@ pub mod openat;
 use std::{
     collections::HashMap,
     error::Error,
-    ffi::CString,
+    ffi::{CStr, CString},
     fmt, io,
     os::fd::{AsRawFd, OwnedFd, RawFd},
     sync::{Arc, Mutex},
@@ -16,25 +16,38 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    bridge::server::{BridgeDispatchTables, BridgeHandler, BridgeHandlerError},
+    bridge::{
+        protocol::success_result_fits_bridge_frame,
+        server::{BridgeDispatchTables, BridgeHandler, BridgeHandlerError},
+    },
     workspaces::{
         grants::{FileIdentity, GrantStatus, GrantStore},
         journal::WorkspaceJournal,
+        operations::WorkspaceOperationGate,
         picker::PendingGrantRegistry,
     },
 };
 
 use self::openat::{
     checked_regular_version, create_regular_at, descriptor_stat, inspect_directory_descriptor,
-    inspect_regular_descriptor, inspect_supported_descriptor, list_directory, open_beneath,
-    read_at, rename_exclusive_at, resolve_parent, stable_regular_identity, stat_at, swap_at,
-    sync_descriptor, unlink_at, write_all,
+    inspect_regular_descriptor, inspect_supported_descriptor, open_beneath, read_at,
+    rename_exclusive_at, resolve_parent, stable_regular_identity, stat_at, swap_at,
+    sync_descriptor, unlink_at, visit_directory, write_all,
 };
 
 pub const MAX_FILE_CHUNK_BYTES: usize = 32 * 1024;
 const MAX_ATOMIC_WRITE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LIST_ENTRIES: usize = 128;
 const DEFAULT_HANDLE_TTL: Duration = Duration::from_secs(5 * 60);
+
+pub trait FileBrokerHooks: Send + Sync {
+    fn before_atomic_write(&self, _parent: RawFd, _temporary: &CStr) {}
+    fn before_atomic_publish(&self, _parent: RawFd, _temporary: &CStr) {}
+    fn before_atomic_swap(&self, _parent: RawFd, _temporary: &CStr, _target: &CStr) {}
+    fn before_atomic_rollback(&self, _parent: RawFd, _temporary: &CStr, _target: &CStr) {}
+}
+
+impl FileBrokerHooks for () {}
 
 #[derive(Debug)]
 pub enum FileBrokerError {
@@ -112,6 +125,14 @@ pub struct DirectoryEntry {
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct DirectoryChunk {
+    pub entries: Vec<DirectoryEntry>,
+    pub next_offset: usize,
+    pub eof: bool,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct ReadChunk {
     pub bytes: Vec<u8>,
     pub next_offset: u64,
@@ -172,6 +193,8 @@ pub struct FileBroker {
     store: GrantStore,
     journal: WorkspaceJournal,
     grants: Arc<Mutex<PendingGrantRegistry>>,
+    operation_gate: Arc<WorkspaceOperationGate>,
+    hooks: Arc<dyn FileBrokerHooks>,
     handle_ttl: Duration,
     handles: Mutex<HashMap<Uuid, HandleRecord>>,
 }
@@ -193,11 +216,28 @@ impl FileBroker {
         grants: Arc<Mutex<PendingGrantRegistry>>,
         handle_ttl: Duration,
     ) -> Self {
+        Self::with_handle_ttl_and_hooks(launch_id, store, journal, grants, handle_ttl, Arc::new(()))
+    }
+
+    pub fn with_handle_ttl_and_hooks(
+        launch_id: Uuid,
+        store: GrantStore,
+        journal: WorkspaceJournal,
+        grants: Arc<Mutex<PendingGrantRegistry>>,
+        handle_ttl: Duration,
+        hooks: Arc<dyn FileBrokerHooks>,
+    ) -> Self {
+        let operation_gate = grants
+            .lock()
+            .expect("Workspace grant registry must be available during broker setup")
+            .operation_gate();
         Self {
             _launch_id: launch_id,
             store,
             journal,
             grants,
+            operation_gate,
+            hooks,
             handle_ttl,
             handles: Mutex::new(HashMap::new()),
         }
@@ -208,6 +248,7 @@ impl FileBroker {
         workspace_id: &str,
         relative_path: &str,
     ) -> Result<FileHandleView, FileBrokerError> {
+        let _lease = self.operation_lease(workspace_id)?;
         let root = self.ready_root(workspace_id, None)?;
         let descriptor = open_beneath(root.descriptor.as_raw_fd(), relative_path)?;
         let stat = inspect_supported_descriptor(descriptor.as_raw_fd())?;
@@ -219,6 +260,7 @@ impl FileBroker {
         workspace_id: &str,
         relative_path: &str,
     ) -> Result<FileHandleView, FileBrokerError> {
+        let _lease = self.operation_lease(workspace_id)?;
         let root = self.ready_root(workspace_id, None)?;
         let target = resolve_parent(root.descriptor.as_raw_fd(), relative_path)?;
         if let Some(metadata) = stat_at(target.parent.as_raw_fd(), &target.leaf)? {
@@ -238,20 +280,48 @@ impl FileBroker {
 
     pub fn stat(&self, handle_id: &str) -> Result<FileStat, FileBrokerError> {
         let (id, binding) = self.handle_binding(handle_id)?;
+        let _lease = self.operation_lease(&binding.workspace_id)?;
         self.ready_root(&binding.workspace_id, Some(&binding))?;
         self.with_open_handle(id, inspect_supported_descriptor)
     }
 
-    pub fn list(&self, handle_id: &str) -> Result<Vec<DirectoryEntry>, FileBrokerError> {
+    pub fn list(
+        &self,
+        handle_id: &str,
+        offset: usize,
+        maximum: usize,
+    ) -> Result<DirectoryChunk, FileBrokerError> {
+        if maximum == 0 || maximum > MAX_LIST_ENTRIES {
+            return Err(FileBrokerError::ChunkTooLarge);
+        }
         let (id, binding) = self.handle_binding(handle_id)?;
+        let _lease = self.operation_lease(&binding.workspace_id)?;
         self.ready_root(&binding.workspace_id, Some(&binding))?;
         self.with_open_handle(id, |descriptor| {
             inspect_directory_descriptor(descriptor)?;
-            list_directory(descriptor).map(|entries| {
-                entries
-                    .into_iter()
-                    .map(|(name, kind)| DirectoryEntry { name, kind })
-                    .collect()
+            let mut entries = Vec::new();
+            let visit = visit_directory(descriptor, offset, maximum, |name, kind| {
+                let entry = DirectoryEntry { name, kind };
+                let mut candidate = entries.clone();
+                candidate.push(entry.clone());
+                let result = json!({
+                    "entries": candidate,
+                    "nextOffset": offset.saturating_add(entries.len()).saturating_add(1),
+                    "eof": false,
+                });
+                if !success_result_fits_bridge_frame(&result) {
+                    return Ok(false);
+                }
+                entries.push(entry);
+                Ok(true)
+            })?;
+            if entries.is_empty() && !visit.eof && visit.visited == offset {
+                return Err(FileBrokerError::ChunkTooLarge);
+            }
+            Ok(DirectoryChunk {
+                entries,
+                next_offset: visit.visited,
+                eof: visit.eof,
             })
         })
     }
@@ -266,6 +336,7 @@ impl FileBroker {
             return Err(FileBrokerError::ChunkTooLarge);
         }
         let (id, binding) = self.handle_binding(handle_id)?;
+        let _lease = self.operation_lease(&binding.workspace_id)?;
         self.ready_root(&binding.workspace_id, Some(&binding))?;
         self.with_open_handle(id, |descriptor| {
             let stat = inspect_regular_descriptor(descriptor)?;
@@ -287,6 +358,7 @@ impl FileBroker {
         relative_path: &str,
         options: AtomicWriteOptions,
     ) -> Result<FileHandleView, FileBrokerError> {
+        let _lease = self.operation_lease(workspace_id)?;
         let root = self.ready_root(workspace_id, None)?;
         let target = resolve_parent(root.descriptor.as_raw_fd(), relative_path)?;
         let initial_version = match stat_at(target.parent.as_raw_fd(), &target.leaf)? {
@@ -337,6 +409,7 @@ impl FileBroker {
             return Err(FileBrokerError::ChunkTooLarge);
         }
         let (id, binding) = self.handle_binding(handle_id)?;
+        let _lease = self.operation_lease(&binding.workspace_id)?;
         self.ready_root(&binding.workspace_id, Some(&binding))?;
         let mut handles = self
             .handles
@@ -346,7 +419,7 @@ impl FileBroker {
         let HandleValue::Atomic(write) = &mut handle.value else {
             return Err(FileBrokerError::WrongHandleKind);
         };
-        inspect_regular_descriptor(write.file.as_raw_fd())?;
+        verify_temporary_ownership(write)?;
         let next_size = write
             .bytes_written
             .checked_add(bytes.len() as u64)
@@ -354,13 +427,19 @@ impl FileBroker {
         if next_size > MAX_ATOMIC_WRITE_BYTES {
             return Err(FileBrokerError::ChunkTooLarge);
         }
+        self.hooks
+            .before_atomic_write(write.parent.as_raw_fd(), &write.temporary);
         write_all(write.file.as_raw_fd(), bytes)?;
+        verify_temporary_ownership(write)?;
         write.bytes_written = next_size;
         Ok(())
     }
 
     pub fn commit_atomic_write(&self, handle_id: &str) -> Result<String, FileBrokerError> {
         let id = parse_handle_id(handle_id)?;
+        let (_, binding) = self.handle_binding(handle_id)?;
+        let _lease = self.operation_lease(&binding.workspace_id)?;
+        self.ready_root(&binding.workspace_id, Some(&binding))?;
         let record = self
             .handles
             .lock()
@@ -370,12 +449,15 @@ impl FileBroker {
         if Instant::now() >= record.expires_at {
             return Err(FileBrokerError::InvalidHandle);
         }
-        self.ready_root(&record.binding.workspace_id, Some(&record.binding))?;
         let HandleValue::Atomic(mut write) = record.value else {
             return Err(FileBrokerError::WrongHandleKind);
         };
-        inspect_regular_descriptor(write.file.as_raw_fd())?;
+        verify_temporary_ownership(&mut write)?;
         sync_descriptor(write.file.as_raw_fd())?;
+        self.hooks
+            .before_atomic_publish(write.parent.as_raw_fd(), &write.temporary);
+        verify_temporary_ownership(&mut write)?;
+        let staged_identity = descriptor_inode_identity(write.file.as_raw_fd())?;
 
         if write.create_if_absent {
             if stat_at(write.parent.as_raw_fd(), &write.target)?.is_some() {
@@ -396,16 +478,45 @@ impl FileBroker {
             {
                 return Err(FileBrokerError::VersionConflict);
             }
+            self.hooks.before_atomic_swap(
+                write.parent.as_raw_fd(),
+                &write.temporary,
+                &write.target,
+            );
             swap_at(write.parent.as_raw_fd(), &write.temporary, &write.target)?;
-            let displaced = stat_at(write.parent.as_raw_fd(), &write.temporary)?
-                .ok_or(FileBrokerError::VersionConflict)
-                .and_then(|metadata| stable_regular_identity(&metadata))?;
+            let displaced_metadata = stat_at(write.parent.as_raw_fd(), &write.temporary)?
+                .ok_or(FileBrokerError::VersionConflict)?;
+            let displaced = stable_regular_identity(&displaced_metadata)?;
             if displaced != current_identity {
-                let rollback = swap_at(write.parent.as_raw_fd(), &write.temporary, &write.target);
-                return match rollback {
-                    Ok(()) => Err(FileBrokerError::VersionConflict),
-                    Err(error) => Err(error),
-                };
+                let displaced_identity = inode_identity(&displaced_metadata)?;
+                write.temporary_exists = false;
+                let rollback_is_safe =
+                    path_inode_identity(write.parent.as_raw_fd(), &write.target)?
+                        == Some(staged_identity)
+                        && path_inode_identity(write.parent.as_raw_fd(), &write.temporary)?
+                            == Some(displaced_identity);
+                if !rollback_is_safe {
+                    return Err(FileBrokerError::VersionConflict);
+                }
+                self.hooks.before_atomic_rollback(
+                    write.parent.as_raw_fd(),
+                    &write.temporary,
+                    &write.target,
+                );
+                if let Err(error) =
+                    swap_at(write.parent.as_raw_fd(), &write.temporary, &write.target)
+                {
+                    return Err(error);
+                }
+                let rollback_succeeded =
+                    path_inode_identity(write.parent.as_raw_fd(), &write.target)?
+                        == Some(displaced_identity)
+                        && path_inode_identity(write.parent.as_raw_fd(), &write.temporary)?
+                            == Some(staged_identity);
+                if rollback_succeeded {
+                    write.temporary_exists = true;
+                }
+                return Err(FileBrokerError::VersionConflict);
             }
             unlink_at(write.parent.as_raw_fd(), &write.temporary)?;
             write.temporary_exists = false;
@@ -420,6 +531,9 @@ impl FileBroker {
 
     pub fn close(&self, handle_id: &str) -> Result<(), FileBrokerError> {
         let id = parse_handle_id(handle_id)?;
+        let (_, binding) = self.handle_binding(handle_id)?;
+        let _lease = self.operation_lease(&binding.workspace_id)?;
+        self.ready_root(&binding.workspace_id, Some(&binding))?;
         self.handles
             .lock()
             .map_err(|_| FileBrokerError::InvalidHandle)?
@@ -439,6 +553,15 @@ impl FileBroker {
             }
         }
         Err(FileBrokerError::AlreadyExists)
+    }
+
+    fn operation_lease(
+        &self,
+        workspace_id: &str,
+    ) -> Result<crate::workspaces::operations::WorkspaceOperationLease, FileBrokerError> {
+        self.operation_gate
+            .acquire(workspace_id)
+            .map_err(|_| FileBrokerError::GrantUnavailable)
     }
 
     fn ready_root(
@@ -524,16 +647,15 @@ impl FileBroker {
     fn handle_binding(&self, handle_id: &str) -> Result<(Uuid, GrantBinding), FileBrokerError> {
         let id = parse_handle_id(handle_id)?;
         let now = Instant::now();
-        let mut handles = self
+        let handles = self
             .handles
             .lock()
             .map_err(|_| FileBrokerError::InvalidHandle)?;
-        handles.retain(|_, handle| now < handle.expires_at);
-        let binding = handles
-            .get(&id)
-            .ok_or(FileBrokerError::InvalidHandle)?
-            .binding
-            .clone();
+        let handle = handles.get(&id).ok_or(FileBrokerError::InvalidHandle)?;
+        if now >= handle.expires_at {
+            return Err(FileBrokerError::InvalidHandle);
+        }
+        let binding = handle.binding.clone();
         Ok((id, binding))
     }
 
@@ -552,6 +674,57 @@ impl FileBroker {
         };
         operation(descriptor.as_raw_fd())
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct InodeIdentity {
+    device: libc::dev_t,
+    inode: libc::ino_t,
+}
+
+fn raw_regular_inode_identity(metadata: &libc::stat) -> Result<InodeIdentity, FileBrokerError> {
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(FileBrokerError::UnsafeFile);
+    }
+    Ok(InodeIdentity {
+        device: metadata.st_dev,
+        inode: metadata.st_ino,
+    })
+}
+
+fn inode_identity(metadata: &libc::stat) -> Result<InodeIdentity, FileBrokerError> {
+    checked_regular_version(metadata)?;
+    raw_regular_inode_identity(metadata)
+}
+
+fn descriptor_inode_identity(descriptor: RawFd) -> Result<InodeIdentity, FileBrokerError> {
+    inode_identity(&descriptor_stat(descriptor)?)
+}
+
+fn path_inode_identity(
+    parent: RawFd,
+    path: &CStr,
+) -> Result<Option<InodeIdentity>, FileBrokerError> {
+    stat_at(parent, path)?
+        .map(|metadata| inode_identity(&metadata))
+        .transpose()
+}
+
+fn verify_temporary_ownership(
+    write: &mut AtomicWriteHandle,
+) -> Result<InodeIdentity, FileBrokerError> {
+    let descriptor_metadata = descriptor_stat(write.file.as_raw_fd())?;
+    let descriptor_identity = raw_regular_inode_identity(&descriptor_metadata)?;
+    let path_identity = stat_at(write.parent.as_raw_fd(), &write.temporary)?
+        .as_ref()
+        .map(raw_regular_inode_identity)
+        .transpose()?;
+    if path_identity != Some(descriptor_identity) {
+        write.temporary_exists = false;
+        return Err(FileBrokerError::UnsafeFile);
+    }
+    inspect_regular_descriptor(write.file.as_raw_fd())?;
+    Ok(descriptor_identity)
 }
 
 fn parse_handle_id(handle_id: &str) -> Result<Uuid, FileBrokerError> {
@@ -666,19 +839,12 @@ pub fn install_file_broker_handlers(
             if input.max_entries == 0 || input.max_entries > MAX_LIST_ENTRIES {
                 return Err(BridgeHandlerError::invalid_request());
             }
-            let entries = bridge_file(broker.list(&input.handle_id))?;
-            if input.offset > entries.len() {
-                return Err(BridgeHandlerError::invalid_request());
-            }
-            let end = input
-                .offset
-                .saturating_add(input.max_entries)
-                .min(entries.len());
-            Ok(json!({
-                "entries": &entries[input.offset..end],
-                "nextOffset": end,
-                "eof": end == entries.len(),
-            }))
+            serde_json::to_value(bridge_file(broker.list(
+                &input.handle_id,
+                input.offset,
+                input.max_entries,
+            ))?)
+            .map_err(|_| BridgeHandlerError::file_failure())
         },
     )?;
     install_handler(
