@@ -345,19 +345,45 @@ impl PendingGrantRegistry {
         if launch_id != self.launch_id {
             return Err(WorkspaceGrantError::LaunchMismatch);
         }
-        let mut pending = self
+        let pending = self
             .pending
-            .remove(&pending_id)
+            .get(&pending_id)
             .ok_or(WorkspaceGrantError::InvalidPendingGrant)?;
         if workspace_id.is_empty() {
             return Err(WorkspaceGrantError::InvalidPendingGrant);
         }
-        verify_pending_grant(&pending)?;
+        verify_pending_grant(pending)?;
+        let mut grant = pending.grant.clone();
+        grant.workspace_id = workspace_id.to_owned();
+        self.promote_validated(pending_id, workspace_id);
+        Ok(grant)
+    }
+
+    pub(crate) fn revalidate_candidate(
+        &self,
+        launch_id: Uuid,
+        pending_id: Uuid,
+        workspace_id: &str,
+        expected: &WorkspaceGrant,
+    ) -> Result<(), WorkspaceGrantError> {
+        let current = self.candidate(launch_id, pending_id, workspace_id)?;
+        if current.canonical_path != expected.canonical_path
+            || current.identity != expected.identity
+            || current.display_path != expected.display_path
+        {
+            return Err(WorkspaceGrantError::InvalidPendingGrant);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn promote_validated(&mut self, pending_id: Uuid, workspace_id: &str) {
+        let mut pending = self
+            .pending
+            .remove(&pending_id)
+            .expect("validated pending Workspace grant must remain registered");
         pending.cancellation = None;
         pending.grant.workspace_id = workspace_id.to_owned();
-        let grant = pending.grant.clone();
         self.committed.insert(workspace_id.to_owned(), pending);
-        Ok(grant)
     }
 
     pub fn candidate(

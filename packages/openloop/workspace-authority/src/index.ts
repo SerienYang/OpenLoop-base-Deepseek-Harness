@@ -143,6 +143,8 @@ function nativePort(bridge: OpenloopDesktopHostClient): NativeWorkspaceAuthority
       bridge.deleteWorkspaceGrant(workspaceId, expectedGrantGeneration, operationId, signal),
     prepareWorkspaceTransaction: (input, signal) =>
       bridge.prepareWorkspaceTransaction(input, signal),
+    readWorkspaceTransaction: async signal =>
+      (await bridge.readWorkspaceTransaction(signal)) ?? undefined,
     advanceWorkspaceTransaction: (
       operationId,
       expectedGeneration,

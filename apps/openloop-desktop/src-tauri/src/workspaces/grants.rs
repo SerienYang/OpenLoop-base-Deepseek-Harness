@@ -276,6 +276,15 @@ impl GrantStore {
         grant: WorkspaceGrant,
         expected_generation: u64,
     ) -> Result<u64, WorkspaceGrantError> {
+        self.commit_validated(grant, expected_generation, || Ok(()))
+    }
+
+    pub fn commit_validated(
+        &self,
+        grant: WorkspaceGrant,
+        expected_generation: u64,
+        validate: impl FnOnce() -> Result<(), WorkspaceGrantError>,
+    ) -> Result<u64, WorkspaceGrantError> {
         let _lock = lock_workspace_root(self.root.as_raw_fd())?;
         let mut snapshot = self.load_locked()?;
         if snapshot.generation != expected_generation {
@@ -289,6 +298,7 @@ impl GrantStore {
                 "Workspace grant version is unsupported".to_owned(),
             ));
         }
+        validate()?;
         snapshot.generation = snapshot
             .generation
             .checked_add(1)

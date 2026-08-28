@@ -83,7 +83,11 @@ function fixture(options: {
         : { name: workspace.name, canonicalPath: workspace.path }
     },
   }
-  const native: NativeWorkspaceAuthorityPort = {
+  const native: NativeWorkspaceAuthorityPort & {
+    readWorkspaceTransaction: (
+      signal: AbortSignal,
+    ) => Promise<WorkspaceTransaction | undefined>
+  } = {
     grantGeneration: () => Promise.resolve(grantGeneration),
     beginWorkspaceAuthorization: vi.fn(async () => {
       calls.push('begin-authorization')
@@ -210,6 +214,7 @@ function fixture(options: {
       calls.push(`prepare:${input.kind}`)
       return { operationId: 'operation-1', generation: 1, stage: input.stage }
     }),
+    readWorkspaceTransaction: vi.fn(async () => undefined),
     advanceWorkspaceTransaction: vi.fn(async (
       _id: string,
       _generation: number,
@@ -329,6 +334,7 @@ describe('WorkspaceAuthority', () => {
         operationId,
         identityValid: true,
         status: 'ready',
+        effectiveStatus: 'ready',
       })
       throw new Error(`response lost for ${workspaceId}`)
     })
@@ -346,6 +352,42 @@ describe('WorkspaceAuthority', () => {
     ])
     expect(value.native.abortWorkspaceAuthorization).not.toHaveBeenCalled()
     expect(value.registry.markNeedsAuthorization).not.toHaveBeenCalled()
+  })
+
+  it('converges an invalid add grant after commit response loss without reporting ready', async () => {
+    const value = fixture()
+    vi.mocked(value.native.commitWorkspaceAuthorization).mockImplementationOnce(async (
+      _pending,
+      _workspaceId,
+      expectedGeneration,
+      operationId,
+    ) => {
+      value.setGrantGeneration(expectedGeneration + 1)
+      vi.mocked(value.native.inspectWorkspaceGrant).mockResolvedValueOnce({
+        exists: true,
+        generation: expectedGeneration + 1,
+        operationId,
+        identityValid: false,
+        status: 'ready',
+        effectiveStatus: 'identity-mismatch',
+      })
+      throw new Error('commit response lost')
+    })
+
+    await expect(value.authority.add()).rejects.toThrow('commit response lost')
+    expect(value.native.markGrantNeedsAuthorization).toHaveBeenCalledWith(
+      'workspace-1',
+      1,
+      'operation-1',
+      expect.any(AbortSignal),
+    )
+    expect(value.registry.markNeedsAuthorization).toHaveBeenCalledWith('workspace-1')
+    expect(value.transactions).toEqual([
+      'prepare:add',
+      'registry-committed',
+      'authorization-failed',
+      'complete',
+    ])
   })
 
   it('rejects stale catalog and grant generations', async () => {
@@ -485,6 +527,157 @@ describe('WorkspaceAuthority', () => {
       1,
       'operation-1',
       '/host/project',
+      expect.any(AbortSignal),
+    )
+  })
+
+  it('continues reauthorization when prepare committed before its response was lost', async () => {
+    const value = fixture({ existingWorkspace: true })
+    let operationId = ''
+    vi.mocked(value.native.prepareWorkspaceTransaction)
+      .mockImplementationOnce(async (input) => {
+        operationId = input.operationId ?? ''
+        throw new Error('prepare response lost')
+      })
+    vi.mocked(value.native.readWorkspaceTransaction).mockImplementationOnce(async () => {
+      return {
+        operationId,
+        generation: 1,
+        kind: 'reauthorize',
+        workspaceId: 'workspace-1',
+        expectedCatalogGeneration: 0,
+        expectedGrantGeneration: 0,
+        stage: 'reauthorize-prepared',
+      }
+    })
+
+    await expect(value.authority.reauthorize('workspace-1')).resolves.toMatchObject({
+      workspaceId: 'workspace-1',
+      state: 'ready',
+    })
+    expect(value.native.markGrantReauthorizing).toHaveBeenCalledWith(
+      'workspace-1',
+      0,
+      operationId,
+      expect.any(AbortSignal),
+    )
+    expect(value.transactions).toEqual(['grant-committed', 'complete'])
+  })
+
+  it('fails closed when prepare response loss reveals a foreign transaction', async () => {
+    const value = fixture({ existingWorkspace: true })
+    vi.mocked(value.native.prepareWorkspaceTransaction)
+      .mockRejectedValueOnce(new Error('prepare response lost'))
+    vi.mocked(value.native.readWorkspaceTransaction).mockResolvedValueOnce({
+      operationId: 'foreign-operation',
+      generation: 1,
+      kind: 'reauthorize',
+      workspaceId: 'workspace-1',
+      expectedCatalogGeneration: 0,
+      expectedGrantGeneration: 0,
+      stage: 'reauthorize-prepared',
+    })
+
+    await expect(value.authority.reauthorize('workspace-1'))
+      .rejects.toThrow('prepare response lost')
+    expect(value.native.markGrantReauthorizing).not.toHaveBeenCalled()
+    expect(value.native.abortWorkspaceTransaction).not.toHaveBeenCalled()
+  })
+
+  it('continues reauthorization when mark committed before its response was lost', async () => {
+    const value = fixture({ existingWorkspace: true })
+    const mark = vi.mocked(value.native.markGrantReauthorizing).getMockImplementation()!
+    vi.mocked(value.native.markGrantReauthorizing).mockImplementationOnce(async (...args) => {
+      await mark(...args)
+      throw new Error('mark response lost')
+    })
+    vi.mocked(value.native.readWorkspaceTransaction).mockResolvedValueOnce({
+      operationId: 'operation-1',
+      generation: 1,
+      kind: 'reauthorize',
+      workspaceId: 'workspace-1',
+      expectedCatalogGeneration: 0,
+      expectedGrantGeneration: 0,
+      stage: 'reauthorize-prepared',
+    })
+
+    await expect(value.authority.reauthorize('workspace-1')).resolves.toMatchObject({
+      workspaceId: 'workspace-1',
+      state: 'ready',
+    })
+    expect(value.native.beginWorkspaceAuthorization).toHaveBeenCalledOnce()
+    expect(value.transactions).toEqual([
+      'prepare:reauthorize',
+      'grant-committed',
+      'complete',
+    ])
+  })
+
+  it('aborts its journal when mark fails before mutating the original grant', async () => {
+    const value = fixture({ existingWorkspace: true })
+    vi.mocked(value.native.markGrantReauthorizing)
+      .mockRejectedValueOnce(new Error('mark failed'))
+    vi.mocked(value.native.readWorkspaceTransaction).mockResolvedValueOnce({
+      operationId: 'operation-1',
+      generation: 1,
+      kind: 'reauthorize',
+      workspaceId: 'workspace-1',
+      expectedCatalogGeneration: 0,
+      expectedGrantGeneration: 0,
+      stage: 'reauthorize-prepared',
+    })
+
+    await expect(value.authority.reauthorize('workspace-1')).rejects.toThrow('mark failed')
+    expect(value.native.beginWorkspaceAuthorization).not.toHaveBeenCalled()
+    expect(value.native.restoreGrantReady).not.toHaveBeenCalled()
+    expect(value.native.abortWorkspaceTransaction).toHaveBeenCalledWith(
+      'operation-1',
+      1,
+      'reauthorize-prepared',
+      expect.any(AbortSignal),
+    )
+    expect(value.transactions).toEqual(['prepare:reauthorize', 'abort'])
+  })
+
+  it('does not mutate a foreign freeze after mark response loss', async () => {
+    const value = fixture({ existingWorkspace: true })
+    vi.mocked(value.native.markGrantReauthorizing)
+      .mockRejectedValueOnce(new Error('mark response lost'))
+    vi.mocked(value.native.readWorkspaceTransaction).mockResolvedValueOnce({
+      operationId: 'operation-1',
+      generation: 1,
+      kind: 'reauthorize',
+      workspaceId: 'workspace-1',
+      expectedCatalogGeneration: 0,
+      expectedGrantGeneration: 0,
+      stage: 'reauthorize-prepared',
+    })
+    vi.mocked(value.native.inspectWorkspaceGrant)
+      .mockResolvedValueOnce({
+        exists: true,
+        generation: 0,
+        operationId: 'prior-operation',
+        identityValid: true,
+        status: 'ready',
+        effectiveStatus: 'ready',
+      })
+      .mockResolvedValueOnce({
+        exists: true,
+        generation: 1,
+        operationId: 'foreign-operation',
+        identityValid: true,
+        status: 'reauthorizing',
+        effectiveStatus: 'ready',
+      })
+
+    await expect(value.authority.reauthorize('workspace-1'))
+      .rejects.toThrow('mark response lost')
+    expect(value.native.restoreGrantReady).not.toHaveBeenCalled()
+    expect(value.native.markGrantNeedsAuthorization).not.toHaveBeenCalled()
+    expect(value.native.abortWorkspaceTransaction).toHaveBeenCalledWith(
+      'operation-1',
+      1,
+      'reauthorize-prepared',
       expect.any(AbortSignal),
     )
   })
@@ -645,6 +838,74 @@ describe('WorkspaceAuthority', () => {
       expect.any(AbortSignal),
     )
     expect(value.transactions).toEqual(['prepare:reauthorize', 'abort'])
+  })
+
+  it('finishes reauthorization when a valid replacement commit response was lost', async () => {
+    const value = fixture({ existingWorkspace: true })
+    vi.mocked(value.native.commitWorkspaceAuthorization).mockImplementationOnce(async (
+      _pending,
+      _workspaceId,
+      expectedGeneration,
+      operationId,
+    ) => {
+      value.setGrantGeneration(expectedGeneration + 1)
+      vi.mocked(value.native.inspectWorkspaceGrant).mockResolvedValueOnce({
+        exists: true,
+        generation: expectedGeneration + 1,
+        operationId,
+        identityValid: true,
+        status: 'ready',
+        effectiveStatus: 'ready',
+      })
+      throw new Error('commit response lost')
+    })
+
+    await expect(value.authority.reauthorize('workspace-1')).resolves.toEqual({
+      workspaceId: 'workspace-1',
+      name: 'Project',
+      state: 'ready',
+    })
+    expect(value.native.markGrantNeedsAuthorization).not.toHaveBeenCalled()
+    expect(value.transactions).toEqual([
+      'prepare:reauthorize',
+      'grant-committed',
+      'complete',
+    ])
+  })
+
+  it('converges an invalid replacement after commit response loss without reporting ready', async () => {
+    const value = fixture({ existingWorkspace: true })
+    vi.mocked(value.native.commitWorkspaceAuthorization).mockImplementationOnce(async (
+      _pending,
+      _workspaceId,
+      expectedGeneration,
+      operationId,
+    ) => {
+      value.setGrantGeneration(expectedGeneration + 1)
+      vi.mocked(value.native.inspectWorkspaceGrant).mockResolvedValueOnce({
+        exists: true,
+        generation: expectedGeneration + 1,
+        operationId,
+        identityValid: false,
+        status: 'ready',
+        effectiveStatus: 'identity-mismatch',
+      })
+      throw new Error('commit response lost')
+    })
+
+    await expect(value.authority.reauthorize('workspace-1'))
+      .rejects.toThrow('commit response lost')
+    expect(value.native.markGrantNeedsAuthorization).toHaveBeenCalledWith(
+      'workspace-1',
+      2,
+      'operation-1',
+      expect.any(AbortSignal),
+    )
+    expect(value.transactions).toEqual([
+      'prepare:reauthorize',
+      'grant-committed',
+      'complete',
+    ])
   })
 
   it('reauthorizes a legacy Workspace without freezing a missing Host grant', async () => {
@@ -839,6 +1100,7 @@ describe('WorkspaceAuthority', () => {
         operationId,
         identityValid: true,
         status: 'ready',
+        effectiveStatus: 'ready',
       })
       return { workspaceId, state: 'ready' }
     })

@@ -196,6 +196,29 @@ fn grant_store_is_owner_only_channel_isolated_and_generation_guarded() {
 }
 
 #[test]
+fn grant_store_validation_failure_prevents_persistence() {
+    let root = tempdir().expect("root");
+    let channel = root.path().join("channel");
+    let workspace = root.path().join("workspace");
+    secure_root(&channel);
+    secure_root(&workspace);
+    let store = GrantStore::open(&channel, ReleaseChannel::Test).expect("store");
+
+    let error = store
+        .commit_validated(grant(&workspace, "workspace-1", 1), 0, || {
+            Err(WorkspaceGrantError::InvalidPendingGrant)
+        })
+        .expect_err("identity revalidation must fail");
+
+    assert!(matches!(error, WorkspaceGrantError::InvalidPendingGrant));
+    assert_eq!(store.load().expect("unchanged store").generation, 0);
+    assert!(store
+        .get("workspace-1")
+        .expect("read rejected grant")
+        .is_none());
+}
+
+#[test]
 fn grant_store_status_update_and_delete_are_atomic_cas_mutations() {
     let root = tempdir().expect("root");
     let channel = root.path().join("channel");
@@ -440,16 +463,18 @@ fn add_registry_commit_atomically_binds_workspace_id_and_generation() {
 }
 
 #[test]
-fn add_prepare_persists_preallocated_workspace_id_without_a_path() {
+fn prepare_persists_preallocated_workspace_and_operation_ids_without_a_path() {
     let root = tempdir().expect("root");
     let channel = root.path().join("channel");
     secure_root(&channel);
     let journal = WorkspaceJournal::open(&channel, ReleaseChannel::Test).expect("journal");
+    let operation_id = Uuid::new_v4();
 
     let response = dispatch_transaction(
         journal.clone(),
         "prepareWorkspaceTransaction",
         serde_json::json!({
+            "operationId": operation_id,
             "kind": "add",
             "workspaceId": "host-preallocated-id",
             "expectedCatalogGeneration": 0,
@@ -467,6 +492,7 @@ fn add_prepare_persists_preallocated_workspace_id_without_a_path() {
         transaction.workspace_id.as_deref(),
         Some("host-preallocated-id")
     );
+    assert_eq!(transaction.operation_id, operation_id);
     let serialized = serde_json::to_string(&transaction).expect("serialize transaction");
     assert!(!serialized.contains("canonicalPath"));
     assert!(!serialized.contains("displayPath"));

@@ -111,6 +111,7 @@ export type WorkspaceTransactionStage =
   | 'authorization-failed'
 
 export interface WorkspaceTransactionInput {
+  readonly operationId?: string
   readonly kind: WorkspaceTransactionKind
   readonly workspaceId?: string
   readonly expectedCatalogGeneration: number

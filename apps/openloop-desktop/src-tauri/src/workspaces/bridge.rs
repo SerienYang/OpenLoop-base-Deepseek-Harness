@@ -62,6 +62,7 @@ struct ConfirmRevokeInput {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PrepareInput {
+    operation_id: Option<Uuid>,
     kind: WorkspaceTransactionKind,
     workspace_id: Option<String>,
     expected_catalog_generation: u64,
@@ -210,12 +211,18 @@ pub fn install_workspace_authority_handlers(
                 grant.operation_id = input.operation_id;
                 grant.previous_operation_id = None;
                 grant.previous_status = None;
+                let validated_grant = grant.clone();
                 commit_store
-                    .commit(grant, input.expected_grant_generation)
+                    .commit_validated(grant, input.expected_grant_generation, || {
+                        registry.revalidate_candidate(
+                            launch_id,
+                            input.pending_grant_id,
+                            &input.workspace_id,
+                            &validated_grant,
+                        )
+                    })
                     .map_err(|_| BridgeHandlerError::workspace_failure())?;
-                registry
-                    .commit(launch_id, input.pending_grant_id, &input.workspace_id)
-                    .map_err(|_| BridgeHandlerError::workspace_failure())?;
+                registry.promote_validated(input.pending_grant_id, &input.workspace_id);
                 Ok(json!({
                     "workspaceId": input.workspace_id,
                     "state": "ready",
@@ -656,7 +663,7 @@ pub fn install_workspace_transaction_handlers(
                 let transaction = WorkspaceTransaction {
                     version: 1,
                     generation: 1,
-                    operation_id: Uuid::new_v4(),
+                    operation_id: input.operation_id.unwrap_or_else(Uuid::new_v4),
                     kind: input.kind,
                     workspace_id: input.workspace_id,
                     expected_catalog_generation: input.expected_catalog_generation,
