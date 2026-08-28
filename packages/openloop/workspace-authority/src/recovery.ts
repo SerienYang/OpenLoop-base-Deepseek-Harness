@@ -126,7 +126,8 @@ export async function recoverWorkspaceTransaction(
         )
         if (!hasOwnedFreeze && (
           grant.exists
-          || currentGrantGeneration !== transaction.expectedGrantGeneration + 2
+          || (currentGrantGeneration !== transaction.expectedGrantGeneration
+            && currentGrantGeneration !== transaction.expectedGrantGeneration + 2)
         )) {
           return 'stale-generation'
         }
@@ -154,6 +155,12 @@ export async function recoverWorkspaceTransaction(
         transaction.expectedGrantGeneration + 1,
         'revoking',
       )
+      const isLegacyUntouched = !grant.exists
+        && currentGrantGeneration === transaction.expectedGrantGeneration
+      if (isLegacyUntouched) {
+        await port.abortTransaction(versionOf(transaction))
+        return 'rolled-back'
+      }
       if (!isOriginalReady && !isOwnedFreeze) return 'stale-generation'
       if (grant.identityValid) {
         if (grant.status !== 'ready') {
@@ -187,7 +194,8 @@ export async function recoverWorkspaceTransaction(
           transaction.operationId,
         )
       } else if (grant.exists
-        || currentGrantGeneration !== transaction.expectedGrantGeneration + 2) {
+        || (currentGrantGeneration !== transaction.expectedGrantGeneration
+          && currentGrantGeneration !== transaction.expectedGrantGeneration + 2)) {
         return 'stale-generation'
       }
       await advanceAndComplete(port, versionOf(transaction), 'grant-deleted')
@@ -195,7 +203,8 @@ export async function recoverWorkspaceTransaction(
     }
     if (workspaceExists
       || (await port.inspectGrant(workspaceId)).exists
-      || currentGrantGeneration !== transaction.expectedGrantGeneration + 2) {
+      || (currentGrantGeneration !== transaction.expectedGrantGeneration
+        && currentGrantGeneration !== transaction.expectedGrantGeneration + 2)) {
       return 'stale-generation'
     }
     await port.completeTransaction(versionOf(transaction))

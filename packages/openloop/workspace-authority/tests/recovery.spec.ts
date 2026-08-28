@@ -203,6 +203,80 @@ describe('Workspace transaction recovery', () => {
     })
   })
 
+  it('finishes a legacy revoke without grant mutations or generation changes', async () => {
+    const value = port({
+      workspaceExists: vi.fn(async () => false),
+      inspectGrant: vi.fn(async () => ({
+        exists: false,
+        identityValid: false,
+      })),
+      grantGeneration: vi.fn(async () => 1),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('revoke', 'revoke-prepared'),
+      value,
+    )).resolves.toBe('completed')
+    expect(value.deleteGrant).not.toHaveBeenCalled()
+    expect(value.restoreGrantReady).not.toHaveBeenCalled()
+    expect(value.markNeedsAuthorization).not.toHaveBeenCalled()
+    expect(value.advanceTransaction).toHaveBeenNthCalledWith(1, {
+      operationId: 'operation-1',
+      generation: 1,
+      stage: 'revoke-prepared',
+    }, 'registry-deleted')
+    expect(value.advanceTransaction).toHaveBeenNthCalledWith(2, {
+      operationId: 'operation-1',
+      generation: 2,
+      stage: 'registry-deleted',
+    }, 'grant-deleted')
+  })
+
+  it('finishes a legacy revoke from registry-deleted without a grant mutation', async () => {
+    const value = port({
+      catalogGeneration: vi.fn(async () => 2),
+      workspaceExists: vi.fn(async () => false),
+      inspectGrant: vi.fn(async () => ({
+        exists: false,
+        identityValid: false,
+      })),
+      grantGeneration: vi.fn(async () => 1),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('revoke', 'registry-deleted'),
+      value,
+    )).resolves.toBe('completed')
+    expect(value.deleteGrant).not.toHaveBeenCalled()
+    expect(value.advanceTransaction).toHaveBeenCalledWith({
+      operationId: 'operation-1',
+      generation: 1,
+      stage: 'registry-deleted',
+    }, 'grant-deleted')
+  })
+
+  it('completes a legacy revoke at grant-deleted without changing grant generation', async () => {
+    const value = port({
+      catalogGeneration: vi.fn(async () => 2),
+      workspaceExists: vi.fn(async () => false),
+      inspectGrant: vi.fn(async () => ({
+        exists: false,
+        identityValid: false,
+      })),
+      grantGeneration: vi.fn(async () => 1),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('revoke', 'grant-deleted'),
+      value,
+    )).resolves.toBe('completed')
+    expect(value.completeTransaction).toHaveBeenCalledWith({
+      operationId: 'operation-1',
+      generation: 1,
+      stage: 'grant-deleted',
+    })
+  })
+
   it('completes when both registry row and grant are already deleted', async () => {
     const value = port({
       catalogGeneration: vi.fn(async () => 2),

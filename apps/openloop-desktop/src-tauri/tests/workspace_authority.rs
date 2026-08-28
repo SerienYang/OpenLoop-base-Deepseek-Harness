@@ -560,7 +560,7 @@ fn restart_never_publishes_ready_before_descriptor_verification() {
 }
 
 #[test]
-fn inspect_workspace_grant_reports_effective_identity_status() {
+fn inspect_workspace_grant_separates_persisted_and_effective_status() {
     let root = tempdir().expect("root");
     let channel = root.path().join("channel");
     let workspace = root.path().join("workspace");
@@ -572,6 +572,31 @@ fn inspect_workspace_grant_reports_effective_identity_status() {
         .commit(grant(&workspace, "workspace-1", 0), 0)
         .expect("commit grant");
     let journal = WorkspaceJournal::open(&channel, ReleaseChannel::Test).expect("journal");
+    let operation_id = Uuid::new_v4();
+    journal
+        .write(
+            WorkspaceTransaction {
+                version: 1,
+                generation: 1,
+                operation_id,
+                kind: WorkspaceTransactionKind::Revoke,
+                workspace_id: Some("workspace-1".to_owned()),
+                expected_catalog_generation: 1,
+                expected_grant_generation: 1,
+                stage: "revoke-prepared".to_owned(),
+            },
+            0,
+        )
+        .expect("revoke journal");
+    store
+        .begin_operation(
+            "workspace-1",
+            GrantStatus::Ready,
+            GrantStatus::Revoking,
+            1,
+            operation_id,
+        )
+        .expect("freeze grant");
     let launch_id = Uuid::new_v4();
     let mut pending = PendingGrantRegistry::new(launch_id);
     pending.inject_launch_grants(store.load_for_launch().expect("launch grants"));
@@ -622,10 +647,11 @@ fn inspect_workspace_grant_reports_effective_identity_status() {
         inspected["result"],
         serde_json::json!({
             "exists": true,
-            "generation": 1,
-            "operationId": inspected["result"]["operationId"],
+            "generation": 2,
+            "operationId": operation_id,
             "identityValid": false,
-            "status": "identity-mismatch",
+            "status": "revoking",
+            "effectiveStatus": "identity-mismatch",
         })
     );
     assert!(!inspected["result"].to_string().contains('/'));
@@ -792,6 +818,72 @@ impl RevokeConfirmation for RecordingConfirmation {
 }
 
 #[test]
+fn native_revoke_confirmation_accepts_a_registry_title_without_a_host_grant() {
+    let root = tempdir().expect("root");
+    let channel = root.path().join("channel");
+    secure_root(&channel);
+    let store = GrantStore::open(&channel, ReleaseChannel::Test).expect("store");
+    let journal = WorkspaceJournal::open(&channel, ReleaseChannel::Test).expect("journal");
+    let launch_id = Uuid::new_v4();
+    let registry = Arc::new(Mutex::new(PendingGrantRegistry::new(launch_id)));
+    let confirmation = Arc::new(RecordingConfirmation::default());
+    let mut tables = BridgeDispatchTables::unavailable();
+    install_workspace_authority_handlers(
+        &mut tables,
+        launch_id,
+        store,
+        journal,
+        registry,
+        Arc::new(SequencePicker {
+            outcomes: Mutex::new(VecDeque::new()),
+        }),
+        confirmation.clone(),
+    )
+    .expect("authority handlers");
+    let executable = std::env::current_exe().expect("test executable");
+    let secret: Vec<u8> = (0..32).collect();
+    let peer = PeerIdentity {
+        uid: unsafe { libc::geteuid() },
+        pid: process::id(),
+    };
+    let dispatcher = AuthenticatedBridgeDispatcher::new(
+        peer.uid,
+        capture_process_identity(process::id(), &executable).expect("process identity"),
+        executable,
+        launch_id,
+        secret.clone(),
+        tables,
+    )
+    .expect("Workspace dispatcher");
+
+    let confirmed = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        1,
+        "confirmWorkspaceRevoke",
+        serde_json::json!({
+            "workspaceId": "workspace-1",
+            "title": "Project Alpha",
+        }),
+    );
+
+    assert_eq!(confirmed["result"], "confirmed");
+    assert_eq!(
+        confirmation
+            .presentations
+            .lock()
+            .expect("presentations")
+            .as_slice(),
+        [RevokePresentation {
+            workspace_id: "workspace-1".to_owned(),
+            title: "Project Alpha".to_owned(),
+        }]
+    );
+}
+
+#[test]
 fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_leaks() {
     let root = tempdir().expect("root");
     let channel = root.path().join("channel");
@@ -942,6 +1034,7 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
             "operationId": operation_id,
             "identityValid": true,
             "status": "ready",
+            "effectiveStatus": "ready",
         })
     );
     assert!(!inspected["result"].to_string().contains('/'));
@@ -1010,12 +1103,32 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
     assert_eq!(frozen.operation_id, reauthorize_operation_id);
     assert_eq!(frozen.previous_operation_id, Some(operation_id));
     assert_eq!(frozen.previous_status, Some(GrantStatus::Ready));
-    let restored = dispatch_workspace(
+    let inspected_frozen = dispatch_workspace(
         &dispatcher,
         launch_id,
         &secret,
         peer,
         8,
+        "inspectWorkspaceGrant",
+        serde_json::json!({ "workspaceId": "workspace-1" }),
+    );
+    assert_eq!(
+        inspected_frozen["result"],
+        serde_json::json!({
+            "exists": true,
+            "generation": 4,
+            "operationId": reauthorize_operation_id,
+            "identityValid": true,
+            "status": "reauthorizing",
+            "effectiveStatus": "ready",
+        })
+    );
+    let restored = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        9,
         "restoreWorkspaceGrantReady",
         serde_json::json!({
             "workspaceId": "workspace-1",
@@ -1038,7 +1151,7 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
         launch_id,
         &secret,
         peer,
-        9,
+        10,
         "confirmWorkspaceRevoke",
         serde_json::json!({
             "workspaceId": "workspace-1",
@@ -1078,7 +1191,7 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
         launch_id,
         &secret,
         peer,
-        10,
+        11,
         "markWorkspaceGrantRevoking",
         serde_json::json!({
             "workspaceId": "workspace-1",
@@ -1102,7 +1215,7 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
         launch_id,
         &secret,
         peer,
-        11,
+        12,
         "deleteWorkspaceGrant",
         serde_json::json!({
             "workspaceId": "workspace-1",

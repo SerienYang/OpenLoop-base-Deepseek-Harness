@@ -51,6 +51,7 @@ export interface NativeWorkspaceAuthorityPort {
     readonly operationId?: string
     readonly identityValid: boolean
     readonly status?: WorkspaceGrantView['state']
+    readonly effectiveStatus?: WorkspaceGrantView['state']
   }>
   beginWorkspaceAuthorization: (signal: AbortSignal) => Promise<
     | {
@@ -325,6 +326,8 @@ export class WorkspaceAuthority {
     const expectedCatalogGeneration = this.#registry.catalogGeneration()
     const expectedGrantGeneration = await this.#native.grantGeneration(signal)
     signal.throwIfAborted()
+    const originalGrant = await this.#native.inspectWorkspaceGrant(workspaceId, signal)
+    signal.throwIfAborted()
     let transaction = await this.#native.prepareWorkspaceTransaction({
       kind: 'revoke',
       workspaceId,
@@ -336,12 +339,14 @@ export class WorkspaceAuthority {
     let registryDeleted = false
     try {
       signal.throwIfAborted()
-      revokingGeneration = await this.#native.markGrantRevoking(
-        workspaceId,
-        expectedGrantGeneration,
-        transaction.operationId,
-        signal,
-      )
+      if (originalGrant.exists) {
+        revokingGeneration = await this.#native.markGrantRevoking(
+          workspaceId,
+          expectedGrantGeneration,
+          transaction.operationId,
+          signal,
+        )
+      }
       signal.throwIfAborted()
       await this.#registry.deleteExpected(workspaceId, expectedCatalogGeneration)
       registryDeleted = true
@@ -354,12 +359,14 @@ export class WorkspaceAuthority {
         signal,
       )
       signal.throwIfAborted()
-      await this.#native.deleteWorkspaceGrant(
-        workspaceId,
-        revokingGeneration,
-        transaction.operationId,
-        signal,
-      )
+      if (revokingGeneration !== undefined) {
+        await this.#native.deleteWorkspaceGrant(
+          workspaceId,
+          revokingGeneration,
+          transaction.operationId,
+          signal,
+        )
+      }
       signal.throwIfAborted()
       transaction = await this.#native.advanceWorkspaceTransaction(
         transaction.operationId,
@@ -380,13 +387,17 @@ export class WorkspaceAuthority {
       const cleanup = cleanupSignal()
       if (!registryDeleted) {
         const grant = await this.#native.inspectWorkspaceGrant(workspaceId, cleanup)
+        const grantGeneration = await this.#native.grantGeneration(cleanup)
         const ownedFreeze = grant.exists
           && grant.operationId === transaction.operationId
           && grant.generation === expectedGrantGeneration + 1
           && grant.status === 'revoking'
-        const untouched = grant.exists
-          && grant.generation === expectedGrantGeneration
-          && grant.status === 'ready'
+        const untouched = originalGrant.exists
+          ? grant.exists
+            && grant.generation === expectedGrantGeneration
+            && grant.status === originalGrant.status
+            && grantGeneration === expectedGrantGeneration
+          : !grant.exists && grantGeneration === expectedGrantGeneration
         if (ownedFreeze) {
           const frozenGeneration = grant.generation
           if (grant.identityValid) {
@@ -426,7 +437,10 @@ export class WorkspaceAuthority {
         )
       }
       const grant = await this.#native.inspectWorkspaceGrant(workspaceId, cleanup)
-      if (grant.exists) {
+      const grantGeneration = await this.#native.grantGeneration(cleanup)
+      if (revokingGeneration === undefined) {
+        if (grant.exists || grantGeneration !== expectedGrantGeneration) throw error
+      } else if (grant.exists) {
         if (grant.operationId !== transaction.operationId
           || grant.generation !== expectedGrantGeneration + 1
           || grant.status !== 'revoking') {
@@ -438,6 +452,8 @@ export class WorkspaceAuthority {
           transaction.operationId,
           cleanup,
         )
+      } else if (grantGeneration !== expectedGrantGeneration + 2) {
+        throw error
       }
       if (transaction.stage === 'registry-deleted') {
         transaction = await this.#native.advanceWorkspaceTransaction(
@@ -496,7 +512,7 @@ export class WorkspaceAuthority {
     } catch (error) {
       const cleanup = cleanupSignal()
       if (originalGrant.exists) {
-        await this.#native.restoreGrantReady(
+        await this.#rollbackReauthorization(
           workspaceId,
           reauthorizingGeneration,
           transaction.operationId,
@@ -514,7 +530,7 @@ export class WorkspaceAuthority {
     if (pending.outcome === 'cancelled') {
       const cleanup = cleanupSignal()
       if (originalGrant.exists) {
-        await this.#native.restoreGrantReady(
+        await this.#rollbackReauthorization(
           workspaceId,
           reauthorizingGeneration,
           transaction.operationId,
@@ -598,12 +614,21 @@ export class WorkspaceAuthority {
         || grantGeneration !== reauthorizingGeneration) {
         throw error
       }
-      await this.#native.restoreGrantReady(
-        workspaceId,
-        reauthorizingGeneration,
-        transaction.operationId,
-        cleanup,
-      )
+      if (grant.identityValid) {
+        await this.#native.restoreGrantReady(
+          workspaceId,
+          reauthorizingGeneration,
+          transaction.operationId,
+          cleanup,
+        )
+      } else {
+        await this.#native.markGrantNeedsAuthorization(
+          workspaceId,
+          reauthorizingGeneration,
+          transaction.operationId,
+          cleanup,
+        )
+      }
       await this.#native.abortWorkspaceTransaction(
         transaction.operationId,
         transaction.generation,
@@ -611,6 +636,38 @@ export class WorkspaceAuthority {
         cleanup,
       )
       throw error
+    }
+  }
+
+  async #rollbackReauthorization(
+    workspaceId: string,
+    reauthorizingGeneration: number,
+    operationId: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const grant = await this.#native.inspectWorkspaceGrant(workspaceId, signal)
+    const currentGeneration = await this.#native.grantGeneration(signal)
+    if (!grant.exists
+      || grant.operationId !== operationId
+      || grant.generation !== reauthorizingGeneration
+      || grant.status !== 'reauthorizing'
+      || currentGeneration !== reauthorizingGeneration) {
+      throw new Error(`Workspace reauthorization freeze ${JSON.stringify(operationId)} is stale`)
+    }
+    if (grant.identityValid) {
+      await this.#native.restoreGrantReady(
+        workspaceId,
+        reauthorizingGeneration,
+        operationId,
+        signal,
+      )
+    } else {
+      await this.#native.markGrantNeedsAuthorization(
+        workspaceId,
+        reauthorizingGeneration,
+        operationId,
+        signal,
+      )
     }
   }
 

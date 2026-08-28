@@ -247,9 +247,12 @@ export class WorkspaceAuthorityService extends Service {
         workspaceId: workspace.id,
         name: workspace.title,
         state: grant.exists && grant.status !== undefined
-          ? grant.status === 'ready' && !grant.identityValid
+          ? !grant.identityValid && grant.effectiveStatus === 'ready'
             ? 'identity-mismatch' as const
-            : grant.status
+            : grant.effectiveStatus
+              ?? (grant.status === 'ready' && !grant.identityValid
+                ? 'identity-mismatch' as const
+                : grant.status)
           : 'needs-authorization' as const,
       }
     }))

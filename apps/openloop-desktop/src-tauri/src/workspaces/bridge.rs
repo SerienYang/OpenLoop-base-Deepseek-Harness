@@ -252,8 +252,16 @@ pub fn install_workspace_authority_handlers(
             .map_err(|_| BridgeHandlerError::workspace_failure())?;
         Ok(match grant {
             Some(grant) => {
-                let (identity_valid, status) = match reopen_verified_grant(&grant) {
-                    Ok(_) => (true, grant.status),
+                let (identity_valid, effective_status) = match reopen_verified_grant(&grant) {
+                    Ok(_) => (
+                        true,
+                        match grant.status {
+                            GrantStatus::Revoking | GrantStatus::Reauthorizing => {
+                                GrantStatus::Ready
+                            }
+                            status => status,
+                        },
+                    ),
                     Err(error) => (
                         false,
                         error
@@ -266,12 +274,14 @@ pub fn install_workspace_authority_handlers(
                     "generation": grant.generation,
                     "operationId": grant.operation_id,
                     "identityValid": identity_valid,
-                    "status": status,
+                    "status": grant.status,
+                    "effectiveStatus": effective_status,
                 })
             }
             None => json!({
                 "exists": false,
                 "identityValid": false,
+                "effectiveStatus": "missing",
             }),
         })
     });
@@ -371,17 +381,10 @@ pub fn install_workspace_authority_handlers(
         .set_host_handler("restoreWorkspaceGrantReady", restore)
         .map_err(|error| error.to_string())?;
 
-    let confirm_store = store.clone();
     let confirm: BridgeHandler = Arc::new(move |payload, _cancellation| {
         let input: ConfirmRevokeInput =
             serde_json::from_value(payload).map_err(|_| BridgeHandlerError::invalid_request())?;
-        if input.workspace_id.is_empty()
-            || input.title.trim().is_empty()
-            || confirm_store
-                .get(&input.workspace_id)
-                .map_err(|_| BridgeHandlerError::workspace_failure())?
-                .is_none()
-        {
+        if input.workspace_id.is_empty() || input.title.trim().is_empty() {
             return Err(BridgeHandlerError::invalid_request());
         }
         let confirmed = confirmation
@@ -415,10 +418,20 @@ pub fn install_workspace_authority_handlers(
                 {
                     return Err(BridgeHandlerError::invalid_request());
                 }
+                let current = revoking_store
+                    .get(&input.workspace_id)
+                    .map_err(|_| BridgeHandlerError::workspace_failure())?
+                    .ok_or_else(BridgeHandlerError::workspace_failure)?;
+                if matches!(
+                    current.status,
+                    GrantStatus::Revoking | GrantStatus::Reauthorizing
+                ) {
+                    return Err(BridgeHandlerError::invalid_request());
+                }
                 let generation = revoking_store
                     .begin_operation(
                         &input.workspace_id,
-                        GrantStatus::Ready,
+                        current.status,
                         GrantStatus::Revoking,
                         input.expected_grant_generation,
                         input.operation_id,

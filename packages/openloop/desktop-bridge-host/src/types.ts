@@ -95,6 +95,7 @@ export interface WorkspaceGrantInspection {
   readonly operationId?: string
   readonly identityValid: boolean
   readonly status?: WorkspaceGrantView['state'] | 'reauthorizing'
+  readonly effectiveStatus?: WorkspaceGrantView['state']
 }
 
 export type WorkspaceTransactionKind = 'add' | 'revoke' | 'reauthorize'
