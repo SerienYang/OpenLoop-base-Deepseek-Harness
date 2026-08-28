@@ -675,6 +675,74 @@ describe('WorkspaceAuthority', () => {
     ])
   })
 
+  it('aborts a pending reauthorization when the Workspace disappears while the picker is open', async () => {
+    const value = fixture({ existingWorkspace: true })
+    vi.mocked(value.native.inspectWorkspaceGrant).mockResolvedValueOnce({
+      exists: true,
+      generation: 0,
+      operationId: 'prior-operation',
+      identityValid: false,
+      status: 'ready',
+    }).mockResolvedValueOnce({
+      exists: true,
+      generation: 1,
+      operationId: 'operation-1',
+      identityValid: false,
+      status: 'reauthorizing',
+    })
+    vi.mocked(value.native.beginWorkspaceAuthorization).mockImplementationOnce(async () => {
+      value.workspaces.delete('workspace-1')
+      return {
+        outcome: 'pending',
+        pendingGrantId: 'pending-1',
+        canonicalPath: '/host/project',
+      }
+    })
+
+    await expect(value.authority.reauthorize('workspace-1'))
+      .rejects.toThrow('Workspace changed while reauthorization picker was open')
+    expect(value.native.commitWorkspaceAuthorization).not.toHaveBeenCalled()
+    expect(value.native.abortWorkspaceAuthorization)
+      .toHaveBeenCalledWith('pending-1', expect.any(AbortSignal))
+    expect(value.native.restoreGrantReady).not.toHaveBeenCalled()
+    expect(value.native.markGrantNeedsAuthorization).toHaveBeenCalledWith(
+      'workspace-1',
+      1,
+      'operation-1',
+      expect.any(AbortSignal),
+    )
+    expect(value.transactions).toEqual(['prepare:reauthorize', 'abort'])
+  })
+
+  it('aborts a pending reauthorization when the catalog generation changes while the picker is open', async () => {
+    const value = fixture({ existingWorkspace: true })
+    vi.mocked(value.native.beginWorkspaceAuthorization).mockImplementationOnce(async () => {
+      value.setCatalogGeneration(1)
+      return {
+        outcome: 'pending',
+        pendingGrantId: 'pending-1',
+        canonicalPath: '/host/project',
+      }
+    })
+
+    await expect(value.authority.reauthorize('workspace-1')).rejects.toMatchObject({
+      store: 'catalog',
+      expected: 0,
+      actual: 1,
+    })
+    expect(value.native.commitWorkspaceAuthorization).not.toHaveBeenCalled()
+    expect(value.native.abortWorkspaceAuthorization)
+      .toHaveBeenCalledWith('pending-1', expect.any(AbortSignal))
+    expect(value.native.restoreGrantReady).toHaveBeenCalledWith(
+      'workspace-1',
+      1,
+      'operation-1',
+      expect.any(AbortSignal),
+    )
+    expect(value.native.markGrantNeedsAuthorization).not.toHaveBeenCalled()
+    expect(value.transactions).toEqual(['prepare:reauthorize', 'abort'])
+  })
+
   it('aborts a legacy reauthorization cancellation without a missing-grant mutation', async () => {
     const value = fixture({ existingWorkspace: true })
     vi.mocked(value.native.inspectWorkspaceGrant).mockResolvedValue({

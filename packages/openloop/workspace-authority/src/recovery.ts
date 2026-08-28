@@ -268,12 +268,27 @@ export async function recoverWorkspaceTransaction(
           return 'stale-generation'
         }
         const grant = await port.inspectGrant(workspaceId)
+        const isOwnedLegacyGrant = isMatchingGrant(
+          transaction,
+          grant,
+          transaction.expectedGrantGeneration + 1,
+          'ready',
+        ) && currentGrantGeneration === transaction.expectedGrantGeneration + 1
         const isOwnedReplacementGrant = isMatchingGrant(
           transaction,
           grant,
           transaction.expectedGrantGeneration + 2,
           'ready',
         ) && currentGrantGeneration === transaction.expectedGrantGeneration + 2
+        if (isOwnedLegacyGrant) {
+          await port.deleteGrant(
+            workspaceId,
+            grantGeneration(workspaceId, grant),
+            transaction.operationId,
+          )
+          await advanceAndComplete(port, versionOf(transaction), 'grant-committed')
+          return 'completed'
+        }
         if (isOwnedReplacementGrant) {
           await port.deleteGrant(
             workspaceId,
@@ -305,12 +320,19 @@ export async function recoverWorkspaceTransaction(
         return 'rolled-back'
       }
       const grant = await port.inspectGrant(workspaceId)
-      if (isMatchingGrant(
+      const isOwnedLegacyGrant = isMatchingGrant(
+        transaction,
+        grant,
+        transaction.expectedGrantGeneration + 1,
+        'ready',
+      ) && currentGrantGeneration === transaction.expectedGrantGeneration + 1
+      const isOwnedReplacementGrant = isMatchingGrant(
         transaction,
         grant,
         transaction.expectedGrantGeneration + 2,
         'ready',
-      )) {
+      ) && currentGrantGeneration === transaction.expectedGrantGeneration + 2
+      if (isOwnedLegacyGrant || isOwnedReplacementGrant) {
         await advanceAndComplete(port, versionOf(transaction), 'grant-committed')
         return 'completed'
       }

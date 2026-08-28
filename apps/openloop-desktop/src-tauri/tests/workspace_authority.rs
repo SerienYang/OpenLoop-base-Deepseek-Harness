@@ -1471,6 +1471,72 @@ fn reauthorization_recovery_deletes_only_owned_ready_replacements() {
 }
 
 #[test]
+fn reauthorization_prepared_recovery_deletes_only_its_owned_legacy_e_plus_one_grant() {
+    let root = tempdir().expect("root");
+    let channel = root.path().join("channel");
+    let workspace = root.path().join("workspace");
+    secure_root(&channel);
+    secure_root(&workspace);
+    let store = GrantStore::open(&channel, ReleaseChannel::Test).expect("store");
+    let operation_id = Uuid::new_v4();
+    let mut persisted = grant(&workspace, "workspace-1", 0);
+    persisted.operation_id = operation_id;
+    store
+        .commit(persisted, 0)
+        .expect("commit legacy replacement");
+    let journal = WorkspaceJournal::open(&channel, ReleaseChannel::Test).expect("journal");
+    journal
+        .write(
+            WorkspaceTransaction {
+                version: 1,
+                generation: 1,
+                operation_id,
+                kind: WorkspaceTransactionKind::Reauthorize,
+                workspace_id: Some("workspace-1".to_owned()),
+                expected_catalog_generation: 1,
+                expected_grant_generation: 0,
+                stage: "reauthorize-prepared".to_owned(),
+            },
+            0,
+        )
+        .expect("reauthorization journal");
+    let launch_id = Uuid::new_v4();
+    let (dispatcher, secret, peer) = recovery_dispatcher(store.clone(), journal, launch_id);
+
+    let rejected = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        1,
+        "deleteWorkspaceGrant",
+        serde_json::json!({
+            "workspaceId": "workspace-1",
+            "expectedGrantGeneration": 1,
+            "operationId": Uuid::new_v4(),
+        }),
+    );
+    assert_eq!(rejected["ok"], false);
+    assert!(store.get("workspace-1").expect("preserved grant").is_some());
+
+    let deleted = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        2,
+        "deleteWorkspaceGrant",
+        serde_json::json!({
+            "workspaceId": "workspace-1",
+            "expectedGrantGeneration": 1,
+            "operationId": operation_id,
+        }),
+    );
+    assert_eq!(deleted["result"], 2);
+    assert!(store.get("workspace-1").expect("deleted grant").is_none());
+}
+
+#[test]
 fn reauthorization_recovery_rejects_original_and_e_plus_one_grants() {
     for (label, stage, expected_grant_generation, operation_id_in_grant) in [
         ("original", "reauthorize-prepared", 1, None),

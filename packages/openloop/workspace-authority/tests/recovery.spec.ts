@@ -677,6 +677,35 @@ describe('Workspace transaction recovery', () => {
     }, 'grant-committed')
   })
 
+  it('finishes a legacy reauthorization whose owned E+1 grant committed first', async () => {
+    const value = port({
+      grantGeneration: vi.fn(async () => 2),
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 2,
+        operationId: 'operation-1',
+        identityValid: true,
+        status: 'ready' as const,
+      })),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('reauthorize', 'reauthorize-prepared'),
+      value,
+    )).resolves.toBe('completed')
+    expect(value.advanceTransaction).toHaveBeenCalledWith({
+      operationId: 'operation-1',
+      generation: 1,
+      stage: 'reauthorize-prepared',
+    }, 'grant-committed')
+    expect(value.completeTransaction).toHaveBeenCalledWith({
+      operationId: 'operation-1',
+      generation: 2,
+      stage: 'grant-committed',
+    })
+    expect(value.abortTransaction).not.toHaveBeenCalled()
+  })
+
   it('finishes an add whose matching grant committed before its journal advance', async () => {
     const value = port({
       grantGeneration: vi.fn(async () => 2),
@@ -998,6 +1027,40 @@ describe('Workspace transaction recovery', () => {
       stage: 'reauthorize-prepared',
     })
     expect(value.completeTransaction).not.toHaveBeenCalled()
+  })
+
+  it('deletes an owned legacy E+1 orphan and completes its reauthorize-prepared journal', async () => {
+    const value = portAfterCommittedCatalogDeletion({
+      grantGeneration: vi.fn(async () => 2),
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 2,
+        operationId: 'operation-1',
+        identityValid: true,
+        status: 'ready' as const,
+      })),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('reauthorize', 'reauthorize-prepared'),
+      value,
+    )).resolves.toBe('completed')
+    expect(value.deleteGrant).toHaveBeenCalledWith(
+      'workspace-1',
+      2,
+      'operation-1',
+    )
+    expect(value.advanceTransaction).toHaveBeenCalledWith({
+      operationId: 'operation-1',
+      generation: 1,
+      stage: 'reauthorize-prepared',
+    }, 'grant-committed')
+    expect(value.completeTransaction).toHaveBeenCalledWith({
+      operationId: 'operation-1',
+      generation: 2,
+      stage: 'grant-committed',
+    })
+    expect(value.abortTransaction).not.toHaveBeenCalled()
   })
 
   it.each(reauthorizeRecoveryMatrix)(

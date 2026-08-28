@@ -546,6 +546,17 @@ export class WorkspaceAuthority {
       return 'cancelled'
     }
     try {
+      const actualCatalogGeneration = this.#registry.catalogGeneration()
+      if (actualCatalogGeneration !== expectedCatalogGeneration) {
+        throw new WorkspaceGenerationConflictError(
+          'catalog',
+          expectedCatalogGeneration,
+          actualCatalogGeneration,
+        )
+      }
+      if (!this.#registry.has(workspaceId)) {
+        throw new Error('Workspace changed while reauthorization picker was open')
+      }
       const view = await this.#native.commitWorkspaceAuthorization(
         pending.pendingGrantId,
         workspaceId,
