@@ -171,6 +171,21 @@ function fakeDependencies(events: string[], output: string[]): RuntimeDependenci
                 disabled: true,
               },
               {
+                id: 'workflow-worker-thread',
+                name: '@deepseek-ai/dsh-workflow-worker-thread',
+                disabled: true,
+              },
+              {
+                id: 'tool-workflow',
+                name: '@deepseek-ai/dsh-tool-workflow',
+                disabled: true,
+              },
+              {
+                id: 'tool-ralph',
+                name: '@deepseek-ai/dsh-tool-ralph',
+                disabled: true,
+              },
+              {
                 id: 'agent-presets',
                 name: '@deepseek-ai/dsh-agent-presets',
                 config: {

@@ -21,6 +21,12 @@
   disabled: true
 - id: tool-pwsh
   disabled: true
+- id: workflow-worker-thread
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-ralph
+  disabled: true
 - id: llm-deepseek
   inject: [llm, credentialConsumers]
 - id: llm-pi-ai

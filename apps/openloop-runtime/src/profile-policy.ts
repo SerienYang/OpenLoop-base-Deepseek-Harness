@@ -75,6 +75,9 @@ const DISABLED_PROCESS_ROWS = new Map([
   ['tool-bash', '@deepseek-ai/dsh-tool-bash'],
   ['tool-pwsh', '@deepseek-ai/dsh-tool-pwsh'],
   ['tool-fs-search', '@deepseek-ai/dsh-tool-fs-search'],
+  ['workflow-worker-thread', '@deepseek-ai/dsh-workflow-worker-thread'],
+  ['tool-workflow', '@deepseek-ai/dsh-tool-workflow'],
+  ['tool-ralph', '@deepseek-ai/dsh-tool-ralph'],
 ])
 
 function rowMap(rows: readonly EntryOptions[], label: string): Map<string, EntryOptions> {
