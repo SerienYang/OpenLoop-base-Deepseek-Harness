@@ -17,9 +17,14 @@ export class WorkspaceGenerationConflictError extends Error {
 
 export interface WorkspaceRegistryPort {
   catalogGeneration: () => number
+  resolveWorkspaceIdExpected: (
+    canonicalPath: string,
+    expectedGeneration: number,
+  ) => Promise<string>
   createExpected: (
     canonicalPath: string,
     expectedGeneration: number,
+    workspaceId: string,
   ) => Promise<{
     readonly workspaceId: string
     readonly name: string
@@ -39,14 +44,15 @@ export interface WorkspaceRegistryPort {
 }
 
 export interface NativeWorkspaceAuthorityPort {
-  grantGeneration: () => Promise<number>
-  inspectWorkspaceGrant: (workspaceId: string) => Promise<{
+  grantGeneration: (signal: AbortSignal) => Promise<number>
+  inspectWorkspaceGrant: (workspaceId: string, signal: AbortSignal) => Promise<{
     readonly exists: boolean
     readonly generation?: number
     readonly operationId?: string
+    readonly identityValid: boolean
     readonly status?: WorkspaceGrantView['state']
   }>
-  beginWorkspaceAuthorization: () => Promise<
+  beginWorkspaceAuthorization: (signal: AbortSignal) => Promise<
     | {
       readonly outcome: 'pending'
       readonly pendingGrantId: string
@@ -60,31 +66,43 @@ export interface NativeWorkspaceAuthorityPort {
     expectedGrantGeneration: number,
     operationId: string,
     expectedCanonicalPath?: string,
+    signal?: AbortSignal,
   ) => Promise<Omit<WorkspaceGrantView, 'name'>>
-  abortWorkspaceAuthorization: (pendingGrantId: string) => Promise<void>
+  abortWorkspaceAuthorization: (pendingGrantId: string, signal: AbortSignal) => Promise<void>
   confirmWorkspaceRevoke: (
     workspaceId: string,
     title: string,
+    signal: AbortSignal,
   ) => Promise<'confirmed' | 'cancelled'>
   markGrantRevoking: (
     workspaceId: string,
     expectedGrantGeneration: number,
     operationId: string,
+    signal: AbortSignal,
   ) => Promise<number>
   markGrantReauthorizing: (
     workspaceId: string,
     expectedGrantGeneration: number,
     operationId: string,
+    signal: AbortSignal,
   ) => Promise<number>
   restoreGrantReady: (
     workspaceId: string,
     expectedGrantGeneration: number,
     operationId: string,
+    signal: AbortSignal,
+  ) => Promise<number>
+  markGrantNeedsAuthorization: (
+    workspaceId: string,
+    expectedGrantGeneration: number,
+    operationId: string,
+    signal: AbortSignal,
   ) => Promise<number>
   deleteWorkspaceGrant: (
     workspaceId: string,
     expectedGrantGeneration: number,
     operationId: string,
+    signal: AbortSignal,
   ) => Promise<number>
   prepareWorkspaceTransaction: (input: {
     readonly kind: WorkspaceTransaction['kind']
@@ -92,25 +110,31 @@ export interface NativeWorkspaceAuthorityPort {
     readonly expectedCatalogGeneration: number
     readonly expectedGrantGeneration: number
     readonly stage: WorkspaceTransaction['stage']
-  }) => Promise<TransactionVersion>
+  }, signal: AbortSignal) => Promise<TransactionVersion>
   advanceWorkspaceTransaction: (
     operationId: string,
     expectedGeneration: number,
     expectedStage: WorkspaceTransaction['stage'],
     nextStage: WorkspaceTransaction['stage'],
+    signal: AbortSignal,
     workspaceId?: string,
   ) => Promise<TransactionVersion>
   abortWorkspaceTransaction: (
     operationId: string,
     expectedGeneration: number,
     expectedStage: WorkspaceTransaction['stage'],
+    signal: AbortSignal,
   ) => Promise<void>
   completeWorkspaceTransaction: (
     operationId: string,
     expectedGeneration: number,
     expectedStage: WorkspaceTransaction['stage'],
+    signal: AbortSignal,
   ) => Promise<void>
 }
+
+const NEVER_ABORTED = new AbortController().signal
+const cleanupSignal = (): AbortSignal => new AbortController().signal
 
 export class WorkspaceAuthority {
   readonly #registry: WorkspaceRegistryPort
@@ -122,42 +146,60 @@ export class WorkspaceAuthority {
     this.#native = native
   }
 
-  add(): Promise<WorkspaceGrantView | 'cancelled'> {
-    return this.#enqueue(() => this.#add())
+  add(signal: AbortSignal = NEVER_ABORTED): Promise<WorkspaceGrantView | 'cancelled'> {
+    return this.#enqueue(() => this.#add(signal))
   }
 
-  revoke(workspaceId: string): Promise<'revoked' | 'cancelled'> {
-    return this.#enqueue(() => this.#revoke(workspaceId))
+  revoke(workspaceId: string, signal: AbortSignal = NEVER_ABORTED): Promise<'revoked' | 'cancelled'> {
+    return this.#enqueue(() => this.#revoke(workspaceId, signal))
   }
 
-  reauthorize(workspaceId: string): Promise<WorkspaceGrantView | 'cancelled'> {
-    return this.#enqueue(() => this.#reauthorize(workspaceId))
+  reauthorize(
+    workspaceId: string,
+    signal: AbortSignal = NEVER_ABORTED,
+  ): Promise<WorkspaceGrantView | 'cancelled'> {
+    return this.#enqueue(() => this.#reauthorize(workspaceId, signal))
   }
 
-  async #add(): Promise<WorkspaceGrantView | 'cancelled'> {
+  async #add(signal: AbortSignal): Promise<WorkspaceGrantView | 'cancelled'> {
+    signal.throwIfAborted()
     const expectedCatalogGeneration = this.#registry.catalogGeneration()
-    const expectedGrantGeneration = await this.#native.grantGeneration()
-    const pending = await this.#native.beginWorkspaceAuthorization()
+    const expectedGrantGeneration = await this.#native.grantGeneration(signal)
+    signal.throwIfAborted()
+    const pending = await this.#native.beginWorkspaceAuthorization(signal)
     if (pending.outcome === 'cancelled') return 'cancelled'
+    let pendingActive = true
     let transaction: TransactionVersion | undefined
+    let workspace: Awaited<ReturnType<WorkspaceRegistryPort['createExpected']>> | undefined
     try {
-      transaction = await this.#native.prepareWorkspaceTransaction({
-        kind: 'add',
-        expectedCatalogGeneration,
-        expectedGrantGeneration,
-        stage: 'prepared',
-      })
-      const workspace = await this.#registry.createExpected(
+      signal.throwIfAborted()
+      const workspaceId = await this.#registry.resolveWorkspaceIdExpected(
         pending.canonicalPath,
         expectedCatalogGeneration,
       )
+      signal.throwIfAborted()
+      transaction = await this.#native.prepareWorkspaceTransaction({
+        kind: 'add',
+        workspaceId,
+        expectedCatalogGeneration,
+        expectedGrantGeneration,
+        stage: 'prepared',
+      }, signal)
+      signal.throwIfAborted()
+      workspace = await this.#registry.createExpected(
+        pending.canonicalPath,
+        expectedCatalogGeneration,
+        workspaceId,
+      )
+      signal.throwIfAborted()
       transaction = await this.#native.advanceWorkspaceTransaction(
         transaction.operationId,
         transaction.generation,
         transaction.stage,
         'registry-committed',
-        workspace.workspaceId,
+        signal,
       )
+      signal.throwIfAborted()
       let view: Omit<WorkspaceGrantView, 'name'>
       try {
         view = await this.#native.commitWorkspaceAuthorization(
@@ -165,16 +207,37 @@ export class WorkspaceAuthority {
           workspace.workspaceId,
           expectedGrantGeneration,
           transaction.operationId,
+          undefined,
+          signal,
         )
+        pendingActive = false
+        signal.throwIfAborted()
       } catch (error) {
-        const grant = await this.#native.inspectWorkspaceGrant(workspace.workspaceId)
-        const grantGeneration = await this.#native.grantGeneration()
+        const cleanup = cleanupSignal()
+        const grant = await this.#native.inspectWorkspaceGrant(workspace.workspaceId, cleanup)
+        const grantGeneration = await this.#native.grantGeneration(cleanup)
         if (grant.exists
           && grant.operationId === transaction.operationId
           && grant.generation === expectedGrantGeneration + 1
           && grant.status === 'ready'
           && grantGeneration === expectedGrantGeneration + 1) {
+          pendingActive = false
           view = { workspaceId: workspace.workspaceId, state: 'ready' }
+          transaction = await this.#native.advanceWorkspaceTransaction(
+            transaction.operationId,
+            transaction.generation,
+            transaction.stage,
+            'grant-committed',
+            cleanup,
+          )
+          await this.#native.completeWorkspaceTransaction(
+            transaction.operationId,
+            transaction.generation,
+            transaction.stage,
+            cleanup,
+          )
+          if (signal.aborted) signal.throwIfAborted()
+          return { ...view, name: workspace.name }
         } else {
           if (grant.exists || grantGeneration !== expectedGrantGeneration) throw error
           await this.#registry.markNeedsAuthorization(workspace.workspaceId)
@@ -183,11 +246,13 @@ export class WorkspaceAuthority {
             transaction.generation,
             transaction.stage,
             'authorization-failed',
+            cleanup,
           )
           await this.#native.completeWorkspaceTransaction(
             transaction.operationId,
             transaction.generation,
             transaction.stage,
+            cleanup,
           )
           throw error
         }
@@ -197,117 +262,270 @@ export class WorkspaceAuthority {
         transaction.generation,
         transaction.stage,
         'grant-committed',
+        signal,
       )
       await this.#native.completeWorkspaceTransaction(
         transaction.operationId,
         transaction.generation,
         transaction.stage,
+        signal,
       )
+      signal.throwIfAborted()
       return { ...view, name: workspace.name }
     } catch (error) {
-      await this.#native.abortWorkspaceAuthorization(pending.pendingGrantId)
+      const cleanup = cleanupSignal()
+      if (pendingActive) {
+        await this.#native.abortWorkspaceAuthorization(pending.pendingGrantId, cleanup)
+      }
       if (transaction !== undefined && transaction.stage === 'prepared') {
-        await this.#native.abortWorkspaceTransaction(
-          transaction.operationId,
-          transaction.generation,
-          transaction.stage,
-        )
+        if (workspace?.created === true) {
+          transaction = await this.#native.advanceWorkspaceTransaction(
+            transaction.operationId,
+            transaction.generation,
+            transaction.stage,
+            'registry-committed',
+            cleanup,
+          )
+          await this.#registry.markNeedsAuthorization(workspace.workspaceId)
+          transaction = await this.#native.advanceWorkspaceTransaction(
+            transaction.operationId,
+            transaction.generation,
+            transaction.stage,
+            'authorization-failed',
+            cleanup,
+          )
+          await this.#native.completeWorkspaceTransaction(
+            transaction.operationId,
+            transaction.generation,
+            transaction.stage,
+            cleanup,
+          )
+        } else {
+          await this.#native.abortWorkspaceTransaction(
+            transaction.operationId,
+            transaction.generation,
+            transaction.stage,
+            cleanup,
+          )
+        }
       }
       throw error
     }
   }
 
-  async #revoke(workspaceId: string): Promise<'revoked' | 'cancelled'> {
+  async #revoke(workspaceId: string, signal: AbortSignal): Promise<'revoked' | 'cancelled'> {
+    signal.throwIfAborted()
     const workspace = this.#registry.get(workspaceId)
     if (workspace === undefined) return 'revoked'
-    if (await this.#native.confirmWorkspaceRevoke(workspaceId, workspace.name) === 'cancelled') {
+    if (await this.#native.confirmWorkspaceRevoke(workspaceId, workspace.name, signal)
+      === 'cancelled') {
       return 'cancelled'
     }
+    signal.throwIfAborted()
     const expectedCatalogGeneration = this.#registry.catalogGeneration()
-    const expectedGrantGeneration = await this.#native.grantGeneration()
+    const expectedGrantGeneration = await this.#native.grantGeneration(signal)
+    signal.throwIfAborted()
     let transaction = await this.#native.prepareWorkspaceTransaction({
       kind: 'revoke',
       workspaceId,
       expectedCatalogGeneration,
       expectedGrantGeneration,
       stage: 'revoke-prepared',
-    })
-    const revokingGeneration = await this.#native.markGrantRevoking(
-      workspaceId,
-      expectedGrantGeneration,
-      transaction.operationId,
-    )
-    await this.#registry.deleteExpected(workspaceId, expectedCatalogGeneration)
-    transaction = await this.#native.advanceWorkspaceTransaction(
-      transaction.operationId,
-      transaction.generation,
-      transaction.stage,
-      'registry-deleted',
-    )
-    await this.#native.deleteWorkspaceGrant(
-      workspaceId,
-      revokingGeneration,
-      transaction.operationId,
-    )
-    transaction = await this.#native.advanceWorkspaceTransaction(
-      transaction.operationId,
-      transaction.generation,
-      transaction.stage,
-      'grant-deleted',
-    )
-    await this.#native.completeWorkspaceTransaction(
-      transaction.operationId,
-      transaction.generation,
-      transaction.stage,
-    )
-    return 'revoked'
+    }, signal)
+    let revokingGeneration: number | undefined
+    let registryDeleted = false
+    try {
+      signal.throwIfAborted()
+      revokingGeneration = await this.#native.markGrantRevoking(
+        workspaceId,
+        expectedGrantGeneration,
+        transaction.operationId,
+        signal,
+      )
+      signal.throwIfAborted()
+      await this.#registry.deleteExpected(workspaceId, expectedCatalogGeneration)
+      registryDeleted = true
+      signal.throwIfAborted()
+      transaction = await this.#native.advanceWorkspaceTransaction(
+        transaction.operationId,
+        transaction.generation,
+        transaction.stage,
+        'registry-deleted',
+        signal,
+      )
+      signal.throwIfAborted()
+      await this.#native.deleteWorkspaceGrant(
+        workspaceId,
+        revokingGeneration,
+        transaction.operationId,
+        signal,
+      )
+      signal.throwIfAborted()
+      transaction = await this.#native.advanceWorkspaceTransaction(
+        transaction.operationId,
+        transaction.generation,
+        transaction.stage,
+        'grant-deleted',
+        signal,
+      )
+      await this.#native.completeWorkspaceTransaction(
+        transaction.operationId,
+        transaction.generation,
+        transaction.stage,
+        signal,
+      )
+      signal.throwIfAborted()
+      return 'revoked'
+    } catch (error) {
+      const cleanup = cleanupSignal()
+      if (!registryDeleted) {
+        const grant = await this.#native.inspectWorkspaceGrant(workspaceId, cleanup)
+        const ownedFreeze = grant.exists
+          && grant.operationId === transaction.operationId
+          && grant.generation === expectedGrantGeneration + 1
+          && grant.status === 'revoking'
+        const untouched = grant.exists
+          && grant.generation === expectedGrantGeneration
+          && grant.status === 'ready'
+        if (ownedFreeze) {
+          const frozenGeneration = grant.generation
+          if (grant.identityValid) {
+            await this.#native.restoreGrantReady(
+              workspaceId,
+              frozenGeneration,
+              transaction.operationId,
+              cleanup,
+            )
+          } else {
+            await this.#native.markGrantNeedsAuthorization(
+              workspaceId,
+              frozenGeneration,
+              transaction.operationId,
+              cleanup,
+            )
+          }
+        } else if (!untouched) {
+          throw error
+        }
+        await this.#native.abortWorkspaceTransaction(
+          transaction.operationId,
+          transaction.generation,
+          transaction.stage,
+          cleanup,
+        )
+        throw error
+      }
+
+      if (transaction.stage === 'revoke-prepared') {
+        transaction = await this.#native.advanceWorkspaceTransaction(
+          transaction.operationId,
+          transaction.generation,
+          transaction.stage,
+          'registry-deleted',
+          cleanup,
+        )
+      }
+      const grant = await this.#native.inspectWorkspaceGrant(workspaceId, cleanup)
+      if (grant.exists) {
+        if (grant.operationId !== transaction.operationId
+          || grant.generation !== expectedGrantGeneration + 1
+          || grant.status !== 'revoking') {
+          throw error
+        }
+        await this.#native.deleteWorkspaceGrant(
+          workspaceId,
+          grant.generation,
+          transaction.operationId,
+          cleanup,
+        )
+      }
+      if (transaction.stage === 'registry-deleted') {
+        transaction = await this.#native.advanceWorkspaceTransaction(
+          transaction.operationId,
+          transaction.generation,
+          transaction.stage,
+          'grant-deleted',
+          cleanup,
+        )
+      }
+      await this.#native.completeWorkspaceTransaction(
+        transaction.operationId,
+        transaction.generation,
+        transaction.stage,
+        cleanup,
+      )
+      throw error
+    }
   }
 
-  async #reauthorize(workspaceId: string): Promise<WorkspaceGrantView | 'cancelled'> {
+  async #reauthorize(
+    workspaceId: string,
+    signal: AbortSignal,
+  ): Promise<WorkspaceGrantView | 'cancelled'> {
+    signal.throwIfAborted()
     const workspace = this.#registry.get(workspaceId)
     if (workspace === undefined) {
       throw new Error(`cannot reauthorize unknown Workspace ${JSON.stringify(workspaceId)}`)
     }
     const expectedCatalogGeneration = this.#registry.catalogGeneration()
-    const expectedGrantGeneration = await this.#native.grantGeneration()
+    const expectedGrantGeneration = await this.#native.grantGeneration(signal)
+    signal.throwIfAborted()
+    const originalGrant = await this.#native.inspectWorkspaceGrant(workspaceId, signal)
+    signal.throwIfAborted()
     let transaction = await this.#native.prepareWorkspaceTransaction({
       kind: 'reauthorize',
       workspaceId,
       expectedCatalogGeneration,
       expectedGrantGeneration,
       stage: 'reauthorize-prepared',
-    })
-    const reauthorizingGeneration = await this.#native.markGrantReauthorizing(
-      workspaceId,
-      expectedGrantGeneration,
-      transaction.operationId,
-    )
+    }, signal)
+    signal.throwIfAborted()
+    const reauthorizingGeneration = originalGrant.exists
+      ? await this.#native.markGrantReauthorizing(
+        workspaceId,
+        expectedGrantGeneration,
+        transaction.operationId,
+        signal,
+      )
+      : expectedGrantGeneration
     let pending: Awaited<ReturnType<NativeWorkspaceAuthorityPort['beginWorkspaceAuthorization']>>
     try {
-      pending = await this.#native.beginWorkspaceAuthorization()
+      signal.throwIfAborted()
+      pending = await this.#native.beginWorkspaceAuthorization(signal)
+      signal.throwIfAborted()
     } catch (error) {
-      await this.#native.restoreGrantReady(
-        workspaceId,
-        reauthorizingGeneration,
-        transaction.operationId,
-      )
+      const cleanup = cleanupSignal()
+      if (originalGrant.exists) {
+        await this.#native.restoreGrantReady(
+          workspaceId,
+          reauthorizingGeneration,
+          transaction.operationId,
+          cleanup,
+        )
+      }
       await this.#native.abortWorkspaceTransaction(
         transaction.operationId,
         transaction.generation,
         transaction.stage,
+        cleanup,
       )
       throw error
     }
     if (pending.outcome === 'cancelled') {
-      await this.#native.restoreGrantReady(
-        workspaceId,
-        reauthorizingGeneration,
-        transaction.operationId,
-      )
+      const cleanup = cleanupSignal()
+      if (originalGrant.exists) {
+        await this.#native.restoreGrantReady(
+          workspaceId,
+          reauthorizingGeneration,
+          transaction.operationId,
+          cleanup,
+        )
+      }
       await this.#native.abortWorkspaceTransaction(
         transaction.operationId,
         transaction.generation,
         transaction.stage,
+        cleanup,
       )
       return 'cancelled'
     }
@@ -318,23 +536,28 @@ export class WorkspaceAuthority {
         reauthorizingGeneration,
         transaction.operationId,
         workspace.canonicalPath,
+        signal,
       )
+      signal.throwIfAborted()
       transaction = await this.#native.advanceWorkspaceTransaction(
         transaction.operationId,
         transaction.generation,
         transaction.stage,
         'grant-committed',
+        signal,
       )
       await this.#native.completeWorkspaceTransaction(
         transaction.operationId,
         transaction.generation,
         transaction.stage,
+        signal,
       )
+      signal.throwIfAborted()
       return { ...view, name: workspace.name }
     } catch (error) {
-      await this.#native.abortWorkspaceAuthorization(pending.pendingGrantId)
-      const grant = await this.#native.inspectWorkspaceGrant(workspaceId)
-      const grantGeneration = await this.#native.grantGeneration()
+      const cleanup = cleanupSignal()
+      const grant = await this.#native.inspectWorkspaceGrant(workspaceId, cleanup)
+      const grantGeneration = await this.#native.grantGeneration(cleanup)
       if (grant.exists
         && grant.operationId === transaction.operationId
         && grant.generation === reauthorizingGeneration + 1
@@ -345,13 +568,28 @@ export class WorkspaceAuthority {
           transaction.generation,
           transaction.stage,
           'grant-committed',
+          cleanup,
         )
         await this.#native.completeWorkspaceTransaction(
           transaction.operationId,
           transaction.generation,
           transaction.stage,
+          cleanup,
         )
+        if (signal.aborted) signal.throwIfAborted()
         return { workspaceId, name: workspace.name, state: 'ready' }
+      }
+      await this.#native.abortWorkspaceAuthorization(pending.pendingGrantId, cleanup)
+      if (!originalGrant.exists
+        && !grant.exists
+        && grantGeneration === expectedGrantGeneration) {
+        await this.#native.abortWorkspaceTransaction(
+          transaction.operationId,
+          transaction.generation,
+          transaction.stage,
+          cleanup,
+        )
+        throw error
       }
       if (!grant.exists
         || grant.operationId !== transaction.operationId
@@ -364,11 +602,13 @@ export class WorkspaceAuthority {
         workspaceId,
         reauthorizingGeneration,
         transaction.operationId,
+        cleanup,
       )
       await this.#native.abortWorkspaceTransaction(
         transaction.operationId,
         transaction.generation,
         transaction.stage,
+        cleanup,
       )
       throw error
     }

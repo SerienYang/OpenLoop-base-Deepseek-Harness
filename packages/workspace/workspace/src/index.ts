@@ -183,6 +183,7 @@ export class WorkspaceRegistry extends Service {
     path: string,
     expectedGeneration: number,
     title?: string,
+    trustedWorkspaceId?: WorkspaceId,
   ): Promise<{
     readonly workspace: Workspace
     readonly created: boolean
@@ -194,7 +195,7 @@ export class WorkspaceRegistry extends Service {
     }
     return await this.enqueueOperation(() => {
       this.assertGeneration(expectedGeneration)
-      return this.createCanonical(canonical, title)
+      return this.createCanonical(canonical, title, trustedWorkspaceId)
     })
   }
 
@@ -331,6 +332,7 @@ export class WorkspaceRegistry extends Service {
   private async createCanonical(
     canonical: string,
     title?: string,
+    trustedWorkspaceId?: WorkspaceId,
   ): Promise<{
     readonly workspace: WorkspaceEntity
     readonly created: boolean
@@ -349,7 +351,10 @@ export class WorkspaceRegistry extends Service {
     const workspaceName = title ?? basename(canonical)
     const table = this.requireTable()
     const state = this.requireState()
-    const id = WorkspaceId(randomUUID())
+    const id = trustedWorkspaceId ?? WorkspaceId(randomUUID())
+    if (this.entities.has(id)) {
+      throw new Error(`cannot create workspace '${id}': id is already registered`)
+    }
     const now = new Date().toISOString()
     const record: WorkspaceRecord = {
       path: canonical,

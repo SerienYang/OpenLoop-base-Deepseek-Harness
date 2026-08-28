@@ -1,8 +1,10 @@
+import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { WorkspaceId, type WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import type { OpenloopDesktopHostClient } from '@openloop/desktop-bridge-host'
 import {
   WorkspaceAuthority,
+  WorkspaceGenerationConflictError,
   type NativeWorkspaceAuthorityPort,
   type WorkspaceRegistryPort,
 } from './authority.ts'
@@ -28,8 +30,23 @@ declare module '@deepseek-ai/cordis' {
 function registryPort(registry: WorkspaceRegistry): WorkspaceRegistryPort {
   return {
     catalogGeneration: () => registry.catalogGeneration(),
-    createExpected: async (path, expectedGeneration) => {
-      const result = await registry.createExpected(path, expectedGeneration)
+    resolveWorkspaceIdExpected: (canonicalPath, expectedGeneration) => {
+      const actual = registry.catalogGeneration()
+      if (actual !== expectedGeneration) {
+        throw new WorkspaceGenerationConflictError('catalog', expectedGeneration, actual)
+      }
+      return Promise.resolve(
+        registry.list().find(workspace => workspace.path === canonicalPath)?.id
+          ?? WorkspaceId(randomUUID()),
+      )
+    },
+    createExpected: async (path, expectedGeneration, workspaceId) => {
+      const result = await registry.createExpected(
+        path,
+        expectedGeneration,
+        undefined,
+        WorkspaceId(workspaceId),
+      )
       return {
         workspaceId: result.workspace.id,
         name: result.workspace.title,
@@ -54,10 +71,11 @@ function registryPort(registry: WorkspaceRegistry): WorkspaceRegistryPort {
 
 function nativePort(bridge: OpenloopDesktopHostClient): NativeWorkspaceAuthorityPort {
   return {
-    grantGeneration: () => bridge.getWorkspaceGrantGeneration(),
-    inspectWorkspaceGrant: workspaceId => bridge.inspectWorkspaceGrant(workspaceId),
-    beginWorkspaceAuthorization: async () => {
-      const selection = await bridge.beginWorkspaceAuthorization()
+    grantGeneration: signal => bridge.getWorkspaceGrantGeneration(signal),
+    inspectWorkspaceGrant: (workspaceId, signal) =>
+      bridge.inspectWorkspaceGrant(workspaceId, signal),
+    beginWorkspaceAuthorization: async (signal) => {
+      const selection = await bridge.beginWorkspaceAuthorization(signal)
       return selection.outcome === 'cancelled'
         ? selection
         : {
@@ -72,44 +90,61 @@ function nativePort(bridge: OpenloopDesktopHostClient): NativeWorkspaceAuthority
       expectedGrantGeneration,
       operationId,
       expectedCanonicalPath,
+      signal,
     ) => bridge.commitWorkspaceAuthorization(
       pendingGrantId,
       workspaceId,
       expectedGrantGeneration,
       operationId,
       expectedCanonicalPath,
+      signal,
     ),
-    abortWorkspaceAuthorization: pendingGrantId =>
-      bridge.abortWorkspaceAuthorization(pendingGrantId),
-    confirmWorkspaceRevoke: (workspaceId, title) =>
-      bridge.confirmWorkspaceRevoke(workspaceId, title),
-    markGrantRevoking: (workspaceId, expectedGrantGeneration, operationId) =>
+    abortWorkspaceAuthorization: (pendingGrantId, signal) =>
+      bridge.abortWorkspaceAuthorization(pendingGrantId, signal),
+    confirmWorkspaceRevoke: (workspaceId, title, signal) =>
+      bridge.confirmWorkspaceRevoke(workspaceId, title, signal),
+    markGrantRevoking: (workspaceId, expectedGrantGeneration, operationId, signal) =>
       bridge.markWorkspaceGrantRevoking(
         workspaceId,
         expectedGrantGeneration,
         operationId,
+        signal,
       ),
-    markGrantReauthorizing: (workspaceId, expectedGrantGeneration, operationId) =>
+    markGrantReauthorizing: (workspaceId, expectedGrantGeneration, operationId, signal) =>
       bridge.markWorkspaceGrantReauthorizing(
         workspaceId,
         expectedGrantGeneration,
         operationId,
+        signal,
       ),
-    restoreGrantReady: (workspaceId, expectedGrantGeneration, operationId) =>
+    restoreGrantReady: (workspaceId, expectedGrantGeneration, operationId, signal) =>
       bridge.restoreWorkspaceGrantReady(
         workspaceId,
         expectedGrantGeneration,
         operationId,
+        signal,
       ),
-    deleteWorkspaceGrant: (workspaceId, expectedGrantGeneration, operationId) =>
-      bridge.deleteWorkspaceGrant(workspaceId, expectedGrantGeneration, operationId),
-    prepareWorkspaceTransaction: input =>
-      bridge.prepareWorkspaceTransaction(input),
+    markGrantNeedsAuthorization: (
+      workspaceId,
+      expectedGrantGeneration,
+      operationId,
+      signal,
+    ) => bridge.markWorkspaceGrantNeedsAuthorization(
+      workspaceId,
+      expectedGrantGeneration,
+      operationId,
+      signal,
+    ),
+    deleteWorkspaceGrant: (workspaceId, expectedGrantGeneration, operationId, signal) =>
+      bridge.deleteWorkspaceGrant(workspaceId, expectedGrantGeneration, operationId, signal),
+    prepareWorkspaceTransaction: (input, signal) =>
+      bridge.prepareWorkspaceTransaction(input, signal),
     advanceWorkspaceTransaction: (
       operationId,
       expectedGeneration,
       expectedStage,
       nextStage,
+      signal,
       workspaceId,
     ) => bridge.advanceWorkspaceTransaction(
       operationId,
@@ -117,11 +152,12 @@ function nativePort(bridge: OpenloopDesktopHostClient): NativeWorkspaceAuthority
       expectedStage,
       nextStage,
       workspaceId,
+      signal,
     ),
-    abortWorkspaceTransaction: (operationId, expectedGeneration, expectedStage) =>
-      bridge.abortWorkspaceTransaction(operationId, expectedGeneration, expectedStage),
-    completeWorkspaceTransaction: (operationId, expectedGeneration, expectedStage) =>
-      bridge.completeWorkspaceTransaction(operationId, expectedGeneration, expectedStage),
+    abortWorkspaceTransaction: (operationId, expectedGeneration, expectedStage, signal) =>
+      bridge.abortWorkspaceTransaction(operationId, expectedGeneration, expectedStage, signal),
+    completeWorkspaceTransaction: (operationId, expectedGeneration, expectedStage, signal) =>
+      bridge.completeWorkspaceTransaction(operationId, expectedGeneration, expectedStage, signal),
   }
 }
 
@@ -200,9 +236,10 @@ export class WorkspaceAuthorityService extends Service {
     }
   }
 
-  async list() {
+  async list(signal: AbortSignal = new AbortController().signal) {
+    signal.throwIfAborted()
     return await Promise.all(this.registry.list().map(async (workspace) => {
-      const grant = await this.bridge.inspectWorkspaceGrant(workspace.id)
+      const grant = await this.bridge.inspectWorkspaceGrant(workspace.id, signal)
       if (grant.exists && (grant.generation === undefined || grant.status === undefined)) {
         throw new Error(`Workspace grant ${JSON.stringify(workspace.id)} is incomplete`)
       }
@@ -210,22 +247,24 @@ export class WorkspaceAuthorityService extends Service {
         workspaceId: workspace.id,
         name: workspace.title,
         state: grant.exists && grant.status !== undefined
-          ? grant.status
+          ? grant.status === 'ready' && !grant.identityValid
+            ? 'identity-mismatch' as const
+            : grant.status
           : 'needs-authorization' as const,
       }
     }))
   }
 
-  add() {
-    return this.authority.add()
+  add(signal?: AbortSignal) {
+    return this.authority.add(signal)
   }
 
-  revoke(workspaceId: string) {
-    return this.authority.revoke(workspaceId)
+  revoke(workspaceId: string, signal?: AbortSignal) {
+    return this.authority.revoke(workspaceId, signal)
   }
 
-  reauthorize(workspaceId: string) {
-    return this.authority.reauthorize(workspaceId)
+  reauthorize(workspaceId: string, signal?: AbortSignal) {
+    return this.authority.reauthorize(workspaceId, signal)
   }
 }
 

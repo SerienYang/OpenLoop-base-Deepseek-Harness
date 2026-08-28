@@ -19,7 +19,17 @@ function fixture(options: {
     workspaceId: string
     generation: number
     operationId: string
-  } | undefined
+    identityValid: boolean
+    status: 'ready' | 'revoking' | 'reauthorizing' | 'needs-authorization'
+  } | undefined = options.existingWorkspace === true
+    ? {
+      workspaceId: 'workspace-1',
+      generation: grantGeneration,
+      operationId: 'prior-operation',
+      identityValid: true,
+      status: 'ready',
+    }
+    : undefined
   const workspaces = new Map<string, { path: string; name: string }>()
   const transactions: string[] = []
   const calls: string[] = []
@@ -28,7 +38,13 @@ function fixture(options: {
   }
   const registry: WorkspaceRegistryPort = {
     catalogGeneration: () => catalogGeneration,
-    createExpected: vi.fn(async (path: string, expected: number) => {
+    resolveWorkspaceIdExpected: vi.fn(async (path: string, expected: number) => {
+      if (expected !== catalogGeneration) {
+        throw new WorkspaceGenerationConflictError('catalog', expected, catalogGeneration)
+      }
+      return [...workspaces].find(([, value]) => value.path === path)?.[0] ?? 'workspace-1'
+    }),
+    createExpected: vi.fn(async (path: string, expected: number, workspaceId: string) => {
       if (expected !== catalogGeneration) {
         throw new WorkspaceGenerationConflictError('catalog', expected, catalogGeneration)
       }
@@ -42,9 +58,9 @@ function fixture(options: {
         }
       }
       catalogGeneration += 1
-      workspaces.set('workspace-1', { path, name: 'Project' })
+      workspaces.set(workspaceId, { path, name: 'Project' })
       return {
-        workspaceId: 'workspace-1',
+        workspaceId,
         name: 'Project',
         created: true,
         generation: catalogGeneration,
@@ -87,13 +103,20 @@ function fixture(options: {
         throw new WorkspaceGenerationConflictError('grant', expected, grantGeneration)
       }
       grantGeneration += 1
-      committedGrant = { workspaceId, generation: grantGeneration, operationId }
+      committedGrant = {
+        workspaceId,
+        generation: grantGeneration,
+        operationId,
+        identityValid: true,
+        status: 'ready',
+      }
       return {
         workspaceId,
         state: 'ready' as const,
       }
     }),
     inspectWorkspaceGrant: vi.fn(async (workspaceId: string) => {
+      calls.push('inspect-grant')
       if (committedGrant?.workspaceId !== workspaceId) {
         return { exists: false, identityValid: false }
       }
@@ -101,38 +124,83 @@ function fixture(options: {
         exists: true,
         generation: committedGrant.generation,
         operationId: committedGrant.operationId,
-        identityValid: true,
-        status: 'ready' as const,
+        identityValid: committedGrant.identityValid,
+        status: committedGrant.status,
       }
     }),
     abortWorkspaceAuthorization: vi.fn(async () => {}),
     confirmWorkspaceRevoke: vi.fn(async () =>
       options.cancelledRevoke === true ? 'cancelled' as const : 'confirmed' as const),
-    markGrantRevoking: vi.fn(async (_id: string, expected: number) => {
+    markGrantRevoking: vi.fn(async (workspaceId: string, expected: number, operationId: string) => {
       if (expected !== grantGeneration) {
         throw new WorkspaceGenerationConflictError('grant', expected, grantGeneration)
       }
       grantGeneration += 1
+      committedGrant = {
+        workspaceId,
+        generation: grantGeneration,
+        operationId,
+        identityValid: committedGrant?.identityValid ?? false,
+        status: 'revoking',
+      }
       return grantGeneration
     }),
-    markGrantReauthorizing: vi.fn(async (_id: string, expected: number) => {
+    markGrantReauthorizing: vi.fn(async (
+      workspaceId: string,
+      expected: number,
+      operationId: string,
+    ) => {
       calls.push('mark-reauthorizing')
       if (expected !== grantGeneration) {
         throw new WorkspaceGenerationConflictError('grant', expected, grantGeneration)
       }
       grantGeneration += 1
+      committedGrant = {
+        workspaceId,
+        generation: grantGeneration,
+        operationId,
+        identityValid: committedGrant?.identityValid ?? false,
+        status: 'reauthorizing',
+      }
       return grantGeneration
     }),
-    restoreGrantReady: vi.fn(async (_id: string, expected: number) => {
+    restoreGrantReady: vi.fn(async (workspaceId: string, expected: number) => {
       calls.push('restore-ready')
       if (expected !== grantGeneration) {
         throw new WorkspaceGenerationConflictError('grant', expected, grantGeneration)
       }
       grantGeneration += 1
+      committedGrant = {
+        workspaceId,
+        generation: grantGeneration,
+        operationId: 'prior-operation',
+        identityValid: true,
+        status: 'ready',
+      }
+      return grantGeneration
+    }),
+    markGrantNeedsAuthorization: vi.fn(async (
+      workspaceId: string,
+      expected: number,
+      operationId: string,
+    ) => {
+      calls.push('mark-needs-authorization')
+      if (expected !== grantGeneration) {
+        throw new WorkspaceGenerationConflictError('grant', expected, grantGeneration)
+      }
+      grantGeneration += 1
+      committedGrant = {
+        workspaceId,
+        generation: grantGeneration,
+        operationId,
+        identityValid: false,
+        status: 'needs-authorization',
+      }
       return grantGeneration
     }),
     deleteWorkspaceGrant: vi.fn(async () => {
       grantGeneration += 1
+      committedGrant = undefined
       return grantGeneration
     }),
     prepareWorkspaceTransaction: vi.fn(async (
@@ -181,13 +249,22 @@ describe('WorkspaceAuthority', () => {
       'grant-committed',
       'complete',
     ])
+    expect(value.native.prepareWorkspaceTransaction).toHaveBeenCalledWith({
+      kind: 'add',
+      workspaceId: 'workspace-1',
+      expectedCatalogGeneration: 0,
+      expectedGrantGeneration: 0,
+      stage: 'prepared',
+    }, expect.any(AbortSignal))
+    expect(value.registry.createExpected)
+      .toHaveBeenCalledWith('/host/project', 0, 'workspace-1')
     expect(value.native.advanceWorkspaceTransaction).toHaveBeenNthCalledWith(
       1,
       'operation-1',
       1,
       'prepared',
       'registry-committed',
-      'workspace-1',
+      expect.any(AbortSignal),
     )
   })
 
@@ -216,7 +293,8 @@ describe('WorkspaceAuthority', () => {
     vi.mocked(value.registry.createExpected).mockRejectedValueOnce(new Error('registry failed'))
 
     await expect(value.authority.add()).rejects.toThrow('registry failed')
-    expect(value.native.abortWorkspaceAuthorization).toHaveBeenCalledWith('pending-1')
+    expect(value.native.abortWorkspaceAuthorization)
+      .toHaveBeenCalledWith('pending-1', expect.any(AbortSignal))
     expect(value.transactions).toContain('abort')
   })
 
@@ -248,6 +326,7 @@ describe('WorkspaceAuthority', () => {
         exists: true,
         generation: expectedGeneration + 1,
         operationId,
+        identityValid: true,
         status: 'ready',
       })
       throw new Error(`response lost for ${workspaceId}`)
@@ -264,6 +343,7 @@ describe('WorkspaceAuthority', () => {
       'grant-committed',
       'complete',
     ])
+    expect(value.native.abortWorkspaceAuthorization).not.toHaveBeenCalled()
     expect(value.registry.markNeedsAuthorization).not.toHaveBeenCalled()
   })
 
@@ -292,9 +372,64 @@ describe('WorkspaceAuthority', () => {
 
     await expect(value.authority.revoke('workspace-1')).resolves.toBe('cancelled')
     expect(value.native.confirmWorkspaceRevoke)
-      .toHaveBeenCalledWith('workspace-1', 'Project')
+      .toHaveBeenCalledWith('workspace-1', 'Project', expect.any(AbortSignal))
     expect(value.native.prepareWorkspaceTransaction).not.toHaveBeenCalled()
     expect(value.registry.deleteExpected).not.toHaveBeenCalled()
+  })
+
+  it('restores the grant and aborts the journal when revoke registry deletion fails', async () => {
+    const value = fixture({ existingWorkspace: true })
+    vi.mocked(value.registry.deleteExpected)
+      .mockRejectedValueOnce(new Error('registry delete failed'))
+    vi.mocked(value.native.inspectWorkspaceGrant).mockResolvedValueOnce({
+      exists: true,
+      generation: 1,
+      operationId: 'operation-1',
+      identityValid: true,
+      status: 'revoking',
+    })
+
+    await expect(value.authority.revoke('workspace-1'))
+      .rejects.toThrow('registry delete failed')
+    expect(value.native.restoreGrantReady).toHaveBeenCalledWith(
+      'workspace-1',
+      1,
+      'operation-1',
+      expect.any(AbortSignal),
+    )
+    expect(value.native.abortWorkspaceTransaction).toHaveBeenCalledWith(
+      'operation-1',
+      1,
+      'revoke-prepared',
+      expect.any(AbortSignal),
+    )
+    expect(value.workspaces.has('workspace-1')).toBe(true)
+    expect(value.transactions).toEqual(['prepare:revoke', 'abort'])
+  })
+
+  it('marks an invalid grant needs-authorization when revoke registry deletion fails', async () => {
+    const value = fixture({ existingWorkspace: true })
+    vi.mocked(value.registry.deleteExpected)
+      .mockRejectedValueOnce(new Error('registry delete failed'))
+    vi.mocked(value.native.inspectWorkspaceGrant).mockResolvedValueOnce({
+      exists: true,
+      generation: 1,
+      operationId: 'operation-1',
+      identityValid: false,
+      status: 'revoking',
+    })
+
+    await expect(value.authority.revoke('workspace-1'))
+      .rejects.toThrow('registry delete failed')
+    expect(value.native.restoreGrantReady).not.toHaveBeenCalled()
+    expect(value.native.markGrantNeedsAuthorization).toHaveBeenCalledWith(
+      'workspace-1',
+      1,
+      'operation-1',
+      expect.any(AbortSignal),
+    )
+    expect(value.native.abortWorkspaceTransaction).toHaveBeenCalled()
+    expect(value.transactions).toEqual(['prepare:revoke', 'abort'])
   })
 
   it('reauthorizes an existing Workspace through the same transaction queue', async () => {
@@ -311,9 +446,9 @@ describe('WorkspaceAuthority', () => {
       'complete',
     ])
     expect(value.calls.slice(0, 3)).toEqual([
+      'inspect-grant',
       'prepare:reauthorize',
       'mark-reauthorizing',
-      'begin-authorization',
     ])
     expect(value.native.commitWorkspaceAuthorization).toHaveBeenCalledWith(
       'pending-1',
@@ -321,6 +456,7 @@ describe('WorkspaceAuthority', () => {
       1,
       'operation-1',
       '/host/project',
+      expect.any(AbortSignal),
     )
   })
 
@@ -332,12 +468,13 @@ describe('WorkspaceAuthority', () => {
 
     await expect(value.authority.reauthorize('workspace-1')).resolves.toBe('cancelled')
     expect(value.calls).toEqual([
+      'inspect-grant',
       'prepare:reauthorize',
       'mark-reauthorizing',
       'restore-ready',
     ])
     expect(value.native.restoreGrantReady)
-      .toHaveBeenCalledWith('workspace-1', 1, 'operation-1')
+      .toHaveBeenCalledWith('workspace-1', 1, 'operation-1', expect.any(AbortSignal))
     expect(value.transactions).toEqual(['prepare:reauthorize', 'abort'])
     expect(value.native.commitWorkspaceAuthorization).not.toHaveBeenCalled()
   })
@@ -349,7 +486,200 @@ describe('WorkspaceAuthority', () => {
 
     await expect(value.authority.reauthorize('workspace-1')).rejects.toThrow('picker failed')
     expect(value.native.restoreGrantReady)
-      .toHaveBeenCalledWith('workspace-1', 1, 'operation-1')
+      .toHaveBeenCalledWith('workspace-1', 1, 'operation-1', expect.any(AbortSignal))
     expect(value.transactions).toEqual(['prepare:reauthorize', 'abort'])
+  })
+
+  it('reauthorizes a legacy Workspace without freezing a missing Host grant', async () => {
+    const value = fixture({ existingWorkspace: true })
+    vi.mocked(value.native.inspectWorkspaceGrant).mockResolvedValueOnce({
+      exists: false,
+      identityValid: false,
+    })
+
+    await expect(value.authority.reauthorize('workspace-1')).resolves.toMatchObject({
+      workspaceId: 'workspace-1',
+      state: 'ready',
+    })
+    expect(value.native.inspectWorkspaceGrant)
+      .toHaveBeenCalledWith('workspace-1', expect.any(AbortSignal))
+    expect(value.native.markGrantReauthorizing).not.toHaveBeenCalled()
+    expect(value.native.commitWorkspaceAuthorization).toHaveBeenCalledWith(
+      'pending-1',
+      'workspace-1',
+      0,
+      'operation-1',
+      '/host/project',
+      expect.any(AbortSignal),
+    )
+    expect(value.calls.slice(0, 3)).toEqual([
+      'prepare:reauthorize',
+      'begin-authorization',
+    ])
+  })
+
+  it('aborts a legacy reauthorization cancellation without a missing-grant mutation', async () => {
+    const value = fixture({ existingWorkspace: true })
+    vi.mocked(value.native.inspectWorkspaceGrant).mockResolvedValue({
+      exists: false,
+      identityValid: false,
+    })
+    vi.mocked(value.native.beginWorkspaceAuthorization).mockResolvedValueOnce({
+      outcome: 'cancelled',
+    })
+
+    await expect(value.authority.reauthorize('workspace-1')).resolves.toBe('cancelled')
+    expect(value.native.markGrantReauthorizing).not.toHaveBeenCalled()
+    expect(value.native.restoreGrantReady).not.toHaveBeenCalled()
+    expect(value.transactions).toEqual(['prepare:reauthorize', 'abort'])
+  })
+
+  it('aborts a failed legacy reauthorization without a missing-grant mutation', async () => {
+    const value = fixture({ existingWorkspace: true })
+    vi.mocked(value.native.inspectWorkspaceGrant).mockResolvedValue({
+      exists: false,
+      identityValid: false,
+    })
+    vi.mocked(value.native.commitWorkspaceAuthorization)
+      .mockRejectedValueOnce(new Error('legacy commit failed'))
+
+    await expect(value.authority.reauthorize('workspace-1'))
+      .rejects.toThrow('legacy commit failed')
+    expect(value.native.abortWorkspaceAuthorization)
+      .toHaveBeenCalledWith('pending-1', expect.any(AbortSignal))
+    expect(value.native.markGrantReauthorizing).not.toHaveBeenCalled()
+    expect(value.native.restoreGrantReady).not.toHaveBeenCalled()
+    expect(value.transactions).toEqual(['prepare:reauthorize', 'abort'])
+  })
+
+  it('stops after picker completion when add is aborted and discards the pending grant', async () => {
+    const value = fixture()
+    const controller = new AbortController()
+    vi.mocked(value.native.beginWorkspaceAuthorization).mockImplementationOnce(async (signal) => {
+      expect(signal).toBe(controller.signal)
+      controller.abort()
+      return {
+        outcome: 'pending',
+        pendingGrantId: 'pending-1',
+        canonicalPath: '/host/project',
+      }
+    })
+
+    await expect(value.authority.add(controller.signal)).rejects.toMatchObject({
+      name: 'AbortError',
+    })
+    expect(value.native.abortWorkspaceAuthorization)
+      .toHaveBeenCalledWith('pending-1', expect.any(AbortSignal))
+    expect(value.native.prepareWorkspaceTransaction).not.toHaveBeenCalled()
+    expect(value.registry.createExpected).not.toHaveBeenCalled()
+  })
+
+  it('aborts the prepared journal before any registry mutation when add is aborted', async () => {
+    const value = fixture()
+    const controller = new AbortController()
+    vi.mocked(value.native.prepareWorkspaceTransaction).mockImplementationOnce(async () => {
+      value.transactions.push('prepare:add')
+      controller.abort()
+      return { operationId: 'operation-1', generation: 1, stage: 'prepared' }
+    })
+
+    await expect(value.authority.add(controller.signal)).rejects.toMatchObject({
+      name: 'AbortError',
+    })
+    expect(value.registry.createExpected).not.toHaveBeenCalled()
+    expect(value.native.abortWorkspaceTransaction).toHaveBeenCalledWith(
+      'operation-1',
+      1,
+      'prepared',
+      expect.any(AbortSignal),
+    )
+    expect(value.native.abortWorkspaceAuthorization)
+      .toHaveBeenCalledWith('pending-1', expect.any(AbortSignal))
+  })
+
+  it('finishes a committed add grant before reporting an abort', async () => {
+    const value = fixture()
+    const controller = new AbortController()
+    vi.mocked(value.native.commitWorkspaceAuthorization).mockImplementationOnce(async (
+      _pending,
+      workspaceId,
+      expectedGeneration,
+      operationId,
+    ) => {
+      value.setGrantGeneration(expectedGeneration + 1)
+      controller.abort()
+      vi.mocked(value.native.inspectWorkspaceGrant).mockResolvedValue({
+        exists: true,
+        generation: expectedGeneration + 1,
+        operationId,
+        identityValid: true,
+        status: 'ready',
+      })
+      return { workspaceId, state: 'ready' }
+    })
+    vi.mocked(value.native.advanceWorkspaceTransaction).mockImplementation(async (
+      _operationId,
+      _generation,
+      _expectedStage,
+      nextStage,
+      signal,
+    ) => {
+      signal.throwIfAborted()
+      value.transactions.push(nextStage)
+      return {
+        operationId: 'operation-1',
+        generation: value.transactions.length,
+        stage: nextStage,
+      }
+    })
+    vi.mocked(value.native.completeWorkspaceTransaction).mockImplementation(async (
+      _operationId,
+      _generation,
+      _expectedStage,
+      signal,
+    ) => {
+      signal.throwIfAborted()
+      value.transactions.push('complete')
+    })
+
+    await expect(value.authority.add(controller.signal))
+      .rejects.toMatchObject({ name: 'AbortError' })
+    expect(value.transactions).toEqual([
+      'prepare:add',
+      'registry-committed',
+      'grant-committed',
+      'complete',
+    ])
+    expect(value.native.abortWorkspaceAuthorization).not.toHaveBeenCalled()
+    expect(value.registry.markNeedsAuthorization).not.toHaveBeenCalled()
+  })
+
+  it('restores a frozen grant before reporting a reauthorization abort', async () => {
+    const value = fixture({ existingWorkspace: true })
+    const controller = new AbortController()
+    vi.mocked(value.native.markGrantReauthorizing).mockImplementationOnce(async (
+      _workspaceId,
+      expectedGeneration,
+    ) => {
+      value.setGrantGeneration(expectedGeneration + 1)
+      controller.abort()
+      return expectedGeneration + 1
+    })
+
+    await expect(value.authority.reauthorize('workspace-1', controller.signal))
+      .rejects.toMatchObject({ name: 'AbortError' })
+    expect(value.native.beginWorkspaceAuthorization).not.toHaveBeenCalled()
+    expect(value.native.restoreGrantReady).toHaveBeenCalledWith(
+      'workspace-1',
+      1,
+      'operation-1',
+      expect.any(AbortSignal),
+    )
+    expect(value.native.abortWorkspaceTransaction).toHaveBeenCalledWith(
+      'operation-1',
+      1,
+      'reauthorize-prepared',
+      expect.any(AbortSignal),
+    )
   })
 })

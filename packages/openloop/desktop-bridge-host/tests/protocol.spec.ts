@@ -423,7 +423,10 @@ describe('authenticated desktop bridge protocol', () => {
     })
     await expect(service.revokeWorkspace('workspace-1', signal)).resolves.toBe('revoked')
     expect(call).not.toHaveBeenCalled()
-    expect(authority.revoke).toHaveBeenCalledWith('workspace-1')
+    expect(authority.list).toHaveBeenCalledWith(signal)
+    expect(authority.add).toHaveBeenCalledWith(signal)
+    expect(authority.reauthorize).toHaveBeenCalledWith('workspace-1', signal)
+    expect(authority.revoke).toHaveBeenCalledWith('workspace-1', signal)
   })
 
   it('sends an authenticated cancellation request for an aborted call', async () => {

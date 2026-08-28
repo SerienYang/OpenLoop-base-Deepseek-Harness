@@ -410,7 +410,7 @@ fn add_registry_commit_atomically_binds_workspace_id_and_generation() {
 }
 
 #[test]
-fn add_prepare_rejects_workspace_id_before_registry_commit() {
+fn add_prepare_persists_preallocated_workspace_id_without_a_path() {
     let root = tempdir().expect("root");
     let channel = root.path().join("channel");
     secure_root(&channel);
@@ -421,16 +421,25 @@ fn add_prepare_rejects_workspace_id_before_registry_commit() {
         "prepareWorkspaceTransaction",
         serde_json::json!({
             "kind": "add",
-            "workspaceId": "browser-chosen-id",
+            "workspaceId": "host-preallocated-id",
             "expectedCatalogGeneration": 0,
             "expectedGrantGeneration": 0,
             "stage": "prepared",
         }),
     );
 
-    assert_eq!(response["ok"], false);
-    assert_eq!(response["error"]["code"], "invalid_request");
-    assert!(journal.read().expect("journal").is_none());
+    assert_eq!(response["ok"], true);
+    let transaction = journal
+        .read()
+        .expect("journal")
+        .expect("prepared transaction");
+    assert_eq!(
+        transaction.workspace_id.as_deref(),
+        Some("host-preallocated-id")
+    );
+    let serialized = serde_json::to_string(&transaction).expect("serialize transaction");
+    assert!(!serialized.contains("canonicalPath"));
+    assert!(!serialized.contains("displayPath"));
 }
 
 #[test]
@@ -548,6 +557,78 @@ fn restart_never_publishes_ready_before_descriptor_verification() {
     assert_eq!(restarted.len(), 1);
     assert_eq!(restarted[0].grant().status, GrantStatus::PermissionDenied);
     assert!(!restarted[0].is_ready());
+}
+
+#[test]
+fn inspect_workspace_grant_reports_effective_identity_status() {
+    let root = tempdir().expect("root");
+    let channel = root.path().join("channel");
+    let workspace = root.path().join("workspace");
+    let moved = root.path().join("moved-workspace");
+    secure_root(&channel);
+    secure_root(&workspace);
+    let store = GrantStore::open(&channel, ReleaseChannel::Test).expect("store");
+    store
+        .commit(grant(&workspace, "workspace-1", 0), 0)
+        .expect("commit grant");
+    let journal = WorkspaceJournal::open(&channel, ReleaseChannel::Test).expect("journal");
+    let launch_id = Uuid::new_v4();
+    let mut pending = PendingGrantRegistry::new(launch_id);
+    pending.inject_launch_grants(store.load_for_launch().expect("launch grants"));
+    let registry = Arc::new(Mutex::new(pending));
+    let picker = Arc::new(SequencePicker {
+        outcomes: Mutex::new(VecDeque::new()),
+    });
+    let mut tables = BridgeDispatchTables::unavailable();
+    install_workspace_authority_handlers(
+        &mut tables,
+        launch_id,
+        store,
+        journal,
+        registry,
+        picker,
+        Arc::new(FixedConfirmation(true)),
+    )
+    .expect("authority handlers");
+    let executable = std::env::current_exe().expect("test executable");
+    let secret: Vec<u8> = (0..32).collect();
+    let peer = PeerIdentity {
+        uid: unsafe { libc::geteuid() },
+        pid: process::id(),
+    };
+    let dispatcher = AuthenticatedBridgeDispatcher::new(
+        peer.uid,
+        capture_process_identity(process::id(), &executable).expect("process identity"),
+        executable,
+        launch_id,
+        secret.clone(),
+        tables,
+    )
+    .expect("Workspace dispatcher");
+
+    fs::rename(&workspace, &moved).expect("move authorized workspace");
+    secure_root(&workspace);
+    let inspected = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        1,
+        "inspectWorkspaceGrant",
+        serde_json::json!({ "workspaceId": "workspace-1" }),
+    );
+
+    assert_eq!(
+        inspected["result"],
+        serde_json::json!({
+            "exists": true,
+            "generation": 1,
+            "operationId": inspected["result"]["operationId"],
+            "identityValid": false,
+            "status": "identity-mismatch",
+        })
+    );
+    assert!(!inspected["result"].to_string().contains('/'));
 }
 
 #[test]

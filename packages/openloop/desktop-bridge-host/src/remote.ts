@@ -82,10 +82,13 @@ interface CredentialBrowserOperations {
 }
 
 interface WorkspaceBrowserOperations {
-  list(): Promise<WorkspaceGrantView[]>
-  add(): Promise<WorkspaceGrantView | 'cancelled'>
-  reauthorize(workspaceId: string): Promise<WorkspaceGrantView | 'cancelled'>
-  revoke(workspaceId: string): Promise<'revoked' | 'cancelled'>
+  list(signal: AbortSignal): Promise<WorkspaceGrantView[]>
+  add(signal: AbortSignal): Promise<WorkspaceGrantView | 'cancelled'>
+  reauthorize(
+    workspaceId: string,
+    signal: AbortSignal,
+  ): Promise<WorkspaceGrantView | 'cancelled'>
+  revoke(workspaceId: string, signal: AbortSignal): Promise<'revoked' | 'cancelled'>
 }
 
 function remoteBridgeClient(service: object): DesktopBridgeClient {
@@ -211,13 +214,13 @@ export class OpenloopDesktopRemoteService extends TypertRemoteService {
   @Remote
   listWorkspaceGrants(signal: AbortSignal): Promise<WorkspaceGrantView[]> {
     signal.throwIfAborted()
-    return workspaceOperations(this).list()
+    return workspaceOperations(this).list(signal)
   }
 
   @Remote
   authorizeWorkspace(signal: AbortSignal): Promise<WorkspaceGrantView | 'cancelled'> {
     signal.throwIfAborted()
-    return workspaceOperations(this).add()
+    return workspaceOperations(this).add(signal)
   }
 
   @Remote
@@ -226,13 +229,13 @@ export class OpenloopDesktopRemoteService extends TypertRemoteService {
     signal: AbortSignal,
   ): Promise<WorkspaceGrantView | 'cancelled'> {
     signal.throwIfAborted()
-    return workspaceOperations(this).reauthorize(workspaceId)
+    return workspaceOperations(this).reauthorize(workspaceId, signal)
   }
 
   @Remote
   revokeWorkspace(workspaceId: string, signal: AbortSignal): Promise<'revoked' | 'cancelled'> {
     signal.throwIfAborted()
-    return workspaceOperations(this).revoke(workspaceId)
+    return workspaceOperations(this).revoke(workspaceId, signal)
   }
 
   @Remote

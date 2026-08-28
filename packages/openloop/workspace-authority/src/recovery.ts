@@ -55,9 +55,7 @@ function catalogGenerationMatches(
       ? actual === expected || actual === expected + 1
       : actual === expected + 1
   }
-  return transaction.stage === 'prepared'
-    ? actual === expected
-    : actual === expected || actual === expected + 1
+  return actual === expected || actual === expected + 1
 }
 
 function isMatchingGrant(
@@ -262,12 +260,18 @@ export async function recoverWorkspaceTransaction(
     return 'completed'
   }
 
+  let addTransaction = versionOf(transaction)
   if (transaction.stage === 'prepared') {
     await port.discardPendingGrant(transaction.operationId)
-    await port.abortTransaction(versionOf(transaction))
-    return 'rolled-back'
+    const catalogGeneration = await port.catalogGeneration()
+    if (catalogGeneration === transaction.expectedCatalogGeneration) {
+      await port.abortTransaction(addTransaction)
+      return 'rolled-back'
+    }
+    if (!workspaceExists) return 'stale-generation'
+    addTransaction = await port.advanceTransaction(addTransaction, 'registry-committed')
   }
-  if (transaction.stage === 'registry-committed') {
+  if (addTransaction.stage === 'registry-committed') {
     await port.discardPendingGrant(transaction.operationId)
     if (!workspaceExists) return 'stale-generation'
     const grant = await port.inspectGrant(workspaceId)
@@ -277,14 +281,14 @@ export async function recoverWorkspaceTransaction(
       transaction.expectedGrantGeneration + 1,
       'ready',
     )) {
-      await advanceAndComplete(port, versionOf(transaction), 'grant-committed')
+      await advanceAndComplete(port, addTransaction, 'grant-committed')
       return 'completed'
     }
     if (grant.exists || currentGrantGeneration !== transaction.expectedGrantGeneration) {
       return 'stale-generation'
     }
     await port.markNeedsAuthorization(workspaceId)
-    await advanceAndComplete(port, versionOf(transaction), 'authorization-failed')
+    await advanceAndComplete(port, addTransaction, 'authorization-failed')
     return 'needs-authorization'
   }
   if (transaction.stage === 'authorization-failed') {

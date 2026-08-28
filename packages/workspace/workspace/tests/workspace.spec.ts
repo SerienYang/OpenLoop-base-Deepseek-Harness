@@ -403,6 +403,24 @@ describe('WorkspaceRegistry create and lookup', () => {
       .rejects.toEqual(new WorkspaceGenerationConflictError(1, 2))
   })
 
+  it('uses a trusted preallocated id only when createExpected creates a new row', async () => {
+    const firstDir = await makeDir('preallocated-first')
+    const secondDir = await makeDir('preallocated-second')
+    const { registry } = await harness()
+    const firstId = WorkspaceId('00000000-0000-4000-8000-000000000031')
+    const ignoredId = WorkspaceId('00000000-0000-4000-8000-000000000032')
+    const secondId = WorkspaceId('00000000-0000-4000-8000-000000000033')
+
+    const first = await registry.createExpected(firstDir, 0, undefined, firstId)
+    const reused = await registry.createExpected(firstDir, 1, undefined, ignoredId)
+    const second = await registry.createExpected(secondDir, 1, undefined, secondId)
+
+    expect(first.workspace.id).toBe(firstId)
+    expect(reused.workspace.id).toBe(firstId)
+    expect(second.workspace.id).toBe(secondId)
+    expect(registry.get(ignoredId)).toBeUndefined()
+  })
+
   it('creates newest-first and idempotently reuses a canonical path without retitling', async () => {
     const firstDir = await makeDir('first')
     const secondDir = await makeDir('second')

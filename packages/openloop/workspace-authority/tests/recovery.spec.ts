@@ -71,6 +71,67 @@ describe('Workspace transaction recovery', () => {
     expect(value.advanceTransaction).not.toHaveBeenCalled()
   })
 
+  it('recovers an add after the registry committed but the prepared journal did not advance', async () => {
+    const value = port({
+      catalogGeneration: vi.fn(async () => 2),
+      grantGeneration: vi.fn(async () => 1),
+      inspectGrant: vi.fn(async () => ({
+        exists: false,
+        identityValid: false,
+      })),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('add', 'prepared'),
+      value,
+    )).resolves.toBe('needs-authorization')
+    expect(value.markNeedsAuthorization).toHaveBeenCalledWith('workspace-1')
+    expect(value.advanceTransaction).toHaveBeenNthCalledWith(1, {
+      operationId: 'operation-1',
+      generation: 1,
+      stage: 'prepared',
+    }, 'registry-committed')
+    expect(value.advanceTransaction).toHaveBeenNthCalledWith(2, {
+      operationId: 'operation-1',
+      generation: 2,
+      stage: 'registry-committed',
+    }, 'authorization-failed')
+    expect(value.completeTransaction).toHaveBeenCalledWith({
+      operationId: 'operation-1',
+      generation: 3,
+      stage: 'authorization-failed',
+    })
+  })
+
+  it('finishes a matching add grant committed inside the prepared crash window', async () => {
+    const value = port({
+      catalogGeneration: vi.fn(async () => 2),
+      grantGeneration: vi.fn(async () => 2),
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 2,
+        operationId: 'operation-1',
+        identityValid: true,
+        status: 'ready' as const,
+      })),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('add', 'prepared'),
+      value,
+    )).resolves.toBe('completed')
+    expect(value.advanceTransaction).toHaveBeenNthCalledWith(1, {
+      operationId: 'operation-1',
+      generation: 1,
+      stage: 'prepared',
+    }, 'registry-committed')
+    expect(value.advanceTransaction).toHaveBeenNthCalledWith(2, {
+      operationId: 'operation-1',
+      generation: 2,
+      stage: 'registry-committed',
+    }, 'grant-committed')
+  })
+
   it('restores a revoke-prepared grant only while registry and identity remain valid', async () => {
     const valid = port({
       grantGeneration: vi.fn(async () => 2),

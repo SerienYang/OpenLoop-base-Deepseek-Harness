@@ -10,7 +10,7 @@ use crate::bridge::server::{BridgeDispatchTables, BridgeHandler, BridgeHandlerEr
 use super::journal::{WorkspaceJournal, WorkspaceTransaction, WorkspaceTransactionKind};
 use super::{
     confirmation::{RevokeConfirmation, RevokePresentation},
-    grants::{GrantStatus, GrantStore},
+    grants::{reopen_verified_grant, GrantStatus, GrantStore},
     picker::{PendingGrantRegistry, WorkspaceDirectoryPicker},
 };
 
@@ -162,13 +162,19 @@ pub fn install_workspace_authority_handlers(
                         registry.candidate(launch_id, input.pending_grant_id, &input.workspace_id)
                     }
                     (WorkspaceTransactionKind::Reauthorize, "reauthorize-prepared")
-                        if transaction.workspace_id.as_deref() == Some(&input.workspace_id)
-                            && transaction.expected_grant_generation.checked_add(1)
-                                == Some(input.expected_grant_generation) =>
+                        if transaction.workspace_id.as_deref() == Some(&input.workspace_id) =>
                     {
                         let old_grant = commit_store
                             .get(&input.workspace_id)
                             .map_err(|_| BridgeHandlerError::workspace_failure())?;
+                        let expected_generation = if old_grant.is_some() {
+                            transaction.expected_grant_generation.checked_add(1)
+                        } else {
+                            Some(transaction.expected_grant_generation)
+                        };
+                        if expected_generation != Some(input.expected_grant_generation) {
+                            return Err(BridgeHandlerError::invalid_request());
+                        }
                         registry.reauthorization_candidate(
                             launch_id,
                             input.pending_grant_id,
@@ -235,7 +241,6 @@ pub fn install_workspace_authority_handlers(
         .map_err(|error| error.to_string())?;
 
     let inspect_store = store.clone();
-    let inspect_registry = registry.clone();
     let inspect: BridgeHandler = Arc::new(move |payload, _cancellation| {
         let input: WorkspaceGrantInput =
             serde_json::from_value(payload).map_err(|_| BridgeHandlerError::invalid_request())?;
@@ -245,19 +250,25 @@ pub fn install_workspace_authority_handlers(
         let grant = inspect_store
             .get(&input.workspace_id)
             .map_err(|_| BridgeHandlerError::workspace_failure())?;
-        let identity_valid = inspect_registry
-            .lock()
-            .map_err(|_| BridgeHandlerError::workspace_failure())?
-            .committed_descriptor(&input.workspace_id)
-            .is_some();
         Ok(match grant {
-            Some(grant) => json!({
-                "exists": true,
-                "generation": grant.generation,
-                "operationId": grant.operation_id,
-                "identityValid": identity_valid,
-                "status": grant.status,
-            }),
+            Some(grant) => {
+                let (identity_valid, status) = match reopen_verified_grant(&grant) {
+                    Ok(_) => (true, grant.status),
+                    Err(error) => (
+                        false,
+                        error
+                            .status()
+                            .ok_or_else(BridgeHandlerError::workspace_failure)?,
+                    ),
+                };
+                json!({
+                    "exists": true,
+                    "generation": grant.generation,
+                    "operationId": grant.operation_id,
+                    "identityValid": identity_valid,
+                    "status": status,
+                })
+            }
             None => json!({
                 "exists": false,
                 "identityValid": false,
@@ -662,7 +673,7 @@ fn valid_initial_payload(
     workspace_id: Option<&str>,
 ) -> bool {
     match (kind, stage, workspace_id) {
-        (WorkspaceTransactionKind::Add, "prepared", None) => true,
+        (WorkspaceTransactionKind::Add, "prepared", Some(workspace_id)) => !workspace_id.is_empty(),
         (WorkspaceTransactionKind::Revoke, "revoke-prepared", Some(workspace_id))
         | (WorkspaceTransactionKind::Reauthorize, "reauthorize-prepared", Some(workspace_id)) => {
             !workspace_id.is_empty()
@@ -729,8 +740,10 @@ fn valid_workspace_binding(
             "registry-committed"
         )
     ) {
-        return current_workspace_id.is_none()
-            && requested_workspace_id.is_some_and(|workspace_id| !workspace_id.is_empty());
+        return match current_workspace_id {
+            Some(workspace_id) => !workspace_id.is_empty() && requested_workspace_id.is_none(),
+            None => requested_workspace_id.is_some_and(|workspace_id| !workspace_id.is_empty()),
+        };
     }
     requested_workspace_id.is_none()
 }
