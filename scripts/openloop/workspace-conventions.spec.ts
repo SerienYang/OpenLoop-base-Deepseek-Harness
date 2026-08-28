@@ -143,6 +143,32 @@ describe('OpenLoop workspace conventions', () => {
     expect(collectOpenLoopWorkspaceViolations(root)).toEqual([])
   })
 
+  it.each([
+    ['fs', "import fs from 'fs'\n"],
+    ['fs/promises', "export { readFile } from 'fs/promises'\n"],
+    ['child_process', "const cp = require('child_process')\n"],
+    ['node:fs', "import { readFile } from 'node:fs'\n"],
+    ['node:fs/promises', "const fs = await import('node:fs/promises')\n"],
+    ['node:child_process', "const cp = require('node:child_process')\n"],
+  ])('rejects direct %s imports from the Workspace filesystem provider', async (specifier, source) => {
+    const { collectOpenLoopWorkspaceViolations } = await import('./workspace-conventions.ts')
+    const root = fixtureRoot()
+    writeManifest(root, 'fs-workspace', {
+      name: '@openloop/fs-workspace',
+      private: true,
+      openloop: { face: 'host', cordisPlugin: true },
+      peerDependencies: { '@deepseek-ai/cordis': 'workspace:^' },
+      devDependencies: { '@deepseek-ai/cordis': 'workspace:^' },
+    })
+    writeSource(root, 'fs-workspace', source)
+    writeAggregates(root, ['fs-workspace'], [])
+
+    expect(collectOpenLoopWorkspaceViolations(root)).toContain(
+      'packages/openloop/fs-workspace/src/index.ts:1: '
+      + `@openloop/fs-workspace must use the Workspace file broker instead of ${specifier}`,
+    )
+  })
+
   it('rejects namespace, privacy, and face violations independently', async () => {
     const { collectOpenLoopWorkspaceViolations } = await import('./workspace-conventions.ts')
     const root = fixtureRoot()

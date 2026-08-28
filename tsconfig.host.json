@@ -307,6 +307,7 @@
     { "path": "./packages/openloop/desktop-bridge-host" },
     { "path": "./packages/openloop/credentials-keychain" },
     { "path": "./packages/openloop/workspace-authority" },
-    { "path": "./packages/openloop/file-broker" }
+    { "path": "./packages/openloop/file-broker" },
+    { "path": "./packages/openloop/fs-workspace" }
   ]
 }

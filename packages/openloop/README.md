@@ -41,6 +41,10 @@ only Workspace ids and normalized relative paths, while native operations walk
 from the retained verified root descriptor and return launch-local opaque
 handles.
 
+`@openloop/fs-workspace` is the Openloop profile's DSH `FileSystem` provider.
+It maps registered Workspace paths to process-local capability keys and routes
+metadata, reads, listings, writes, and edits through file-broker handles.
+
 Create packages through the root command:
 
 ```sh

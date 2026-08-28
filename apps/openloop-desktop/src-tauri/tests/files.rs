@@ -476,6 +476,45 @@ fn broker_reads_stats_lists_and_creates_regular_files_in_bounded_chunks() {
 }
 
 #[test]
+fn broker_lists_links_and_special_entries_without_following_them() {
+    let harness = Harness::new(Duration::from_secs(60));
+    fs::write(harness.workspace.join("regular.txt"), b"content").expect("regular fixture");
+    symlink(
+        harness._root.path().join("outside"),
+        harness.workspace.join("link"),
+    )
+    .expect("symlink fixture");
+    let fifo = harness.workspace.join("pipe");
+    let fifo_name = CString::new(fifo.as_os_str().as_bytes()).expect("FIFO path");
+    assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+
+    let root = harness.broker.open("workspace-1", ".").expect("open root");
+    let listed = harness
+        .broker
+        .list(&root.handle_id, 0, 128)
+        .expect("list without following entries");
+    let mut serialized = serde_json::to_value(listed.entries)
+        .expect("serialize entries")
+        .as_array()
+        .expect("entry array")
+        .clone();
+    serialized.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
+
+    assert_eq!(serialized[0]["name"], "link");
+    assert_eq!(serialized[0]["kind"], "symlink");
+    assert_eq!(serialized[1]["name"], "pipe");
+    assert_eq!(serialized[1]["kind"], "other");
+    assert_eq!(serialized[2]["name"], "regular.txt");
+    assert_eq!(serialized[2]["kind"], "regular");
+    assert_eq!(serialized[2]["size"], 7);
+    assert!(serialized.iter().all(|entry| {
+        entry["version"]
+            .as_str()
+            .is_some_and(|version| !version.is_empty())
+    }));
+}
+
+#[test]
 fn broker_rejects_symlinks_at_every_depth_and_sensitive_hardlinks() {
     let harness = Harness::new(Duration::from_secs(60));
     let outside = harness._root.path().join("outside");

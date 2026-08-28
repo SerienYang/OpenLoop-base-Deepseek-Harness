@@ -260,6 +260,70 @@ export function collectDshWorkspaceNamingViolations(root: string): string[] {
   return errors
 }
 
+const fsWorkspaceForbiddenModules = new Set([
+  'fs',
+  'fs/promises',
+  'child_process',
+  'node:fs',
+  'node:fs/promises',
+  'node:child_process',
+])
+
+function sourceFiles(directory: string): string[] {
+  if (!existsSync(directory)) return []
+  return readdirSync(directory, { withFileTypes: true })
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .flatMap((entry) => {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) return sourceFiles(path)
+      return entry.isFile() && /\.[cm]?[jt]sx?$/u.test(entry.name) ? [path] : []
+    })
+}
+
+function importedModules(path: string): ReadonlyArray<{ value: string; line: number }> {
+  const source = ts.createSourceFile(
+    path,
+    readFileSync(path, 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+  )
+  const imports: Array<{ value: string; line: number }> = []
+  const add = (literal: ts.StringLiteralLike): void => {
+    imports.push({
+      value: literal.text,
+      line: source.getLineAndCharacterOfPosition(literal.getStart(source)).line + 1,
+    })
+  }
+  const visit = (node: ts.Node): void => {
+    const firstArgument = ts.isCallExpression(node) ? node.arguments[0] : undefined
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node))
+      && node.moduleSpecifier !== undefined
+      && ts.isStringLiteralLike(node.moduleSpecifier)) {
+      add(node.moduleSpecifier)
+    } else if (ts.isCallExpression(node)
+      && node.arguments.length === 1
+      && firstArgument !== undefined
+      && ts.isStringLiteralLike(firstArgument)
+      && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+        || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
+      add(firstArgument)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  return imports
+}
+
+function fsWorkspaceBoundaryViolations(root: string): string[] {
+  const packageRoot = join(root, 'packages', 'openloop', 'fs-workspace')
+  return sourceFiles(join(packageRoot, 'src')).flatMap(path =>
+    importedModules(path)
+      .filter(entry => fsWorkspaceForbiddenModules.has(entry.value))
+      .map(entry =>
+        `${relative(root, path).split(sep).join('/')}:${String(entry.line)}: `
+        + `@openloop/fs-workspace must use the Workspace file broker instead of ${entry.value}`))
+}
+
 /**
  * Validate the product-owned package namespace without changing DSH's public
  * package policy.
@@ -341,5 +405,6 @@ export function collectOpenLoopWorkspaceViolations(root: string): string[] {
     }
   }
 
+  errors.push(...fsWorkspaceBoundaryViolations(root))
   return errors
 }

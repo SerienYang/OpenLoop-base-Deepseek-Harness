@@ -203,7 +203,10 @@
     "@openloop/bundle": "workspace:^",
     "@openloop/credentials-keychain": "workspace:^",
     "@openloop/desktop-bridge-host": "workspace:^",
+    "@openloop/file-broker": "workspace:^",
+    "@openloop/fs-workspace": "workspace:^",
     "@openloop/runtime": "workspace:^",
-    "@openloop/runtime-bootstrap": "workspace:^"
+    "@openloop/runtime-bootstrap": "workspace:^",
+    "@openloop/workspace-authority": "workspace:^"
   }
 }

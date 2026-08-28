@@ -35,6 +35,20 @@
   disabled: true
 - id: ui-agent-preset
   disabled: true
+- id: fs-sandbox
+  disabled: true
+- id: tool-fs-search
+  disabled: true
+- id: agent-presets
+  config:
+    default: standard
+    patches:
+      - id: tool-fs-search
+        disabled: true
+      - id: filesystem
+        isolate: null
+      - id: fs-local
+        disabled: true
 - insert:
     - id: desktop-bridge-host
       name: '@openloop/desktop-bridge-host'
@@ -53,3 +67,7 @@
     - id: file-broker
       name: '@openloop/file-broker'
       inject: [desktopBridge]
+- insert:
+    - id: fs-workspace
+      name: '@openloop/fs-workspace'
+      inject: [fileBroker, workspaceRegistry, sandboxPolicy]

@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use super::{FileBrokerError, FileKind, FileStat};
+use super::{DirectoryEntryKind, FileBrokerError, FileKind, FileStat};
 
 #[derive(Debug)]
 pub(crate) struct RelativeTarget {
@@ -146,6 +146,15 @@ fn mode_kind(mode: libc::mode_t) -> Option<FileKind> {
         libc::S_IFREG => Some(FileKind::Regular),
         libc::S_IFDIR => Some(FileKind::Directory),
         _ => None,
+    }
+}
+
+fn directory_entry_kind(metadata: &libc::stat) -> DirectoryEntryKind {
+    match metadata.st_mode & libc::S_IFMT {
+        libc::S_IFREG if metadata.st_nlink == 1 => DirectoryEntryKind::Regular,
+        libc::S_IFDIR => DirectoryEntryKind::Directory,
+        libc::S_IFLNK => DirectoryEntryKind::Symlink,
+        _ => DirectoryEntryKind::Other,
     }
 }
 
@@ -343,7 +352,7 @@ pub(crate) fn visit_directory(
     descriptor: RawFd,
     offset: usize,
     maximum: usize,
-    mut visitor: impl FnMut(String, FileKind) -> Result<bool, FileBrokerError>,
+    mut visitor: impl FnMut(String, DirectoryEntryKind, u64, String) -> Result<bool, FileBrokerError>,
 ) -> Result<DirectoryVisit, FileBrokerError> {
     let current = c".";
     let reopened = unsafe {
@@ -392,12 +401,9 @@ pub(crate) fn visit_directory(
             .to_owned();
         let child = CString::new(name.as_bytes()).map_err(|_| FileBrokerError::UnsafeFile)?;
         let metadata = stat_at(descriptor, &child)?.ok_or(FileBrokerError::UnsafeFile)?;
-        let Some(kind) = mode_kind(metadata.st_mode) else {
-            return Err(FileBrokerError::UnsafeFile);
-        };
-        if kind == FileKind::Regular && metadata.st_nlink != 1 {
-            return Err(FileBrokerError::UnsafeFile);
-        }
+        let kind = directory_entry_kind(&metadata);
+        let size = metadata.st_size.max(0) as u64;
+        let version = file_version(&metadata);
         if visited < offset {
             visited += 1;
             continue;
@@ -408,7 +414,7 @@ pub(crate) fn visit_directory(
                 visited,
             });
         }
-        if !visitor(name, kind)? {
+        if !visitor(name, kind, size, version)? {
             return Ok(DirectoryVisit {
                 eof: false,
                 visited,

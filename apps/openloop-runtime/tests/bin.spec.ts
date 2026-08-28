@@ -118,6 +118,16 @@ function fakeDependencies(events: string[], output: string[]): RuntimeDependenci
                 name: '@deepseek-ai/dsh-client-ui-cordis',
                 disabled: true,
               },
+              {
+                id: 'fs-sandbox',
+                name: '@deepseek-ai/dsh-fs-sandbox',
+                disabled: true,
+              },
+              {
+                id: 'tool-fs-search',
+                name: '@deepseek-ai/dsh-tool-fs-search',
+                disabled: true,
+              },
             ],
           }],
         },
@@ -142,6 +152,11 @@ function fakeDependencies(events: string[], output: string[]): RuntimeDependenci
                 id: 'openloop-bootstrap',
                 name: '@openloop/bundle/bootstrap-host',
                 inject: ['webServer', 'runtimeBootstrap'],
+              },
+              {
+                id: 'fs-workspace',
+                name: '@openloop/fs-workspace',
+                inject: ['fileBroker', 'workspaceRegistry', 'sandboxPolicy'],
               },
             ],
           }],
@@ -385,7 +400,11 @@ describe('Openloop runtime launcher', () => {
     dependencies.watchUserPatches = async (_ctx, options) => {
       livePatches = options.compose?.([{
         id: 'agent-presets',
-        config: { default: 'minimal', includeUserRoot: false },
+        config: {
+          default: 'minimal',
+          includeUserRoot: false,
+          patches: [{ id: 'tool-fs-search', disabled: false }],
+        },
       }]) ?? []
       return async () => {}
     }
@@ -402,6 +421,11 @@ describe('Openloop runtime launcher', () => {
       config: {
         default: 'standard',
         includeUserRoot: true,
+        patches: [
+          { id: 'tool-fs-search', disabled: true },
+          { id: 'filesystem', isolate: null },
+          { id: 'fs-local', disabled: true },
+        ],
         roots: [{ path: presetRoot, trust: 'system' }],
       },
     })
@@ -410,6 +434,11 @@ describe('Openloop runtime launcher', () => {
       config: {
         default: 'minimal',
         includeUserRoot: false,
+        patches: [
+          { id: 'tool-fs-search', disabled: true },
+          { id: 'filesystem', isolate: null },
+          { id: 'fs-local', disabled: true },
+        ],
         roots: [{ path: presetRoot, trust: 'system' }],
       },
     })

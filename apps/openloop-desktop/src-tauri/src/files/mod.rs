@@ -98,6 +98,15 @@ pub enum FileKind {
     Directory,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DirectoryEntryKind {
+    Regular,
+    Directory,
+    Symlink,
+    Other,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct FileHandleView {
@@ -120,7 +129,9 @@ pub struct FileStat {
 #[serde(rename_all = "camelCase")]
 pub struct DirectoryEntry {
     pub name: String,
-    pub kind: FileKind,
+    pub kind: DirectoryEntryKind,
+    pub size: u64,
+    pub version: String,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -300,21 +311,27 @@ impl FileBroker {
         self.with_open_handle(id, |descriptor| {
             inspect_directory_descriptor(descriptor)?;
             let mut entries = Vec::new();
-            let visit = visit_directory(descriptor, offset, maximum, |name, kind| {
-                let entry = DirectoryEntry { name, kind };
-                let mut candidate = entries.clone();
-                candidate.push(entry.clone());
-                let result = json!({
-                    "entries": candidate,
-                    "nextOffset": offset.saturating_add(entries.len()).saturating_add(1),
-                    "eof": false,
-                });
-                if !success_result_fits_bridge_frame(&result) {
-                    return Ok(false);
-                }
-                entries.push(entry);
-                Ok(true)
-            })?;
+            let visit =
+                visit_directory(descriptor, offset, maximum, |name, kind, size, version| {
+                    let entry = DirectoryEntry {
+                        name,
+                        kind,
+                        size,
+                        version,
+                    };
+                    let mut candidate = entries.clone();
+                    candidate.push(entry.clone());
+                    let result = json!({
+                        "entries": candidate,
+                        "nextOffset": offset.saturating_add(entries.len()).saturating_add(1),
+                        "eof": false,
+                    });
+                    if !success_result_fits_bridge_frame(&result) {
+                        return Ok(false);
+                    }
+                    entries.push(entry);
+                    Ok(true)
+                })?;
             if entries.is_empty() && !visit.eof && visit.visited == offset {
                 return Err(FileBrokerError::ChunkTooLarge);
             }

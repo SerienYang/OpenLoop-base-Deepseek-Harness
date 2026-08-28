@@ -167,6 +167,34 @@ describe('OpenLoop profile', () => {
     })
   })
 
+  it('replaces only the Openloop filesystem provider and removes process-backed search', () => {
+    const entries = openloopEntries()
+
+    expect(entries.find(entry => entry.id === 'fs-sandbox')).toMatchObject({
+      id: 'fs-sandbox',
+      name: '@deepseek-ai/dsh-fs-sandbox',
+      disabled: true,
+    })
+    expect(entries.find(entry => entry.id === 'fs-workspace')).toEqual({
+      id: 'fs-workspace',
+      name: '@openloop/fs-workspace',
+      inject: ['fileBroker', 'workspaceRegistry', 'sandboxPolicy'],
+    })
+    expect(entries.find(entry => entry.id === 'tool-fs-search')).toMatchObject({
+      id: 'tool-fs-search',
+      name: '@deepseek-ai/dsh-tool-fs-search',
+      disabled: true,
+    })
+    expect(entries.find(entry => entry.id === 'agent-presets')?.config).toMatchObject({
+      default: 'standard',
+      patches: [
+        { id: 'tool-fs-search', disabled: true },
+        { id: 'filesystem', isolate: null },
+        { id: 'fs-local', disabled: true },
+      ],
+    })
+  })
+
   it('replaces only the Openloop credential provider and wires built-in consumers to its registry', () => {
     const entries = openloopEntries()
 
@@ -265,6 +293,13 @@ describe('OpenLoop profile', () => {
     expect(entries.find(entry => entry.id === 'typert-gateway')?.inject).toBeUndefined()
     expect(entries.find(entry => entry.id === 'credentials')?.name)
       .toBe('@deepseek-ai/dsh-credentials-local')
+    const defaultFs = entries.find(entry => entry.id === 'fs-sandbox')
+    expect(defaultFs?.name).toBe('@deepseek-ai/dsh-fs-sandbox')
+    expect(defaultFs).not.toHaveProperty('disabled')
+    expect(entries.find(entry => entry.id === 'fs-workspace')).toBeUndefined()
+    const defaultSearch = entries.find(entry => entry.id === 'tool-fs-search')
+    expect(defaultSearch?.name).toBe('@deepseek-ai/dsh-tool-fs-search')
+    expect(defaultSearch?.disabled).toBe(true)
   })
 
   it('initializes the OpenLoop profile once with the official bundle order', () => {

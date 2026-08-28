@@ -27,6 +27,10 @@ Workspace、设置与桌面数据，但不负责持久化或工作流状态。
 只读旧来源。它的 Host-only consumer registry 负责生成原生删除确认所需的展示信息；
 浏览器调用方既不能解析明文，也不能提供这些展示信息。
 
+`@openloop/fs-workspace` 是 Openloop profile 的 DSH `FileSystem` provider。
+它把已登记 Workspace 路径映射为进程内 capability key，并通过 file broker handle
+执行元数据查询、读取、列目录、写入和编辑。
+
 通过根命令创建包：
 
 ```sh

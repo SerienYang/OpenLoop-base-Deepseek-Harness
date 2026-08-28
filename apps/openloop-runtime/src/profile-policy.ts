@@ -25,6 +25,9 @@ const PROTECTED_ROW_IDS = new Set([
   'approval',
   'permission',
   'fs-observation-policy',
+  'fs-sandbox',
+  'fs-workspace',
+  'tool-fs-search',
   'session-checkpoint-policy',
 ])
 
@@ -147,6 +150,20 @@ export function assertOpenloopProfileSecurity(
   requireInject(policyOwner, 'runtimeBootstrap')
   requireInject(requireRow(effective, 'connection'), 'browserApiPolicy')
   requireInject(requireRow(effective, 'typert-gateway'), 'browserApiPolicy')
+
+  if (requireRow(effective, 'fs-sandbox').disabled !== true) {
+    throw new Error('openloop-runtime: direct host filesystem provider must remain disabled')
+  }
+  const workspaceFs = requireRow(effective, 'fs-workspace')
+  if (workspaceFs.name !== '@openloop/fs-workspace' || workspaceFs.disabled === true) {
+    throw new Error('openloop-runtime: Workspace filesystem provider must remain enabled')
+  }
+  for (const service of ['fileBroker', 'workspaceRegistry', 'sandboxPolicy']) {
+    requireInject(workspaceFs, service)
+  }
+  if (requireRow(effective, 'tool-fs-search').disabled !== true) {
+    throw new Error('openloop-runtime: process-backed filesystem search must remain disabled')
+  }
 
   for (const id of ['cordis-client-runner', 'ui-cordis']) {
     if (requireRow(effective, id).disabled !== true) {

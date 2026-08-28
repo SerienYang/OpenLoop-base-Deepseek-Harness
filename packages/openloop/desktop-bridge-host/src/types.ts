@@ -168,7 +168,9 @@ export interface WorkspaceFileStat {
 
 export interface WorkspaceDirectoryEntry {
   readonly name: string
-  readonly kind: WorkspaceFileHandle['kind']
+  readonly kind: WorkspaceFileHandle['kind'] | 'symlink' | 'other'
+  readonly size: number
+  readonly version: string
 }
 
 export interface WorkspaceDirectoryChunk {

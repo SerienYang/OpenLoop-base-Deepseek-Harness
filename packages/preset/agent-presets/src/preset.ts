@@ -1,3 +1,5 @@
+import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
+
 /** Agent-preset vocabulary shared by discovery, mounting, and consumers. */
 
 /**
@@ -59,6 +61,8 @@ export interface Config {
    * configured root. False mounts a roster over `roots` alone.
    */
   includeUserRoot: boolean
+  /** Deployment-owned patches applied in memory whenever a preset mounts. */
+  patches?: PatchOptions[]
 }
 
 /**
