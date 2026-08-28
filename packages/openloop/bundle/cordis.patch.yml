@@ -7,8 +7,6 @@
   inject: [webRuntime, browserApiPolicy]
 - id: typert-gateway
   inject: [browserApiPolicy]
-- id: client-runtime
-  inject: [workspaceRuntimeAdapter]
 - id: credentials
   disabled: true
 - id: code-runtime

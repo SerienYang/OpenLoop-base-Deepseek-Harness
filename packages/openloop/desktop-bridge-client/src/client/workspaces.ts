@@ -35,6 +35,10 @@ export interface OpenloopWorkspaceSessions {
   clear(): void
 }
 
+export type OpenloopWorkspaceRemoteSource =
+  | OpenloopWorkspaceRemote
+  | (() => Promise<OpenloopWorkspaceRemote>)
+
 const EMPTY_WORKSPACE_LIST: WorkspaceListState = {
   items: [],
   archivedSessionIds: [],
@@ -58,7 +62,7 @@ export class OpenloopWorkspaceService {
     createSnapshotStore<WorkspaceListState>(EMPTY_WORKSPACE_LIST)
 
   constructor(
-    private readonly remote: OpenloopWorkspaceRemote,
+    private readonly remoteSource: OpenloopWorkspaceRemoteSource,
     private readonly sessions: OpenloopWorkspaceSessions,
   ) {}
 
@@ -68,7 +72,8 @@ export class OpenloopWorkspaceService {
       state: 'loading',
       error: null,
     })
-    const result = await this.remote.listWorkspaceGrants()
+    const remote = await this.remote()
+    const result = await remote.listWorkspaceGrants()
     if (!result.ok) {
       const error = new Error(
         `Openloop Workspace list failed: ${result.error.code}: ${result.error.message}`,
@@ -88,14 +93,16 @@ export class OpenloopWorkspaceService {
   }
 
   async authorize(): Promise<WorkspaceGrantView | 'cancelled'> {
-    const value = this.value(await this.remote.authorizeWorkspace(), 'authorize')
+    const remote = await this.remote()
+    const value = this.value(await remote.authorizeWorkspace(), 'authorize')
     if (value !== 'cancelled') this.upsert(value)
     return value
   }
 
   async reauthorize(workspaceId: string): Promise<WorkspaceGrantView | 'cancelled'> {
+    const remote = await this.remote()
     const value = this.value(
-      await this.remote.reauthorizeWorkspace(workspaceId),
+      await remote.reauthorizeWorkspace(workspaceId),
       'reauthorize',
     )
     if (value !== 'cancelled') this.upsert(value)
@@ -103,7 +110,8 @@ export class OpenloopWorkspaceService {
   }
 
   async revoke(workspaceId: string): Promise<'revoked' | 'cancelled'> {
-    const value = this.value(await this.remote.revokeWorkspace(workspaceId), 'revoke')
+    const remote = await this.remote()
+    const value = this.value(await remote.revokeWorkspace(workspaceId), 'revoke')
     if (value === 'revoked') {
       const current = this.grants.getSnapshot()
       this.grants.set({
@@ -115,7 +123,8 @@ export class OpenloopWorkspaceService {
   }
 
   async reveal(workspaceId: string): Promise<void> {
-    this.value(await this.remote.revealWorkspace(workspaceId), 'reveal')
+    const remote = await this.remote()
+    this.value(await remote.revealWorkspace(workspaceId), 'reveal')
   }
 
   connectWorkspace(workspaceId: WorkspaceId, agentPreset?: string): Promise<SessionId> {
@@ -146,6 +155,12 @@ export class OpenloopWorkspaceService {
     void this.refresh().catch(() => {})
   }
 
+  private remote(): Promise<OpenloopWorkspaceRemote> {
+    return typeof this.remoteSource === 'function'
+      ? this.remoteSource()
+      : Promise.resolve(this.remoteSource)
+  }
+
   private value<T>(result: RemoteResult<T>, operation: string): T {
     if (result.ok) return result.value
     throw new Error(
@@ -164,7 +179,7 @@ export class OpenloopWorkspaceService {
 }
 
 export class OpenloopWorkspaceRuntimeAdapter implements WorkspaceRuntimeAdapter {
-  constructor(private readonly remote: OpenloopWorkspaceRemote) {}
+  constructor(private readonly remote: OpenloopWorkspaceRemoteSource) {}
 
   create(ctx: Context, _api: unknown, sessions: SessionsPort): OpenloopWorkspaceService {
     const service = new OpenloopWorkspaceService(this.remote, sessions)

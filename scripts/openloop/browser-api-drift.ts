@@ -1037,9 +1037,18 @@ export async function collectOpenloopBrowserApiSurface(
     }
   }
 
-  const files = [...roots.values()].flatMap(owner =>
+  const usesWorkspaceAdapter = rows.some(row =>
+    row.packageName === '@openloop/desktop-bridge-client')
+  const files = [...roots.entries()].flatMap(([packageName, owner]) =>
     sourceFiles(join(owner.root, 'src', 'client'))
-      .filter(path => !isExcludedClientSource(path, owner.root)))
+      .filter(path => !isExcludedClientSource(path, owner.root))
+      .filter((path) => {
+        if (!usesWorkspaceAdapter
+          || packageName !== '@deepseek-ai/dsh-client-runtime') return true
+        const source = relative(join(owner.root, 'src', 'client'), path)
+        return source !== 'workspaces'
+          && !source.startsWith(`workspaces${sep}`)
+      }))
   const program = ts.createProgram(files, compilerOptions(root))
   const checker = program.getTypeChecker()
   const remoteCatalog = await generatedRemoteCatalog(root)
@@ -1115,6 +1124,10 @@ export async function collectOpenloopBrowserApiSurface(
     if (owner === undefined || source.isDeclarationFile) continue
     const packageRoot = roots.get(owner.packageName)?.root
     if (packageRoot === undefined || isExcludedClientSource(source.fileName, packageRoot)) continue
+    if (usesWorkspaceAdapter
+      && owner.packageName === '@deepseek-ai/dsh-client-runtime'
+      && relative(join(packageRoot, 'src', 'client'), source.fileName)
+        .startsWith(`workspaces${sep}`)) continue
     const origins = assignmentOrigins(source, checker)
     const aliases = staticAliasOrigins(source, checker)
     const isRemoteRoot = (expression: ts.Expression): boolean =>

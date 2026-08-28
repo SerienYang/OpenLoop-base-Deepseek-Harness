@@ -125,6 +125,20 @@ export interface WorkspaceRuntimeAdapter {
   create(ctx: Context, api: IApiClient, sessions: SessionsPort): WorkspaceRuntimeLifecycle
 }
 
+const OPENLOOP_WORKSPACE_ADAPTER_CLIENT = '@openloop/desktop-bridge-client'
+
+/** Whether the signed browser graph requires a profile-owned Workspace adapter. */
+export function requiresWorkspaceRuntimeAdapter(source: unknown = globalThis): boolean {
+  if (typeof source !== 'object' || source === null) return false
+  const boot = (source as { __DSH_BOOT__?: unknown }).__DSH_BOOT__
+  if (typeof boot !== 'object' || boot === null) return false
+  const entries = (boot as { entries?: unknown }).entries
+  return Array.isArray(entries) && entries.some(entry =>
+    typeof entry === 'object'
+    && entry !== null
+    && (entry as { id?: unknown }).id === OPENLOOP_WORKSPACE_ADAPTER_CLIENT)
+}
+
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertContextMap {
     /** Client Agent scope identity; the agent and session share one wire id. */
@@ -198,10 +212,7 @@ declare module '@deepseek-ai/cordis' {
 /** Required services: the wire handle and Client Typert registry. */
 export const inject = ['connection', 'typert', 'remote', 'remote.commands']
 
-/** Mounts the browser runtime services and connection stream.
- * @param ctx - Client Cordis context.
- */
-export function apply(ctx: Context): void {
+function installRuntime(ctx: Context, workspaceRuntimeAdapter?: WorkspaceRuntimeAdapter): void {
   ctx.plugin(SlotRegistry)
   const conversation = {
     events: new ConversationEventRegistry(ctx),
@@ -212,7 +223,6 @@ export function apply(ctx: Context): void {
   ctx.typert.contexts.registerClient('agent', {
     identity: candidate => sessions.scopeOf(candidate),
   })
-  const workspaceRuntimeAdapter = ctx.get('workspaceRuntimeAdapter')
   const workspaces = workspaceRuntimeAdapter === undefined
     ? new WorkspaceRuntime(ctx, connection.api, sessions)
     : workspaceRuntimeAdapter.create(ctx, connection.api, sessions)
@@ -249,4 +259,22 @@ export function apply(ctx: Context): void {
     },
   })
   ctx.effect(() => () => { loop.stop() }, 'runtime: connection stream loop')
+}
+
+/** Mounts the browser runtime services and connection stream.
+ * @param ctx - Client Cordis context.
+ */
+export function apply(ctx: Context): void | PromiseLike<unknown> {
+  const availableAdapter = ctx.get('workspaceRuntimeAdapter')
+  if (availableAdapter !== undefined) {
+    installRuntime(ctx, availableAdapter)
+    return
+  }
+  if (!requiresWorkspaceRuntimeAdapter()) {
+    installRuntime(ctx)
+    return
+  }
+  return ctx.inject(['workspaceRuntimeAdapter'], (adapterCtx) => {
+    installRuntime(adapterCtx, adapterCtx.workspaceRuntimeAdapter)
+  })
 }

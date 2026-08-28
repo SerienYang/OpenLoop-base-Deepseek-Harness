@@ -37,7 +37,12 @@ interface BundleManifest {
 
 interface ClientPackageManifest {
   readonly name?: string
-  readonly dsh?: { readonly client?: { readonly platform?: string } }
+  readonly dsh?: {
+    readonly client?: {
+      readonly inject?: readonly string[]
+      readonly platform?: string
+    }
+  }
 }
 
 interface RemoteContribution {
@@ -168,17 +173,23 @@ describe('OpenLoop profile', () => {
   })
 
   it('selects the path-free Workspace adapter before the shared client runtime starts', () => {
+    const require = createRequire(import.meta.url)
     const entries = openloopEntries()
 
     expect(entries.find(entry => entry.id === 'desktop-bridge-client')).toEqual({
       id: 'desktop-bridge-client',
       name: '@openloop/desktop-bridge-client',
     })
-    expect(entries.find(entry => entry.id === 'client-runtime')).toMatchObject({
+    expect(entries.find(entry => entry.id === 'client-runtime')).toEqual({
       id: 'client-runtime',
       name: '@deepseek-ai/dsh-client-runtime',
-      inject: ['workspaceRuntimeAdapter'],
     })
+    const clientManifest = JSON.parse(readFileSync(
+      require.resolve('@openloop/desktop-bridge-client/package.json'),
+      'utf8',
+    )) as ClientPackageManifest
+    expect(clientManifest.dsh?.client?.inject)
+      .toEqual(['@deepseek-ai/dsh-api-gateway'])
   })
 
   it('replaces only the Openloop filesystem provider and removes process-backed search', () => {

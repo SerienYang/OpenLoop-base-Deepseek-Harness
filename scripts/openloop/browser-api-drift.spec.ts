@@ -463,6 +463,15 @@ describe('Openloop assembled browser API drift gate', () => {
     expect(() => { assertOpenloopBrowserApiCoverage(surface, manifest) }).not.toThrow()
   }, 60_000)
 
+  it('catalogues the Openloop adapter and excludes the unreachable legacy Workspace runtime', async () => {
+    const surface = await surfacePromise
+
+    expect(surface.cataloguedClientPackages).toContain('@openloop/desktop-bridge-client')
+    expect(surface.legacyRpcMethods.has('workspace.list')).toBe(false)
+    expect(surface.legacyRpcMethods.has('workspace.create')).toBe(false)
+    expect(surface.legacyRpcMethods.has('workspace.delete')).toBe(false)
+  })
+
   it('requires every reviewed OpenLoop Remote facade and excludes every Host-only method', async () => {
     const surface = await surfacePromise
 
@@ -490,6 +499,28 @@ describe('Openloop assembled browser API drift gate', () => {
     })
     expect(surface.cataloguedClientPackages).toContain('@deepseek-ai/dsh-client-hmr')
   })
+
+  it('excludes legacy Workspace sources only while the signed adapter row is enabled', async () => {
+    const surface = await surfacePromise
+
+    expect(surface.legacyRpcMethods.has('workspace.list')).toBe(false)
+    expect(surface.legacyRpcMethods.has('workspace.create')).toBe(false)
+  })
+
+  it('does not exempt legacy Workspace sources when the adapter row is disabled', async () => {
+    const fixtureRoot = createMutationRoot('openloop-browser-api-drift-runtime-adapter-')
+    rosterFailureRoots.push(fixtureRoot)
+    const patchPath = join(fixtureRoot, 'packages/openloop/bundle/cordis.patch.yml')
+    writeFileSync(
+      patchPath,
+      `${readFileSync(patchPath, 'utf8')}\n- id: desktop-bridge-client\n  disabled: true\n`,
+    )
+
+    const surface = await collectOpenloopBrowserApiSurface(fixtureRoot)
+
+    expect(surface.legacyRpcMethods.get('workspace.list')).toContain('client-runtime')
+    expect(surface.legacyRpcMethods.get('workspace.create')).toContain('client-runtime')
+  }, 60_000)
 
   it('does not let a nested fixture manifest override a declared workspace package', async () => {
     const fixtureRoot = createMutationRoot('openloop-browser-api-drift-nested-fixture-')

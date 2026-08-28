@@ -214,24 +214,24 @@ describe('Openloop browser Workspace facade', () => {
     expect(ctx.openloopWorkspaces).toBeInstanceOf(OpenloopWorkspaceService)
   })
 
-  it('mounts the generated desktop Remote before publishing the runtime adapter', async () => {
+  it('publishes the adapter before mounting the generated desktop Remote', async () => {
     const ctx = new Context()
     const dispose = vi.fn(async () => {})
     const mount = vi.fn(async (_remote: unknown) => dispose)
+    const cleanup = applyClient(ctx)
+
+    expect(ctx.get('workspaceRuntimeAdapter')).toBeInstanceOf(
+      OpenloopWorkspaceRuntimeAdapter,
+    )
     ctx.reflect.provide('remote', {
       $mount: mount,
       openloopDesktop: remote(),
     })
 
-    const cleanup = await applyClient(ctx)
-
-    expect(mount).toHaveBeenCalledOnce()
+    await vi.waitFor(() => { expect(mount).toHaveBeenCalledOnce() })
     expect(mount.mock.calls[0]?.[0]).toMatchObject({
       package: '@openloop/desktop-bridge-host',
     })
-    expect(ctx.get('workspaceRuntimeAdapter')).toBeInstanceOf(
-      OpenloopWorkspaceRuntimeAdapter,
-    )
     await cleanup()
     expect(dispose).toHaveBeenCalledOnce()
   })

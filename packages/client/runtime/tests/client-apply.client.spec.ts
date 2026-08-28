@@ -55,6 +55,61 @@ async function flushMicrotasks(): Promise<void> {
 }
 
 describe('runtime client apply', () => {
+  it('waits for the signed Openloop Workspace adapter instead of falling back to legacy RPCs', async () => {
+    const previousBoot = (globalThis as { __DSH_BOOT__?: unknown }).__DSH_BOOT__
+    ;(globalThis as { __DSH_BOOT__?: unknown }).__DSH_BOOT__ = {
+      rev: 'openloop-test',
+      entries: [{
+        id: '@openloop/desktop-bridge-client',
+        url: '/plugins/openloop/client.js',
+        rev: 'adapter',
+      }],
+    }
+    try {
+      const ctx = new Context()
+      await ctx.plugin(TypertRegistry)
+      const api = new FakeApiClient()
+      const start = vi.fn(() => ({ stop: vi.fn() }))
+      const create = vi.fn(() => ({
+        startInitialSelection: () => () => {},
+        handleHostEnvelope: () => {},
+        handleConnected: () => {},
+      }))
+      ctx.reflect.provide('connection', {
+        api,
+        isLoopback: true,
+        hostDescription: {
+          getSnapshot: () => undefined,
+          subscribe: () => () => {},
+        },
+        rpc: {
+          call: () => Promise.reject(new Error('unexpected generic RPC call')),
+        },
+        start,
+      } satisfies ConnectionHandle)
+      ctx.reflect.provide('remote', {})
+      ctx.reflect.provide('remote.commands', fakeRemote().commands)
+
+      const fiber = ctx.plugin(RuntimeClient)
+      await Promise.resolve()
+      expect(start).not.toHaveBeenCalled()
+      expect(api.callsOf('workspace.list')).toEqual([])
+
+      ctx.reflect.provide('workspaceRuntimeAdapter', { create })
+      await fiber.await()
+
+      expect(create).toHaveBeenCalledOnce()
+      expect(start).toHaveBeenCalledOnce()
+      await ctx.fiber.dispose()
+    } finally {
+      if (previousBoot === undefined) {
+        delete (globalThis as { __DSH_BOOT__?: unknown }).__DSH_BOOT__
+      } else {
+        ;(globalThis as { __DSH_BOOT__?: unknown }).__DSH_BOOT__ = previousBoot
+      }
+    }
+  })
+
   it('uses a profile-provided Workspace adapter', async () => {
     const ctx = new Context()
     await ctx.plugin(TypertRegistry)

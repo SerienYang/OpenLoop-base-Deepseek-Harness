@@ -3,6 +3,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import desktopRemote from '@openloop/desktop-bridge-host/remote'
 import { OpenloopWorkspaceRuntimeAdapter } from './workspaces.ts'
+import type { OpenloopWorkspaceRemote } from './workspaces.ts'
 
 export {
   OpenloopWorkspaceRuntimeAdapter,
@@ -11,17 +12,29 @@ export {
 export type {
   OpenloopWorkspaceListState,
   OpenloopWorkspaceRemote,
+  OpenloopWorkspaceRemoteSource,
   OpenloopWorkspaceSessions,
 } from './workspaces.ts'
 
-export const inject = ['remote']
+export const inject: string[] = []
 
-export async function apply(ctx: Context): Promise<() => Promise<void>> {
-  const disposeRemote = await ctx.remote.$mount(desktopRemote)
-  const adapter = new OpenloopWorkspaceRuntimeAdapter(ctx.remote.openloopDesktop)
+export function apply(ctx: Context): () => Promise<void> {
+  const ready = Promise.withResolvers<OpenloopWorkspaceRemote>()
+  void ready.promise.catch(() => {})
+  const adapter = new OpenloopWorkspaceRuntimeAdapter(() => ready.promise)
   const removeAdapter = ctx.reflect.provide('workspaceRuntimeAdapter', adapter)
+  const remoteFiber = ctx.inject(['remote'], async (remoteCtx) => {
+    try {
+      const disposeRemote = await remoteCtx.remote.$mount(desktopRemote)
+      ready.resolve(remoteCtx.remote.openloopDesktop)
+      return disposeRemote
+    } catch (error) {
+      ready.reject(error)
+      throw error
+    }
+  })
   return async () => {
     await removeAdapter()
-    await disposeRemote()
+    await remoteFiber.dispose()
   }
 }
