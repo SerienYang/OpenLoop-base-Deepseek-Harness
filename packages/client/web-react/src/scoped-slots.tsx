@@ -546,13 +546,17 @@ function SessionMaybeEntryBody({ entry, ownerProps, info, slotKey, slotInjected,
  * that must SURVIVE a switch belongs in session-bound sources (machine,
  * store, hooks) — the existing layering rule, now load-bearing.
  */
-function SessionMaybeEntry({ entry, ownerProps, slotKey, slotInjected, hookContext, hasHookContext }: {
+function SessionMaybeEntry({
+  entry, ownerProps, slotKey, slotInjected, hookContext, hasHookContext, onEntryError, fallback,
+}: {
   entry: StoredEntry
   ownerProps: object
   slotKey: string
   slotInjected: BoundSlotInject
   hookContext: unknown
   hasHookContext: boolean
+  onEntryError: (error: unknown) => void
+  fallback?: ReactNode
 }) {
   const info = useSessionMaybeProvideInfo()
   // The child key is an incarnation counter, NOT the session id: adoption
@@ -579,16 +583,17 @@ function SessionMaybeEntry({ entry, ownerProps, slotKey, slotInjected, hookConte
     setState({ adopted, epoch })
   }
   return (
-    <SessionMaybeEntryBody
-      key={epoch}
-      entry={entry}
-      ownerProps={ownerProps}
-      info={info}
-      slotKey={slotKey}
-      slotInjected={slotInjected}
-      hookContext={hookContext}
-      hasHookContext={hasHookContext}
-    />
+    <SlotErrorBoundary slotKey={slotKey} key={epoch} onEntryError={onEntryError} fallback={fallback}>
+      <SessionMaybeEntryBody
+        entry={entry}
+        ownerProps={ownerProps}
+        info={info}
+        slotKey={slotKey}
+        slotInjected={slotInjected}
+        hookContext={hookContext}
+        hasHookContext={hasHookContext}
+      />
+    </SlotErrorBoundary>
   )
 }
 
@@ -722,8 +727,8 @@ function renderOutletContent(
         abdicate: spec.kind !== 'chain' && !hasHookContext,
       })
     }
-    return spec.scope === 'session'
-      ? (
+    if (spec.scope === 'session') {
+      return (
         <StrictSessionEntry
           slotKey={slotKey}
           entry={entry}
@@ -736,36 +741,39 @@ function renderOutletContent(
           key={key}
         />
       )
-      : (
-        <SlotErrorBoundary
-          slotKey={slotKey}
+    }
+    if (spec.scope === 'session-maybe') {
+      return (
+        <SessionMaybeEntry
           key={key}
+          entry={entry}
+          ownerProps={owner}
+          slotKey={slotKey}
+          slotInjected={slotInjected}
+          hookContext={hookContext}
+          hasHookContext={hasHookContext}
           onEntryError={onEntryError}
           fallback={occurrenceFallback}
-        >
-          {spec.scope === 'session-maybe'
-            ? (
-              <SessionMaybeEntry
-                entry={entry}
-                ownerProps={owner}
-                slotKey={slotKey}
-                slotInjected={slotInjected}
-                hookContext={hookContext}
-                hasHookContext={hasHookContext}
-              />
-            )
-            : (
-              <RootEntry
-                entry={entry}
-                ownerProps={owner}
-                slotKey={slotKey}
-                slotInjected={slotInjected}
-                hookContext={hookContext}
-                hasHookContext={hasHookContext}
-              />
-            )}
-        </SlotErrorBoundary>
+        />
       )
+    }
+    return (
+      <SlotErrorBoundary
+        slotKey={slotKey}
+        key={key}
+        onEntryError={onEntryError}
+        fallback={occurrenceFallback}
+      >
+        <RootEntry
+          entry={entry}
+          ownerProps={owner}
+          slotKey={slotKey}
+          slotInjected={slotInjected}
+          hookContext={hookContext}
+          hasHookContext={hasHookContext}
+        />
+      </SlotErrorBoundary>
+    )
   }
   // A cell whose every registration abdicated keeps the crash face: the
   // shadowing collapse ran out of survivors, which is a failure state, not
