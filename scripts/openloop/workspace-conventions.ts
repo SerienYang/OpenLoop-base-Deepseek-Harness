@@ -365,11 +365,14 @@ function workspaceExecutionBoundaryViolations(root: string): string[] {
 
 function unapprovedProcessProviderViolations(root: string): string[] {
   const packagesRoot = join(root, 'packages', 'openloop')
-  if (!existsSync(packagesRoot)) return []
-  return readdirSync(packagesRoot, { withFileTypes: true })
-    .filter(entry => entry.isDirectory())
-    .sort((left, right) => left.name.localeCompare(right.name))
-    .flatMap(entry => sourceFiles(join(packagesRoot, entry.name, 'src')))
+  const packageSources = existsSync(packagesRoot)
+    ? readdirSync(packagesRoot, { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .map(entry => join(packagesRoot, entry.name, 'src'))
+    : []
+  return [...packageSources, join(root, 'apps', 'openloop-runtime', 'src')]
+    .flatMap(sourceFiles)
     .flatMap(path => importedModules(path)
       .filter(entry => OPENLOOP_FORBIDDEN_PROCESS_PACKAGES.has(entry.value))
       .map(entry =>
@@ -383,7 +386,6 @@ function unapprovedProcessProviderViolations(root: string): string[] {
  */
 export function collectOpenLoopWorkspaceViolations(root: string): string[] {
   const packagesRoot = join(root, 'packages', 'openloop')
-  if (!existsSync(packagesRoot)) return []
 
   const errors: string[] = []
   const aggregates = {
@@ -391,9 +393,11 @@ export function collectOpenLoopWorkspaceViolations(root: string): string[] {
     client: aggregateReferences(root, 'client'),
   }
   const clientConfigs = clientProjectConfigs(root)
-  const packageDirectories = readdirSync(packagesRoot, { withFileTypes: true })
-    .filter(entry => entry.isDirectory())
-    .sort((left, right) => left.name.localeCompare(right.name))
+  const packageDirectories = existsSync(packagesRoot)
+    ? readdirSync(packagesRoot, { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .sort((left, right) => left.name.localeCompare(right.name))
+    : []
 
   for (const entry of packageDirectories) {
     const relativeManifestPath = `packages/openloop/${entry.name}/package.json`

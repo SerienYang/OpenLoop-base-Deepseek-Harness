@@ -7,6 +7,7 @@ import {
   name,
   WORKSPACE_PROCESS_CAPABILITY,
 } from '@openloop/sandbox-workspace'
+import * as SandboxWorkspaceInvariant from '@openloop/sandbox-workspace/invariant'
 
 interface PackageManifest {
   readonly name?: string
@@ -67,6 +68,7 @@ describe('Openloop Workspace process capability', () => {
   it('fails its invariant if another row registered ctx.subprocess', async () => {
     const ctx = new Context()
     await ctx.plugin(InvariantRegistry)
+    await ctx.plugin(SandboxWorkspaceInvariant)
 
     let failure: unknown
     try {

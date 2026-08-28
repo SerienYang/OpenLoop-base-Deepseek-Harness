@@ -215,6 +215,27 @@ describe('OpenLoop workspace conventions', () => {
     )
   })
 
+  it('rejects an unapproved process provider imported by the Openloop runtime', async () => {
+    const { collectOpenLoopWorkspaceViolations } = await import('./workspace-conventions.ts')
+    const root = fixtureRoot()
+    writeJson(join(root, 'apps/openloop-runtime/package.json'), {
+      name: '@openloop/runtime',
+      private: true,
+      openloop: { face: 'host' },
+    })
+    mkdirSync(join(root, 'apps/openloop-runtime/src'), { recursive: true })
+    writeFileSync(
+      join(root, 'apps/openloop-runtime/src/index.ts'),
+      "import '@deepseek-ai/dsh-code-runtime-worker-thread'\n",
+    )
+
+    expect(collectOpenLoopWorkspaceViolations(root)).toContain(
+      'apps/openloop-runtime/src/index.ts:1: '
+      + 'Openloop code must not import unapproved process provider '
+      + '"@deepseek-ai/dsh-code-runtime-worker-thread"',
+    )
+  })
+
   it('rejects namespace, privacy, and face violations independently', async () => {
     const { collectOpenLoopWorkspaceViolations } = await import('./workspace-conventions.ts')
     const root = fixtureRoot()
