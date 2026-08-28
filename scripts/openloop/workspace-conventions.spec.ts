@@ -150,6 +150,7 @@ describe('OpenLoop workspace conventions', () => {
     ['node:fs', "import { readFile } from 'node:fs'\n"],
     ['node:fs/promises', "const fs = await import('node:fs/promises')\n"],
     ['node:child_process', "const cp = require('node:child_process')\n"],
+    ['node-pty', "import * as pty from 'node-pty'\n"],
   ])('rejects direct %s imports from the Workspace filesystem provider', async (specifier, source) => {
     const { collectOpenLoopWorkspaceViolations } = await import('./workspace-conventions.ts')
     const root = fixtureRoot()
@@ -166,6 +167,51 @@ describe('OpenLoop workspace conventions', () => {
     expect(collectOpenLoopWorkspaceViolations(root)).toContain(
       'packages/openloop/fs-workspace/src/index.ts:1: '
       + `@openloop/fs-workspace must use the Workspace file broker instead of ${specifier}`,
+    )
+  })
+
+  it.each([
+    ['fs', "import fs from 'fs'\n"],
+    ['fs/promises', "export { readFile } from 'fs/promises'\n"],
+    ['child_process', "const cp = require('child_process')\n"],
+    ['node:fs', "import { readFile } from 'node:fs'\n"],
+    ['node:fs/promises', "const fs = await import('node:fs/promises')\n"],
+    ['node:child_process', "const cp = require('node:child_process')\n"],
+    ['node-pty', "import * as pty from 'node-pty'\n"],
+  ])('rejects direct %s imports from the Workspace process capability', async (specifier, source) => {
+    const { collectOpenLoopWorkspaceViolations } = await import('./workspace-conventions.ts')
+    const root = fixtureRoot()
+    writeManifest(root, 'sandbox-workspace', {
+      name: '@openloop/sandbox-workspace',
+      private: true,
+      openloop: { face: 'host', cordisPlugin: true },
+      peerDependencies: { '@deepseek-ai/cordis': 'workspace:^' },
+      devDependencies: { '@deepseek-ai/cordis': 'workspace:^' },
+    })
+    writeSource(root, 'sandbox-workspace', source)
+    writeAggregates(root, ['sandbox-workspace'], [])
+
+    expect(collectOpenLoopWorkspaceViolations(root)).toContain(
+      'packages/openloop/sandbox-workspace/src/index.ts:1: '
+      + `@openloop/sandbox-workspace must not implement process execution through ${specifier}`,
+    )
+  })
+
+  it('rejects an unapproved process-spawning provider import from Openloop code', async () => {
+    const { collectOpenLoopWorkspaceViolations } = await import('./workspace-conventions.ts')
+    const root = fixtureRoot()
+    writeManifest(root, 'probe', {
+      name: '@openloop/probe',
+      private: true,
+      openloop: { face: 'host' },
+    })
+    writeSource(root, 'probe', "import '@deepseek-ai/dsh-subprocess-local'\n")
+    writeAggregates(root, ['probe'], [])
+
+    expect(collectOpenLoopWorkspaceViolations(root)).toContain(
+      'packages/openloop/probe/src/index.ts:1: '
+      + 'Openloop code must not import unapproved process provider '
+      + '"@deepseek-ai/dsh-subprocess-local"',
     )
   })
 

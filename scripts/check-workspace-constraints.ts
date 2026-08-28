@@ -8,6 +8,12 @@
 import { existsSync, globSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  applyEntryPatches,
+  entryListSchema,
+  type PatchOptions,
+} from '@deepseek-ai/cordis-plugin-include'
+import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import * as yaml from 'js-yaml'
 import ts from 'typescript'
 import { hasTypertRemoteNavigation, isForbiddenPublicationFile } from './publication-payload.ts'
@@ -1198,6 +1204,112 @@ export function collectOpenLoopDshPrivateImportViolations(scanRoot: string): str
   return errors
 }
 
+const openLoopProcessPackages = new Set([
+  '@deepseek-ai/dsh-agent-tool-presentation',
+  '@deepseek-ai/dsh-bash-sandbox',
+  '@deepseek-ai/dsh-code-runtime-worker-thread',
+  '@deepseek-ai/dsh-lsp-stdio',
+  '@deepseek-ai/dsh-mcp-client',
+  '@deepseek-ai/dsh-pwsh-sandbox',
+  '@deepseek-ai/dsh-subagent-acp',
+  '@deepseek-ai/dsh-subagent-claude-code',
+  '@deepseek-ai/dsh-subagent-codex',
+  '@deepseek-ai/dsh-subagent-dsh-sdk',
+  '@deepseek-ai/dsh-subprocess-local',
+  '@deepseek-ai/dsh-terminal',
+  '@deepseek-ai/dsh-terminal-bash',
+  '@deepseek-ai/dsh-tool-bash',
+  '@deepseek-ai/dsh-tool-bash-persistent',
+  '@deepseek-ai/dsh-tool-cordis',
+  '@deepseek-ai/dsh-tool-fs-search',
+  '@deepseek-ai/dsh-tool-lsp',
+  '@deepseek-ai/dsh-tool-pwsh',
+  '@deepseek-ai/dsh-tool-terminal',
+])
+
+function readEntryPatches(path: string): PatchOptions[] {
+  const parsed = yaml.load(readFileSync(path, 'utf8'), { schema: entryListSchema })
+  if (!Array.isArray(parsed)) throw new Error(`${path}: expected a patch list`)
+  return parsed as PatchOptions[]
+}
+
+function nestedEntries(entries: readonly EntryOptions[]): EntryOptions[] {
+  return entries.flatMap(entry => [
+    entry,
+    ...entry.group === true && Array.isArray(entry.config)
+      ? nestedEntries(entry.config as EntryOptions[])
+      : [],
+  ])
+}
+
+function processRowViolation(row: EntryOptions, label: string): string | undefined {
+  if (typeof row.name !== 'string' || !openLoopProcessPackages.has(row.name)) return undefined
+  if (row.name === '@deepseek-ai/dsh-mcp-client'
+    && (row.config as Readonly<Record<string, unknown>> | undefined)?.['transport'] === 'streamable-http') {
+    return undefined
+  }
+  if (row.disabled === true) return undefined
+  return `${label}: process row ${JSON.stringify(row.id)} (${row.name}) must be disabled`
+}
+
+/**
+ * Compose the checked-in Openloop profile and every exposed system preset,
+ * then reject any enabled local-process provider or model-facing bypass.
+ */
+export function collectOpenLoopProcessProfileViolations(scanRoot: string): string[] {
+  const patchPaths = [
+    'packages/bundle/base/cordis.patch.yml',
+    'packages/bundle/web-app/cordis.patch.yml',
+    'packages/openloop/bundle/cordis.patch.yml',
+  ]
+  const missingPatches = patchPaths.filter(path => !existsSync(join(scanRoot, path)))
+  if (missingPatches.length > 0) {
+    return missingPatches.map(path =>
+      `${path}: required Openloop process-policy input is missing`)
+  }
+  const patches = patchPaths.flatMap(path => readEntryPatches(join(scanRoot, path)))
+  const profile = applyEntryPatches([], structuredClone(patches), () => {})
+  const errors = nestedEntries(profile)
+    .flatMap(row => processRowViolation(row, 'Openloop profile') ?? [])
+
+  const presetRow = profile.find(row => row.id === 'agent-presets')
+  const config = presetRow?.config as Readonly<Record<string, unknown>> | undefined
+  if (config?.['includeUserRoot'] !== false) {
+    errors.push('Openloop profile: agent preset user root must remain disabled')
+  }
+  const allowed = config?.['allowedPresetIds']
+  if (!Array.isArray(allowed)
+    || allowed.length === 0
+    || allowed.some(id => typeof id !== 'string' || id.length === 0)) {
+    errors.push('Openloop profile: agent presets must declare a non-empty allowedPresetIds list')
+    return errors
+  }
+  if (!allowed.includes(config?.['default'])) {
+    errors.push('Openloop profile: default agent preset must be present in allowedPresetIds')
+  }
+  const presetPatches = config?.['patches']
+  if (!Array.isArray(presetPatches)) {
+    errors.push('Openloop profile: agent presets must declare deployment-owned process patches')
+    return errors
+  }
+
+  for (const id of allowed as string[]) {
+    const path = join(scanRoot, 'apps', 'cli', 'config', 'agent-presets', id, 'agent.cordis.yml')
+    if (!existsSync(path)) {
+      errors.push(`Openloop profile: allowed agent preset ${JSON.stringify(id)} is missing`)
+      continue
+    }
+    const entries = applyEntryPatches(
+      readEntryPatches(path) as EntryOptions[],
+      structuredClone(presetPatches) as PatchOptions[],
+      () => {},
+    )
+    errors.push(...nestedEntries(entries)
+      .flatMap(row => processRowViolation(row, `Openloop preset ${JSON.stringify(id)}`) ?? []))
+  }
+  return errors
+}
+
 const isMain = process.argv[1] !== undefined
   && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 
@@ -1212,6 +1324,7 @@ if (isMain) {
     ...collectDshWorkspaceNamingViolations(root),
     ...collectOpenLoopWorkspaceViolations(root),
     ...collectOpenLoopDshPrivateImportViolations(root),
+    ...collectOpenLoopProcessProfileViolations(root),
   ]
   if (errors.length > 0) {
     console.error(errors.join('\n'))

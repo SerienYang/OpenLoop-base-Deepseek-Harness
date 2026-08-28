@@ -85,6 +85,7 @@ export class AgentPresets extends Service {
   /** Runtime schema for the preset roster. */
   static Config = z.object({
     default: z.string().required(),
+    allowedPresetIds: z.union([z.const(false), z.array(z.string())]).default(false),
     roots: z.array(z.object({
       path: z.string().required(),
       trust: z.union(['system', 'user'] as const).default('user'),
@@ -198,7 +199,12 @@ export class AgentPresets extends Service {
    * @returns the presets, first-root-wins per id.
    */
   async list(): Promise<AgentPreset[]> {
-    return await discoverPresets(this.resolvedRoots)
+    const presets = await discoverPresets(this.resolvedRoots)
+    if (this.config.allowedPresetIds === undefined || this.config.allowedPresetIds === false) {
+      return presets
+    }
+    const allowed = new Set(this.config.allowedPresetIds)
+    return presets.filter(preset => allowed.has(preset.id))
   }
 
   /**

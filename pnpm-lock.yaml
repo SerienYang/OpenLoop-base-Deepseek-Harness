@@ -5637,6 +5637,9 @@ importers:
       '@openloop/runtime-bootstrap':
         specifier: workspace:^
         version: link:../runtime-bootstrap
+      '@openloop/sandbox-workspace':
+        specifier: workspace:^
+        version: link:../sandbox-workspace
       '@openloop/workspace-authority':
         specifier: workspace:*
         version: link:../workspace-authority
@@ -5773,6 +5776,15 @@ importers:
         version: link:../file-broker
 
   packages/openloop/runtime-bootstrap:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-invariants':
+        specifier: workspace:^
+        version: link:../../runtime-diagnostics/invariants
+
+  packages/openloop/sandbox-workspace:
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: workspace:^
@@ -9529,6 +9541,9 @@ importers:
       '@openloop/runtime-bootstrap':
         specifier: workspace:^
         version: link:../../packages/openloop/runtime-bootstrap
+      '@openloop/sandbox-workspace':
+        specifier: workspace:^
+        version: link:../../packages/openloop/sandbox-workspace
       '@openloop/workspace-authority':
         specifier: workspace:^
         version: link:../../packages/openloop/workspace-authority

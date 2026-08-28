@@ -356,6 +356,37 @@ fn browser_safe_and_host_only_dispatch_tables_are_disjoint_and_complete() {
 }
 
 #[test]
+fn workspace_process_native_handler_remains_not_implemented() {
+    let dispatcher = AuthenticatedBridgeDispatcher::new(
+        unsafe { libc::geteuid() },
+        current_process_identity(),
+        current_executable(),
+        Uuid::parse_str(LAUNCH_ID).expect("launch id"),
+        secret(),
+        BridgeDispatchTables::unavailable(),
+    )
+    .expect("authenticated dispatcher");
+    let envelope = sign_request(
+        request("spawnWorkspaceProcess"),
+        sequenced_nonce(41),
+        &secret(),
+    )
+    .expect("signed process request");
+
+    let response = dispatcher
+        .dispatch(current_peer(), envelope)
+        .expect("authenticated response");
+
+    assert!(!response.ok);
+    let error = response.error.expect("fail-closed error");
+    assert_eq!(error.code, "not_implemented");
+    assert_eq!(
+        error.message,
+        "desktop capability is not implemented in this release"
+    );
+}
+
+#[test]
 fn authenticated_cancel_targets_only_the_exact_active_request() {
     let calls = Arc::new(AtomicUsize::new(0));
     let started = Arc::new(std::sync::Barrier::new(2));

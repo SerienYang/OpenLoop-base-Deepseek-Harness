@@ -54,6 +54,8 @@ export interface PresetRoot {
 export interface Config {
   /** Preset id mounted when a caller names none. Missing at mount time fails loud. */
   default: string
+  /** Deployment-owned exact preset ids exposed by this roster; false or omitted exposes every discovered id. */
+  allowedPresetIds?: false | string[]
   /** Scanned roots in precedence order; an earlier root wins a duplicate id. */
   roots: PresetRoot[]
   /**

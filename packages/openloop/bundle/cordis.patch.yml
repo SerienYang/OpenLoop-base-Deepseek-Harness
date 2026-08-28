@@ -9,6 +9,18 @@
   inject: [browserApiPolicy]
 - id: credentials
   disabled: true
+- id: code-runtime
+  disabled: true
+- id: subprocess
+  disabled: true
+- id: bash-sandbox
+  disabled: true
+- id: pwsh-sandbox
+  disabled: true
+- id: tool-bash
+  disabled: true
+- id: tool-pwsh
+  disabled: true
 - id: llm-deepseek
   inject: [llm, credentialConsumers]
 - id: llm-pi-ai
@@ -42,8 +54,46 @@
 - id: agent-presets
   config:
     default: standard
+    allowedPresetIds: [standard, code]
+    includeUserRoot: false
     patches:
+      - id: tool-bash
+        disabled: true
+      - id: tool-pwsh
+        disabled: true
       - id: tool-fs-search
+        disabled: true
+      - id: pty
+        disabled: true
+      - id: terminal-bash
+        disabled: true
+      - id: persistent-bash
+        disabled: true
+      - id: terminal
+        disabled: true
+      - id: tool-terminal
+        disabled: true
+      - id: lsp-stdio
+        disabled: true
+      - id: tool-lsp
+        disabled: true
+      - id: mcp-stdio
+        disabled: true
+      - id: subagent-acp
+        disabled: true
+      - id: subagent-codex
+        disabled: true
+      - id: subagent-claude-code
+        disabled: true
+      - id: subagent-dsh-sdk
+        disabled: true
+      - id: tool-subagent-codex
+        disabled: true
+      - id: tool-subagent-claude-code
+        disabled: true
+      - id: tool-presentation
+        disabled: true
+      - id: tool-cordis
         disabled: true
       - id: filesystem
         isolate: null
@@ -67,6 +117,9 @@
     - id: file-broker
       name: '@openloop/file-broker'
       inject: [desktopBridge]
+- insert:
+    - id: sandbox-workspace
+      name: '@openloop/sandbox-workspace'
 - insert:
     - id: fs-workspace
       name: '@openloop/fs-workspace'

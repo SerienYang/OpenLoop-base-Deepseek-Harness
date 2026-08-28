@@ -31,6 +31,12 @@ Workspace、设置与桌面数据，但不负责持久化或工作流状态。
 它把已登记 Workspace 路径映射为进程内 capability key，并通过 file broker handle
 执行元数据查询、读取、列目录、写入和编辑。
 
+`@openloop/sandbox-workspace` 将本发布版的 Workspace 进程执行能力明确标记为
+`disabled`。Openloop 不注册 `ctx.subprocess`，不提供 path-string fallback，
+禁用本地进程 provider 与模型工具，并且只开放应用同一组进程禁用补丁后的
+`standard` 和 `code` 系统 preset。原生 `spawnWorkspaceProcess` Bridge 方法继续以
+`not_implemented` fail-closed。
+
 通过根命令创建包：
 
 ```sh

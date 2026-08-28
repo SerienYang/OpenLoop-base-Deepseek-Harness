@@ -207,6 +207,20 @@ describe('composing an agent from a preset', () => {
     expect(toolNames(patched, agent)).toEqual([])
   })
 
+  it('limits discovery and resolution to deployment-allowed preset ids', async () => {
+    const restricted = await harness({
+      default: 'standard',
+      roots: ROOTS,
+      includeUserRoot: false,
+      allowedPresetIds: ['standard'],
+    })
+
+    expect((await restricted.agentPresets.list()).map(preset => preset.id))
+      .toEqual(['standard'])
+    await expect(restricted.agentPresets.resolve('minimal'))
+      .rejects.toThrow(/not found.*standard/iu)
+  })
+
   it('lets two sessions share one preset without colliding', async () => {
     const first = await agentOn(ctx, 'sess-first', 'standard')
     const second = await agentOn(ctx, 'sess-second', 'standard')

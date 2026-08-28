@@ -361,6 +361,7 @@ describe('Openloop desktop foundation configuration', () => {
     expect(dependencies.serde_json).toBe('=1.0.151')
     expect(macosDependencies).toEqual({
       block2: '=0.6.2',
+      'core-foundation': '=0.10.1',
       objc2: '=0.6.4',
       'objc2-app-kit': {
         version: '=0.3.2',
@@ -370,7 +371,10 @@ describe('Openloop desktop foundation configuration', () => {
           'NSApplication',
           'NSButton',
           'NSControl',
+          'NSOpenPanel',
+          'NSPanel',
           'NSResponder',
+          'NSSavePanel',
           'NSSecureTextField',
           'NSTextField',
           'NSView',
@@ -380,7 +384,7 @@ describe('Openloop desktop foundation configuration', () => {
       'objc2-foundation': {
         version: '=0.3.2',
         'default-features': false,
-        features: ['NSGeometry', 'NSString', 'NSThread'],
+        features: ['NSArray', 'NSGeometry', 'NSString', 'NSThread', 'NSURL'],
       },
       'security-framework': '=3.7.0',
       'security-framework-sys': '=2.17.0',
@@ -869,7 +873,10 @@ describe('Openloop desktop foundation configuration', () => {
     expect(stringArray(bundle.ignoreDependencies, 'Openloop bundle ignoreDependencies')).toEqual([
       '@deepseek-ai/dsh-base',
       '@deepseek-ai/dsh-web-app',
-      '@openloop/credentials-keychain',
+      '@openloop/file-broker',
+      '@openloop/fs-workspace',
+      '@openloop/sandbox-workspace',
+      '@openloop/workspace-authority',
     ])
     expect(stringArray(adapters.entry, 'Openloop adapters entry')).toEqual([
       'tests/**/*.spec.ts',

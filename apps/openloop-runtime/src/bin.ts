@@ -48,6 +48,8 @@ import {
 import { readLaunchSecretsFromFd, type LaunchSecrets } from './launch-secrets.ts'
 import {
   assertOpenloopProfileSecurity,
+  OPENLOOP_AGENT_PRESET_PATCHES,
+  OPENLOOP_ALLOWED_AGENT_PRESET_IDS,
   validateOpenloopUserPatches,
 } from './profile-policy.ts'
 
@@ -58,11 +60,6 @@ const SHUTDOWN_TIMEOUT_MS = 5_000
 const AGENT_PRESETS_ROW = 'agent-presets'
 const DSH_PACKAGE = '@deepseek-ai/dsh'
 const EMPTY_ROOT = '[]\n'
-const OPENLOOP_AGENT_PRESET_PATCHES: PatchOptions[] = [
-  { id: 'tool-fs-search', disabled: true },
-  { id: 'filesystem', isolate: null },
-  { id: 'fs-local', disabled: true },
-]
 
 /** Exact core bytes and their parsed identity. */
 export interface LoadedCoreManifest {
@@ -334,6 +331,9 @@ function withShippedAgentPresetRoot(
       id: AGENT_PRESETS_ROW,
       config: {
         ...(row.config ?? {}) as Record<string, unknown>,
+        default: 'standard',
+        allowedPresetIds: [...OPENLOOP_ALLOWED_AGENT_PRESET_IDS],
+        includeUserRoot: false,
         patches: structuredClone(OPENLOOP_AGENT_PRESET_PATCHES),
         roots: [{ path: presetRoot, trust: 'system' }],
       },

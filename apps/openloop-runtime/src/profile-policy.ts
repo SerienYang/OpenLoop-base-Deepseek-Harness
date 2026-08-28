@@ -2,6 +2,32 @@ import { isDeepStrictEqual } from 'node:util'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 
+export const OPENLOOP_ALLOWED_AGENT_PRESET_IDS = ['standard', 'code'] as const
+
+export const OPENLOOP_AGENT_PRESET_PATCHES: readonly PatchOptions[] = [
+  { id: 'tool-bash', disabled: true },
+  { id: 'tool-pwsh', disabled: true },
+  { id: 'tool-fs-search', disabled: true },
+  { id: 'pty', disabled: true },
+  { id: 'terminal-bash', disabled: true },
+  { id: 'persistent-bash', disabled: true },
+  { id: 'terminal', disabled: true },
+  { id: 'tool-terminal', disabled: true },
+  { id: 'lsp-stdio', disabled: true },
+  { id: 'tool-lsp', disabled: true },
+  { id: 'mcp-stdio', disabled: true },
+  { id: 'subagent-acp', disabled: true },
+  { id: 'subagent-codex', disabled: true },
+  { id: 'subagent-claude-code', disabled: true },
+  { id: 'subagent-dsh-sdk', disabled: true },
+  { id: 'tool-subagent-codex', disabled: true },
+  { id: 'tool-subagent-claude-code', disabled: true },
+  { id: 'tool-presentation', disabled: true },
+  { id: 'tool-cordis', disabled: true },
+  { id: 'filesystem', isolate: null },
+  { id: 'fs-local', disabled: true },
+]
+
 const PROTECTED_ROW_IDS = new Set([
   'desktop-bridge-host',
   'connection',
@@ -18,20 +44,35 @@ const PROTECTED_ROW_IDS = new Set([
   'openloop-bootstrap',
   'credentials',
   'settings',
+  'code-runtime',
+  'subprocess',
   'sandbox',
   'sandbox-policy',
   'bash-sandbox',
   'pwsh-sandbox',
+  'tool-bash',
+  'tool-pwsh',
   'approval',
   'permission',
   'fs-observation-policy',
   'fs-sandbox',
   'fs-workspace',
+  'sandbox-workspace',
   'tool-fs-search',
+  'agent-presets',
   'session-checkpoint-policy',
 ])
 
 const REQUIRED_WEB_ROWS = ['web-startup', 'webserver', 'web-runtime'] as const
+const DISABLED_PROCESS_ROWS = new Map([
+  ['code-runtime', '@deepseek-ai/dsh-code-runtime-worker-thread'],
+  ['subprocess', '@deepseek-ai/dsh-subprocess-local'],
+  ['bash-sandbox', '@deepseek-ai/dsh-bash-sandbox'],
+  ['pwsh-sandbox', '@deepseek-ai/dsh-pwsh-sandbox'],
+  ['tool-bash', '@deepseek-ai/dsh-tool-bash'],
+  ['tool-pwsh', '@deepseek-ai/dsh-tool-pwsh'],
+  ['tool-fs-search', '@deepseek-ai/dsh-tool-fs-search'],
+])
 
 function rowMap(rows: readonly EntryOptions[], label: string): Map<string, EntryOptions> {
   const result = new Map<string, EntryOptions>()
@@ -161,8 +202,34 @@ export function assertOpenloopProfileSecurity(
   for (const service of ['fileBroker', 'workspaceRegistry', 'sandboxPolicy']) {
     requireInject(workspaceFs, service)
   }
-  if (requireRow(effective, 'tool-fs-search').disabled !== true) {
-    throw new Error('openloop-runtime: process-backed filesystem search must remain disabled')
+  const workspaceProcess = requireRow(effective, 'sandbox-workspace')
+  if (workspaceProcess.name !== '@openloop/sandbox-workspace' || workspaceProcess.disabled === true) {
+    throw new Error('openloop-runtime: disabled Workspace process capability must remain mounted with its signed name')
+  }
+  for (const [id, name] of DISABLED_PROCESS_ROWS) {
+    const row = requireRow(effective, id)
+    if (row.name !== name || row.disabled !== true) {
+      throw new Error(`openloop-runtime: process capability ${JSON.stringify(id)} must remain disabled`)
+    }
+  }
+
+  const presetConfig = requireRow(effective, 'agent-presets').config as
+    | Readonly<Record<string, unknown>>
+    | undefined
+  if (presetConfig === undefined
+    || presetConfig['includeUserRoot'] !== false
+    || !isDeepStrictEqual(presetConfig['allowedPresetIds'], OPENLOOP_ALLOWED_AGENT_PRESET_IDS)
+    || !isDeepStrictEqual(presetConfig['patches'], OPENLOOP_AGENT_PRESET_PATCHES)) {
+    throw new Error('openloop-runtime: agent preset process restrictions must remain locked')
+  }
+  const roots = presetConfig['roots']
+  if (!Array.isArray(roots)
+    || roots.length !== 1
+    || typeof roots[0] !== 'object'
+    || roots[0] === null
+    || (roots[0] as Record<string, unknown>)['trust'] !== 'system'
+    || typeof (roots[0] as Record<string, unknown>)['path'] !== 'string') {
+    throw new Error('openloop-runtime: agent presets must use only the pinned system root')
   }
 
   for (const id of ['cordis-client-runner', 'ui-cordis']) {

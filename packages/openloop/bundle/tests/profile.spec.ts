@@ -187,12 +187,70 @@ describe('OpenLoop profile', () => {
     })
     expect(entries.find(entry => entry.id === 'agent-presets')?.config).toMatchObject({
       default: 'standard',
+      allowedPresetIds: ['standard', 'code'],
+      includeUserRoot: false,
       patches: [
+        { id: 'tool-bash', disabled: true },
+        { id: 'tool-pwsh', disabled: true },
         { id: 'tool-fs-search', disabled: true },
+        { id: 'pty', disabled: true },
+        { id: 'terminal-bash', disabled: true },
+        { id: 'persistent-bash', disabled: true },
+        { id: 'terminal', disabled: true },
+        { id: 'tool-terminal', disabled: true },
+        { id: 'lsp-stdio', disabled: true },
+        { id: 'tool-lsp', disabled: true },
+        { id: 'mcp-stdio', disabled: true },
+        { id: 'subagent-acp', disabled: true },
+        { id: 'subagent-codex', disabled: true },
+        { id: 'subagent-claude-code', disabled: true },
+        { id: 'subagent-dsh-sdk', disabled: true },
+        { id: 'tool-subagent-codex', disabled: true },
+        { id: 'tool-subagent-claude-code', disabled: true },
+        { id: 'tool-presentation', disabled: true },
+        { id: 'tool-cordis', disabled: true },
         { id: 'filesystem', isolate: null },
         { id: 'fs-local', disabled: true },
       ],
     })
+  })
+
+  it('makes every signed Host process capability unreachable', () => {
+    const entries = openloopEntries()
+    const disabled = [
+      ['code-runtime', '@deepseek-ai/dsh-code-runtime-worker-thread'],
+      ['subprocess', '@deepseek-ai/dsh-subprocess-local'],
+      ['bash-sandbox', '@deepseek-ai/dsh-bash-sandbox'],
+      ['pwsh-sandbox', '@deepseek-ai/dsh-pwsh-sandbox'],
+      ['tool-bash', '@deepseek-ai/dsh-tool-bash'],
+      ['tool-pwsh', '@deepseek-ai/dsh-tool-pwsh'],
+      ['tool-fs-search', '@deepseek-ai/dsh-tool-fs-search'],
+    ] as const
+
+    for (const [id, name] of disabled) {
+      expect(entries.find(entry => entry.id === id)).toMatchObject({
+        id,
+        name,
+        disabled: true,
+      })
+    }
+    expect(entries.find(entry => entry.id === 'sandbox-workspace')).toEqual({
+      id: 'sandbox-workspace',
+      name: '@openloop/sandbox-workspace',
+    })
+    for (const id of [
+      'terminal',
+      'tool-terminal',
+      'lsp-stdio',
+      'tool-lsp',
+      'mcp-stdio',
+      'subagent-acp',
+      'subagent-codex',
+      'subagent-claude-code',
+      'subagent-dsh-sdk',
+    ]) {
+      expect(entries.find(entry => entry.id === id)).toBeUndefined()
+    }
   })
 
   it('replaces only the Openloop credential provider and wires built-in consumers to its registry', () => {
@@ -300,6 +358,9 @@ describe('OpenLoop profile', () => {
     const defaultSearch = entries.find(entry => entry.id === 'tool-fs-search')
     expect(defaultSearch?.name).toBe('@deepseek-ai/dsh-tool-fs-search')
     expect(defaultSearch?.disabled).toBe(true)
+    expect(entries.find(entry => entry.id === 'subprocess')?.disabled).not.toBe(true)
+    expect(entries.find(entry => entry.id === 'bash-sandbox')?.disabled).not.toBe(true)
+    expect(entries.find(entry => entry.id === 'sandbox-workspace')).toBeUndefined()
   })
 
   it('initializes the OpenLoop profile once with the official bundle order', () => {
@@ -511,6 +572,7 @@ describe('OpenLoop profile', () => {
         '@deepseek-ai/dsh-base': 'workspace:^',
         '@deepseek-ai/dsh-web-app': 'workspace:^',
         '@openloop/runtime-bootstrap': 'workspace:^',
+        '@openloop/sandbox-workspace': 'workspace:^',
       },
       dsh: { bundle: { patch: './cordis.patch.yml' } },
       exports: {

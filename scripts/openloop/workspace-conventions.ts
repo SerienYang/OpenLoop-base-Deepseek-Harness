@@ -260,13 +260,25 @@ export function collectDshWorkspaceNamingViolations(root: string): string[] {
   return errors
 }
 
-const fsWorkspaceForbiddenModules = new Set([
+const workspaceExecutionForbiddenModules = new Set([
   'fs',
   'fs/promises',
   'child_process',
   'node:fs',
   'node:fs/promises',
   'node:child_process',
+  'node-pty',
+])
+
+const unapprovedOpenLoopProcessProviders = new Set([
+  '@deepseek-ai/dsh-mcp-client',
+  '@deepseek-ai/dsh-subagent-acp',
+  '@deepseek-ai/dsh-subagent-claude-code',
+  '@deepseek-ai/dsh-subagent-codex',
+  '@deepseek-ai/dsh-subagent-dsh-sdk',
+  '@deepseek-ai/dsh-subprocess-local',
+  '@deepseek-ai/dsh-terminal-bash',
+  '@deepseek-ai/dsh-lsp-stdio',
 ])
 
 function sourceFiles(directory: string): string[] {
@@ -314,14 +326,40 @@ function importedModules(path: string): ReadonlyArray<{ value: string; line: num
   return imports
 }
 
-function fsWorkspaceBoundaryViolations(root: string): string[] {
-  const packageRoot = join(root, 'packages', 'openloop', 'fs-workspace')
-  return sourceFiles(join(packageRoot, 'src')).flatMap(path =>
-    importedModules(path)
-      .filter(entry => fsWorkspaceForbiddenModules.has(entry.value))
+function workspaceExecutionBoundaryViolations(root: string): string[] {
+  const boundaries = [
+    {
+      packageDirectory: 'fs-workspace',
+      message: (specifier: string) =>
+        `@openloop/fs-workspace must use the Workspace file broker instead of ${specifier}`,
+    },
+    {
+      packageDirectory: 'sandbox-workspace',
+      message: (specifier: string) =>
+        `@openloop/sandbox-workspace must not implement process execution through ${specifier}`,
+    },
+  ] as const
+  return boundaries.flatMap(boundary =>
+    sourceFiles(join(root, 'packages', 'openloop', boundary.packageDirectory, 'src'))
+      .flatMap(path => importedModules(path)
+        .filter(entry => workspaceExecutionForbiddenModules.has(entry.value))
+        .map(entry =>
+          `${relative(root, path).split(sep).join('/')}:${String(entry.line)}: `
+          + boundary.message(entry.value))))
+}
+
+function unapprovedProcessProviderViolations(root: string): string[] {
+  const packagesRoot = join(root, 'packages', 'openloop')
+  if (!existsSync(packagesRoot)) return []
+  return readdirSync(packagesRoot, { withFileTypes: true })
+    .filter(entry => entry.isDirectory())
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .flatMap(entry => sourceFiles(join(packagesRoot, entry.name, 'src')))
+    .flatMap(path => importedModules(path)
+      .filter(entry => unapprovedOpenLoopProcessProviders.has(entry.value))
       .map(entry =>
         `${relative(root, path).split(sep).join('/')}:${String(entry.line)}: `
-        + `@openloop/fs-workspace must use the Workspace file broker instead of ${entry.value}`))
+        + `Openloop code must not import unapproved process provider ${JSON.stringify(entry.value)}`))
 }
 
 /**
@@ -405,6 +443,7 @@ export function collectOpenLoopWorkspaceViolations(root: string): string[] {
     }
   }
 
-  errors.push(...fsWorkspaceBoundaryViolations(root))
+  errors.push(...workspaceExecutionBoundaryViolations(root))
+  errors.push(...unapprovedProcessProviderViolations(root))
   return errors
 }

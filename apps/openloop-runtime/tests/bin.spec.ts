@@ -34,7 +34,19 @@ function temporaryDirectory(label: string): string {
 function fakeDependencies(events: string[], output: string[]): RuntimeDependencies {
   const processEvents = new EventEmitter()
   const profileDir = join(temporaryDirectory('fake'), 'profiles/openloop')
+  const installation = temporaryDirectory('fake-installation')
+  const installAnchor = join(installation, 'node_modules/@openloop/runtime/package.json')
+  const presetRoot = join(
+    installation,
+    'node_modules/@deepseek-ai/dsh/config/agent-presets',
+  )
   mkdirSync(profileDir, { recursive: true })
+  mkdirSync(join(presetRoot, 'standard'), { recursive: true })
+  writeFileSync(join(presetRoot, 'standard/agent.cordis.yml'), '[]\n')
+  writeFileSync(
+    join(installation, 'node_modules/@deepseek-ai/dsh/package.json'),
+    '{"name":"@deepseek-ai/dsh"}\n',
+  )
   const services = new Map<string, unknown>()
   const loader = {
     create: async ({ name, config }: { name: string; config?: { base?: string; root?: string[] } }) => {
@@ -71,7 +83,7 @@ function fakeDependencies(events: string[], output: string[]): RuntimeDependenci
       stdout: { write: (line: string) => { output.push(line); return true } },
       stderr: { write: vi.fn(() => true) },
     }),
-    installAnchor: '/runtime/package.json',
+    installAnchor,
     moduleBaseUrl: 'file:///runtime/lib/bin.js',
     coreManifestPath: '/runtime/openloop-core.json',
     loadCoreManifest: () => ({
@@ -124,9 +136,49 @@ function fakeDependencies(events: string[], output: string[]): RuntimeDependenci
                 disabled: true,
               },
               {
+                id: 'subprocess',
+                name: '@deepseek-ai/dsh-subprocess-local',
+                disabled: true,
+              },
+              {
+                id: 'code-runtime',
+                name: '@deepseek-ai/dsh-code-runtime-worker-thread',
+                disabled: true,
+              },
+              {
+                id: 'bash-sandbox',
+                name: '@deepseek-ai/dsh-bash-sandbox',
+                disabled: true,
+              },
+              {
+                id: 'pwsh-sandbox',
+                name: '@deepseek-ai/dsh-pwsh-sandbox',
+                disabled: true,
+              },
+              {
+                id: 'tool-bash',
+                name: '@deepseek-ai/dsh-tool-bash',
+                disabled: true,
+              },
+              {
+                id: 'tool-pwsh',
+                name: '@deepseek-ai/dsh-tool-pwsh',
+                disabled: true,
+              },
+              {
                 id: 'tool-fs-search',
                 name: '@deepseek-ai/dsh-tool-fs-search',
                 disabled: true,
+              },
+              {
+                id: 'agent-presets',
+                name: '@deepseek-ai/dsh-agent-presets',
+                config: {
+                  default: 'standard',
+                  allowedPresetIds: ['standard', 'code'],
+                  includeUserRoot: false,
+                  patches: [],
+                },
               },
             ],
           }],
@@ -157,6 +209,10 @@ function fakeDependencies(events: string[], output: string[]): RuntimeDependenci
                 id: 'fs-workspace',
                 name: '@openloop/fs-workspace',
                 inject: ['fileBroker', 'workspaceRegistry', 'sandboxPolicy'],
+              },
+              {
+                id: 'sandbox-workspace',
+                name: '@openloop/sandbox-workspace',
               },
             ],
           }],
@@ -208,6 +264,17 @@ const MALICIOUS_USER_PATCHES: ReadonlyArray<readonly [string, PatchOptions[]]> =
     insert: [{ id: 'third-party-client', name: '@attacker/client' }],
   }]],
   ['re-enable the dynamic Client runner', [{ id: 'cordis-client-runner', disabled: false }]],
+  ['re-enable the code runtime', [{ id: 'code-runtime', disabled: false }]],
+  ['re-enable the subprocess provider', [{ id: 'subprocess', disabled: false }]],
+  ['replace the locked preset policy', [{
+    id: 'agent-presets',
+    config: {
+      default: 'cordis',
+      includeUserRoot: true,
+      patches: [],
+      roots: [{ path: '/tmp/attacker-presets', trust: 'user' }],
+    },
+  }]],
   ['target an unknown row', [{ id: 'not-in-signed-profile', config: { enabled: true } }]],
   ['change config on a protected row', [{ id: 'connection', config: { trustedHosts: ['attacker'] } }]],
 ]
@@ -367,28 +434,6 @@ describe('Openloop runtime launcher', () => {
       '{"name":"@deepseek-ai/dsh"}\n',
     )
     dependencies.installAnchor = installAnchor
-    const loadProfile = dependencies.loadProfile.bind(dependencies)
-    dependencies.loadProfile = (...args) => {
-      const profile = loadProfile(...args)
-      return {
-        ...profile,
-        layers: profile.layers.map(layer => layer.packageName === '@openloop/bundle'
-          ? {
-            ...layer,
-            patches: [
-              ...layer.patches,
-              {
-                insert: [{
-                  id: 'agent-presets',
-                  name: '@deepseek-ai/dsh-agent-presets',
-                  config: { default: 'standard', includeUserRoot: true },
-                }],
-              },
-            ],
-          }
-          : layer),
-      }
-    }
 
     let bootPatches: unknown[] = []
     const boot = dependencies.boot.bind(dependencies)
@@ -398,14 +443,9 @@ describe('Openloop runtime launcher', () => {
     }
     let livePatches: unknown[] = []
     dependencies.watchUserPatches = async (_ctx, options) => {
-      livePatches = options.compose?.([{
-        id: 'agent-presets',
-        config: {
-          default: 'minimal',
-          includeUserRoot: false,
-          patches: [{ id: 'tool-fs-search', disabled: false }],
-        },
-      }]) ?? []
+      livePatches = options.compose?.([
+        { id: 'bundle', config: { hmr: true } },
+      ]) ?? []
       return async () => {}
     }
 
@@ -420,9 +460,28 @@ describe('Openloop runtime launcher', () => {
       id: 'agent-presets',
       config: {
         default: 'standard',
-        includeUserRoot: true,
+        allowedPresetIds: ['standard', 'code'],
+        includeUserRoot: false,
         patches: [
+          { id: 'tool-bash', disabled: true },
+          { id: 'tool-pwsh', disabled: true },
           { id: 'tool-fs-search', disabled: true },
+          { id: 'pty', disabled: true },
+          { id: 'terminal-bash', disabled: true },
+          { id: 'persistent-bash', disabled: true },
+          { id: 'terminal', disabled: true },
+          { id: 'tool-terminal', disabled: true },
+          { id: 'lsp-stdio', disabled: true },
+          { id: 'tool-lsp', disabled: true },
+          { id: 'mcp-stdio', disabled: true },
+          { id: 'subagent-acp', disabled: true },
+          { id: 'subagent-codex', disabled: true },
+          { id: 'subagent-claude-code', disabled: true },
+          { id: 'subagent-dsh-sdk', disabled: true },
+          { id: 'tool-subagent-codex', disabled: true },
+          { id: 'tool-subagent-claude-code', disabled: true },
+          { id: 'tool-presentation', disabled: true },
+          { id: 'tool-cordis', disabled: true },
           { id: 'filesystem', isolate: null },
           { id: 'fs-local', disabled: true },
         ],
@@ -432,10 +491,29 @@ describe('Openloop runtime launcher', () => {
     expect(livePatches.at(-1)).toEqual({
       id: 'agent-presets',
       config: {
-        default: 'minimal',
+        default: 'standard',
+        allowedPresetIds: ['standard', 'code'],
         includeUserRoot: false,
         patches: [
+          { id: 'tool-bash', disabled: true },
+          { id: 'tool-pwsh', disabled: true },
           { id: 'tool-fs-search', disabled: true },
+          { id: 'pty', disabled: true },
+          { id: 'terminal-bash', disabled: true },
+          { id: 'persistent-bash', disabled: true },
+          { id: 'terminal', disabled: true },
+          { id: 'tool-terminal', disabled: true },
+          { id: 'lsp-stdio', disabled: true },
+          { id: 'tool-lsp', disabled: true },
+          { id: 'mcp-stdio', disabled: true },
+          { id: 'subagent-acp', disabled: true },
+          { id: 'subagent-codex', disabled: true },
+          { id: 'subagent-claude-code', disabled: true },
+          { id: 'subagent-dsh-sdk', disabled: true },
+          { id: 'tool-subagent-codex', disabled: true },
+          { id: 'tool-subagent-claude-code', disabled: true },
+          { id: 'tool-presentation', disabled: true },
+          { id: 'tool-cordis', disabled: true },
           { id: 'filesystem', isolate: null },
           { id: 'fs-local', disabled: true },
         ],

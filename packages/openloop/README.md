@@ -45,6 +45,13 @@ handles.
 It maps registered Workspace paths to process-local capability keys and routes
 metadata, reads, listings, writes, and edits through file-broker handles.
 
+`@openloop/sandbox-workspace` records Workspace process execution as
+`disabled` for this release. Openloop registers no `ctx.subprocess`, offers no
+path-string fallback, disables local process providers and model tools, and
+exposes only the `standard` and `code` system presets after applying the same
+process-denial patches. The native `spawnWorkspaceProcess` bridge method
+continues to fail closed with `not_implemented`.
+
 Create packages through the root command:
 
 ```sh

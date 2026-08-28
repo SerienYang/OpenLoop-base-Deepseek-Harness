@@ -794,7 +794,11 @@
     "packages/openloop/bundle": {
       "ignoreDependencies": [
         "@deepseek-ai/dsh-base",
-        "@deepseek-ai/dsh-web-app"
+        "@deepseek-ai/dsh-web-app",
+        "@openloop/file-broker",
+        "@openloop/fs-workspace",
+        "@openloop/sandbox-workspace",
+        "@openloop/workspace-authority"
       ]
     },
     "packages/openloop/desktop-bridge-host": {

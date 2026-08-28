@@ -207,6 +207,7 @@
     "@openloop/fs-workspace": "workspace:^",
     "@openloop/runtime": "workspace:^",
     "@openloop/runtime-bootstrap": "workspace:^",
+    "@openloop/sandbox-workspace": "workspace:^",
     "@openloop/workspace-authority": "workspace:^"
   }
 }
