@@ -70,6 +70,19 @@ function isMatchingGrant(
     && grant.status === status
 }
 
+function isOriginalUnfrozenGrant(
+  transaction: WorkspaceTransaction,
+  grant: WorkspaceGrantRecoveryState,
+  currentGrantGeneration: number,
+): boolean {
+  return grant.exists
+    && grant.generation === transaction.expectedGrantGeneration
+    && currentGrantGeneration === transaction.expectedGrantGeneration
+    && grant.status !== undefined
+    && grant.status !== 'revoking'
+    && grant.status !== 'reauthorizing'
+}
+
 function versionOf(transaction: WorkspaceTransaction): TransactionVersion {
   return {
     operationId: transaction.operationId,
@@ -145,10 +158,6 @@ export async function recoverWorkspaceTransaction(
         await advanceAndComplete(port, registryDeleted, 'grant-deleted')
         return 'completed'
       }
-      const isOriginalReady = grant.exists
-        && grant.generation === transaction.expectedGrantGeneration
-        && currentGrantGeneration === transaction.expectedGrantGeneration
-        && grant.status === 'ready'
       const isOwnedFreeze = isMatchingGrant(
         transaction,
         grant,
@@ -161,20 +170,32 @@ export async function recoverWorkspaceTransaction(
         await port.abortTransaction(versionOf(transaction))
         return 'rolled-back'
       }
-      if (!isOriginalReady && !isOwnedFreeze) return 'stale-generation'
-      if (grant.identityValid) {
-        if (grant.status !== 'ready') {
+      const isOriginalUnfrozen = isOriginalUnfrozenGrant(
+        transaction,
+        grant,
+        currentGrantGeneration,
+      )
+      if (!isOriginalUnfrozen && !isOwnedFreeze) {
+        return 'stale-generation'
+      }
+      if (isOwnedFreeze) {
+        if (grant.identityValid) {
           await port.restoreGrantReady(
             workspaceId,
             grantGeneration(workspaceId, grant),
             transaction.operationId,
           )
+        } else {
+          await port.markNeedsAuthorization(
+            workspaceId,
+            grantGeneration(workspaceId, grant),
+            transaction.operationId,
+          )
         }
-      } else {
+      } else if (!grant.identityValid) {
         await port.markNeedsAuthorization(
           workspaceId,
-          grant.exists ? grantGeneration(workspaceId, grant) : undefined,
-          transaction.operationId,
+          grantGeneration(workspaceId, grant),
         )
       }
       await port.abortTransaction(versionOf(transaction))
@@ -228,30 +249,38 @@ export async function recoverWorkspaceTransaction(
         await advanceAndComplete(port, versionOf(transaction), 'grant-committed')
         return 'completed'
       }
-      const isOriginalReady = grant.exists
-        && grant.generation === transaction.expectedGrantGeneration
-        && currentGrantGeneration === transaction.expectedGrantGeneration
-        && grant.status === 'ready'
       const isOwnedFreeze = isMatchingGrant(
         transaction,
         grant,
         transaction.expectedGrantGeneration + 1,
         'reauthorizing',
       )
-      if (!isOriginalReady && !isOwnedFreeze) return 'stale-generation'
-      if (grant.identityValid) {
-        if (grant.status !== 'ready') {
+      const isOriginalUnfrozen = isOriginalUnfrozenGrant(
+        transaction,
+        grant,
+        currentGrantGeneration,
+      )
+      if (!isOriginalUnfrozen && !isOwnedFreeze) {
+        return 'stale-generation'
+      }
+      if (isOwnedFreeze) {
+        if (grant.identityValid) {
           await port.restoreGrantReady(
             workspaceId,
             grantGeneration(workspaceId, grant),
             transaction.operationId,
           )
+        } else {
+          await port.markNeedsAuthorization(
+            workspaceId,
+            grantGeneration(workspaceId, grant),
+            transaction.operationId,
+          )
         }
-      } else {
+      } else if (!grant.identityValid) {
         await port.markNeedsAuthorization(
           workspaceId,
-          grant.exists ? grantGeneration(workspaceId, grant) : undefined,
-          transaction.operationId,
+          grantGeneration(workspaceId, grant),
         )
       }
       await port.abortTransaction(versionOf(transaction))

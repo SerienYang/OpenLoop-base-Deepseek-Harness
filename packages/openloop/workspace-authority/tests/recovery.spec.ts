@@ -170,6 +170,66 @@ describe('Workspace transaction recovery', () => {
       .toHaveBeenCalledWith('workspace-1', 2, 'operation-1')
   })
 
+  it.each([
+    ['revoke', 'revoke-prepared'],
+    ['reauthorize', 'reauthorize-prepared'],
+  ] as const)('preserves an identity-valid stable grant before the %s freeze', async (
+    kind,
+    stage,
+  ) => {
+    const value = port({
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 1,
+        operationId: 'prior-operation',
+        identityValid: true,
+        status: 'permission-denied' as const,
+      })),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction(kind, stage),
+      value,
+    )).resolves.toBe('rolled-back')
+    expect(value.restoreGrantReady).not.toHaveBeenCalled()
+    expect(value.markNeedsAuthorization).not.toHaveBeenCalled()
+    expect(value.abortTransaction).toHaveBeenCalledWith({
+      operationId: 'operation-1',
+      generation: 1,
+      stage,
+    })
+  })
+
+  it.each([
+    ['revoke', 'revoke-prepared'],
+    ['reauthorize', 'reauthorize-prepared'],
+  ] as const)('marks an identity-invalid unfrozen grant without claiming the %s operation', async (
+    kind,
+    stage,
+  ) => {
+    const value = port({
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 1,
+        operationId: 'prior-operation',
+        identityValid: false,
+        status: 'ready' as const,
+      })),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction(kind, stage),
+      value,
+    )).resolves.toBe('rolled-back')
+    expect(value.restoreGrantReady).not.toHaveBeenCalled()
+    expect(value.markNeedsAuthorization).toHaveBeenCalledWith('workspace-1', 1)
+    expect(value.abortTransaction).toHaveBeenCalledWith({
+      operationId: 'operation-1',
+      generation: 1,
+      stage,
+    })
+  })
+
   it('finishes grant deletion after registry-deleted', async () => {
     const value = port({
       catalogGeneration: vi.fn(async () => 2),
