@@ -248,7 +248,6 @@ describe('WorkspaceAuthority', () => {
         exists: true,
         generation: expectedGeneration + 1,
         operationId,
-        identityValid: true,
         status: 'ready',
       })
       throw new Error(`response lost for ${workspaceId}`)
