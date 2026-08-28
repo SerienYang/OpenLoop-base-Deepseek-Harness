@@ -67,7 +67,7 @@ function manifest() {
     payloadRules: {
       'session.create': {
         required: ['workspaceId'],
-        optional: ['sessionId', 'agentPreset'],
+        optional: ['agentPreset'],
       },
     },
     transportRoutes: [
@@ -713,9 +713,12 @@ describe('OpenLoop browser API policy', () => {
     expect(policy.allows('session.create', { workspaceId: 'workspace-1' })).toBe(true)
     expect(policy.allows('session.create', {
       workspaceId: 'workspace-1',
-      sessionId: 'session-1',
       agentPreset: 'standard',
     })).toBe(true)
+    expect(policy.allows('session.create', {
+      workspaceId: 'workspace-1',
+      sessionId: 'session-1',
+    })).toBe(false)
     expect(policy.allows('session.create', inheritedWorkspace)).toBe(false)
     expect(policy.allows('session.create', symbolField)).toBe(false)
     expect(policy.allows('session.create', {})).toBe(false)

@@ -51,7 +51,6 @@
         "workspaceId"
       ],
       "optional": [
-        "sessionId",
         "agentPreset"
       ]
     }

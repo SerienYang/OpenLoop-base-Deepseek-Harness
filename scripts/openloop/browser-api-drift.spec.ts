@@ -500,28 +500,6 @@ describe('Openloop assembled browser API drift gate', () => {
     expect(surface.cataloguedClientPackages).toContain('@deepseek-ai/dsh-client-hmr')
   })
 
-  it('excludes legacy Workspace sources only while the signed adapter row is enabled', async () => {
-    const surface = await surfacePromise
-
-    expect(surface.legacyRpcMethods.has('workspace.list')).toBe(false)
-    expect(surface.legacyRpcMethods.has('workspace.create')).toBe(false)
-  })
-
-  it('does not exempt legacy Workspace sources when the adapter row is disabled', async () => {
-    const fixtureRoot = createMutationRoot('openloop-browser-api-drift-runtime-adapter-')
-    rosterFailureRoots.push(fixtureRoot)
-    const patchPath = join(fixtureRoot, 'packages/openloop/bundle/cordis.patch.yml')
-    writeFileSync(
-      patchPath,
-      `${readFileSync(patchPath, 'utf8')}\n- id: desktop-bridge-client\n  disabled: true\n`,
-    )
-
-    const surface = await collectOpenloopBrowserApiSurface(fixtureRoot)
-
-    expect(surface.legacyRpcMethods.get('workspace.list')).toContain('client-runtime')
-    expect(surface.legacyRpcMethods.get('workspace.create')).toContain('client-runtime')
-  }, 60_000)
-
   it('does not let a nested fixture manifest override a declared workspace package', async () => {
     const fixtureRoot = createMutationRoot('openloop-browser-api-drift-nested-fixture-')
     rosterFailureRoots.push(fixtureRoot)

@@ -15,7 +15,7 @@ legacy payload 分派、Typert descriptor 或 receiver 查找、HTTP transport �
 对象和 WebSocket downlink 都会读取同一个实时 service，并在业务执行前检查。仅按
 target 的预检会在 HTTP bridge 缓冲请求体前拒绝方法；获准的方法在解码后仍需通过
 payload 检查。`session.create` 必须具有 own `workspaceId`，且只能额外携带可选的
-`sessionId` 和 `agentPreset`。未知方法、endpoint、路由、manifest 字段及重复条目
+`agentPreset`。未知方法、endpoint、路由、manifest 字段及重复条目
 都会被拒绝。所有 legacy credential 方法（包括 `credentials.describe`）均不在
 浏览器 allowlist 中。
 

@@ -18,7 +18,7 @@ descriptor or receiver lookup, HTTP transport objects, and WebSocket
 downlinks. Its target-only preflight rejects a method before the HTTP bridge
 buffers its body; admitted methods still pass the payload-aware check after
 decoding. `session.create` requires an own `workspaceId` and permits only the
-optional `sessionId` and `agentPreset` fields. Unknown methods, endpoints,
+optional `agentPreset` field. Unknown methods, endpoints,
 routes, manifest fields, and duplicate entries are rejected. All legacy
 credential methods, including `credentials.describe`, remain outside the
 browser allowlist.
