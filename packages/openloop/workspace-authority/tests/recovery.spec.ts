@@ -50,6 +50,22 @@ function port(overrides: Partial<WorkspaceRecoveryPort> = {}): WorkspaceRecovery
   }
 }
 
+function portAfterCommittedCatalogDeletion(
+  overrides: Partial<WorkspaceRecoveryPort> = {},
+): WorkspaceRecoveryPort {
+  let catalogGeneration = 1
+  const workspaces = new Set(['workspace-1'])
+  const deleteWorkspace = (workspaceId: string) => {
+    if (workspaces.delete(workspaceId)) catalogGeneration += 1
+  }
+  deleteWorkspace('workspace-1')
+  return port({
+    catalogGeneration: vi.fn(async () => catalogGeneration),
+    workspaceExists: vi.fn(async (workspaceId: string) => workspaces.has(workspaceId)),
+    ...overrides,
+  })
+}
+
 describe('Workspace transaction recovery', () => {
   it('has no action when no durable transaction exists', async () => {
     const value = port()
@@ -461,6 +477,100 @@ describe('Workspace transaction recovery', () => {
     }, 'grant-committed')
   })
 
+  it.each([
+    'prepared',
+    'registry-committed',
+  ] as const)('reuses an identity-valid ready grant for a duplicate-path add at %s', async (stage) => {
+    const value = port({
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 1,
+        operationId: 'prior-operation',
+        identityValid: true,
+        status: 'ready' as const,
+      })),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('add', stage),
+      value,
+    )).resolves.toBe('completed')
+    expect(value.markNeedsAuthorization).not.toHaveBeenCalled()
+    expect(value.advanceTransaction).toHaveBeenLastCalledWith({
+      operationId: 'operation-1',
+      generation: stage === 'prepared' ? 2 : 1,
+      stage: 'registry-committed',
+    }, 'grant-committed')
+    expect(value.completeTransaction).toHaveBeenCalledWith({
+      operationId: 'operation-1',
+      generation: stage === 'prepared' ? 3 : 2,
+      stage: 'grant-committed',
+    })
+  })
+
+  it('marks a duplicate-path add needs-authorization when its old ready grant is invalid', async () => {
+    const value = port({
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 1,
+        operationId: 'prior-operation',
+        identityValid: false,
+        status: 'ready' as const,
+      })),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('add', 'registry-committed'),
+      value,
+    )).resolves.toBe('needs-authorization')
+    expect(value.markNeedsAuthorization).toHaveBeenCalledWith('workspace-1', 1)
+    expect(value.advanceTransaction).toHaveBeenCalledWith({
+      operationId: 'operation-1',
+      generation: 1,
+      stage: 'registry-committed',
+    }, 'authorization-failed')
+  })
+
+  it('rejects a duplicate-path grant when the grant store generation drifted', async () => {
+    const value = port({
+      grantGeneration: vi.fn(async () => 2),
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 1,
+        operationId: 'prior-operation',
+        identityValid: true,
+        status: 'ready' as const,
+      })),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('add', 'registry-committed'),
+      value,
+    )).resolves.toBe('stale-generation')
+    expect(value.advanceTransaction).not.toHaveBeenCalled()
+    expect(value.completeTransaction).not.toHaveBeenCalled()
+  })
+
+  it('rejects a matching new add grant when the grant store generation drifted', async () => {
+    const value = port({
+      grantGeneration: vi.fn(async () => 3),
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 2,
+        operationId: 'operation-1',
+        identityValid: true,
+        status: 'ready' as const,
+      })),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('add', 'registry-committed'),
+      value,
+    )).resolves.toBe('stale-generation')
+    expect(value.advanceTransaction).not.toHaveBeenCalled()
+    expect(value.completeTransaction).not.toHaveBeenCalled()
+  })
+
   it('rejects a grant from another operation instead of guessing across the crash window', async () => {
     const value = port({
       grantGeneration: vi.fn(async () => 2),
@@ -495,14 +605,85 @@ describe('Workspace transaction recovery', () => {
     })
   })
 
-  it('discards pending state and never recreates a concurrently deleted workspace', async () => {
-    const value = port({ workspaceExists: vi.fn(async () => false) })
+  it('deletes an unfrozen orphan grant after a concurrent catalog deletion', async () => {
+    const value = portAfterCommittedCatalogDeletion({
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 1,
+        operationId: 'prior-operation',
+        identityValid: true,
+        status: 'ready' as const,
+      })),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('reauthorize', 'reauthorize-prepared'),
+      value,
+    )).resolves.toBe('rolled-back')
+    expect(value.discardPendingGrant).toHaveBeenCalledWith('operation-1')
+    expect(value.deleteGrant).toHaveBeenCalledWith('workspace-1', 1)
+    expect(value.restoreGrantReady).not.toHaveBeenCalled()
+    expect(value.abortTransaction).toHaveBeenCalledWith({
+      operationId: 'operation-1',
+      generation: 1,
+      stage: 'reauthorize-prepared',
+    })
+  })
+
+  it('deletes its owned reauthorizing freeze after a concurrent catalog deletion', async () => {
+    const value = portAfterCommittedCatalogDeletion({
+      grantGeneration: vi.fn(async () => 2),
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 2,
+        operationId: 'operation-1',
+        identityValid: true,
+        status: 'reauthorizing' as const,
+      })),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('reauthorize', 'reauthorize-prepared'),
+      value,
+    )).resolves.toBe('rolled-back')
+    expect(value.deleteGrant).toHaveBeenCalledWith('workspace-1', 2, 'operation-1')
+    expect(value.abortTransaction).toHaveBeenCalled()
+  })
+
+  it('rejects an owned reauthorizing freeze after grant generation drift', async () => {
+    const value = portAfterCommittedCatalogDeletion({
+      grantGeneration: vi.fn(async () => 3),
+      inspectGrant: vi.fn(async () => ({
+        exists: true,
+        generation: 2,
+        operationId: 'operation-1',
+        identityValid: true,
+        status: 'reauthorizing' as const,
+      })),
+    })
+
     await expect(recoverWorkspaceTransaction(
       transaction('reauthorize', 'reauthorize-prepared'),
       value,
     )).resolves.toBe('stale-generation')
-    expect(value.discardPendingGrant).toHaveBeenCalledWith('operation-1')
-    expect(value.restoreGrantReady).not.toHaveBeenCalled()
+    expect(value.deleteGrant).not.toHaveBeenCalled()
+    expect(value.abortTransaction).not.toHaveBeenCalled()
+  })
+
+  it('settles reauthorization when its frozen grant was already deleted concurrently', async () => {
+    const value = portAfterCommittedCatalogDeletion({
+      grantGeneration: vi.fn(async () => 3),
+      inspectGrant: vi.fn(async () => ({
+        exists: false,
+        identityValid: false,
+      })),
+    })
+
+    await expect(recoverWorkspaceTransaction(
+      transaction('reauthorize', 'reauthorize-prepared'),
+      value,
+    )).resolves.toBe('rolled-back')
+    expect(value.deleteGrant).not.toHaveBeenCalled()
     expect(value.abortTransaction).toHaveBeenCalled()
   })
 

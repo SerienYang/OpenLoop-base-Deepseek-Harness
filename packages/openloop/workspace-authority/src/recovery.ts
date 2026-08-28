@@ -31,7 +31,7 @@ export interface WorkspaceRecoveryPort {
   deleteGrant: (
     workspaceId: string,
     expectedGrantGeneration: number,
-    operationId: string,
+    operationId?: string,
   ) => Promise<number>
   discardPendingGrant: (operationId: string) => Promise<void>
   advanceTransaction: (
@@ -49,7 +49,9 @@ function catalogGenerationMatches(
   actual: number,
 ): boolean {
   const expected = transaction.expectedCatalogGeneration
-  if (transaction.kind === 'reauthorize') return actual === expected
+  if (transaction.kind === 'reauthorize') {
+    return actual === expected || actual === expected + 1
+  }
   if (transaction.kind === 'revoke') {
     return transaction.stage === 'revoke-prepared'
       ? actual === expected || actual === expected + 1
@@ -81,6 +83,19 @@ function isOriginalUnfrozenGrant(
     && grant.status !== undefined
     && grant.status !== 'revoking'
     && grant.status !== 'reauthorizing'
+}
+
+function isReusableAddGrant(
+  transaction: WorkspaceTransaction,
+  grant: WorkspaceGrantRecoveryState,
+  currentGrantGeneration: number,
+): boolean {
+  return grant.exists
+    && grant.generation === transaction.expectedGrantGeneration
+    && currentGrantGeneration === transaction.expectedGrantGeneration
+    && grant.operationId !== undefined
+    && grant.operationId !== transaction.operationId
+    && grant.status === 'ready'
 }
 
 function versionOf(transaction: WorkspaceTransaction): TransactionVersion {
@@ -115,7 +130,8 @@ export async function recoverWorkspaceTransaction(
   port: WorkspaceRecoveryPort,
 ): Promise<WorkspaceRecoveryOutcome> {
   if (transaction === undefined) return 'completed'
-  if (!catalogGenerationMatches(transaction, await port.catalogGeneration())) {
+  const currentCatalogGeneration = await port.catalogGeneration()
+  if (!catalogGenerationMatches(transaction, currentCatalogGeneration)) {
     return 'stale-generation'
   }
   const workspaceId = transaction.workspaceId
@@ -236,8 +252,30 @@ export async function recoverWorkspaceTransaction(
     if (transaction.stage === 'reauthorize-prepared') {
       await port.discardPendingGrant(transaction.operationId)
       if (!workspaceExists) {
+        if (currentCatalogGeneration !== transaction.expectedCatalogGeneration + 1) {
+          return 'stale-generation'
+        }
+        const grant = await port.inspectGrant(workspaceId)
+        if (isMatchingGrant(
+          transaction,
+          grant,
+          transaction.expectedGrantGeneration + 1,
+          'reauthorizing',
+        ) && currentGrantGeneration === transaction.expectedGrantGeneration + 1) {
+          await port.deleteGrant(
+            workspaceId,
+            grantGeneration(workspaceId, grant),
+            transaction.operationId,
+          )
+        } else if (isOriginalUnfrozenGrant(transaction, grant, currentGrantGeneration)) {
+          await port.deleteGrant(workspaceId, grantGeneration(workspaceId, grant))
+        } else if (grant.exists
+          || currentGrantGeneration < transaction.expectedGrantGeneration
+          || currentGrantGeneration > transaction.expectedGrantGeneration + 2) {
+          return 'stale-generation'
+        }
         await port.abortTransaction(versionOf(transaction))
-        return 'stale-generation'
+        return 'rolled-back'
       }
       const grant = await port.inspectGrant(workspaceId)
       if (isMatchingGrant(
@@ -302,7 +340,7 @@ export async function recoverWorkspaceTransaction(
   if (transaction.stage === 'prepared') {
     await port.discardPendingGrant(transaction.operationId)
     const catalogGeneration = await port.catalogGeneration()
-    if (catalogGeneration === transaction.expectedCatalogGeneration) {
+    if (catalogGeneration === transaction.expectedCatalogGeneration && !workspaceExists) {
       await port.abortTransaction(addTransaction)
       return 'rolled-back'
     }
@@ -318,9 +356,21 @@ export async function recoverWorkspaceTransaction(
       grant,
       transaction.expectedGrantGeneration + 1,
       'ready',
-    )) {
+    ) && currentGrantGeneration === transaction.expectedGrantGeneration + 1) {
       await advanceAndComplete(port, addTransaction, 'grant-committed')
       return 'completed'
+    }
+    if (isReusableAddGrant(transaction, grant, currentGrantGeneration)) {
+      if (grant.identityValid) {
+        await advanceAndComplete(port, addTransaction, 'grant-committed')
+        return 'completed'
+      }
+      await port.markNeedsAuthorization(
+        workspaceId,
+        grantGeneration(workspaceId, grant),
+      )
+      await advanceAndComplete(port, addTransaction, 'authorization-failed')
+      return 'needs-authorization'
     }
     if (grant.exists || currentGrantGeneration !== transaction.expectedGrantGeneration) {
       return 'stale-generation'

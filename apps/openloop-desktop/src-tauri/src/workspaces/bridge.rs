@@ -495,7 +495,7 @@ pub fn install_workspace_authority_handlers(
     let delete_registry = registry;
     let delete_journal = journal;
     let delete: BridgeHandler = Arc::new(move |payload, cancellation| {
-        let input: WorkspaceGrantOperationInput =
+        let input: WorkspaceGrantMutationInput =
             serde_json::from_value(payload).map_err(|_| BridgeHandlerError::invalid_request())?;
         cancellation
             .commit_if_active(|| {
@@ -503,21 +503,62 @@ pub fn install_workspace_authority_handlers(
                     .read()
                     .map_err(|_| BridgeHandlerError::workspace_failure())?
                     .ok_or_else(BridgeHandlerError::workspace_failure)?;
-                if transaction.kind != WorkspaceTransactionKind::Revoke
-                    || transaction.stage != "registry-deleted"
-                    || transaction.workspace_id.as_deref() != Some(&input.workspace_id)
-                    || transaction.operation_id != input.operation_id
-                {
+                if transaction.workspace_id.as_deref() != Some(&input.workspace_id) {
                     return Err(BridgeHandlerError::invalid_request());
                 }
-                let generation = delete_store
-                    .delete_operation(
-                        &input.workspace_id,
-                        GrantStatus::Revoking,
-                        input.expected_grant_generation,
-                        input.operation_id,
-                    )
-                    .map_err(|_| BridgeHandlerError::workspace_failure())?;
+                let generation = match (
+                    transaction.kind,
+                    transaction.stage.as_str(),
+                    input.operation_id,
+                ) {
+                    (WorkspaceTransactionKind::Revoke, "registry-deleted", Some(operation_id))
+                        if transaction.operation_id == operation_id =>
+                    {
+                        delete_store.delete_operation(
+                            &input.workspace_id,
+                            GrantStatus::Revoking,
+                            input.expected_grant_generation,
+                            operation_id,
+                        )
+                    }
+                    (
+                        WorkspaceTransactionKind::Reauthorize,
+                        "reauthorize-prepared",
+                        Some(operation_id),
+                    ) if transaction.operation_id == operation_id
+                        && transaction.expected_grant_generation.checked_add(1)
+                            == Some(input.expected_grant_generation) =>
+                    {
+                        delete_store.delete_operation(
+                            &input.workspace_id,
+                            GrantStatus::Reauthorizing,
+                            input.expected_grant_generation,
+                            operation_id,
+                        )
+                    }
+                    (WorkspaceTransactionKind::Reauthorize, "reauthorize-prepared", None)
+                        if transaction.expected_grant_generation
+                            == input.expected_grant_generation =>
+                    {
+                        let current = delete_store
+                            .get(&input.workspace_id)
+                            .map_err(|_| BridgeHandlerError::workspace_failure())?
+                            .ok_or_else(BridgeHandlerError::workspace_failure)?;
+                        if matches!(
+                            current.status,
+                            GrantStatus::Revoking | GrantStatus::Reauthorizing
+                        ) {
+                            return Err(BridgeHandlerError::invalid_request());
+                        }
+                        delete_store.delete(
+                            &input.workspace_id,
+                            current.status,
+                            input.expected_grant_generation,
+                        )
+                    }
+                    _ => return Err(BridgeHandlerError::invalid_request()),
+                }
+                .map_err(|_| BridgeHandlerError::workspace_failure())?;
                 delete_registry
                     .lock()
                     .map_err(|_| BridgeHandlerError::workspace_failure())?

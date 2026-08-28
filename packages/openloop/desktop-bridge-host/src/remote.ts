@@ -442,12 +442,16 @@ export class OpenloopDesktopHostClient {
   deleteWorkspaceGrant(
     workspaceId: string,
     expectedGrantGeneration: number,
-    operationId: string,
+    operationId?: string,
     signal?: AbortSignal,
   ): Promise<number> {
     return this.#client.call<number>(
       'deleteWorkspaceGrant',
-      { expectedGrantGeneration, operationId, workspaceId },
+      {
+        expectedGrantGeneration,
+        workspaceId,
+        ...(operationId === undefined ? {} : { operationId }),
+      },
       signal,
     )
   }
