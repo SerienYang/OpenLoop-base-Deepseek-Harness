@@ -1225,6 +1225,9 @@ const openLoopProcessPackages = new Set([
   '@deepseek-ai/dsh-tool-lsp',
   '@deepseek-ai/dsh-tool-pwsh',
   '@deepseek-ai/dsh-tool-terminal',
+  '@deepseek-ai/dsh-tool-workflow',
+  '@deepseek-ai/dsh-tool-ralph',
+  '@deepseek-ai/dsh-workflow-worker-thread',
 ])
 
 function readEntryPatches(path: string): PatchOptions[] {

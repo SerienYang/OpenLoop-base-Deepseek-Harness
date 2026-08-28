@@ -33,9 +33,9 @@ Workspace、设置与桌面数据，但不负责持久化或工作流状态。
 
 `@openloop/sandbox-workspace` 将本发布版的 Workspace 进程执行能力明确标记为
 `disabled`。Openloop 不注册 `ctx.subprocess`，不提供 path-string fallback，
-禁用本地进程 provider 与模型工具，并且只开放应用同一组进程禁用补丁后的
-`standard` 和 `code` 系统 preset。原生 `spawnWorkspaceProcess` Bridge 方法继续以
-`not_implemented` fail-closed。
+禁用本地进程 provider、模型工具、代码模式 worker 与 workflow worker，并且只开放
+应用同一组进程禁用补丁后的 `standard` 和 `code` 系统 preset。原生
+`spawnWorkspaceProcess` Bridge 方法继续以 `not_implemented` fail-closed。
 
 通过根命令创建包：
 
