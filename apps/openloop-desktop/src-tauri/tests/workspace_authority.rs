@@ -5,7 +5,6 @@ use std::{
     fs,
     io::Write,
     net::Shutdown,
-    os::fd::AsRawFd,
     os::unix::fs::{symlink, PermissionsExt},
     path::{Path, PathBuf},
     process,
@@ -27,7 +26,7 @@ use openloop_desktop_lib::{
     workspaces::{
         bridge::{
             install_workspace_authority_handlers, install_workspace_authority_handlers_with_reveal,
-            install_workspace_transaction_handlers,
+            install_workspace_transaction_handlers, reveal_workspace_with_command,
         },
         confirmation::{
             confirm_workspace_revoke, AppKitWorkspaceRevokeConfirmation,
@@ -2027,11 +2026,12 @@ fn reveal_workspace_requires_a_ready_grant_before_invoking_finder() {
 }
 
 #[test]
-fn reveal_workspace_keeps_the_verified_descriptor_across_path_replacement() {
+fn reveal_workspace_child_inherits_verified_descriptor_across_path_replacement() {
     let root = tempdir().expect("root");
     let channel = root.path().join("channel");
     let workspace = root.path().join("workspace");
     let moved = root.path().join("moved-workspace");
+    let observation = root.path().join("reveal-observation");
     secure_root(&channel);
     secure_root(&workspace);
     let persisted = grant(&workspace, "workspace-1", 0);
@@ -2040,10 +2040,9 @@ fn reveal_workspace_keeps_the_verified_descriptor_across_path_replacement() {
     store.commit(persisted, 0).expect("commit grant");
     let journal = WorkspaceJournal::open(&channel, ReleaseChannel::Test).expect("journal");
     let launch_id = Uuid::new_v4();
-    let observed_identity = Arc::new(Mutex::new(None));
-    let observed = observed_identity.clone();
     let replace_path = workspace.clone();
     let moved_path = moved.clone();
+    let observation_path = observation.clone();
     let mut tables = BridgeDispatchTables::unavailable();
     install_workspace_authority_handlers_with_reveal(
         &mut tables,
@@ -2058,18 +2057,12 @@ fn reveal_workspace_keeps_the_verified_descriptor_across_path_replacement() {
         Arc::new(move |verified: VerifiedGrant| {
             fs::rename(&replace_path, &moved_path).expect("move verified Workspace");
             secure_root(&replace_path);
-            let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
-            assert_eq!(
-                unsafe { libc::fstat(verified.descriptor().as_raw_fd(), metadata.as_mut_ptr()) },
-                0,
-                "inspect descriptor-backed Workspace",
-            );
-            let metadata = unsafe { metadata.assume_init() };
-            *observed.lock().expect("observed identity") = Some(FileIdentity {
-                volume_id: metadata.st_dev as u64,
-                file_id: metadata.st_ino,
-            });
-            Ok(())
+            let mut command = process::Command::new("/bin/sh");
+            command
+                .arg("-c")
+                .arg("printf '%s\\n' \"$1\" > \"$0\" && /usr/bin/stat -f '%i' \"$1\" >> \"$0\"")
+                .arg(&observation_path);
+            reveal_workspace_with_command(verified, command)
         }),
     )
     .expect("authority handlers");
@@ -2101,10 +2094,16 @@ fn reveal_workspace_keeps_the_verified_descriptor_across_path_replacement() {
 
     assert_eq!(response["ok"], true);
     assert_eq!(response["result"], serde_json::Value::Null);
-    assert_eq!(
-        *observed_identity.lock().expect("observed identity"),
-        Some(original_identity)
+    let observed = fs::read_to_string(&observation).expect("reveal child observation");
+    let mut lines = observed.lines();
+    assert!(
+        lines
+            .next()
+            .is_some_and(|path| path.starts_with("/dev/fd/")),
+        "reveal child must receive a descriptor-backed path"
     );
+    let original_inode = original_identity.file_id.to_string();
+    assert_eq!(lines.next(), Some(original_inode.as_str()));
     assert_ne!(
         FileIdentity::from_metadata(&fs::metadata(&workspace).expect("replacement metadata")),
         original_identity

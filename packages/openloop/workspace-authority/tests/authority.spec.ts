@@ -299,7 +299,7 @@ describe('WorkspaceAuthority', () => {
     const create = value.authority.runIfReady(
       'workspace-1',
       async () => {
-        createStarted.resolve()
+        createStarted.resolve(undefined)
         await releaseCreate.promise
         return 'session-created'
       },
@@ -310,7 +310,7 @@ describe('WorkspaceAuthority', () => {
     await Promise.resolve()
     expect(value.native.confirmWorkspaceRevoke).not.toHaveBeenCalled()
 
-    releaseCreate.resolve()
+    releaseCreate.resolve(undefined)
     await expect(create).resolves.toEqual({
       allowed: true,
       value: 'session-created',
@@ -337,11 +337,15 @@ describe('WorkspaceAuthority', () => {
     const create = value.authority.runIfReady(
       'workspace-1',
       async () => {
-        createStarted.resolve()
+        createStarted.resolve(undefined)
         await new Promise<void>((_resolve, reject) => {
           controller.signal.addEventListener(
             'abort',
-            () => { reject(controller.signal.reason) },
+            () => {
+              reject(controller.signal.reason instanceof Error
+                ? controller.signal.reason
+                : new Error('session create aborted'))
+            },
             { once: true },
           )
         })

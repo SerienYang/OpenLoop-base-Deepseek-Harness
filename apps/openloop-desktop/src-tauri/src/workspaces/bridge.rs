@@ -699,9 +699,18 @@ pub fn install_workspace_authority_handlers_with_reveal(
 }
 
 fn reveal_workspace_in_finder(verified: VerifiedGrant) -> Result<(), BridgeHandlerError> {
-    let descriptor = verified.descriptor().as_raw_fd();
     let mut command = Command::new("/usr/bin/open");
-    command.arg("-R").arg(format!("/dev/fd/{descriptor}"));
+    command.arg("-R");
+    reveal_workspace_with_command(verified, command)
+}
+
+#[doc(hidden)]
+pub fn reveal_workspace_with_command(
+    verified: VerifiedGrant,
+    mut command: Command,
+) -> Result<(), BridgeHandlerError> {
+    let descriptor = verified.descriptor().as_raw_fd();
+    command.arg(format!("/dev/fd/{descriptor}"));
     unsafe {
         command.pre_exec(move || {
             let flags = libc::fcntl(descriptor, libc::F_GETFD);
