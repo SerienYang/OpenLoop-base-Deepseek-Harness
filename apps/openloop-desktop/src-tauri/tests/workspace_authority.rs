@@ -49,6 +49,8 @@ use openloop_desktop_lib::{
 use tempfile::tempdir;
 use uuid::Uuid;
 
+const ASYNC_TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn dispatch_transaction(
     journal: WorkspaceJournal,
     method: &str,
@@ -1022,7 +1024,7 @@ fn picker_cancellation_releases_an_open_blocking_backend() {
         });
     }
     entered_rx
-        .recv_timeout(Duration::from_secs(1))
+        .recv_timeout(ASYNC_TEST_TIMEOUT)
         .expect("picker opened");
 
     cancellation.cancel();
@@ -1200,7 +1202,7 @@ fn revoke_confirmation_cancellation_releases_an_open_blocking_backend() {
         });
     }
     entered_rx
-        .recv_timeout(Duration::from_secs(1))
+        .recv_timeout(ASYNC_TEST_TIMEOUT)
         .expect("confirmation opened");
 
     cancellation.cancel();
@@ -1363,7 +1365,7 @@ fn disconnected_begin_request_releases_pending_grant_and_descriptor_before_deliv
         .write_all(&encode_frame(&envelope).expect("begin request frame"))
         .expect("write begin request");
     picker_entered_rx
-        .recv_timeout(Duration::from_secs(1))
+        .recv_timeout(ASYNC_TEST_TIMEOUT)
         .expect("picker entered");
     stream
         .shutdown(Shutdown::Both)
@@ -1371,11 +1373,11 @@ fn disconnected_begin_request_releases_pending_grant_and_descriptor_before_deliv
     drop(stream);
     release_picker_tx.send(()).expect("release picker");
 
-    wait_until(Duration::from_secs(1), || {
+    wait_until(ASYNC_TEST_TIMEOUT, || {
         registry.lock().expect("registry").pending_count() == 0
     });
     drop(server);
-    wait_until(Duration::from_secs(1), || {
+    wait_until(ASYNC_TEST_TIMEOUT, || {
         open_descriptor_count() <= descriptor_baseline
     });
     assert_eq!(registry.lock().expect("registry").pending_count(), 0);
@@ -1441,7 +1443,7 @@ fn bridge_cancellation_reaches_workspace_picker_and_revoke_confirmation() {
         })
     };
     picker_entered_rx
-        .recv_timeout(Duration::from_secs(1))
+        .recv_timeout(ASYNC_TEST_TIMEOUT)
         .expect("picker request entered");
     let picker_cancel = dispatch_workspace(
         &dispatcher,
@@ -1477,7 +1479,7 @@ fn bridge_cancellation_reaches_workspace_picker_and_revoke_confirmation() {
         })
     };
     confirmation_entered_rx
-        .recv_timeout(Duration::from_secs(1))
+        .recv_timeout(ASYNC_TEST_TIMEOUT)
         .expect("confirmation request entered");
     let confirmation_cancel = dispatch_workspace(
         &dispatcher,

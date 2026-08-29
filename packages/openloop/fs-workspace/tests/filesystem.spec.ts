@@ -4,6 +4,7 @@ import * as FsPolicy from '@deepseek-ai/dsh-fs-observation-policy'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as ToolFs from '@deepseek-ai/dsh-tool-fs'
+import { WorkspaceFileBroker } from '@openloop/file-broker'
 import { describe, expect, it, vi } from 'vitest'
 import WorkspaceFileSystem from '../src/index.ts'
 
@@ -18,8 +19,12 @@ type Entry = {
   version?: string
 }
 
-function text(value: string): Uint8Array {
+function text(value: string): Uint8Array<ArrayBuffer> {
   return new TextEncoder().encode(value)
+}
+
+function bridgeError(code: string, message: string): Error {
+  return new Error(`desktop bridge ${code}: ${message}`)
 }
 
 function harness(initial: Record<string, Entry> = {}) {
@@ -187,6 +192,103 @@ function call(ctx: Context, name: string, args: unknown) {
 }
 
 describe('Workspace FileSystem capability boundary', () => {
+  it('uses commitAtomicWrite entry as the point of no return and never forwards its signal', async () => {
+    const preCancelled = new AbortController()
+    const preCancelledReason = new Error('cancel before commit admission')
+    preCancelled.abort(preCancelledReason)
+    const commitWorkspaceAtomicWrite = vi.fn(async (
+      _handleId: string,
+      commitSignal?: AbortSignal,
+    ) => {
+      if (commitSignal?.aborted === true) throw commitSignal.reason
+      return { version: 'v2' }
+    })
+    const broker = new WorkspaceFileBroker({ commitWorkspaceAtomicWrite } as never)
+
+    await expect(broker.commitAtomicWrite('pre-cancelled', preCancelled.signal))
+      .rejects.toBe(preCancelledReason)
+    expect(commitWorkspaceAtomicWrite).not.toHaveBeenCalled()
+
+    const admitted = new AbortController()
+    commitWorkspaceAtomicWrite.mockImplementationOnce(async (
+      _handleId: string,
+      commitSignal?: AbortSignal,
+    ) => {
+      admitted.abort(new Error('cancel after commit admission'))
+      if (commitSignal?.aborted === true) throw commitSignal.reason
+      return { version: 'v3' }
+    })
+
+    await expect(broker.commitAtomicWrite('admitted', admitted.signal))
+      .resolves.toEqual({ version: 'v3' })
+    expect(commitWorkspaceAtomicWrite).toHaveBeenLastCalledWith('admitted')
+  })
+
+  it('maps only the thrown abort reason or AbortError to FS_ABORTED', async () => {
+    const genericHarness = harness({
+      'generic.txt': { kind: 'regular', bytes: text('value'), version: 'v1' },
+    })
+    const genericTarget = await genericHarness.filesystem.resolve('generic.txt', {
+      cwd: WORKSPACE_PATH,
+    })
+    const genericController = new AbortController()
+    genericHarness.broker.open.mockImplementationOnce(async () => {
+      genericController.abort(new Error('late cancellation'))
+      throw bridgeError('file_failure', 'desktop Workspace file operation failed')
+    })
+
+    await expect(genericHarness.filesystem.readText(
+      genericTarget,
+      genericController.signal,
+    )).rejects.toMatchObject({ code: 'FS_IO_ERROR' })
+
+    const abortedHarness = harness({
+      'aborted.txt': { kind: 'regular', bytes: text('value'), version: 'v1' },
+    })
+    const abortedTarget = await abortedHarness.filesystem.resolve('aborted.txt', {
+      cwd: WORKSPACE_PATH,
+    })
+    const abortedController = new AbortController()
+    const abortReason = new Error('broker operation aborted')
+    abortedHarness.broker.open.mockImplementationOnce(async () => {
+      abortedController.abort(abortReason)
+      throw abortReason
+    })
+
+    await expect(abortedHarness.filesystem.readText(
+      abortedTarget,
+      abortedController.signal,
+    )).rejects.toMatchObject({ code: 'FS_ABORTED', cause: abortReason })
+
+    const abortErrorHarness = harness({
+      'abort-error.txt': { kind: 'regular', bytes: text('value'), version: 'v1' },
+    })
+    const abortErrorTarget = await abortErrorHarness.filesystem.resolve('abort-error.txt', {
+      cwd: WORKSPACE_PATH,
+    })
+    const abortError = new DOMException('operation aborted', 'AbortError')
+    abortErrorHarness.broker.open.mockRejectedValueOnce(abortError)
+
+    await expect(abortErrorHarness.filesystem.readText(abortErrorTarget))
+      .rejects.toMatchObject({ code: 'FS_ABORTED', cause: abortError })
+  })
+
+  it('maps a thrown TypeError abort reason to FS_ABORTED', async () => {
+    const { broker, filesystem } = harness({
+      'aborted.txt': { kind: 'regular', bytes: text('value'), version: 'v1' },
+    })
+    const target = await filesystem.resolve('aborted.txt', { cwd: WORKSPACE_PATH })
+    const controller = new AbortController()
+    const abortReason = new TypeError('broker operation aborted')
+    broker.open.mockImplementationOnce(async () => {
+      controller.abort(abortReason)
+      throw abortReason
+    })
+
+    await expect(filesystem.readText(target, controller.signal))
+      .rejects.toMatchObject({ code: 'FS_ABORTED', cause: abortReason })
+  })
+
   it('maps trusted cwd paths to stable opaque targets and rejects escapes and forgeries', async () => {
     const { broker, filesystem } = harness()
 
@@ -212,10 +314,93 @@ describe('Workspace FileSystem capability boundary', () => {
 
   it('rejects resolution when the workspace has no ready native grant', async () => {
     const { broker, filesystem } = harness()
-    broker.openRoot.mockRejectedValueOnce(new Error('grant unavailable'))
+    broker.openRoot.mockRejectedValueOnce(bridgeError(
+      'file_grant_unavailable',
+      'desktop Workspace file grant is unavailable',
+    ))
 
     await expect(filesystem.resolve('src/index.ts', { cwd: WORKSPACE_PATH }))
       .rejects.toMatchObject({ code: 'FS_PERMISSION_DENIED' })
+  })
+
+  it('maps stable native file broker errors without treating caller intent as an error code', async () => {
+    const missingHarness = harness()
+    const missing = await missingHarness.filesystem.resolve('missing.txt', {
+      cwd: WORKSPACE_PATH,
+    })
+    missingHarness.broker.open.mockRejectedValueOnce(bridgeError(
+      'file_not_found',
+      'desktop Workspace file was not found',
+    ))
+    await expect(missingHarness.filesystem.readText(missing))
+      .rejects.toMatchObject({ code: 'FS_NOT_FOUND' })
+
+    const createHarness = harness()
+    const create = await createHarness.filesystem.resolve('new.txt', {
+      cwd: WORKSPACE_PATH,
+    })
+    createHarness.broker.beginAtomicWrite.mockRejectedValueOnce(bridgeError(
+      'file_already_exists',
+      'desktop Workspace file already exists',
+    ))
+    await expect(createHarness.filesystem.writeText(
+      create,
+      'new',
+      { kind: 'createIfAbsent' },
+      signal,
+      { mode: 'workspace-write', workspaceRoot: WORKSPACE_PATH },
+    )).rejects.toMatchObject({ code: 'FS_NOT_OBSERVED' })
+
+    const staleHarness = harness({
+      'stale.txt': { kind: 'regular', bytes: text('before'), version: 'v1' },
+    })
+    const stale = await staleHarness.filesystem.resolve('stale.txt', {
+      cwd: WORKSPACE_PATH,
+    })
+    staleHarness.broker.commitAtomicWrite.mockRejectedValueOnce(bridgeError(
+      'file_version_conflict',
+      'desktop Workspace file version changed',
+    ))
+    await expect(staleHarness.filesystem.writeText(
+      stale,
+      'after',
+      undefined,
+      signal,
+      { mode: 'workspace-write', workspaceRoot: WORKSPACE_PATH },
+    )).rejects.toMatchObject({ code: 'FS_STALE_VERSION' })
+
+    const ioHarness = harness({
+      'io.txt': { kind: 'regular', bytes: text('before'), version: 'v1' },
+    })
+    const io = await ioHarness.filesystem.resolve('io.txt', { cwd: WORKSPACE_PATH })
+    ioHarness.broker.writeChunk.mockRejectedValueOnce(bridgeError(
+      'file_failure',
+      'desktop Workspace file operation failed',
+    ))
+    await expect(ioHarness.filesystem.writeText(
+      io,
+      'after',
+      { kind: 'replaceIfVersion', version: 'v1' as never },
+      signal,
+      { mode: 'workspace-write', workspaceRoot: WORKSPACE_PATH },
+    )).rejects.toMatchObject({ code: 'FS_IO_ERROR' })
+  })
+
+  it('maps already-exists to not-observed only for explicit create intent', async () => {
+    const { broker, filesystem } = harness()
+    const target = await filesystem.resolve('new.txt', { cwd: WORKSPACE_PATH })
+    broker.beginAtomicWrite.mockRejectedValueOnce(bridgeError(
+      'file_already_exists',
+      'desktop Workspace file already exists',
+    ))
+
+    await expect(filesystem.writeText(
+      target,
+      'new',
+      undefined,
+      signal,
+      { mode: 'workspace-write', workspaceRoot: WORKSPACE_PATH },
+    )).rejects.toMatchObject({ code: 'FS_IO_ERROR' })
   })
 
   it('implements stat, lstat, and stable listing only through broker handles', async () => {
@@ -264,6 +449,67 @@ describe('Workspace FileSystem capability boundary', () => {
     await expect(filesystem.readBytes(target, undefined, 4))
       .rejects.toMatchObject({ code: 'FS_TOO_LARGE' })
     expect(broker.read).toHaveBeenCalled()
+  })
+
+  it('rejects a raw byte read when the file grows past its initial size', async () => {
+    const { broker, filesystem } = harness({
+      'growing.bin': { kind: 'regular', bytes: text('old'), version: 'v1' },
+    })
+    const target = await filesystem.resolve('growing.bin', { cwd: WORKSPACE_PATH })
+    broker.stat
+      .mockResolvedValueOnce({ kind: 'regular', size: 3, version: 'v1' })
+      .mockResolvedValueOnce({ kind: 'regular', size: 4, version: 'v2' })
+    broker.read.mockResolvedValueOnce({
+      bytes: text('old'),
+      nextOffset: 3,
+      eof: false,
+    })
+
+    await expect(filesystem.readBytes(target, undefined, 10))
+      .rejects.toMatchObject({
+        code: 'FS_IO_ERROR',
+        message: 'cannot read "growing.bin": file changed during read',
+      })
+  })
+
+  it('rejects a mixed raw byte result when the version changes without a size change', async () => {
+    const { broker, filesystem } = harness({
+      'replaced.bin': { kind: 'regular', bytes: text('abcdef'), version: 'v1' },
+    })
+    const target = await filesystem.resolve('replaced.bin', { cwd: WORKSPACE_PATH })
+    broker.stat
+      .mockResolvedValueOnce({ kind: 'regular', size: 6, version: 'v1' })
+      .mockResolvedValueOnce({ kind: 'regular', size: 6, version: 'v2' })
+    broker.read
+      .mockResolvedValueOnce({ bytes: text('abc'), nextOffset: 3, eof: false })
+      .mockResolvedValueOnce({ bytes: text('XYZ'), nextOffset: 6, eof: true })
+
+    await expect(filesystem.readBytes(target, undefined, 10))
+      .rejects.toMatchObject({
+        code: 'FS_IO_ERROR',
+        message: 'cannot read "replaced.bin": file changed during read',
+      })
+  })
+
+  it('returns a stable raw byte result after validating its final stat', async () => {
+    const { broker, filesystem } = harness({
+      'stable.bin': { kind: 'regular', bytes: text('stable'), version: 'v1' },
+    })
+    const target = await filesystem.resolve('stable.bin', { cwd: WORKSPACE_PATH })
+
+    await expect(filesystem.readBytes(target, undefined, 10)).resolves.toEqual(text('stable'))
+    expect(broker.stat).toHaveBeenCalledTimes(2)
+  })
+
+  it('validates the final stat before returning an empty raw byte result', async () => {
+    const { broker, filesystem } = harness({
+      'empty.bin': { kind: 'regular', bytes: new Uint8Array(), version: 'v1' },
+    })
+    const target = await filesystem.resolve('empty.bin', { cwd: WORKSPACE_PATH })
+
+    await expect(filesystem.readBytes(target, undefined, 0)).resolves.toEqual(new Uint8Array())
+    expect(broker.read).not.toHaveBeenCalled()
+    expect(broker.stat).toHaveBeenCalledTimes(2)
   })
 
   it('routes model-facing read, write, and edit through the broker and preserves stale guards', async () => {

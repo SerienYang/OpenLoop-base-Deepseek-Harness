@@ -164,28 +164,51 @@ function parentAndName(path: string): { parent: string; name: string } {
     : { parent: path.slice(0, at), name: path.slice(at + 1) }
 }
 
+function isAbortFailure(error: unknown, signal?: AbortSignal): boolean {
+  return (signal?.aborted === true && Object.is(error, signal.reason))
+    || (error instanceof Error && error.name === 'AbortError')
+}
+
 function mapBrokerError(
   error: unknown,
   operation: string,
   displayPath: string,
   signal?: AbortSignal,
+  callerIntent?: FsWriteIntent | { readonly version: FsVersion },
 ): FsError {
-  if (error instanceof FsError) return error
-  if (signal?.aborted === true) {
+  if (isAbortFailure(error, signal)) {
     return new FsError(`${operation} aborted`, 'FS_ABORTED', { cause: error })
   }
+  if (error instanceof FsError) return error
   const message = error instanceof Error ? error.message : String(error)
-  if (/grant unavailable|workspace_failure/iu.test(message)) {
+  if (/file_grant_unavailable|grant unavailable|workspace_failure/iu.test(message)) {
     return new FsError(
       `cannot ${operation} "${displayPath}": Workspace grant is not ready`,
       'FS_PERMISSION_DENIED',
       { cause: error },
     )
   }
-  if (/not found/iu.test(message)) {
+  if (/file_not_found|not found/iu.test(message)) {
     return new FsError(`cannot ${operation} "${displayPath}": not found`, 'FS_NOT_FOUND', {
       cause: error,
     })
+  }
+  if (/file_already_exists|already exists/iu.test(message)
+    && callerIntent !== undefined
+    && 'kind' in callerIntent
+    && callerIntent.kind === 'createIfAbsent') {
+    return new FsError(
+      `cannot overwrite existing "${displayPath}" without reading it first`,
+      'FS_NOT_OBSERVED',
+      { cause: error },
+    )
+  }
+  if (/file_version_conflict|version changed|version conflict/iu.test(message)) {
+    return new FsError(
+      `cannot ${operation} "${displayPath}": file changed since it was read`,
+      'FS_STALE_VERSION',
+      { cause: error },
+    )
   }
   return new FsError(`cannot ${operation} "${displayPath}": Workspace broker failed`, 'FS_IO_ERROR', {
     cause: error,
@@ -335,6 +358,9 @@ export class WorkspaceFileSystem extends FileSystem {
         }
         yield decoder.decode()
       } catch (error) {
+        if (isAbortFailure(error, signal)) {
+          throw new FsError('read aborted', 'FS_ABORTED', { cause: error })
+        }
         if (error instanceof TypeError) {
           throw new FsError(`cannot read "${displayPath}": invalid UTF-8 text`, 'FS_NOT_TEXT', {
             cause: error,
@@ -380,6 +406,7 @@ export class WorkspaceFileSystem extends FileSystem {
       }
       const result = new Uint8Array(info.size)
       let offset = 0
+      let eof = info.size === 0
       while (offset < info.size) {
         const chunk = await this.broker.read(
           handleId,
@@ -395,12 +422,23 @@ export class WorkspaceFileSystem extends FileSystem {
         }
         result.set(chunk.bytes, offset)
         offset = chunk.nextOffset
+        eof = chunk.eof
         if (chunk.eof && offset !== info.size) {
           throw new FsError(
             `cannot read "${record.target.displayPath}": file changed during read`,
             'FS_IO_ERROR',
           )
         }
+      }
+      const finalInfo = await this.broker.stat(handleId, signal)
+      if (finalInfo.kind !== info.kind
+        || finalInfo.size !== info.size
+        || finalInfo.version !== info.version
+        || !eof) {
+        throw new FsError(
+          `cannot read "${record.target.displayPath}": file changed during read`,
+          'FS_IO_ERROR',
+        )
       }
       aborted(signal, 'read')
       return result
@@ -741,25 +779,7 @@ export class WorkspaceFileSystem extends FileSystem {
       handleId = undefined
       return FsVersion(committed.version)
     } catch (error) {
-      if (signal?.aborted === true) {
-        throw new FsError('write aborted', 'FS_ABORTED', { cause: error })
-      }
-      const message = error instanceof Error ? error.message : String(error)
-      if ('kind' in (callerIntent ?? {}) && (callerIntent as FsWriteIntent).kind === 'createIfAbsent') {
-        throw new FsError(
-          `cannot overwrite existing "${record.target.displayPath}" without reading it first`,
-          'FS_NOT_OBSERVED',
-          { cause: error },
-        )
-      }
-      if (callerIntent !== undefined || /version changed|version conflict/iu.test(message)) {
-        throw new FsError(
-          `cannot write "${record.target.displayPath}": file changed since it was read`,
-          'FS_STALE_VERSION',
-          { cause: error },
-        )
-      }
-      throw mapBrokerError(error, 'write', record.target.displayPath, signal)
+      throw mapBrokerError(error, 'write', record.target.displayPath, signal, callerIntent)
     } finally {
       if (handleId !== undefined) await this.broker.close(handleId).catch(() => {})
     }

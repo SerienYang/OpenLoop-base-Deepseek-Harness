@@ -48,6 +48,40 @@ struct BlockingWriteHook {
     release: Mutex<Receiver<()>>,
 }
 
+struct BlockingSwapHook {
+    entered: SyncSender<()>,
+    release: Mutex<Receiver<()>>,
+}
+
+struct BlockingCreateHook {
+    entered: SyncSender<()>,
+    release: Mutex<Option<Receiver<()>>>,
+}
+
+struct FailFirstCreateHook {
+    failed: Mutex<bool>,
+}
+
+struct FailCreateSyncAfterReplacementHook {
+    workspace: Mutex<Option<PathBuf>>,
+}
+
+struct ReplaceTemporaryBeforeCreateFailureHook {
+    workspace: Mutex<Option<PathBuf>>,
+}
+
+struct ReplaceTemporaryBeforeSwapHook {
+    workspace: Mutex<Option<PathBuf>>,
+}
+
+struct ReplaceCreatedAfterPublishHook {
+    workspace: Mutex<Option<PathBuf>>,
+}
+
+struct ModifyCreatedAfterPublishHook {
+    workspace: Mutex<Option<PathBuf>>,
+}
+
 struct HardlinkWriteHook;
 
 impl FileBrokerHooks for HardlinkWriteHook {
@@ -127,6 +161,141 @@ impl FileBrokerHooks for BlockingWriteHook {
             .expect("release receiver")
             .recv()
             .expect("release blocked write");
+    }
+}
+
+impl FileBrokerHooks for BlockingSwapHook {
+    fn before_atomic_swap(
+        &self,
+        _parent: i32,
+        _temporary: &std::ffi::CStr,
+        _target: &std::ffi::CStr,
+    ) {
+        self.entered.send(()).expect("announce active commit");
+        self.release
+            .lock()
+            .expect("commit release receiver")
+            .recv()
+            .expect("release active commit");
+    }
+}
+
+impl FileBrokerHooks for BlockingCreateHook {
+    fn after_create(&self, _parent: i32, _target: &std::ffi::CStr) {
+        let Some(release) = self.release.lock().expect("create release receiver").take() else {
+            return;
+        };
+        self.entered.send(()).expect("announce created file");
+        release.recv().expect("release created file");
+    }
+}
+
+impl FileBrokerHooks for FailFirstCreateHook {
+    fn before_create(&self, parent: i32, _target: &std::ffi::CStr) {
+        let mut failed = self.failed.lock().expect("create failure state");
+        if !*failed {
+            assert_eq!(
+                unsafe { libc::fchmod(parent, 0o500) },
+                0,
+                "make parent read-only"
+            );
+            *failed = true;
+        }
+    }
+}
+
+impl FileBrokerHooks for FailCreateSyncAfterReplacementHook {
+    fn before_create_sync(
+        &self,
+        _parent: i32,
+        temporary: &std::ffi::CStr,
+        target: &std::ffi::CStr,
+    ) -> Result<(), FileBrokerError> {
+        let workspace = self
+            .workspace
+            .lock()
+            .expect("hook workspace")
+            .clone()
+            .expect("hook workspace configured");
+        let temporary = workspace.join(std::ffi::OsStr::from_bytes(temporary.to_bytes()));
+        let target = workspace.join(std::ffi::OsStr::from_bytes(target.to_bytes()));
+        fs::rename(&temporary, workspace.join("preserved-created.txt"))
+            .expect("move created inode before sync failure");
+        fs::write(target, b"attacker replacement").expect("install target replacement");
+        Err(FileBrokerError::Io(std::io::Error::other(
+            "injected create sync failure",
+        )))
+    }
+}
+
+impl FileBrokerHooks for ReplaceTemporaryBeforeCreateFailureHook {
+    fn before_create_sync(
+        &self,
+        _parent: i32,
+        temporary: &std::ffi::CStr,
+        _target: &std::ffi::CStr,
+    ) -> Result<(), FileBrokerError> {
+        let workspace = self
+            .workspace
+            .lock()
+            .expect("hook workspace")
+            .clone()
+            .expect("hook workspace configured");
+        let temporary = workspace.join(std::ffi::OsStr::from_bytes(temporary.to_bytes()));
+        fs::rename(&temporary, workspace.join("preserved-created.txt"))
+            .expect("move created inode before failure");
+        fs::write(&temporary, b"attacker replacement").expect("replace temporary name");
+        Err(FileBrokerError::Io(std::io::Error::other(
+            "injected create failure after replacement",
+        )))
+    }
+}
+
+impl FileBrokerHooks for ReplaceTemporaryBeforeSwapHook {
+    fn before_atomic_swap(
+        &self,
+        _parent: i32,
+        temporary: &std::ffi::CStr,
+        _target: &std::ffi::CStr,
+    ) {
+        let workspace = self
+            .workspace
+            .lock()
+            .expect("hook workspace")
+            .clone()
+            .expect("hook workspace configured");
+        let temporary = workspace.join(std::ffi::OsStr::from_bytes(temporary.to_bytes()));
+        fs::rename(&temporary, workspace.join("preserved-staged.txt"))
+            .expect("move staged inode before swap");
+        fs::write(&temporary, b"attacker replacement").expect("replace temporary name");
+    }
+}
+
+impl FileBrokerHooks for ReplaceCreatedAfterPublishHook {
+    fn after_create(&self, _parent: i32, target: &std::ffi::CStr) {
+        let workspace = self
+            .workspace
+            .lock()
+            .expect("hook workspace")
+            .clone()
+            .expect("hook workspace configured");
+        let target = workspace.join(std::ffi::OsStr::from_bytes(target.to_bytes()));
+        fs::rename(&target, workspace.join("preserved-created.txt"))
+            .expect("move created inode after publish");
+        fs::write(&target, b"attacker replacement").expect("replace published target");
+    }
+}
+
+impl FileBrokerHooks for ModifyCreatedAfterPublishHook {
+    fn after_create(&self, _parent: i32, target: &std::ffi::CStr) {
+        let workspace = self
+            .workspace
+            .lock()
+            .expect("hook workspace")
+            .clone()
+            .expect("hook workspace configured");
+        let target = workspace.join(std::ffi::OsStr::from_bytes(target.to_bytes()));
+        fs::write(target, b"changed after publish").expect("modify published inode");
     }
 }
 
@@ -377,6 +546,20 @@ fn dispatch_file(
 fn secure_directory(path: &Path) {
     fs::create_dir_all(path).expect("create secure directory");
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("set secure permissions");
+}
+
+fn atomic_temporary_paths(path: &Path) -> Vec<PathBuf> {
+    fs::read_dir(path)
+        .expect("workspace entries")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".openloop-write-")
+        })
+        .map(|entry| entry.path())
+        .collect()
 }
 
 #[test]
@@ -690,6 +873,492 @@ fn handles_expire_close_and_stop_after_grant_revocation() {
 }
 
 #[test]
+fn inserting_a_handle_drops_unvisited_expired_atomic_staging() {
+    let harness = Harness::new(Duration::ZERO);
+    let expired_write = harness
+        .broker
+        .begin_atomic_write(
+            "workspace-1",
+            "expired.txt",
+            AtomicWriteOptions {
+                create_if_absent: true,
+                expected_version: None,
+            },
+        )
+        .expect("begin expiring write");
+    let expired_temporary = atomic_temporary_paths(&harness.workspace)
+        .pop()
+        .expect("expired temporary");
+
+    let replacement_write = harness
+        .broker
+        .begin_atomic_write(
+            "workspace-1",
+            "replacement.txt",
+            AtomicWriteOptions {
+                create_if_absent: true,
+                expected_version: None,
+            },
+        )
+        .expect("begin replacement write");
+
+    assert!(!expired_temporary.exists());
+    assert_eq!(atomic_temporary_paths(&harness.workspace).len(), 1);
+    assert!(matches!(
+        harness.broker.close(&expired_write.handle_id),
+        Err(FileBrokerError::InvalidHandle)
+    ));
+    harness
+        .broker
+        .close(&replacement_write.handle_id)
+        .expect("close replacement handle");
+}
+
+#[test]
+fn accessing_a_valid_handle_drops_other_expired_atomic_staging() {
+    let handle_ttl = Duration::from_secs(1);
+    let harness = Harness::new(handle_ttl);
+    fs::write(harness.workspace.join("valid.txt"), b"value").expect("valid fixture");
+    let expired_write = harness
+        .broker
+        .begin_atomic_write(
+            "workspace-1",
+            "expired.txt",
+            AtomicWriteOptions {
+                create_if_absent: true,
+                expected_version: None,
+            },
+        )
+        .expect("begin expiring write");
+    let expired_by = Instant::now() + handle_ttl;
+    let expired_temporary = atomic_temporary_paths(&harness.workspace)
+        .pop()
+        .expect("expired temporary");
+    thread::sleep(Duration::from_millis(600));
+    let valid = harness
+        .broker
+        .open("workspace-1", "valid.txt")
+        .expect("open valid handle");
+    thread::sleep(expired_by.saturating_duration_since(Instant::now()));
+
+    harness
+        .broker
+        .stat(&valid.handle_id)
+        .expect("access valid handle");
+
+    assert!(!expired_temporary.exists());
+    assert!(matches!(
+        harness.broker.close(&expired_write.handle_id),
+        Err(FileBrokerError::InvalidHandle)
+    ));
+    harness
+        .broker
+        .close(&valid.handle_id)
+        .expect("close valid handle");
+}
+
+#[test]
+fn broker_rejects_handles_beyond_its_fixed_capacity() {
+    let harness = Harness::new(Duration::from_secs(60));
+    fs::write(harness.workspace.join("capacity.txt"), b"value").expect("capacity fixture");
+    let mut handles = Vec::new();
+    for _ in 0..64 {
+        handles.push(
+            harness
+                .broker
+                .open("workspace-1", "capacity.txt")
+                .expect("open handle within capacity"),
+        );
+    }
+
+    assert!(matches!(
+        harness.broker.open("workspace-1", "capacity.txt"),
+        Err(FileBrokerError::InvalidHandle)
+    ));
+
+    for handle in handles {
+        harness
+            .broker
+            .close(&handle.handle_id)
+            .expect("close capacity handle");
+    }
+}
+
+#[test]
+fn create_rejects_full_handle_capacity_before_touching_the_filesystem() {
+    let harness = Harness::new(Duration::from_secs(60));
+    fs::write(harness.workspace.join("capacity.txt"), b"value").expect("capacity fixture");
+    let mut handles = Vec::new();
+    for _ in 0..64 {
+        handles.push(
+            harness
+                .broker
+                .open("workspace-1", "capacity.txt")
+                .expect("open handle within capacity"),
+        );
+    }
+    fs::set_permissions(&harness.workspace, fs::Permissions::from_mode(0o500))
+        .expect("make workspace read-only");
+
+    let result = harness.broker.create("workspace-1", "capacity-create.txt");
+    assert!(!harness.workspace.join("capacity-create.txt").exists());
+    fs::set_permissions(&harness.workspace, fs::Permissions::from_mode(0o700))
+        .expect("restore workspace permissions");
+    assert!(matches!(result, Err(FileBrokerError::InvalidHandle)));
+
+    for handle in handles {
+        harness
+            .broker
+            .close(&handle.handle_id)
+            .expect("close capacity handle");
+    }
+}
+
+#[test]
+fn atomic_write_rejects_full_handle_capacity_before_creating_staging() {
+    let harness = Harness::new(Duration::from_secs(60));
+    fs::write(harness.workspace.join("capacity.txt"), b"value").expect("capacity fixture");
+    let mut handles = Vec::new();
+    for _ in 0..64 {
+        handles.push(
+            harness
+                .broker
+                .open("workspace-1", "capacity.txt")
+                .expect("open handle within capacity"),
+        );
+    }
+    fs::set_permissions(&harness.workspace, fs::Permissions::from_mode(0o500))
+        .expect("make workspace read-only");
+
+    let result = harness.broker.begin_atomic_write(
+        "workspace-1",
+        "capacity-write.txt",
+        AtomicWriteOptions {
+            create_if_absent: true,
+            expected_version: None,
+        },
+    );
+    assert!(atomic_temporary_paths(&harness.workspace).is_empty());
+    fs::set_permissions(&harness.workspace, fs::Permissions::from_mode(0o700))
+        .expect("restore workspace permissions");
+    assert!(matches!(result, Err(FileBrokerError::InvalidHandle)));
+
+    for handle in handles {
+        harness
+            .broker
+            .close(&handle.handle_id)
+            .expect("close capacity handle");
+    }
+}
+
+#[test]
+fn concurrent_create_reserves_capacity_before_creation_and_never_unlinks_a_replacement() {
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let harness = Harness::with_hooks(
+        Duration::from_secs(60),
+        Arc::new(BlockingCreateHook {
+            entered: entered_tx,
+            release: Mutex::new(Some(release_rx)),
+        }),
+    );
+    fs::write(harness.workspace.join("capacity.txt"), b"value").expect("capacity fixture");
+    let mut handles = Vec::new();
+    for _ in 0..63 {
+        handles.push(
+            harness
+                .broker
+                .open("workspace-1", "capacity.txt")
+                .expect("open handle within capacity"),
+        );
+    }
+
+    let create_broker = harness.broker.clone();
+    let creator = thread::spawn(move || create_broker.create("workspace-1", "reserved-create.txt"));
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("created file reached activation hook");
+
+    let contender = harness.broker.create("workspace-1", "contender-create.txt");
+    fs::rename(
+        harness.workspace.join("reserved-create.txt"),
+        harness.workspace.join("preserved-created.txt"),
+    )
+    .expect("preserve created inode");
+    fs::write(
+        harness.workspace.join("reserved-create.txt"),
+        b"attacker replacement",
+    )
+    .expect("install attacker replacement");
+    release_tx.send(()).expect("release created file");
+    let created = creator.join().expect("creator thread");
+
+    let contender_path_exists = harness.workspace.join("contender-create.txt").exists();
+    let replacement = fs::read(harness.workspace.join("reserved-create.txt")).ok();
+    let preserved_created = fs::read(harness.workspace.join("preserved-created.txt")).ok();
+    if let Ok(handle) = &created {
+        harness
+            .broker
+            .close(&handle.handle_id)
+            .expect("close created handle");
+    }
+    if let Ok(handle) = &contender {
+        harness
+            .broker
+            .close(&handle.handle_id)
+            .expect("close contender handle");
+    }
+    for handle in handles {
+        harness
+            .broker
+            .close(&handle.handle_id)
+            .expect("close capacity handle");
+    }
+
+    assert_eq!(
+        replacement.as_deref(),
+        Some(b"attacker replacement".as_slice())
+    );
+    assert_eq!(preserved_created.as_deref(), Some(b"".as_slice()));
+    assert!(matches!(created, Err(FileBrokerError::UnsafeFile)));
+    assert!(matches!(contender, Err(FileBrokerError::InvalidHandle)));
+    assert!(!contender_path_exists);
+}
+
+#[test]
+fn create_sync_failure_never_unlinks_a_target_replacement() {
+    let hook = Arc::new(FailCreateSyncAfterReplacementHook {
+        workspace: Mutex::new(None),
+    });
+    let harness = Harness::with_hooks(Duration::from_secs(60), hook.clone());
+    *hook.workspace.lock().expect("hook workspace") = Some(harness.workspace.clone());
+
+    let result = harness.broker.create("workspace-1", "sync-failure.txt");
+
+    assert!(matches!(
+        result,
+        Err(FileBrokerError::Io(ref error))
+            if error.kind() == std::io::ErrorKind::Other
+    ));
+    assert_eq!(
+        fs::read(harness.workspace.join("sync-failure.txt")).expect("target replacement preserved"),
+        b"attacker replacement"
+    );
+    assert_eq!(
+        fs::read(harness.workspace.join("preserved-created.txt")).expect("created inode preserved"),
+        b""
+    );
+}
+
+#[test]
+fn create_failure_never_unlinks_a_temporary_name_replacement() {
+    let hook = Arc::new(ReplaceTemporaryBeforeCreateFailureHook {
+        workspace: Mutex::new(None),
+    });
+    let harness = Harness::with_hooks(Duration::from_secs(60), hook.clone());
+    *hook.workspace.lock().expect("hook workspace") = Some(harness.workspace.clone());
+
+    let result = harness.broker.create("workspace-1", "sync-failure.txt");
+
+    assert!(matches!(
+        result,
+        Err(FileBrokerError::Io(ref error))
+            if error.kind() == std::io::ErrorKind::Other
+    ));
+    assert_eq!(
+        fs::read(harness.workspace.join("preserved-created.txt")).expect("created inode preserved"),
+        b""
+    );
+    let temporary = atomic_temporary_paths(&harness.workspace)
+        .pop()
+        .expect("temporary replacement preserved");
+    assert_eq!(
+        fs::read(temporary).expect("temporary replacement contents"),
+        b"attacker replacement"
+    );
+}
+
+#[test]
+fn create_never_reports_success_for_a_post_publish_replacement() {
+    let hook = Arc::new(ReplaceCreatedAfterPublishHook {
+        workspace: Mutex::new(None),
+    });
+    let harness = Harness::with_hooks(Duration::from_secs(60), hook.clone());
+    *hook.workspace.lock().expect("hook workspace") = Some(harness.workspace.clone());
+
+    let result = harness.broker.create("workspace-1", "created.txt");
+
+    assert!(matches!(result, Err(FileBrokerError::UnsafeFile)));
+    assert_eq!(
+        fs::read(harness.workspace.join("created.txt")).expect("replacement preserved"),
+        b"attacker replacement"
+    );
+    assert_eq!(
+        fs::read(harness.workspace.join("preserved-created.txt")).expect("created inode preserved"),
+        b""
+    );
+}
+
+#[test]
+fn create_returns_the_final_published_inode_version() {
+    let hook = Arc::new(ModifyCreatedAfterPublishHook {
+        workspace: Mutex::new(None),
+    });
+    let harness = Harness::with_hooks(Duration::from_secs(60), hook.clone());
+    *hook.workspace.lock().expect("hook workspace") = Some(harness.workspace.clone());
+
+    let created = harness
+        .broker
+        .create("workspace-1", "created.txt")
+        .expect("create file");
+    let current = harness
+        .broker
+        .stat(&created.handle_id)
+        .expect("stat created file");
+
+    assert_eq!(created.version, current.version);
+    assert_eq!(current.size, b"changed after publish".len() as u64);
+}
+
+#[test]
+fn create_failure_releases_its_handle_reservation() {
+    let harness = Harness::with_hooks(
+        Duration::from_secs(60),
+        Arc::new(FailFirstCreateHook {
+            failed: Mutex::new(false),
+        }),
+    );
+    fs::write(harness.workspace.join("capacity.txt"), b"value").expect("capacity fixture");
+    let mut handles = Vec::new();
+    for _ in 0..63 {
+        handles.push(
+            harness
+                .broker
+                .open("workspace-1", "capacity.txt")
+                .expect("open handle within capacity"),
+        );
+    }
+
+    let failed = harness.broker.create("workspace-1", "failed-create.txt");
+    assert!(matches!(
+        failed,
+        Err(FileBrokerError::Io(ref error))
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+    ));
+    assert!(!harness.workspace.join("failed-create.txt").exists());
+    fs::set_permissions(&harness.workspace, fs::Permissions::from_mode(0o700))
+        .expect("restore workspace permissions");
+
+    let recovered = harness
+        .broker
+        .create("workspace-1", "recovered-create.txt")
+        .expect("reservation released after create failure");
+    harness
+        .broker
+        .close(&recovered.handle_id)
+        .expect("close recovered handle");
+    for handle in handles {
+        harness
+            .broker
+            .close(&handle.handle_id)
+            .expect("close capacity handle");
+    }
+}
+
+#[test]
+fn failed_open_releases_its_handle_reservation() {
+    let harness = Harness::new(Duration::from_secs(60));
+    fs::write(harness.workspace.join("capacity.txt"), b"value").expect("capacity fixture");
+    let mut handles = Vec::new();
+    for _ in 0..63 {
+        handles.push(
+            harness
+                .broker
+                .open("workspace-1", "capacity.txt")
+                .expect("open handle within capacity"),
+        );
+    }
+
+    assert!(matches!(
+        harness.broker.open("workspace-1", "missing.txt"),
+        Err(FileBrokerError::Io(ref error)) if error.kind() == std::io::ErrorKind::NotFound
+    ));
+    let recovered = harness
+        .broker
+        .open("workspace-1", "capacity.txt")
+        .expect("reservation released after open failure");
+
+    harness
+        .broker
+        .close(&recovered.handle_id)
+        .expect("close recovered handle");
+    for handle in handles {
+        harness
+            .broker
+            .close(&handle.handle_id)
+            .expect("close capacity handle");
+    }
+}
+
+#[test]
+fn close_drops_expired_and_revoked_atomic_handles_without_authorization() {
+    let expired = Harness::new(Duration::ZERO);
+    let expired_write = expired
+        .broker
+        .begin_atomic_write(
+            "workspace-1",
+            "expired-close.txt",
+            AtomicWriteOptions {
+                create_if_absent: true,
+                expected_version: None,
+            },
+        )
+        .expect("begin expired close");
+    assert_eq!(atomic_temporary_paths(&expired.workspace).len(), 1);
+    expired
+        .broker
+        .close(&expired_write.handle_id)
+        .expect("close expired handle");
+    assert!(atomic_temporary_paths(&expired.workspace).is_empty());
+    assert!(matches!(
+        expired.broker.close(&expired_write.handle_id),
+        Err(FileBrokerError::InvalidHandle)
+    ));
+
+    let revoked = Harness::new(Duration::from_secs(60));
+    let revoked_write = revoked
+        .broker
+        .begin_atomic_write(
+            "workspace-1",
+            "revoked-close.txt",
+            AtomicWriteOptions {
+                create_if_absent: true,
+                expected_version: None,
+            },
+        )
+        .expect("begin revoked close");
+    revoked
+        .store
+        .update_status(
+            "workspace-1",
+            openloop_desktop_lib::workspaces::grants::GrantStatus::Ready,
+            openloop_desktop_lib::workspaces::grants::GrantStatus::Revoking,
+            1,
+        )
+        .expect("revoke grant");
+    assert_eq!(atomic_temporary_paths(&revoked.workspace).len(), 1);
+    revoked
+        .broker
+        .close(&revoked_write.handle_id)
+        .expect("close revoked handle");
+    assert!(atomic_temporary_paths(&revoked.workspace).is_empty());
+    assert!(matches!(
+        revoked.broker.close(&revoked_write.handle_id),
+        Err(FileBrokerError::InvalidHandle)
+    ));
+}
+
+#[test]
 fn atomic_write_uses_descriptor_relative_temp_fsync_rename_and_version_cas() {
     let harness = Harness::new(Duration::from_secs(60));
     fs::write(harness.workspace.join("document.txt"), b"before").expect("fixture");
@@ -870,6 +1539,54 @@ fn failed_swap_rollback_preserves_staged_displaced_and_attacker_files() {
 }
 
 #[test]
+fn atomic_publish_never_commits_a_temporary_name_replacement() {
+    let hook = Arc::new(ReplaceTemporaryBeforeSwapHook {
+        workspace: Mutex::new(None),
+    });
+    let harness = Harness::with_hooks(Duration::from_secs(60), hook.clone());
+    *hook.workspace.lock().expect("hook workspace") = Some(harness.workspace.clone());
+    fs::write(harness.workspace.join("document.txt"), b"original").expect("fixture");
+    let current = harness
+        .broker
+        .open("workspace-1", "document.txt")
+        .expect("open current");
+    let write = harness
+        .broker
+        .begin_atomic_write(
+            "workspace-1",
+            "document.txt",
+            AtomicWriteOptions {
+                create_if_absent: false,
+                expected_version: current.version,
+            },
+        )
+        .expect("begin write");
+    harness
+        .broker
+        .write_chunk(&write.handle_id, b"staged")
+        .expect("stage bytes");
+
+    let result = harness.broker.commit_atomic_write(&write.handle_id);
+
+    assert!(matches!(result, Err(FileBrokerError::UnsafeFile)));
+    assert_eq!(
+        fs::read(harness.workspace.join("document.txt")).expect("original target restored"),
+        b"original"
+    );
+    assert_eq!(
+        fs::read(harness.workspace.join("preserved-staged.txt")).expect("staged inode preserved"),
+        b"staged"
+    );
+    let temporary = atomic_temporary_paths(&harness.workspace)
+        .pop()
+        .expect("temporary replacement preserved");
+    assert_eq!(
+        fs::read(temporary).expect("temporary replacement contents"),
+        b"attacker replacement"
+    );
+}
+
+#[test]
 fn atomic_write_rejects_stale_versions_existing_create_and_final_symlink() {
     let harness = Harness::new(Duration::from_secs(60));
     fs::write(harness.workspace.join("document.txt"), b"before").expect("fixture");
@@ -964,6 +1681,247 @@ fn create_if_absent_atomic_write_creates_one_new_file() {
         fs::read(harness.workspace.join("new.txt")).expect("created file"),
         b"created"
     );
+}
+
+#[test]
+fn cancellation_before_atomic_commit_admission_preserves_target_and_staging() {
+    let harness = Harness::new(Duration::from_secs(60));
+    let write = harness
+        .broker
+        .begin_atomic_write(
+            "workspace-1",
+            "cancelled.txt",
+            AtomicWriteOptions {
+                create_if_absent: true,
+                expected_version: None,
+            },
+        )
+        .expect("begin cancellable write");
+    harness
+        .broker
+        .write_chunk(&write.handle_id, b"cancelled")
+        .expect("stage cancellable bytes");
+    let (dispatcher, launch_id, secret, peer) = broker_dispatcher(harness.broker.clone());
+    let cancel = dispatch_file(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        200,
+        "$cancel",
+        serde_json::json!({ "requestId": "file-request-201" }),
+    );
+    assert_eq!(cancel["ok"], true);
+    let committed = dispatch_file(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        201,
+        "commitWorkspaceAtomicWrite",
+        serde_json::json!({ "handleId": write.handle_id }),
+    );
+
+    assert_eq!(committed["ok"], false);
+    assert_eq!(committed["error"]["code"], "invalid_request");
+    assert!(!harness.workspace.join("cancelled.txt").exists());
+    let closed = dispatch_file(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        202,
+        "closeWorkspaceFile",
+        serde_json::json!({ "handleId": write.handle_id }),
+    );
+    assert_eq!(closed["ok"], true);
+    assert!(atomic_temporary_paths(&harness.workspace).is_empty());
+}
+
+#[test]
+fn cancellation_returns_while_an_atomic_publish_that_already_started_finishes() {
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let harness = Harness::with_hooks(
+        Duration::from_secs(60),
+        Arc::new(BlockingSwapHook {
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        }),
+    );
+    fs::write(harness.workspace.join("committed.txt"), b"before").expect("fixture");
+    let current = harness
+        .broker
+        .open("workspace-1", "committed.txt")
+        .expect("open current");
+    let write = harness
+        .broker
+        .begin_atomic_write(
+            "workspace-1",
+            "committed.txt",
+            AtomicWriteOptions {
+                create_if_absent: false,
+                expected_version: current.version,
+            },
+        )
+        .expect("begin committed write");
+    harness
+        .broker
+        .write_chunk(&write.handle_id, b"after")
+        .expect("stage committed bytes");
+    let (dispatcher, launch_id, secret, peer) = broker_dispatcher(harness.broker.clone());
+    let dispatcher = Arc::new(dispatcher);
+    let (committed_tx, committed_rx) = mpsc::channel();
+    let commit = {
+        let dispatcher = dispatcher.clone();
+        let secret = secret.clone();
+        let handle_id = write.handle_id.clone();
+        thread::spawn(move || {
+            let response = dispatch_file(
+                &dispatcher,
+                launch_id,
+                &secret,
+                peer,
+                210,
+                "commitWorkspaceAtomicWrite",
+                serde_json::json!({ "handleId": handle_id }),
+            );
+            committed_tx.send(response).expect("report commit");
+        })
+    };
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("atomic publish started");
+    let (cancel_started_tx, cancel_started_rx) = mpsc::sync_channel(1);
+    let (cancelled_tx, cancelled_rx) = mpsc::channel();
+    let cancel = {
+        let dispatcher = dispatcher.clone();
+        let secret = secret.clone();
+        thread::spawn(move || {
+            cancel_started_tx
+                .send(())
+                .expect("announce cancellation request");
+            let response = dispatch_file(
+                &dispatcher,
+                launch_id,
+                &secret,
+                peer,
+                211,
+                "$cancel",
+                serde_json::json!({ "requestId": "file-request-210" }),
+            );
+            cancelled_tx.send(response).expect("report cancellation");
+        })
+    };
+    cancel_started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("cancellation request started");
+    let cancel_response = cancelled_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("cancellation response while publish remains active");
+    release_tx.send(()).expect("finish atomic publish");
+    let committed = committed_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("commit response");
+    commit.join().expect("commit request thread");
+    cancel.join().expect("cancellation thread");
+
+    assert_eq!(committed["ok"], true);
+    assert_eq!(cancel_response["ok"], true);
+    assert_eq!(
+        fs::read(harness.workspace.join("committed.txt")).expect("committed file"),
+        b"after"
+    );
+}
+
+#[test]
+fn bridge_file_failures_use_stable_path_free_codes() {
+    let harness = Harness::new(Duration::from_secs(60));
+    fs::write(harness.workspace.join("existing.txt"), b"existing").expect("fixture");
+    let (dispatcher, launch_id, secret, peer) = broker_dispatcher(harness.broker.clone());
+
+    let grant = dispatch_file(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        220,
+        "openWorkspaceRoot",
+        serde_json::json!({ "workspaceId": "missing-workspace" }),
+    );
+    assert_eq!(
+        grant["error"],
+        serde_json::json!({
+            "code": "file_grant_unavailable",
+            "message": "desktop Workspace file grant is unavailable",
+        })
+    );
+
+    let missing = dispatch_file(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        221,
+        "openWorkspaceFile",
+        serde_json::json!({
+            "workspaceId": "workspace-1",
+            "relativePath": "private-missing.txt",
+            "mode": "read",
+        }),
+    );
+    assert_eq!(
+        missing["error"],
+        serde_json::json!({
+            "code": "file_not_found",
+            "message": "desktop Workspace file was not found",
+        })
+    );
+
+    let existing = dispatch_file(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        222,
+        "createWorkspaceFile",
+        serde_json::json!({
+            "workspaceId": "workspace-1",
+            "relativePath": "existing.txt",
+        }),
+    );
+    assert_eq!(
+        existing["error"],
+        serde_json::json!({
+            "code": "file_already_exists",
+            "message": "desktop Workspace file already exists",
+        })
+    );
+
+    let conflict = dispatch_file(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        223,
+        "beginWorkspaceAtomicWrite",
+        serde_json::json!({
+            "workspaceId": "workspace-1",
+            "relativePath": "private-missing.txt",
+            "createIfAbsent": false,
+            "expectedVersion": null,
+        }),
+    );
+    assert_eq!(
+        conflict["error"],
+        serde_json::json!({
+            "code": "file_version_conflict",
+            "message": "desktop Workspace file version changed",
+        })
+    );
+    let serialized = serde_json::json!([grant, missing, existing, conflict]).to_string();
+    assert!(!serialized.contains(harness.workspace.to_string_lossy().as_ref()));
+    assert!(!serialized.contains("private-missing.txt"));
 }
 
 #[test]

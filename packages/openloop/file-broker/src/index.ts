@@ -185,11 +185,17 @@ export class WorkspaceFileBroker {
     )
   }
 
-  commitAtomicWrite(
+  /**
+   * Commits after a cancellation preflight. Entering this method is the point of no return:
+   * the current bridge protocol has no native admission acknowledgement, so the signal is
+   * deliberately not forwarded and callers receive the definitive commit result.
+   */
+  async commitAtomicWrite(
     handleId: string,
     signal?: AbortSignal,
   ): Promise<WorkspaceFileVersion> {
-    return this.port.commitWorkspaceAtomicWrite(handleId, signal)
+    signal?.throwIfAborted()
+    return await this.port.commitWorkspaceAtomicWrite(handleId)
   }
 
   close(handleId: string, signal?: AbortSignal): Promise<void> {

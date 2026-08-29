@@ -38,9 +38,20 @@ use self::openat::{
 pub const MAX_FILE_CHUNK_BYTES: usize = 32 * 1024;
 const MAX_ATOMIC_WRITE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LIST_ENTRIES: usize = 128;
+const MAX_OPEN_HANDLES: usize = 64;
 const DEFAULT_HANDLE_TTL: Duration = Duration::from_secs(5 * 60);
 
 pub trait FileBrokerHooks: Send + Sync {
+    fn before_create(&self, _parent: RawFd, _target: &CStr) {}
+    fn after_create(&self, _parent: RawFd, _target: &CStr) {}
+    fn before_create_sync(
+        &self,
+        _parent: RawFd,
+        _temporary: &CStr,
+        _target: &CStr,
+    ) -> Result<(), FileBrokerError> {
+        Ok(())
+    }
     fn before_atomic_write(&self, _parent: RawFd, _temporary: &CStr) {}
     fn before_atomic_publish(&self, _parent: RawFd, _temporary: &CStr) {}
     fn before_atomic_swap(&self, _parent: RawFd, _temporary: &CStr, _target: &CStr) {}
@@ -174,6 +185,95 @@ struct HandleRecord {
     value: HandleValue,
 }
 
+#[derive(Default)]
+struct HandleTable {
+    records: HashMap<Uuid, HandleRecord>,
+    reservations: usize,
+}
+
+struct HandleReservation<'a> {
+    table: &'a Mutex<HandleTable>,
+    active: bool,
+}
+
+impl HandleReservation<'_> {
+    fn activate(
+        mut self,
+        binding: GrantBinding,
+        value: HandleValue,
+        stat: FileStat,
+        handle_ttl: Duration,
+    ) -> Result<FileHandleView, FileBrokerError> {
+        let handle_id = Uuid::new_v4();
+        let mut table = self
+            .table
+            .lock()
+            .map_err(|_| FileBrokerError::InvalidHandle)?;
+        table.reservations -= 1;
+        table.records.insert(
+            handle_id,
+            HandleRecord {
+                binding,
+                expires_at: Instant::now() + handle_ttl,
+                value,
+            },
+        );
+        self.active = false;
+        Ok(FileHandleView {
+            handle_id: handle_id.to_string(),
+            kind: stat.kind,
+            version: stat.version,
+        })
+    }
+}
+
+impl Drop for HandleReservation<'_> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut table = match self.table.lock() {
+            Ok(table) => table,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        table.reservations = table.reservations.saturating_sub(1);
+    }
+}
+
+struct TemporaryCleanup<'a> {
+    parent: RawFd,
+    temporary: &'a CStr,
+    descriptor: RawFd,
+    active: bool,
+}
+
+impl TemporaryCleanup<'_> {
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+
+    fn verify_ownership(&mut self, descriptor: RawFd) -> Result<(), FileBrokerError> {
+        if temporary_inode_identity(self.parent, self.temporary, descriptor)?.is_none() {
+            self.disarm();
+            return Err(FileBrokerError::UnsafeFile);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TemporaryCleanup<'_> {
+    fn drop(&mut self) {
+        if self.active
+            && temporary_inode_identity(self.parent, self.temporary, self.descriptor)
+                .ok()
+                .flatten()
+                .is_some()
+        {
+            let _ = unlink_at(self.parent, self.temporary);
+        }
+    }
+}
+
 struct AtomicWriteHandle {
     parent: OwnedFd,
     temporary: CString,
@@ -188,9 +288,12 @@ struct AtomicWriteHandle {
 
 impl Drop for AtomicWriteHandle {
     fn drop(&mut self) {
-        if self.temporary_exists {
-            let _ = unlink_at(self.parent.as_raw_fd(), &self.temporary);
-        }
+        let _cleanup = TemporaryCleanup {
+            parent: self.parent.as_raw_fd(),
+            temporary: &self.temporary,
+            descriptor: self.file.as_raw_fd(),
+            active: self.temporary_exists,
+        };
     }
 }
 
@@ -207,7 +310,7 @@ pub struct FileBroker {
     operation_gate: Arc<WorkspaceOperationGate>,
     hooks: Arc<dyn FileBrokerHooks>,
     handle_ttl: Duration,
-    handles: Mutex<HashMap<Uuid, HandleRecord>>,
+    handles: Mutex<HandleTable>,
 }
 
 impl FileBroker {
@@ -250,7 +353,7 @@ impl FileBroker {
             operation_gate,
             hooks,
             handle_ttl,
-            handles: Mutex::new(HashMap::new()),
+            handles: Mutex::new(HandleTable::default()),
         }
     }
 
@@ -261,9 +364,15 @@ impl FileBroker {
     ) -> Result<FileHandleView, FileBrokerError> {
         let _lease = self.operation_lease(workspace_id)?;
         let root = self.ready_root(workspace_id, None)?;
+        let reservation = self.reserve_handle()?;
         let descriptor = open_beneath(root.descriptor.as_raw_fd(), relative_path)?;
         let stat = inspect_supported_descriptor(descriptor.as_raw_fd())?;
-        self.insert_handle(root.binding, HandleValue::Open(descriptor), stat)
+        reservation.activate(
+            root.binding,
+            HandleValue::Open(descriptor),
+            stat,
+            self.handle_ttl,
+        )
     }
 
     pub fn create(
@@ -278,15 +387,44 @@ impl FileBroker {
             checked_regular_version(&metadata)?;
             return Err(FileBrokerError::AlreadyExists);
         }
-        let descriptor = create_regular_at(target.parent.as_raw_fd(), &target.leaf)?;
-        if let Err(error) = sync_descriptor(descriptor.as_raw_fd())
-            .and_then(|()| sync_descriptor(target.parent.as_raw_fd()))
+        let reservation = self.reserve_handle()?;
+        self.hooks
+            .before_create(target.parent.as_raw_fd(), &target.leaf);
+        let (temporary, descriptor) = self.create_temporary(target.parent.as_raw_fd())?;
+        let mut cleanup = TemporaryCleanup {
+            parent: target.parent.as_raw_fd(),
+            temporary: &temporary,
+            descriptor: descriptor.as_raw_fd(),
+            active: true,
+        };
+        self.hooks
+            .before_create_sync(target.parent.as_raw_fd(), &temporary, &target.leaf)?;
+        cleanup.verify_ownership(descriptor.as_raw_fd())?;
+        sync_descriptor(descriptor.as_raw_fd())?;
+        cleanup.verify_ownership(descriptor.as_raw_fd())?;
+        inspect_regular_descriptor(descriptor.as_raw_fd())?;
+        rename_exclusive_at(target.parent.as_raw_fd(), &temporary, &target.leaf)?;
+        cleanup.disarm();
+        if path_inode_identity(target.parent.as_raw_fd(), &target.leaf)?
+            != Some(descriptor_inode_identity(descriptor.as_raw_fd())?)
         {
-            let _ = unlink_at(target.parent.as_raw_fd(), &target.leaf);
-            return Err(error);
+            return Err(FileBrokerError::UnsafeFile);
+        }
+        self.hooks
+            .after_create(target.parent.as_raw_fd(), &target.leaf);
+        sync_descriptor(target.parent.as_raw_fd())?;
+        if path_inode_identity(target.parent.as_raw_fd(), &target.leaf)?
+            != Some(descriptor_inode_identity(descriptor.as_raw_fd())?)
+        {
+            return Err(FileBrokerError::UnsafeFile);
         }
         let stat = inspect_regular_descriptor(descriptor.as_raw_fd())?;
-        self.insert_handle(root.binding, HandleValue::Open(descriptor), stat)
+        reservation.activate(
+            root.binding,
+            HandleValue::Open(descriptor),
+            stat,
+            self.handle_ttl,
+        )
     }
 
     pub fn stat(&self, handle_id: &str) -> Result<FileStat, FileBrokerError> {
@@ -402,9 +540,10 @@ impl FileBroker {
             }
         }
 
+        let reservation = self.reserve_handle()?;
         let (temporary, file) = self.create_temporary(target.parent.as_raw_fd())?;
         let stat = inspect_regular_descriptor(file.as_raw_fd())?;
-        self.insert_handle(
+        reservation.activate(
             root.binding,
             HandleValue::Atomic(AtomicWriteHandle {
                 parent: target.parent,
@@ -418,6 +557,7 @@ impl FileBroker {
                 temporary_exists: true,
             }),
             stat,
+            self.handle_ttl,
         )
     }
 
@@ -432,7 +572,10 @@ impl FileBroker {
             .handles
             .lock()
             .map_err(|_| FileBrokerError::InvalidHandle)?;
-        let handle = handles.get_mut(&id).ok_or(FileBrokerError::InvalidHandle)?;
+        let handle = handles
+            .records
+            .get_mut(&id)
+            .ok_or(FileBrokerError::InvalidHandle)?;
         let HandleValue::Atomic(write) = &mut handle.value else {
             return Err(FileBrokerError::WrongHandleKind);
         };
@@ -461,6 +604,7 @@ impl FileBroker {
             .handles
             .lock()
             .map_err(|_| FileBrokerError::InvalidHandle)?
+            .records
             .remove(&id)
             .ok_or(FileBrokerError::InvalidHandle)?;
         if Instant::now() >= record.expires_at {
@@ -482,6 +626,11 @@ impl FileBroker {
             }
             rename_exclusive_at(write.parent.as_raw_fd(), &write.temporary, &write.target)?;
             write.temporary_exists = false;
+            if path_inode_identity(write.parent.as_raw_fd(), &write.target)?
+                != Some(staged_identity)
+            {
+                return Err(FileBrokerError::UnsafeFile);
+            }
         } else {
             let current_metadata = stat_at(write.parent.as_raw_fd(), &write.target)?
                 .ok_or(FileBrokerError::VersionConflict)?;
@@ -501,19 +650,32 @@ impl FileBroker {
                 &write.target,
             );
             swap_at(write.parent.as_raw_fd(), &write.temporary, &write.target)?;
-            let displaced_metadata = stat_at(write.parent.as_raw_fd(), &write.temporary)?
-                .ok_or(FileBrokerError::VersionConflict)?;
-            let displaced = stable_regular_identity(&displaced_metadata)?;
-            if displaced != current_identity {
-                let displaced_identity = inode_identity(&displaced_metadata)?;
+            let published_identity = path_inode_identity(write.parent.as_raw_fd(), &write.target)?;
+            let displaced_metadata = stat_at(write.parent.as_raw_fd(), &write.temporary)?;
+            let displaced_identity = displaced_metadata
+                .as_ref()
+                .map(inode_identity)
+                .transpose()?;
+            let displaced_version = displaced_metadata
+                .as_ref()
+                .map(stable_regular_identity)
+                .transpose()?;
+            if published_identity != Some(staged_identity)
+                || displaced_version != Some(current_identity)
+            {
                 write.temporary_exists = false;
-                let rollback_is_safe =
-                    path_inode_identity(write.parent.as_raw_fd(), &write.target)?
-                        == Some(staged_identity)
-                        && path_inode_identity(write.parent.as_raw_fd(), &write.temporary)?
-                            == Some(displaced_identity);
+                let rollback_is_safe = published_identity.is_some()
+                    && displaced_identity.is_some()
+                    && path_inode_identity(write.parent.as_raw_fd(), &write.target)?
+                        == published_identity
+                    && path_inode_identity(write.parent.as_raw_fd(), &write.temporary)?
+                        == displaced_identity;
                 if !rollback_is_safe {
-                    return Err(FileBrokerError::VersionConflict);
+                    return Err(if published_identity == Some(staged_identity) {
+                        FileBrokerError::VersionConflict
+                    } else {
+                        FileBrokerError::UnsafeFile
+                    });
                 }
                 self.hooks.before_atomic_rollback(
                     write.parent.as_raw_fd(),
@@ -523,13 +685,17 @@ impl FileBroker {
                 swap_at(write.parent.as_raw_fd(), &write.temporary, &write.target)?;
                 let rollback_succeeded =
                     path_inode_identity(write.parent.as_raw_fd(), &write.target)?
-                        == Some(displaced_identity)
+                        == displaced_identity
                         && path_inode_identity(write.parent.as_raw_fd(), &write.temporary)?
-                            == Some(staged_identity);
-                if rollback_succeeded {
+                            == published_identity;
+                if rollback_succeeded && published_identity == Some(staged_identity) {
                     write.temporary_exists = true;
                 }
-                return Err(FileBrokerError::VersionConflict);
+                return Err(if published_identity == Some(staged_identity) {
+                    FileBrokerError::VersionConflict
+                } else {
+                    FileBrokerError::UnsafeFile
+                });
             }
             unlink_at(write.parent.as_raw_fd(), &write.temporary)?;
             write.temporary_exists = false;
@@ -539,17 +705,18 @@ impl FileBroker {
             stat_at(write.parent.as_raw_fd(), &write.target)?.ok_or(FileBrokerError::Io(
                 io::Error::new(io::ErrorKind::NotFound, "committed Workspace file vanished"),
             ))?;
-        checked_regular_version(&metadata)
+        if inode_identity(&metadata)? != staged_identity {
+            return Err(FileBrokerError::UnsafeFile);
+        }
+        checked_regular_version(&descriptor_stat(write.file.as_raw_fd())?)
     }
 
     pub fn close(&self, handle_id: &str) -> Result<(), FileBrokerError> {
         let id = parse_handle_id(handle_id)?;
-        let (_, binding) = self.handle_binding(handle_id)?;
-        let _lease = self.operation_lease(&binding.workspace_id)?;
-        self.ready_root(&binding.workspace_id, Some(&binding))?;
         self.handles
             .lock()
             .map_err(|_| FileBrokerError::InvalidHandle)?
+            .records
             .remove(&id)
             .ok_or(FileBrokerError::InvalidHandle)?;
         Ok(())
@@ -632,43 +799,37 @@ impl FileBroker {
         })
     }
 
-    fn insert_handle(
-        &self,
-        binding: GrantBinding,
-        value: HandleValue,
-        stat: FileStat,
-    ) -> Result<FileHandleView, FileBrokerError> {
-        let handle_id = Uuid::new_v4();
-        self.handles
+    fn reserve_handle(&self) -> Result<HandleReservation<'_>, FileBrokerError> {
+        let now = Instant::now();
+        let mut table = self
+            .handles
             .lock()
-            .map_err(|_| FileBrokerError::InvalidHandle)?
-            .insert(
-                handle_id,
-                HandleRecord {
-                    binding,
-                    expires_at: Instant::now() + self.handle_ttl,
-                    value,
-                },
-            );
-        Ok(FileHandleView {
-            handle_id: handle_id.to_string(),
-            kind: stat.kind,
-            version: stat.version,
+            .map_err(|_| FileBrokerError::InvalidHandle)?;
+        table.records.retain(|_, record| record.expires_at > now);
+        if table.records.len() + table.reservations >= MAX_OPEN_HANDLES {
+            return Err(FileBrokerError::InvalidHandle);
+        }
+        table.reservations += 1;
+        Ok(HandleReservation {
+            table: &self.handles,
+            active: true,
         })
     }
 
     fn handle_binding(&self, handle_id: &str) -> Result<(Uuid, GrantBinding), FileBrokerError> {
         let id = parse_handle_id(handle_id)?;
         let now = Instant::now();
-        let handles = self
+        let mut table = self
             .handles
             .lock()
             .map_err(|_| FileBrokerError::InvalidHandle)?;
-        let handle = handles.get(&id).ok_or(FileBrokerError::InvalidHandle)?;
-        if now >= handle.expires_at {
-            return Err(FileBrokerError::InvalidHandle);
-        }
-        let binding = handle.binding.clone();
+        table.records.retain(|_, record| record.expires_at > now);
+        let binding = table
+            .records
+            .get(&id)
+            .ok_or(FileBrokerError::InvalidHandle)?
+            .binding
+            .clone();
         Ok((id, binding))
     }
 
@@ -677,11 +838,14 @@ impl FileBroker {
         id: Uuid,
         operation: impl FnOnce(RawFd) -> Result<T, FileBrokerError>,
     ) -> Result<T, FileBrokerError> {
-        let handles = self
+        let table = self
             .handles
             .lock()
             .map_err(|_| FileBrokerError::InvalidHandle)?;
-        let handle = handles.get(&id).ok_or(FileBrokerError::InvalidHandle)?;
+        let handle = table
+            .records
+            .get(&id)
+            .ok_or(FileBrokerError::InvalidHandle)?;
         let HandleValue::Open(descriptor) = &handle.value else {
             return Err(FileBrokerError::WrongHandleKind);
         };
@@ -726,18 +890,34 @@ fn path_inode_identity(
 fn verify_temporary_ownership(
     write: &mut AtomicWriteHandle,
 ) -> Result<InodeIdentity, FileBrokerError> {
-    let descriptor_metadata = descriptor_stat(write.file.as_raw_fd())?;
+    let Some(descriptor_identity) = temporary_inode_identity(
+        write.parent.as_raw_fd(),
+        &write.temporary,
+        write.file.as_raw_fd(),
+    )?
+    else {
+        write.temporary_exists = false;
+        return Err(FileBrokerError::UnsafeFile);
+    };
+    Ok(descriptor_identity)
+}
+
+fn temporary_inode_identity(
+    parent: RawFd,
+    temporary: &CStr,
+    descriptor: RawFd,
+) -> Result<Option<InodeIdentity>, FileBrokerError> {
+    let descriptor_metadata = descriptor_stat(descriptor)?;
     let descriptor_identity = raw_regular_inode_identity(&descriptor_metadata)?;
-    let path_identity = stat_at(write.parent.as_raw_fd(), &write.temporary)?
+    let path_identity = stat_at(parent, temporary)?
         .as_ref()
         .map(raw_regular_inode_identity)
         .transpose()?;
     if path_identity != Some(descriptor_identity) {
-        write.temporary_exists = false;
-        return Err(FileBrokerError::UnsafeFile);
+        return Ok(None);
     }
-    inspect_regular_descriptor(write.file.as_raw_fd())?;
-    Ok(descriptor_identity)
+    inspect_regular_descriptor(descriptor)?;
+    Ok(Some(descriptor_identity))
 }
 
 fn parse_handle_id(handle_id: &str) -> Result<Uuid, FileBrokerError> {
@@ -927,18 +1107,19 @@ pub fn install_file_broker_handlers(
             Ok(Value::Null)
         },
     )?;
-    install_handler(
-        tables,
-        "commitWorkspaceAtomicWrite",
-        broker.clone(),
-        |broker, payload| {
-            let input: HandleInput = serde_json::from_value(payload)
-                .map_err(|_| BridgeHandlerError::invalid_request())?;
-            Ok(json!({
-                "version": bridge_file(broker.commit_atomic_write(&input.handle_id))?
-            }))
-        },
-    )?;
+    let commit_broker = broker.clone();
+    let commit_handler: BridgeHandler = Arc::new(move |payload, cancellation| {
+        let input: HandleInput =
+            serde_json::from_value(payload).map_err(|_| BridgeHandlerError::invalid_request())?;
+        if !cancellation.admit_commit() {
+            return Err(BridgeHandlerError::invalid_request());
+        }
+        let version = bridge_file(commit_broker.commit_atomic_write(&input.handle_id))?;
+        Ok(json!({ "version": version }))
+    });
+    tables
+        .set_host_handler("commitWorkspaceAtomicWrite", commit_handler)
+        .map_err(|error| error.to_string())?;
     install_handler(tables, "closeWorkspaceFile", broker, |broker, payload| {
         let input: HandleInput =
             serde_json::from_value(payload).map_err(|_| BridgeHandlerError::invalid_request())?;
@@ -978,5 +1159,13 @@ fn install_handler(
 }
 
 fn bridge_file<T>(result: Result<T, FileBrokerError>) -> Result<T, BridgeHandlerError> {
-    result.map_err(|_| BridgeHandlerError::file_failure())
+    result.map_err(|error| match error {
+        FileBrokerError::GrantUnavailable => BridgeHandlerError::file_grant_unavailable(),
+        FileBrokerError::Io(source) if source.kind() == io::ErrorKind::NotFound => {
+            BridgeHandlerError::file_not_found()
+        }
+        FileBrokerError::AlreadyExists => BridgeHandlerError::file_already_exists(),
+        FileBrokerError::VersionConflict => BridgeHandlerError::file_version_conflict(),
+        _ => BridgeHandlerError::file_failure(),
+    })
 }

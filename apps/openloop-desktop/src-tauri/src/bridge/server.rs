@@ -96,6 +96,7 @@ type CancellationCallback = Box<dyn FnOnce() + Send + 'static>;
 
 struct CancellationState {
     cancelled: bool,
+    commit_admitted: bool,
     next_subscription_id: u64,
     callbacks: HashMap<u64, CancellationCallback>,
 }
@@ -125,6 +126,7 @@ impl CancellationToken {
             state: Arc::new((
                 Mutex::new(CancellationState {
                     cancelled: false,
+                    commit_admitted: false,
                     next_subscription_id: 0,
                     callbacks: HashMap::new(),
                 }),
@@ -156,13 +158,25 @@ impl CancellationToken {
             .unwrap_or(true)
     }
 
-    /// Run a commit only while cancellation is excluded from the same state lock.
+    /// Run a short destructive commit while cancellation is excluded.
     pub fn commit_if_active<T>(&self, commit: impl FnOnce() -> T) -> Option<T> {
         let state = self.state.0.lock().ok()?;
-        if state.cancelled {
+        if state.cancelled || state.commit_admitted {
             return None;
         }
         Some(commit())
+    }
+
+    /// Mark a long-running commit irreversible without holding the cancellation lock.
+    pub fn admit_commit(&self) -> bool {
+        let Ok(mut state) = self.state.0.lock() else {
+            return false;
+        };
+        if state.cancelled || state.commit_admitted {
+            return false;
+        }
+        state.commit_admitted = true;
+        true
     }
 
     pub(crate) fn subscribe(
@@ -249,6 +263,34 @@ impl BridgeHandlerError {
         Self {
             code: "file_failure",
             message: "desktop Workspace file operation failed",
+        }
+    }
+
+    pub fn file_grant_unavailable() -> Self {
+        Self {
+            code: "file_grant_unavailable",
+            message: "desktop Workspace file grant is unavailable",
+        }
+    }
+
+    pub fn file_not_found() -> Self {
+        Self {
+            code: "file_not_found",
+            message: "desktop Workspace file was not found",
+        }
+    }
+
+    pub fn file_already_exists() -> Self {
+        Self {
+            code: "file_already_exists",
+            message: "desktop Workspace file already exists",
+        }
+    }
+
+    pub fn file_version_conflict() -> Self {
+        Self {
+            code: "file_version_conflict",
+            message: "desktop Workspace file version changed",
         }
     }
 }
@@ -1025,6 +1067,26 @@ mod tests {
         assert_eq!(commit.join().expect("commit thread"), Some(7));
         cancel.join().expect("cancellation thread");
         assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn admitted_long_running_commit_does_not_hold_the_cancellation_lock() {
+        let cancellation = CancellationToken::new();
+        assert!(cancellation.admit_commit());
+
+        let cancel_cancellation = cancellation.clone();
+        let (cancelled, cancel_returned) = std::sync::mpsc::channel();
+        let cancel = thread::spawn(move || {
+            cancel_cancellation.cancel();
+            cancelled.send(()).expect("report cancellation return");
+        });
+
+        cancel_returned
+            .recv_timeout(Duration::from_secs(2))
+            .expect("cancellation returned after commit admission");
+        cancel.join().expect("cancellation thread");
+        assert!(cancellation.is_cancelled());
+        assert!(!cancellation.admit_commit());
     }
 
     #[test]
