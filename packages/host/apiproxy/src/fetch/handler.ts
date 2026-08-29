@@ -75,11 +75,15 @@ interface BrowserApiPolicy {
   readonly version: 1
   allowsTarget?(method: string): boolean
   allows(method: string, payload: unknown): boolean
-  allowsInvocation?(
+  allowsInvocation?<T>(
     method: string,
     payload: unknown,
     signal: AbortSignal,
-  ): Promise<boolean>
+    operation: () => Promise<T>,
+  ): Promise<
+    | { readonly allowed: false }
+    | { readonly allowed: true; readonly value: T }
+  >
 }
 
 /**
@@ -197,15 +201,26 @@ async function handleUnary<K extends keyof RpcMethodMap>(
   if (!payload.success) {
     return errorResponse(message.rpcId, { code: 'bad-request', message: `invalid payload for ${method}`, details: { issues: payload.error.issues } })
   }
-  if (policy?.allowsInvocation !== undefined
-    && !await policy.allowsInvocation(method, payload.data, signal)) {
-    return new Response('forbidden', { status: 403 })
+  let businessFailure: { readonly error: unknown } | undefined
+  const invoke = async () => {
+    try {
+      return await route.invoke(api, { rpcId: message.rpcId, payload: payload.data }, signal)
+    } catch (error) {
+      businessFailure = { error }
+      throw error
+    }
   }
   try {
-    return fullResponse(await route.invoke(api, { rpcId: message.rpcId, payload: payload.data }, signal))
-  } catch (error: unknown) {
+    if (policy?.allowsInvocation === undefined) return fullResponse(await invoke())
+    const admission = await policy.allowsInvocation(method, payload.data, signal, invoke)
+    if (!admission.allowed) return new Response('forbidden', { status: 403 })
+    return fullResponse(admission.value)
+  } catch {
+    if (businessFailure === undefined) {
+      return new Response('forbidden', { status: 403 })
+    }
     // The impl never throws business errors; reaching here means the implementation itself crashed — 500, carrier layer.
-    return new Response(`handler failure: ${String(error)}`, { status: 500 })
+    return new Response(`handler failure: ${String(businessFailure.error)}`, { status: 500 })
   }
 }
 

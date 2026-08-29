@@ -776,7 +776,7 @@ pub(crate) fn c_name(value: &str) -> Result<CString, WorkspaceGrantError> {
 #[derive(Debug)]
 pub struct VerifiedGrant {
     grant: WorkspaceGrant,
-    _descriptor: OwnedFd,
+    descriptor: OwnedFd,
 }
 
 #[derive(Debug)]
@@ -808,8 +808,12 @@ impl VerifiedGrant {
         &self.grant
     }
 
+    pub fn descriptor(&self) -> &OwnedFd {
+        &self.descriptor
+    }
+
     pub(crate) fn into_parts(self) -> (WorkspaceGrant, OwnedFd) {
-        (self.grant, self._descriptor)
+        (self.grant, self.descriptor)
     }
 }
 
@@ -887,7 +891,7 @@ pub fn reopen_verified_grant(grant: &WorkspaceGrant) -> Result<VerifiedGrant, Wo
     verified.status = GrantStatus::Ready;
     Ok(VerifiedGrant {
         grant: verified,
-        _descriptor: current,
+        descriptor: current,
     })
 }
 

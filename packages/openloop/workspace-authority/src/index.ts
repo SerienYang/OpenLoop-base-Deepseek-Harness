@@ -295,6 +295,14 @@ export class WorkspaceAuthorityService extends Service {
   isReady(workspaceId: string, signal?: AbortSignal) {
     return this.authority.isReady(workspaceId, signal)
   }
+
+  runIfReady<T>(
+    workspaceId: string,
+    operation: () => Promise<T>,
+    signal?: AbortSignal,
+  ) {
+    return this.authority.runIfReady(workspaceId, operation, signal)
+  }
 }
 
 export default WorkspaceAuthorityService

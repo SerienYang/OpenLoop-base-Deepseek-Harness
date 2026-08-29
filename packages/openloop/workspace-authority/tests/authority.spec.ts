@@ -269,6 +269,94 @@ describe('WorkspaceAuthority', () => {
     )
   })
 
+  it('returns the committed name when cancellation arrives after rename persistence', async () => {
+    const value = fixture({ existingWorkspace: true })
+    const controller = new AbortController()
+    const rename = vi.mocked(value.registry.renameExpected).getMockImplementation()!
+    vi.mocked(value.registry.renameExpected).mockImplementationOnce(async (...args) => {
+      const committed = await rename(...args)
+      controller.abort(new Error('cancelled after commit'))
+      return committed
+    })
+
+    await expect(value.authority.rename(
+      'workspace-1',
+      'Committed Name',
+      controller.signal,
+    )).resolves.toEqual({
+      workspaceId: 'workspace-1',
+      name: 'Committed Name',
+      displayPath: '/display/project',
+      state: 'ready',
+    })
+    expect(value.workspaces.get('workspace-1')?.name).toBe('Committed Name')
+  })
+
+  it('holds session creation in the authority queue until its business work settles', async () => {
+    const value = fixture({ existingWorkspace: true })
+    const createStarted = Promise.withResolvers<undefined>()
+    const releaseCreate = Promise.withResolvers<undefined>()
+    const create = value.authority.runIfReady(
+      'workspace-1',
+      async () => {
+        createStarted.resolve()
+        await releaseCreate.promise
+        return 'session-created'
+      },
+    )
+    await createStarted.promise
+
+    const revoke = value.authority.revoke('workspace-1')
+    await Promise.resolve()
+    expect(value.native.confirmWorkspaceRevoke).not.toHaveBeenCalled()
+
+    releaseCreate.resolve()
+    await expect(create).resolves.toEqual({
+      allowed: true,
+      value: 'session-created',
+    })
+    await expect(revoke).resolves.toBe('revoked')
+  })
+
+  it('releases the authority queue when admitted session creation rejects', async () => {
+    const value = fixture({ existingWorkspace: true })
+
+    await expect(value.authority.runIfReady(
+      'workspace-1',
+      async () => { throw new Error('session create failed') },
+    )).rejects.toThrow('session create failed')
+    await expect(value.authority.rename('workspace-1', 'After Failure')).resolves.toMatchObject({
+      name: 'After Failure',
+    })
+  })
+
+  it('releases the authority queue when admitted session creation is aborted', async () => {
+    const value = fixture({ existingWorkspace: true })
+    const controller = new AbortController()
+    const createStarted = Promise.withResolvers<undefined>()
+    const create = value.authority.runIfReady(
+      'workspace-1',
+      async () => {
+        createStarted.resolve()
+        await new Promise<void>((_resolve, reject) => {
+          controller.signal.addEventListener(
+            'abort',
+            () => { reject(controller.signal.reason) },
+            { once: true },
+          )
+        })
+      },
+      controller.signal,
+    )
+    await createStarted.promise
+    const rename = value.authority.rename('workspace-1', 'After Abort')
+
+    controller.abort(new Error('session create aborted'))
+
+    await expect(create).rejects.toThrow('session create aborted')
+    await expect(rename).resolves.toMatchObject({ name: 'After Abort' })
+  })
+
   it('rejects invalid rename names before inspecting Host authority', async () => {
     const value = fixture({ existingWorkspace: true })
 

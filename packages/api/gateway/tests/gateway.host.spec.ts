@@ -401,6 +401,67 @@ describe('TypertGatewayService', () => {
     expect(service.calls).toEqual([])
   })
 
+  it('keeps the Typert business method inside asynchronous policy admission', async () => {
+    const ctx = new Context()
+    await ctx.plugin(TypertRegistry)
+    const events: string[] = []
+    const allowsInvocation = vi.fn(async (
+      _endpoint: string,
+      _args: unknown,
+      _signal: AbortSignal,
+      invoke: () => Promise<unknown>,
+    ) => {
+      events.push('admission-enter')
+      const value = await invoke()
+      events.push('admission-exit')
+      return { allowed: true as const, value }
+    })
+    ctx.provide('browserApiPolicy', {
+      version: 1,
+      allows: () => true,
+      allowsInvocation,
+    })
+    await ctx.plugin(TypertGatewayService)
+    const serviceFiber = ctx.plugin(GoalService)
+    await serviceFiber
+    ctx.typert.lookups.register('gatewayFixture', agentLookup({ id: 'agent-1' }))
+    registerStrict(ctx, [createDescriptor()])
+    const service = rawGoalService(ctx)
+
+    await expect(ctx.typertGateway.invoke({
+      namespace: 'goals',
+      method: 'create',
+      args: { agentId: 'agent-1', request: { title: 'ship' } },
+    })).resolves.toMatchObject({ title: 'ship' })
+
+    expect(events).toEqual(['admission-enter', 'admission-exit'])
+    expect(service.calls).toEqual(['create'])
+    expect(allowsInvocation).toHaveBeenCalledOnce()
+  })
+
+  it('turns a rejected Typert invocation policy hook into policy denial', async () => {
+    const ctx = new Context()
+    await ctx.plugin(TypertRegistry)
+    ctx.provide('browserApiPolicy', {
+      version: 1,
+      allows: () => true,
+      allowsInvocation: async () => { throw new Error('policy unavailable') },
+    })
+    await ctx.plugin(TypertGatewayService)
+    const serviceFiber = ctx.plugin(GoalService)
+    await serviceFiber
+    ctx.typert.lookups.register('gatewayFixture', agentLookup({ id: 'agent-1' }))
+    registerStrict(ctx, [createDescriptor()])
+    const service = rawGoalService(ctx)
+
+    await expectCode(ctx.typertGateway.invoke({
+      namespace: 'goals',
+      method: 'create',
+      args: { agentId: 'agent-1', request: { title: 'ship' } },
+    }), 'policy-denied')
+    expect(service.calls).toEqual([])
+  })
+
   it('fails closed before lookup and business work while a required policy is unloading', async () => {
     class RequiredPolicyGateway extends TypertGatewayService {
       static override inject = ['typert', 'browserApiPolicy']

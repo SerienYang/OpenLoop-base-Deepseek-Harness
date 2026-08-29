@@ -776,17 +776,31 @@ describe('OpenLoop browser API policy', () => {
   ] as const)('admits session.create only when Host authority reports %s', async (_state, ready) => {
     const ctx = new Context()
     const disposeBootstrap = installBridgeBootstrap(ctx)
-    const isReady = vi.fn(async () => ready)
-    ctx.provide('workspaceAuthority', { isReady } as never)
+    const runIfReady = vi.fn(async (
+      _workspaceId: string,
+      invoke: () => Promise<string>,
+    ) => ready
+      ? { allowed: true as const, value: await invoke() }
+      : { allowed: false as const })
+    ctx.provide('workspaceAuthority', { runIfReady } as never)
     const fiber = ctx.plugin(OpenloopBrowserApiPolicyService)
     await fiber
+    const invoke = vi.fn(async () => 'created')
 
     await expect(ctx.browserApiPolicy.allowsInvocation?.(
       'session.create',
       { workspaceId: 'workspace-1', agentPreset: 'standard' },
       new AbortController().signal,
-    )).resolves.toBe(ready)
-    expect(isReady).toHaveBeenCalledWith('workspace-1', expect.any(AbortSignal))
+      invoke,
+    )).resolves.toEqual(ready
+      ? { allowed: true, value: 'created' }
+      : { allowed: false })
+    expect(runIfReady).toHaveBeenCalledWith(
+      'workspace-1',
+      invoke,
+      expect.any(AbortSignal),
+    )
+    expect(invoke).toHaveBeenCalledTimes(ready ? 1 : 0)
 
     await fiber.dispose()
     disposeBootstrap()

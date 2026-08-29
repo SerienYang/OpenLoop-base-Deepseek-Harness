@@ -20,14 +20,19 @@ export interface BrowserApiPolicy {
   allowsTarget?(method: string): boolean
   allows(method: string, payload: unknown): boolean
   /**
-   * Optional asynchronous check performed after payload validation and before
-   * a legacy business handler is invoked.
+   * Optional asynchronous admission scope around one validated business
+   * invocation. An allowed result must contain the value produced by invoking
+   * `operation` while the policy's admission remains active.
    */
-  allowsInvocation?(
+  allowsInvocation?<T>(
     method: string,
     payload: unknown,
     signal: AbortSignal,
-  ): Promise<boolean>
+    operation: () => Promise<T>,
+  ): Promise<
+    | { readonly allowed: false }
+    | { readonly allowed: true; readonly value: T }
+  >
 }
 
 declare module '@deepseek-ai/cordis' {

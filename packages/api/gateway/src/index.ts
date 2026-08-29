@@ -184,11 +184,45 @@ export class TypertGatewayService extends Service implements TypertGateway {
       )
     }
 
+    let businessFailure: { readonly error: unknown } | undefined
+    const invoke = async (): Promise<unknown> => {
+      try {
+        return await Reflect.apply(method, receiver, args) as unknown
+      } catch (error) {
+        businessFailure = { error }
+        throw error
+      }
+    }
     let result: unknown
     try {
-      result = await Reflect.apply(method, receiver, args) as unknown
+      if (policy?.allowsInvocation === undefined) {
+        result = await invoke()
+      } else {
+        const admission = await policy.allowsInvocation(
+          endpoint,
+          request.args,
+          request.signal ?? NEVER_ABORTED_SIGNAL,
+          invoke,
+        )
+        if (!admission.allowed) {
+          throw new TypertGatewayError(
+            'policy-denied',
+            endpoint,
+            'browser API policy denied this endpoint',
+          )
+        }
+        result = admission.value
+      }
     } catch (error) {
       if (request.signal?.aborted === true) throw new RemoteInvocationCancelled(endpoint, error)
+      if (businessFailure === undefined && !(error instanceof TypertGatewayError)) {
+        throw new TypertGatewayError(
+          'policy-denied',
+          endpoint,
+          'browser API policy could not admit this endpoint',
+          { cause: error },
+        )
+      }
       throw error
     }
     // A weak descriptor declares no return type, so nothing returned is a void

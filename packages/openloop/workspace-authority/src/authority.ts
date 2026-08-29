@@ -205,15 +205,33 @@ export class WorkspaceAuthority {
   }
 
   isReady(workspaceId: string, signal: AbortSignal = NEVER_ABORTED): Promise<boolean> {
+    return this.#enqueue(() => this.#isReady(workspaceId, signal))
+  }
+
+  runIfReady<T>(
+    workspaceId: string,
+    operation: () => Promise<T>,
+    signal: AbortSignal = NEVER_ABORTED,
+  ): Promise<
+    | { readonly allowed: false }
+    | { readonly allowed: true; readonly value: T }
+  > {
     return this.#enqueue(async () => {
+      if (!await this.#isReady(workspaceId, signal)) return { allowed: false }
       signal.throwIfAborted()
-      if (!this.#registry.has(workspaceId)) return false
-      const grant = await this.#native.inspectWorkspaceGrant(workspaceId, signal)
-      return grant.exists
-        && grant.status === 'ready'
-        && grant.identityValid
-        && grant.effectiveStatus === 'ready'
+      return { allowed: true, value: await operation() }
     })
+  }
+
+  async #isReady(workspaceId: string, signal: AbortSignal): Promise<boolean> {
+    signal.throwIfAborted()
+    if (!this.#registry.has(workspaceId)) return false
+    const grant = await this.#native.inspectWorkspaceGrant(workspaceId, signal)
+    signal.throwIfAborted()
+    return grant.exists
+      && grant.status === 'ready'
+      && grant.identityValid
+      && grant.effectiveStatus === 'ready'
   }
 
   async #rename(
@@ -242,7 +260,6 @@ export class WorkspaceAuthority {
       normalized,
       expectedCatalogGeneration,
     )
-    signal.throwIfAborted()
     return {
       workspaceId,
       name: renamed.name,

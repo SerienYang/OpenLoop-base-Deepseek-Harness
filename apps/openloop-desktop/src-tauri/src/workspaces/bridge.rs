@@ -1,4 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
@@ -11,7 +13,7 @@ use crate::bridge::server::{BridgeDispatchTables, BridgeHandler, BridgeHandlerEr
 use super::journal::{WorkspaceJournal, WorkspaceTransaction, WorkspaceTransactionKind};
 use super::{
     confirmation::{RevokeConfirmation, RevokePresentation},
-    grants::{reopen_verified_grant, GrantStatus, GrantStore},
+    grants::{reopen_verified_grant, GrantStatus, GrantStore, VerifiedGrant},
     picker::{PendingGrantRegistry, WorkspaceDirectoryPicker},
 };
 
@@ -119,7 +121,9 @@ pub fn install_workspace_authority_handlers_with_reveal(
     registry: Arc<Mutex<PendingGrantRegistry>>,
     picker: Arc<dyn WorkspaceDirectoryPicker>,
     confirmation: Arc<dyn RevokeConfirmation>,
-    reveal_workspace: Arc<dyn Fn(&Path) -> Result<(), BridgeHandlerError> + Send + Sync + 'static>,
+    reveal_workspace: Arc<
+        dyn Fn(VerifiedGrant) -> Result<(), BridgeHandlerError> + Send + Sync + 'static,
+    >,
 ) -> Result<(), String> {
     let operation_gate = registry
         .lock()
@@ -365,9 +369,10 @@ pub fn install_workspace_authority_handlers_with_reveal(
         if grant.status != GrantStatus::Ready {
             return Err(BridgeHandlerError::workspace_failure());
         }
-        reopen_verified_grant(&grant).map_err(|_| BridgeHandlerError::workspace_failure())?;
+        let verified =
+            reopen_verified_grant(&grant).map_err(|_| BridgeHandlerError::workspace_failure())?;
         cancellation
-            .commit_if_active(|| reveal_workspace(&grant.canonical_path))
+            .commit_if_active(|| reveal_workspace(verified))
             .ok_or_else(BridgeHandlerError::invalid_request)??;
         Ok(Value::Null)
     });
@@ -693,12 +698,26 @@ pub fn install_workspace_authority_handlers_with_reveal(
     Ok(())
 }
 
-fn reveal_workspace_in_finder(path: &Path) -> Result<(), BridgeHandlerError> {
-    let status = Command::new("/usr/bin/open")
-        .arg("-R")
-        .arg(path)
+fn reveal_workspace_in_finder(verified: VerifiedGrant) -> Result<(), BridgeHandlerError> {
+    let descriptor = verified.descriptor().as_raw_fd();
+    let mut command = Command::new("/usr/bin/open");
+    command.arg("-R").arg(format!("/dev/fd/{descriptor}"));
+    unsafe {
+        command.pre_exec(move || {
+            let flags = libc::fcntl(descriptor, libc::F_GETFD);
+            if flags < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::fcntl(descriptor, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let status = command
         .status()
         .map_err(|_| BridgeHandlerError::workspace_failure())?;
+    drop(verified);
     if !status.success() {
         return Err(BridgeHandlerError::workspace_failure());
     }

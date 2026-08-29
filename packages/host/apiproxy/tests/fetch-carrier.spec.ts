@@ -625,7 +625,7 @@ describe('handler carrier-layer statuses', () => {
   it('runs asynchronous invocation admission before the DSH session handler', async () => {
     const api = fakeApi()
     const create = vi.spyOn(api.sessions, 'create')
-    const allowsInvocation = vi.fn(async () => false)
+    const allowsInvocation = vi.fn(async () => ({ allowed: false as const }))
     const restricted = toFetchHandler(api, {
       version: 1,
       allows: () => true,
@@ -650,7 +650,79 @@ describe('handler carrier-layer statuses', () => {
       'session.create',
       payload,
       expect.any(AbortSignal),
+      expect.any(Function),
     )
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('keeps asynchronous admission active until the DSH session handler settles', async () => {
+    const api = fakeApi()
+    const events: string[] = []
+    let admissionCalls = 0
+    const create = vi.spyOn(api.sessions, 'create').mockImplementationOnce(async (request) => {
+      events.push('create')
+      return { rpcId: request.rpcId, result: { ok: true, value: { sessionId: 's-new' as never } } }
+    })
+    const allowsInvocation = async <T>(
+      _method: string,
+      _payload: unknown,
+      _signal: AbortSignal,
+      invoke: () => Promise<T>,
+    ): Promise<
+      | { readonly allowed: false }
+      | { readonly allowed: true; readonly value: T }
+    > => {
+      admissionCalls += 1
+      events.push('admission-enter')
+      const value = await invoke()
+      events.push('admission-exit')
+      return { allowed: true as const, value }
+    }
+    const restricted = toFetchHandler(api, {
+      version: 1,
+      allows: () => true,
+      allowsInvocation,
+    })
+
+    const response = await restricted.fetch(new Request('http://x/api/session.create', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'r-session-create-lease',
+        method: 'session.create',
+        payload: { workspaceId: 'workspace-1', agentPreset: 'standard' },
+      }),
+    }))
+
+    expect(response.status).toBe(200)
+    expect(events).toEqual(['admission-enter', 'create', 'admission-exit'])
+    expect(create).toHaveBeenCalledOnce()
+    expect(admissionCalls).toBe(1)
+  })
+
+  it('turns an asynchronous invocation policy rejection into a closed response', async () => {
+    const api = fakeApi()
+    const create = vi.spyOn(api.sessions, 'create')
+    const restricted = toFetchHandler(api, {
+      version: 1,
+      allows: () => true,
+      allowsInvocation: async () => { throw new Error('policy unavailable') },
+    })
+
+    const response = await restricted.fetch(new Request('http://x/api/session.create', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'r-session-create-policy-error',
+        method: 'session.create',
+        payload: { workspaceId: 'workspace-1' },
+      }),
+    }))
+
+    expect(response.status).toBe(403)
+    expect(await response.text()).toBe('forbidden')
     expect(create).not.toHaveBeenCalled()
   })
 

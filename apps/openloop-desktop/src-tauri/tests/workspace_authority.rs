@@ -5,6 +5,7 @@ use std::{
     fs,
     io::Write,
     net::Shutdown,
+    os::fd::AsRawFd,
     os::unix::fs::{symlink, PermissionsExt},
     path::{Path, PathBuf},
     process,
@@ -35,8 +36,8 @@ use openloop_desktop_lib::{
             RevokeConfirmationCancellation, RevokeConfirmationCompletion, RevokePresentation,
         },
         grants::{
-            reopen_verified_grant, FileIdentity, GrantStatus, GrantStore, WorkspaceGrant,
-            WorkspaceGrantError,
+            reopen_verified_grant, FileIdentity, GrantStatus, GrantStore, VerifiedGrant,
+            WorkspaceGrant, WorkspaceGrantError,
         },
         journal::{WorkspaceJournal, WorkspaceTransaction, WorkspaceTransactionKind},
         picker::{
@@ -1962,11 +1963,11 @@ fn reveal_workspace_requires_a_ready_grant_before_invoking_finder() {
             outcomes: Mutex::new(VecDeque::new()),
         }),
         Arc::new(FixedConfirmation(true)),
-        Arc::new(move |path: &Path| {
+        Arc::new(move |verified: VerifiedGrant| {
             reveal_calls
                 .lock()
                 .expect("reveal calls")
-                .push(path.to_path_buf());
+                .push(verified.grant().canonical_path.clone());
             Ok(())
         }),
     )
@@ -2022,6 +2023,91 @@ fn reveal_workspace_requires_a_ready_grant_before_invoking_finder() {
     assert_eq!(
         revealed.lock().expect("reveal calls").as_slice(),
         [fs::canonicalize(&workspace).expect("canonical workspace")]
+    );
+}
+
+#[test]
+fn reveal_workspace_keeps_the_verified_descriptor_across_path_replacement() {
+    let root = tempdir().expect("root");
+    let channel = root.path().join("channel");
+    let workspace = root.path().join("workspace");
+    let moved = root.path().join("moved-workspace");
+    secure_root(&channel);
+    secure_root(&workspace);
+    let persisted = grant(&workspace, "workspace-1", 0);
+    let original_identity = persisted.identity;
+    let store = GrantStore::open(&channel, ReleaseChannel::Test).expect("store");
+    store.commit(persisted, 0).expect("commit grant");
+    let journal = WorkspaceJournal::open(&channel, ReleaseChannel::Test).expect("journal");
+    let launch_id = Uuid::new_v4();
+    let observed_identity = Arc::new(Mutex::new(None));
+    let observed = observed_identity.clone();
+    let replace_path = workspace.clone();
+    let moved_path = moved.clone();
+    let mut tables = BridgeDispatchTables::unavailable();
+    install_workspace_authority_handlers_with_reveal(
+        &mut tables,
+        launch_id,
+        store,
+        journal,
+        Arc::new(Mutex::new(PendingGrantRegistry::new(launch_id))),
+        Arc::new(SequencePicker {
+            outcomes: Mutex::new(VecDeque::new()),
+        }),
+        Arc::new(FixedConfirmation(true)),
+        Arc::new(move |verified: VerifiedGrant| {
+            fs::rename(&replace_path, &moved_path).expect("move verified Workspace");
+            secure_root(&replace_path);
+            let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+            assert_eq!(
+                unsafe { libc::fstat(verified.descriptor().as_raw_fd(), metadata.as_mut_ptr()) },
+                0,
+                "inspect descriptor-backed Workspace",
+            );
+            let metadata = unsafe { metadata.assume_init() };
+            *observed.lock().expect("observed identity") = Some(FileIdentity {
+                volume_id: metadata.st_dev as u64,
+                file_id: metadata.st_ino,
+            });
+            Ok(())
+        }),
+    )
+    .expect("authority handlers");
+    let executable = std::env::current_exe().expect("test executable");
+    let secret: Vec<u8> = (0..32).collect();
+    let peer = PeerIdentity {
+        uid: unsafe { libc::geteuid() },
+        pid: process::id(),
+    };
+    let dispatcher = AuthenticatedBridgeDispatcher::new(
+        peer.uid,
+        capture_process_identity(process::id(), &executable).expect("process identity"),
+        executable,
+        launch_id,
+        secret.clone(),
+        tables,
+    )
+    .expect("Workspace dispatcher");
+
+    let response = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        1,
+        "revealWorkspace",
+        serde_json::json!({ "workspaceId": "workspace-1" }),
+    );
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["result"], serde_json::Value::Null);
+    assert_eq!(
+        *observed_identity.lock().expect("observed identity"),
+        Some(original_identity)
+    );
+    assert_ne!(
+        FileIdentity::from_metadata(&fs::metadata(&workspace).expect("replacement metadata")),
+        original_identity
     );
 }
 

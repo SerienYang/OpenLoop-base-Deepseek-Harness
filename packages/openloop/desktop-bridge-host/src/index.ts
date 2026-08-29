@@ -97,30 +97,42 @@ export class OpenloopBrowserApiPolicyService extends Service implements BrowserA
     return this.policy.allows(method, payload)
   }
 
-  /** Require a live, identity-valid Host grant before DSH creates a session. */
-  async allowsInvocation(
+  /** Keep session creation inside the same authority queue lease as its ready check. */
+  async allowsInvocation<T>(
     method: string,
     payload: unknown,
     signal: AbortSignal,
-  ): Promise<boolean> {
-    if (method !== 'session.create') return true
+    operation: () => Promise<T>,
+  ): Promise<
+    | { readonly allowed: false }
+    | { readonly allowed: true; readonly value: T }
+  > {
+    if (method !== 'session.create') {
+      return { allowed: true, value: await operation() }
+    }
     if (typeof payload !== 'object' || payload === null
       || !Object.hasOwn(payload, 'workspaceId')
       || typeof (payload as { workspaceId?: unknown }).workspaceId !== 'string') {
-      return false
+      return { allowed: false }
     }
     const authority = this.ctx.get('workspaceAuthority') as
-      | { isReady(workspaceId: string, signal: AbortSignal): Promise<boolean> }
+      | {
+        runIfReady<R>(
+          workspaceId: string,
+          operation: () => Promise<R>,
+          signal: AbortSignal,
+        ): Promise<
+          | { readonly allowed: false }
+          | { readonly allowed: true; readonly value: R }
+        >
+      }
       | undefined
-    if (authority === undefined) return false
-    try {
-      return await authority.isReady(
-        (payload as { workspaceId: string }).workspaceId,
-        signal,
-      )
-    } catch {
-      return false
-    }
+    if (authority === undefined) return { allowed: false }
+    return await authority.runIfReady(
+      (payload as { workspaceId: string }).workspaceId,
+      operation,
+      signal,
+    )
   }
 }
 
