@@ -118,32 +118,20 @@ interface BrowserApiResponseCapture {
 }
 
 interface BrowserStreamCapture {
-  readonly transport: 'sse' | 'websocket'
   readonly url: string
-  readonly observedFrames?: unknown[]
+  readonly observedFrames: unknown[]
   bytes: number
   frameCount: number
   text: string
   truncated: boolean
 }
 
-async function installSseCapture(page: Page): Promise<void> {
-  await page.addInitScript((maximumBytes) => {
-    interface SseCapture {
-      readonly transport: 'sse'
-      readonly url: string
-      bytes: number
-      frameCount: number
-      text: string
-      truncated: boolean
-    }
+async function installDownlinkLifecycleControl(page: Page): Promise<void> {
+  await page.addInitScript(() => {
     interface CaptureGlobal {
-      __openloopSseCaptures?: SseCapture[]
       __openloopCloseDownlinks?: () => void
     }
     const state = globalThis as typeof globalThis & CaptureGlobal
-    state.__openloopSseCaptures = []
-    let capturedBytes = 0
     const sockets = new Set<WebSocket>()
     const NativeWebSocket = globalThis.WebSocket
     globalThis.WebSocket = new Proxy(NativeWebSocket, {
@@ -157,54 +145,6 @@ async function installSseCapture(page: Page): Promise<void> {
     state.__openloopCloseDownlinks = () => {
       for (const socket of sockets) socket.close()
     }
-    const originalFetch = globalThis.fetch.bind(globalThis)
-    globalThis.fetch = async (...args): Promise<Response> => {
-      const response = await originalFetch(...args)
-      if (!response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')
-        || response.body === null) {
-        return response
-      }
-      const capture: SseCapture = {
-        transport: 'sse',
-        url: response.url,
-        bytes: 0,
-        frameCount: 0,
-        text: '',
-        truncated: false,
-      }
-      state.__openloopSseCaptures?.push(capture)
-      const decoder = new TextDecoder()
-      const observed = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-        transform(chunk, controller) {
-          capture.frameCount += 1
-          const remaining = maximumBytes - capturedBytes
-          if (remaining > 0) {
-            const recorded = chunk.subarray(0, remaining)
-            capture.text += decoder.decode(recorded, { stream: recorded.length === chunk.length })
-            capture.bytes += recorded.byteLength
-            capturedBytes += recorded.byteLength
-          }
-          if (chunk.byteLength > remaining) capture.truncated = true
-          controller.enqueue(chunk)
-        },
-        flush() {
-          if (!capture.truncated) capture.text += decoder.decode()
-        },
-      }))
-      return new Response(observed, {
-        headers: response.headers,
-        status: response.status,
-        statusText: response.statusText,
-      })
-    }
-  }, STREAM_CAPTURE_LIMIT_BYTES)
-}
-
-async function readSseCaptures(page: Page): Promise<BrowserStreamCapture[]> {
-  return await page.evaluate(() => {
-    return [...((globalThis as typeof globalThis & {
-      __openloopSseCaptures?: BrowserStreamCapture[]
-    }).__openloopSseCaptures ?? [])]
   })
 }
 
@@ -338,13 +278,12 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     browser = await chromium.launch()
     page = await newEnglishPage(browser)
     page.setDefaultTimeout(10_000)
-    await installSseCapture(page)
+    await installDownlinkLifecycleControl(page)
     tripwire = watchConsole(page)
     page.on('websocket', (socket) => {
       const pathname = new URL(socket.url()).pathname
       if (pathname !== '/api/events.mux' && pathname !== '/api/events.host') return
       const capture: BrowserStreamCapture = {
-        transport: 'websocket',
         url: socket.url(),
         observedFrames: [],
         bytes: 0,
@@ -621,6 +560,8 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
 
     const preRemoveAria = await captureStableAria(page, '[class*="frame"]', scaffold.workspaceCwd)
     await compareOrRefreshGolden(UI_EXPECTED, preRemoveAria, MODE)
+    expect(preRemoveAria).toContain('button "authority-project"')
+    expect(preRemoveAria).not.toContain(initialSessionId)
 
     expect(scaffold.ctx.sessions.get(initialSessionId)).toBeDefined()
 
@@ -783,13 +724,13 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
       'final dynamic browser API reads',
       15_000,
     )
-    const browserStreams = [...browserStreamCaptures, ...await readSseCaptures(page)]
+    const browserStreams = [...browserStreamCaptures]
     for (const path of ['/api/events.mux', '/api/events.host']) {
+      const captures = browserStreams.filter(capture => new URL(capture.url).pathname === path)
       expect(
-        browserStreams.some(capture =>
-          new URL(capture.url).pathname === path && capture.frameCount > 0),
-        `browser capture did not observe a real ${path} frame`,
-      ).toBe(true)
+        captures.flatMap(capture => capture.observedFrames).length,
+        `browser WebSocket capture did not observe a real ${path} frame`,
+      ).toBeGreaterThan(0)
     }
     const responseMethods = browserApiResponses.map(response => response.rpcMethod)
     expect(responseMethods, 'API response capture omitted session.create')
@@ -800,12 +741,23 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
       .toContain('session.list')
     expect(responseMethods, 'API response capture omitted renameWorkspace')
       .toContain('openloopDesktop/renameWorkspace')
+    const sessionListItems = browserApiResponses
+      .filter(response => response.rpcMethod === 'session.list' && response.body !== undefined)
+      .flatMap((response) => {
+        const envelope = JSON.parse(response.body ?? '') as {
+          result?: { ok?: boolean; value?: { items?: unknown[] } }
+        }
+        return envelope.result?.ok === true ? envelope.result.value?.items ?? [] : []
+      })
+    expect(sessionListItems).toContainEqual(expect.objectContaining({
+      sessionId: initialSessionId,
+      cwd: 'authority-project',
+    }))
     const browserApiRequestTraffic = JSON.stringify(browserApiRequests)
     const browserApiResponseTraffic = JSON.stringify(browserApiResponses)
     const browserStreamTraffic = JSON.stringify(browserStreams)
     const websocketFrames = browserStreams
-      .filter(capture => capture.transport === 'websocket')
-      .flatMap(capture => capture.observedFrames ?? [])
+      .flatMap(capture => capture.observedFrames)
     const frameType = (frame: unknown): unknown =>
       (frame as { payload?: { type?: unknown } } | null)?.payload?.type
     const sessionAddedFrames = websocketFrames.filter(
@@ -814,7 +766,7 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     expect(sessionAddedFrames.length, 'WebSocket capture omitted projected host/session-added')
       .toBeGreaterThan(0)
     for (const frame of sessionAddedFrames) {
-      expect((frame as { payload: object }).payload).not.toHaveProperty('cwd')
+      expect((frame as { payload: object }).payload).toHaveProperty('cwd', 'authority-project')
     }
     expect(websocketFrames.some(frame => frameType(frame) === 'host/workspace-changed'))
       .toBe(false)

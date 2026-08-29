@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket, { type RawData } from 'ws'
 import type {
-  ApiProxy, HostFrame, MuxFrame, RpcRequest, ServerRequest,
+  ApiProxy, HostFrame, MuxFrame, RpcError, RpcRequest, ServerRequest,
 } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { HOST_EVENTS_PATH, MUX_EVENTS_PATH } from '../src/api-path.ts'
@@ -256,6 +256,90 @@ describe('WebSocket downlinks', () => {
       error: { code: 'internal', message: 'Error: mux source failed', details: {} },
     })
     await closed
+  })
+
+  it('projects a source failure before WebSocket serialization', async () => {
+    const canonicalPath = '/private/canonical/workspace'
+    const projectError = vi.fn((_method: string, _error: RpcError): RpcError => ({
+      code: 'internal',
+      message: 'mux source failed',
+      details: { requestedCwd: canonicalPath, retained: 'public detail' },
+    }))
+    const projectStreamFrame = vi.fn((frame: MuxFrame | HostFrame) => {
+      if (frame.type !== 'stream/error') return frame
+      const { requestedCwd: _requestedCwd, ...details } = frame.error.details as Record<string, unknown>
+      return { ...frame, error: { ...frame.error, details } } as MuxFrame | HostFrame
+    })
+    const downlinks = new WebSocketDownlinks(api(
+      async function * () {
+        throw new Error(`mux source failed at ${canonicalPath}`)
+      },
+      idle,
+    ), {
+      version: 1,
+      allows: () => true,
+      projectError,
+      projectStreamFrame,
+    })
+    const host = await serve(downlinks)
+    running.push(host.close)
+    const socket = new WebSocket(`${host.origin}${MUX_EVENTS_PATH}`)
+    const failure = read(socket)
+    const closed = once(socket, 'close')
+    const payload = (await failure).payload
+
+    expect(payload).toEqual({
+      type: 'stream/error',
+      error: {
+        code: 'internal',
+        message: 'mux source failed',
+        details: { retained: 'public detail' },
+      },
+    })
+    expect(JSON.stringify(payload)).not.toContain(canonicalPath)
+    expect(projectError).toHaveBeenCalledExactlyOnceWith('stream/error', {
+      code: 'internal',
+      message: `Error: mux source failed at ${canonicalPath}`,
+      details: {},
+    })
+    expect(projectStreamFrame).toHaveBeenCalledExactlyOnceWith({
+      type: 'stream/error',
+      error: {
+        code: 'internal',
+        message: 'mux source failed',
+        details: { requestedCwd: canonicalPath, retained: 'public detail' },
+      },
+    })
+    await closed
+  })
+
+  it('does not send a source failure frame dropped by the WebSocket policy', async () => {
+    const projectStreamFrame = vi.fn((frame: MuxFrame | HostFrame) =>
+      frame.type === 'stream/error' ? undefined : frame)
+    const downlinks = new WebSocketDownlinks(api(
+      async function * () {
+        throw new Error('mux source failed')
+      },
+      idle,
+    ), {
+      version: 1,
+      allows: () => true,
+      projectStreamFrame,
+    })
+    const host = await serve(downlinks)
+    running.push(host.close)
+    const socket = new WebSocket(`${host.origin}${MUX_EVENTS_PATH}`)
+    const messages: ServerRequest[] = []
+    socket.on('message', (data) => {
+      messages.push(JSON.parse(rawDataText(data)) as ServerRequest)
+    })
+    await once(socket, 'close')
+
+    expect(messages).toEqual([])
+    expect(projectStreamFrame).toHaveBeenCalledExactlyOnceWith({
+      type: 'stream/error',
+      error: { code: 'internal', message: 'Error: mux source failed', details: {} },
+    })
   })
 
   it('aborts the source when an accepted socket reports a transport error', async () => {

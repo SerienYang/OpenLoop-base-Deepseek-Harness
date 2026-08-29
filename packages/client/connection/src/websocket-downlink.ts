@@ -44,6 +44,23 @@ function failureFrame(error: unknown): RpcRequest<Frame> {
   }
 }
 
+function projectedFrame(
+  frame: RpcRequest<Frame>,
+  policy?: BrowserApiPolicy,
+): RpcRequest<Frame> | undefined {
+  let payload = frame.payload
+  if (payload.type === 'stream/error' && policy?.projectError !== undefined) {
+    payload = {
+      ...payload,
+      error: policy.projectError(payload.type, payload.error),
+    }
+  }
+  const projected = policy?.projectStreamFrame === undefined
+    ? payload
+    : policy.projectStreamFrame(payload)
+  return projected === undefined ? undefined : { ...frame, payload: projected }
+}
+
 /**
  * Owns WebSocket negotiation and frame pumping for the connection plugin's
  * two downlinks. Client messages are a protocol violation: upstream traffic
@@ -129,18 +146,17 @@ export class WebSocketDownlinks {
   ): Promise<void> {
     try {
       for await (const frame of frames) {
-        const payload = this.policy?.projectStreamFrame === undefined
-          ? frame.payload
-          : this.policy.projectStreamFrame(frame.payload)
-        if (payload === undefined) continue
-        await send(socket, { ...frame, payload })
+        const projected = projectedFrame(frame, this.policy)
+        if (projected === undefined) continue
+        await send(socket, projected)
       }
     } catch (error) {
       if (!abort.signal.aborted) {
         try {
-          await send(socket, failureFrame(error))
+          const projected = projectedFrame(failureFrame(error), this.policy)
+          if (projected !== undefined) await send(socket, projected)
         } catch {
-          // Socket loss won the race; no downstream remains to receive the failure frame.
+          // Socket loss or projection failure leaves no safe failure frame to send.
         }
       }
     } finally {

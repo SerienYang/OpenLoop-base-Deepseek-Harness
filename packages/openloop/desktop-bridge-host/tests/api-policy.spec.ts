@@ -182,6 +182,14 @@ describe('OpenLoop browser API policy manifest', () => {
           updatedAt: 2,
           running: true,
           blank: false,
+          cwd: 'C:\\secret\\projects\\windows-workspace\\',
+        },
+        {
+          sessionId: 'session-root',
+          updatedAt: 3,
+          running: false,
+          blank: false,
+          cwd: '/',
         },
       ],
     }
@@ -201,12 +209,20 @@ describe('OpenLoop browser API policy manifest', () => {
           updatedAt: 1,
           running: false,
           blank: true,
+          cwd: 'workspace',
           agentPreset: 'standard',
         },
         {
           sessionId: 'session-2',
           updatedAt: 2,
           running: true,
+          blank: false,
+          cwd: 'windows-workspace',
+        },
+        {
+          sessionId: 'session-root',
+          updatedAt: 3,
+          running: false,
           blank: false,
         },
       ],
@@ -220,9 +236,21 @@ describe('OpenLoop browser API policy manifest', () => {
       details: {
         sessionId: 'session-1',
         path: '/private/canonical/workspace/session.jsonl',
+        requestedCwd: '/private/requested',
+        existingCWD: 'C:\\private\\existing',
+        canonicalPath: '/private/canonical/workspace',
+        PATH: '/private/environment',
+        retained: 'public detail',
         nested: {
           cwd: '/private/canonical/workspace',
           displayPath: '~/Projects/workspace',
+          entries: [
+            {
+              sourcePATH: '/private/source',
+              resultCwd: '/private/result',
+              reason: 'not a path',
+            },
+          ],
         },
       },
     } as unknown as BrowserApiError)).toEqual({
@@ -230,7 +258,11 @@ describe('OpenLoop browser API policy manifest', () => {
       message: 'session log is unavailable',
       details: {
         sessionId: 'session-1',
-        nested: { displayPath: '~/Projects/workspace' },
+        retained: 'public detail',
+        nested: {
+          displayPath: '~/Projects/workspace',
+          entries: [{ reason: 'not a path' }],
+        },
       },
     })
 
@@ -244,6 +276,7 @@ describe('OpenLoop browser API policy manifest', () => {
       type: 'host/session-added',
       sessionId: 'session-1',
       blank: true,
+      cwd: 'workspace',
       agentPreset: 'standard',
     })
     for (const frame of [
@@ -522,6 +555,7 @@ describe('OpenLoop browser API policy', () => {
       name: 'Renamed',
       displayPath: '~/Project Alpha',
       state: 'ready' as const,
+      sessionIds: [],
     }))
     ctx.provide('workspaceAuthority', { rename } as never)
     new OpenloopDesktopRemoteService(ctx, {

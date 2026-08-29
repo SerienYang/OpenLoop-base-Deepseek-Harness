@@ -140,8 +140,9 @@ export function createBrowserApiPolicy(source: unknown): BrowserApiPolicy {
           ...value,
           items: items.map((item) => {
             if (!isRecord(item)) return item
-            const { cwd: _cwd, ...projected } = item
-            return projected
+            const { cwd, ...projected } = item
+            const label = pathDisplayLabel(cwd)
+            return label === undefined ? projected : { ...projected, cwd: label }
           }),
         }
       }
@@ -156,8 +157,9 @@ export function createBrowserApiPolicy(source: unknown): BrowserApiPolicy {
     projectStreamFrame(frame: BrowserApiStreamFrame): BrowserApiStreamFrame | undefined {
       if (DROPPED_HOST_FRAMES.has(frame.type)) return undefined
       if (frame.type !== 'host/session-added') return frame
-      const { cwd: _cwd, ...projected } = frame
-      return projected
+      const { cwd, ...projected } = frame
+      const label = pathDisplayLabel(cwd)
+      return label === undefined ? projected : { ...projected, cwd: label }
     },
   })
 }
@@ -167,11 +169,18 @@ function redactPathDetails(value: unknown): unknown {
   if (!isRecord(value)) return value
   return Object.fromEntries(
     Object.entries(value)
-      .filter(([key]) => key !== 'cwd'
-        && key !== 'path'
-        && (key === 'displayPath' || !key.endsWith('Path')))
+      .filter(([key]) => key === 'displayPath'
+        || (!key.toLowerCase().endsWith('path') && !key.toLowerCase().endsWith('cwd')))
       .map(([key, entry]) => [key, redactPathDetails(entry)]),
   )
+}
+
+function pathDisplayLabel(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length === 0 || /^[A-Za-z]:[\\/]*$/u.test(value)) {
+    return undefined
+  }
+  const segments = value.split(/[\\/]/u).filter(segment => segment.length > 0)
+  return segments.at(-1)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

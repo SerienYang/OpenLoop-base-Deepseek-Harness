@@ -259,6 +259,22 @@ function fullFrame(narrow: RpcRequest<MuxFrame | HostFrame>): ServerRequest {
   return { type: 'server-request', rpcId: narrow.rpcId, method: narrow.payload.type, payload: narrow.payload }
 }
 
+function projectedStreamFrame(
+  frame: MuxFrame | HostFrame,
+  policy?: BrowserApiPolicy,
+): MuxFrame | HostFrame | undefined {
+  let projected = frame
+  if (projected.type === 'stream/error' && policy?.projectError !== undefined) {
+    projected = {
+      ...projected,
+      error: policy.projectError(projected.type, projected.error),
+    }
+  }
+  return policy?.projectStreamFrame === undefined
+    ? projected
+    : policy.projectStreamFrame(projected)
+}
+
 /**
  * Wrap a frame stream as an SSE Response; stops when req.signal aborts. An
  * impl throw mid-stream emits one stream/error frame and then closes.
@@ -276,9 +292,7 @@ function sseResponse(
         // a comment line is not a frame, so client frame parsing skips it naturally).
         controller.enqueue(encoder.encode(': connected\n\n'))
         for await (const narrow of frames) {
-          const payload = policy?.projectStreamFrame === undefined
-            ? narrow.payload
-            : policy.projectStreamFrame(narrow.payload)
+          const payload = projectedStreamFrame(narrow.payload, policy)
           if (payload === undefined) continue
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(fullFrame({
             ...narrow,
@@ -291,10 +305,15 @@ function sseResponse(
         // rpcId is minted — this is a server-initiated push like any other frame.
         const failure: MuxFrame | HostFrame = { type: 'stream/error', error: { code: 'internal', message: String(error), details: {} } }
         try {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(fullFrame({ rpcId: RpcId(randomUUID()), payload: failure }))}\n\n`))
+          const payload = projectedStreamFrame(failure, policy)
+          if (payload !== undefined) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(fullFrame({
+              rpcId: RpcId(randomUUID()),
+              payload,
+            }))}\n\n`))
+          }
         } catch {
-          // Consumer already cancelled the stream: enqueue-after-cancel is the
-          // only reachable error, and there is no one left to tell.
+          // Consumer cancellation or projection failure leaves no safe frame to enqueue.
         }
       } finally {
         try {

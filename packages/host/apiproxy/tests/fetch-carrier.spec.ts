@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ApiProxy, HostFrame, MuxFrame } from '../src/api/index.ts'
-import type { ClientResponse, RpcMessage, RpcReceipt, RpcRequest } from '../src/api/rpc.ts'
+import type { ClientResponse, RpcError, RpcMessage, RpcReceipt, RpcRequest } from '../src/api/rpc.ts'
 import { RpcId } from '../src/api/rpc.ts'
 import { toFetchHandler } from '../src/fetch/handler.ts'
 import { AbstractApiClient, InProcessApiClient } from '../src/fetch/client.ts'
@@ -1034,6 +1034,83 @@ describe('SSE streams through the carrier', () => {
     const frames = await collect(client(api).events.mux({}, new AbortController().signal))
     expect(frames).toHaveLength(2)
     expect(frames[1]?.payload).toMatchObject({ type: 'stream/error', error: { code: 'internal' } })
+  })
+
+  it('projects a source failure before SSE serialization', async () => {
+    const canonicalPath = '/private/canonical/workspace'
+    const api = fakeApi()
+    api.events.mux = (_request, _signal) => (async function * (): AsyncGenerator<RpcRequest<MuxFrame>> {
+      throw new Error(`stream source died at ${canonicalPath}`)
+    })()
+    const projectError = vi.fn((_method: string, _error: RpcError): RpcError => ({
+      code: 'internal',
+      message: 'stream source died',
+      details: { requestedCwd: canonicalPath, retained: 'public detail' },
+    }))
+    const projectStreamFrame = vi.fn((frame: MuxFrame | HostFrame) => {
+      if (frame.type !== 'stream/error') return frame
+      const { requestedCwd: _requestedCwd, ...details } = frame.error.details as Record<string, unknown>
+      return { ...frame, error: { ...frame.error, details } } as MuxFrame | HostFrame
+    })
+    const projected = toFetchHandler(api, {
+      version: 1,
+      allows: () => true,
+      projectError,
+      projectStreamFrame,
+    } as never)
+
+    const response = await projected.fetch(new Request('http://x/api/events.mux'))
+    const text = await response.text()
+    const data = text.split('\n').find(line => line.startsWith('data: '))
+    if (data === undefined) throw new Error('projected SSE response omitted its failure frame')
+    const frame = JSON.parse(data.slice('data: '.length)) as {
+      payload: MuxFrame | HostFrame
+    }
+
+    expect(frame.payload).toEqual({
+      type: 'stream/error',
+      error: {
+        code: 'internal',
+        message: 'stream source died',
+        details: { retained: 'public detail' },
+      },
+    })
+    expect(text).not.toContain(canonicalPath)
+    expect(projectError).toHaveBeenCalledExactlyOnceWith('stream/error', {
+      code: 'internal',
+      message: `Error: stream source died at ${canonicalPath}`,
+      details: {},
+    })
+    expect(projectStreamFrame).toHaveBeenCalledExactlyOnceWith({
+      type: 'stream/error',
+      error: {
+        code: 'internal',
+        message: 'stream source died',
+        details: { requestedCwd: canonicalPath, retained: 'public detail' },
+      },
+    })
+  })
+
+  it('does not serialize a source failure frame dropped by the SSE policy', async () => {
+    const api = fakeApi()
+    api.events.mux = (_request, _signal) => (async function * (): AsyncGenerator<RpcRequest<MuxFrame>> {
+      throw new Error('stream source died')
+    })()
+    const projectStreamFrame = vi.fn((frame: MuxFrame | HostFrame) =>
+      frame.type === 'stream/error' ? undefined : frame)
+    const projected = new InProcessApiClient(toFetchHandler(api, {
+      version: 1,
+      allows: () => true,
+      projectStreamFrame,
+    } as never))
+
+    const frames = await collect(projected.events.mux({}, new AbortController().signal))
+
+    expect(frames).toEqual([])
+    expect(projectStreamFrame).toHaveBeenCalledExactlyOnceWith({
+      type: 'stream/error',
+      error: { code: 'internal', message: 'Error: stream source died', details: {} },
+    })
   })
 })
 

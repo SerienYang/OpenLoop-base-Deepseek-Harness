@@ -278,7 +278,13 @@ export class TypertGatewayService extends Service implements TypertGateway {
       // representation of absence that both args and results already use.
       return { ok: true, value }
     } catch (error) {
-      return rpcFailure(error)
+      const failure = rpcFailure(error)
+      const policy = this.ctx.get('browserApiPolicy')
+      if (failure.ok || policy?.projectError === undefined) return failure
+      return {
+        ok: false,
+        error: policy.projectError(endpoint, failure.error),
+      }
     }
   }
 

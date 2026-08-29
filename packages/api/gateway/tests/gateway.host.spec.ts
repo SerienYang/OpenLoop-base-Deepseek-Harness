@@ -470,6 +470,64 @@ describe('TypertGatewayService', () => {
     )
   })
 
+  it('projects a Typert business error before returning it to the browser carrier', async () => {
+    const ctx = new Context()
+    await ctx.plugin(TypertRegistry)
+    await ctx.plugin(FakeConnectionService)
+    const projectError = vi.fn((endpoint: string, error: {
+      readonly code: string
+      readonly message: string
+      readonly details: Record<string, unknown>
+    }) => {
+      const { requestedCwd: _requestedCwd, path: _path, ...details } = error.details
+      return { ...error, details: { ...details, projectedBy: endpoint } }
+    })
+    ctx.provide('browserApiPolicy', {
+      version: 1,
+      allows: () => true,
+      projectError,
+    } as never)
+    await ctx.plugin(TypertGatewayService)
+    await ctx.plugin(GoalService)
+    const service = rawGoalService(ctx)
+    service.businessError = new TypertLookupFailure({
+      code: 'workspace-denied',
+      message: 'workspace is unavailable',
+      details: {
+        requestedCwd: '/private/requested/workspace',
+        path: '/private/canonical/workspace',
+        reason: 'not-authorized',
+      },
+    })
+    const handler = rawConnection(ctx).handler
+    if (handler === undefined) throw new Error('fixture Connection did not retain the /api interceptor')
+
+    await expect(handler(
+      'goals/fail',
+      { args: { request: null } },
+      new AbortController().signal,
+    )).resolves.toEqual({
+      ok: false,
+      error: {
+        code: 'workspace-denied',
+        message: 'workspace is unavailable',
+        details: {
+          reason: 'not-authorized',
+          projectedBy: 'goals/fail',
+        },
+      },
+    })
+    expect(projectError).toHaveBeenCalledExactlyOnceWith('goals/fail', {
+      code: 'workspace-denied',
+      message: 'workspace is unavailable',
+      details: {
+        requestedCwd: '/private/requested/workspace',
+        path: '/private/canonical/workspace',
+        reason: 'not-authorized',
+      },
+    })
+  })
+
   it('turns a rejected Typert invocation policy hook into policy denial', async () => {
     const ctx = new Context()
     await ctx.plugin(TypertRegistry)
