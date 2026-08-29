@@ -4,7 +4,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
-import type { Browser, Page } from 'playwright'
+import type { Browser, Page, Request, Response } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
@@ -62,42 +62,82 @@ async function closeAll(
   }
 }
 
-function bridgeMethodOf(body: string | null): string | undefined {
+function rpcMethodOf(body: string | null): string | undefined {
   if (body === null) return undefined
   try {
     const value = JSON.parse(body) as { method?: unknown }
-    return typeof value.method === 'string' && value.method.startsWith('openloopDesktop/')
-      ? value.method
-      : undefined
+    return typeof value.method === 'string' ? value.method : undefined
   } catch {
     return undefined
   }
 }
 
-interface BrowserRequestCapture {
+function isBusinessApiUrl(url: string): boolean {
+  return new URL(url).pathname.startsWith('/api/')
+}
+
+function isStreamingApiResponse(
+  url: string,
+  headers: Readonly<Record<string, string>>,
+): boolean {
+  const pathname = new URL(url).pathname
+  const contentType = headers['content-type']?.toLowerCase() ?? ''
+  return pathname === '/api/events.mux'
+    || pathname === '/api/events.host'
+    || contentType.includes('text/event-stream')
+}
+
+function shouldReadApiResponseBody(
+  requestMethod: string,
+  headers: Readonly<Record<string, string>>,
+): boolean {
+  const contentDisposition = headers['content-disposition']?.toLowerCase() ?? ''
+  return requestMethod !== 'HEAD'
+    && !contentDisposition.includes('attachment')
+}
+
+interface BrowserApiRequestCapture {
   readonly method: string
   readonly url: string
   readonly postData: string | null
-  readonly bridgeMethod: string | undefined
+  readonly rpcMethod: string | undefined
   headers: Readonly<Record<string, string>>
 }
 
-interface BrowserBridgeResponseCapture {
-  readonly method: string
+interface BrowserApiResponseCapture {
+  readonly requestMethod: string
   readonly url: string
   readonly status: number
+  readonly rpcMethod: string | undefined
   headers: Readonly<Record<string, string>>
-  body: string
+  body: string | undefined
 }
 
-async function drainDynamicReads(reads: readonly Promise<void>[]): Promise<void> {
-  let offset = 0
-  while (offset < reads.length) {
-    const end = reads.length
-    await Promise.all(reads.slice(offset, end))
-    offset = end
+async function drainDynamicReads(
+  readGroups: ReadonlyArray<readonly Promise<void>[]>,
+): Promise<void> {
+  const offsets = readGroups.map(() => 0)
+  while (true) {
+    const batch = readGroups.flatMap((reads, index) => {
+      const pending = reads.slice(offsets[index])
+      offsets[index] = reads.length
+      return pending
+    })
+    if (batch.length > 0) await Promise.all(batch)
     await new Promise<void>(resolve => setTimeout(resolve, 0))
+    if (readGroups.every((reads, index) => reads.length === offsets[index])) return
   }
+}
+
+function withReadTimeout(read: Promise<void>, label: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`timed out reading ${label}`))
+    }, 5_000)
+    read.then(resolve, reject).finally(() => {
+      clearTimeout(timer)
+    })
+  })
 }
 
 describe('web e2e: assembled Openloop Workspace authority', () => {
@@ -107,10 +147,14 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
   let page: Page
   let tripwire: ReturnType<typeof watchConsole>
   let pendingGrantId = ''
-  const browserRequests: BrowserRequestCapture[] = []
-  const browserBridgeResponses: BrowserBridgeResponseCapture[] = []
+  const browserApiRequests: BrowserApiRequestCapture[] = []
+  const browserApiResponses: BrowserApiResponseCapture[] = []
   const requestReads: Promise<void>[] = []
   const responseReads: Promise<void>[] = []
+  const apiResponsesByRequest = new Map<Request, {
+    readonly response: Response
+    readonly capture: BrowserApiResponseCapture
+  }>()
 
   async function openHeroWorkspaceMenu(): Promise<void> {
     await page.getByRole('textbox', { name: /choose workspace/iu }).click()
@@ -167,36 +211,57 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     page.setDefaultTimeout(10_000)
     tripwire = watchConsole(page)
     page.on('request', (request) => {
+      if (!isBusinessApiUrl(request.url())) return
       const postData = request.postData()
-      const capture: BrowserRequestCapture = {
+      const capture: BrowserApiRequestCapture = {
         method: request.method(),
         url: request.url(),
         postData,
-        bridgeMethod: bridgeMethodOf(postData),
+        rpcMethod: rpcMethodOf(postData),
         headers: request.headers(),
       }
-      browserRequests.push(capture)
+      browserApiRequests.push(capture)
       requestReads.push(request.allHeaders().then((headers) => {
         capture.headers = headers
       }))
     })
     page.on('response', (response) => {
-      const method = bridgeMethodOf(response.request().postData())
-      if (method === undefined) return
-      const capture: BrowserBridgeResponseCapture = {
-        method,
+      if (!isBusinessApiUrl(response.url())) return
+      const request = response.request()
+      const capture: BrowserApiResponseCapture = {
+        requestMethod: request.method(),
         url: response.url(),
         status: response.status(),
+        rpcMethod: rpcMethodOf(request.postData()),
         headers: response.headers(),
-        body: '',
+        body: undefined,
       }
-      browserBridgeResponses.push(capture)
-      const read = Promise.all([response.allHeaders(), response.text()])
-        .then(([headers, body]) => {
-          capture.headers = headers
-          capture.body = body
-        })
-      responseReads.push(read)
+      browserApiResponses.push(capture)
+      apiResponsesByRequest.set(request, { response, capture })
+      if (isStreamingApiResponse(capture.url, capture.headers)) return
+      const read = response.allHeaders().then((headers) => {
+        capture.headers = headers
+      })
+      responseReads.push(withReadTimeout(
+        read,
+        `headers for ${capture.requestMethod} ${capture.url}`,
+      ))
+    })
+    page.on('requestfinished', (request) => {
+      const entry = apiResponsesByRequest.get(request)
+      if (entry === undefined
+        || isStreamingApiResponse(entry.capture.url, entry.capture.headers)
+        || !shouldReadApiResponseBody(entry.capture.requestMethod, entry.capture.headers)) {
+        return
+      }
+      const read = entry.response.text().then((body) => {
+        entry.capture.body = body
+      })
+      responseReads.push(withReadTimeout(
+        read,
+        `${entry.capture.requestMethod} ${entry.capture.url}`
+          + ` (${entry.capture.rpcMethod ?? 'no RPC method'})`,
+      ))
     })
     const bootstrap = Buffer.from(BOOTSTRAP_TOKEN).toString('hex')
     await page.goto(
@@ -262,7 +327,7 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
       throw new Error([
         String(error),
         `page: ${await page.locator('body').innerText()}`,
-        `requests: ${JSON.stringify(browserRequests.slice(-12))}`,
+        `requests: ${JSON.stringify(browserApiRequests.slice(-12))}`,
       ].join('\n'))
     }
     await expect.poll(() => page.getByRole('menuitem').count(), { timeout: 10_000 }).toBe(0)
@@ -372,8 +437,8 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     expect(create.mock.calls).toHaveLength(createCallsBefore)
     bridge.setWorkspaceGrantState(workspace.id, 'ready')
 
-    const snapshot = await captureStableAria(page, '[class*="frame"]', scaffold.workspaceCwd)
-    await compareOrRefreshGolden(UI_EXPECTED, snapshot, MODE)
+    const preRemoveAria = await captureStableAria(page, '[class*="frame"]', scaffold.workspaceCwd)
+    await compareOrRefreshGolden(UI_EXPECTED, preRemoveAria, MODE)
 
     expect(scaffold.ctx.sessions.get(initialSessionId)).toBeDefined()
 
@@ -407,15 +472,21 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     expect(await readFile(join(canonicalPath, 'keep.txt'), 'utf8')).toBe('retained\n')
     expect(scaffold.ctx.sessions.get(initialSessionId)).toBeDefined()
 
-    await drainDynamicReads(requestReads)
+    const finalAria = await captureStableAria(page, '[class*="frame"]', scaffold.workspaceCwd)
+    const finalDom = await page.content()
+    await drainDynamicReads([requestReads, responseReads])
     await expect.poll(
-      () => browserBridgeResponses.length,
+      () => browserApiResponses.length,
       { timeout: 10_000 },
-    ).toBe(browserRequests.filter(request => request.bridgeMethod !== undefined).length)
-    await drainDynamicReads(responseReads)
-    const browserRequestTraffic = JSON.stringify(browserRequests)
-    const browserBridgeTraffic = JSON.stringify(browserBridgeResponses)
-    const domSnapshot = await page.content()
+    ).toBe(browserApiRequests.length)
+    await drainDynamicReads([requestReads, responseReads])
+    const responseMethods = browserApiResponses.map(response => response.rpcMethod)
+    expect(responseMethods, 'API response capture omitted session.create')
+      .toContain('session.create')
+    expect(responseMethods, 'API response capture omitted renameWorkspace')
+      .toContain('openloopDesktop/renameWorkspace')
+    const browserApiRequestTraffic = JSON.stringify(browserApiRequests)
+    const browserApiResponseTraffic = JSON.stringify(browserApiResponses)
     const forbidden = [
       ['canonicalPath field', 'canonicalPath'],
       ['pendingGrantId field', 'pendingGrantId'],
@@ -426,11 +497,12 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
       ['Bridge socket path', bridge.socketPath],
     ] as const
     for (const [label, value] of forbidden) {
-      expect(browserRequestTraffic, `browser requests leaked ${label}`).not.toContain(value)
-      expect(browserBridgeTraffic, `openloopDesktop responses leaked ${label}`)
+      expect(browserApiRequestTraffic, `browser API requests leaked ${label}`).not.toContain(value)
+      expect(browserApiResponseTraffic, `browser API responses leaked ${label}`)
         .not.toContain(value)
-      expect(snapshot, `ARIA snapshot leaked ${label}`).not.toContain(value)
-      expect(domSnapshot, `DOM snapshot leaked ${label}`).not.toContain(value)
+      expect(preRemoveAria, `pre-remove ARIA snapshot leaked ${label}`).not.toContain(value)
+      expect(finalAria, `final ARIA snapshot leaked ${label}`).not.toContain(value)
+      expect(finalDom, `final DOM snapshot leaked ${label}`).not.toContain(value)
     }
 
     expect(tripwire.warnings).toEqual([])
