@@ -31,7 +31,7 @@ use super::protocol::{
 
 const MAX_BRIDGE_CONNECTIONS: usize = 16;
 
-pub const BROWSER_SAFE_METHODS: [&str; 13] = [
+pub const BROWSER_SAFE_METHODS: [&str; 14] = [
     "getAppInfo",
     "getUpdateStatus",
     "checkForUpdate",
@@ -43,6 +43,7 @@ pub const BROWSER_SAFE_METHODS: [&str; 13] = [
     "listWorkspaceGrants",
     "authorizeWorkspace",
     "reauthorizeWorkspace",
+    "renameWorkspace",
     "revokeWorkspace",
     "revealWorkspace",
 ];

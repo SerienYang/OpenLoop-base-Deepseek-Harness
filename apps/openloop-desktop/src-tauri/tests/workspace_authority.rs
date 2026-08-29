@@ -708,9 +708,12 @@ fn inspect_workspace_grant_separates_persisted_and_effective_status() {
             "identityValid": false,
             "status": "revoking",
             "effectiveStatus": "identity-mismatch",
+            "displayPath": fs::canonicalize(&workspace).expect("canonical display path"),
         })
     );
-    assert!(!inspected["result"].to_string().contains('/'));
+    assert!(inspected["result"].get("canonicalPath").is_none());
+    assert!(inspected["result"].get("identity").is_none());
+    assert!(inspected["result"].get("pendingGrantId").is_none());
 }
 
 #[test]
@@ -1964,6 +1967,18 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
     )
     .expect("Workspace dispatcher");
 
+    let missing_reveal = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        0,
+        "revealWorkspace",
+        serde_json::json!({ "workspaceId": "missing-workspace" }),
+    );
+    assert_eq!(missing_reveal["ok"], false);
+    assert_eq!(missing_reveal["error"]["code"], "workspace_failure");
+
     let cancelled = dispatch_workspace(
         &dispatcher,
         launch_id,
@@ -2038,10 +2053,14 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
     );
     assert_eq!(
         committed["result"],
-        serde_json::json!({ "workspaceId": "workspace-1", "state": "ready" })
+        serde_json::json!({
+            "workspaceId": "workspace-1",
+            "displayPath": workspace,
+            "state": "ready",
+        })
     );
     let serialized = committed["result"].to_string();
-    assert!(!serialized.contains(workspace.to_string_lossy().as_ref()));
+    assert!(!serialized.contains("canonicalPath"));
     assert!(!serialized.contains("pendingGrantId"));
     assert!(!serialized.contains("identity"));
     let committed_grant = store
@@ -2072,11 +2091,14 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
             "generation": 1,
             "operationId": operation_id,
             "identityValid": true,
+            "displayPath": workspace,
             "status": "ready",
             "effectiveStatus": "ready",
         })
     );
-    assert!(!inspected["result"].to_string().contains('/'));
+    assert!(inspected["result"].get("canonicalPath").is_none());
+    assert!(inspected["result"].get("identity").is_none());
+    assert!(inspected["result"].get("pendingGrantId").is_none());
 
     let needs_authorization = dispatch_workspace(
         &dispatcher,
@@ -2158,6 +2180,7 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
             "generation": 4,
             "operationId": reauthorize_operation_id,
             "identityValid": true,
+            "displayPath": workspace,
             "status": "reauthorizing",
             "effectiveStatus": "ready",
         })

@@ -60,6 +60,14 @@ function registryPort(registry: WorkspaceRegistry): WorkspaceRegistryPort {
     },
     deleteExpected: (workspaceId, expectedGeneration) =>
       registry.deleteExpected(WorkspaceId(workspaceId), expectedGeneration),
+    renameExpected: async (workspaceId, name, expectedGeneration) => {
+      const result = await registry.renameExpected(
+        WorkspaceId(workspaceId),
+        name,
+        expectedGeneration,
+      )
+      return { name: result.workspace.title, generation: result.generation }
+    },
     // Missing a committed Host grant is itself the needs-authorization projection;
     // DSH registry rows remain untouched so sessions stay visible.
     markNeedsAuthorization: async () => {},
@@ -262,6 +270,7 @@ export class WorkspaceAuthorityService extends Service {
       return {
         workspaceId: workspace.id,
         name: workspace.title,
+        ...(grant.displayPath === undefined ? {} : { displayPath: grant.displayPath }),
         state,
       }
     }))
@@ -277,6 +286,14 @@ export class WorkspaceAuthorityService extends Service {
 
   reauthorize(workspaceId: string, signal?: AbortSignal) {
     return this.authority.reauthorize(workspaceId, signal)
+  }
+
+  rename(workspaceId: string, name: string, signal?: AbortSignal) {
+    return this.authority.rename(workspaceId, name, signal)
+  }
+
+  isReady(workspaceId: string, signal?: AbortSignal) {
+    return this.authority.isReady(workspaceId, signal)
   }
 }
 

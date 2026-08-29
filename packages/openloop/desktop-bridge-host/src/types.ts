@@ -60,6 +60,7 @@ export interface MainWebviewHealthAcknowledgement {
 export interface WorkspaceGrantView {
   readonly workspaceId: string
   readonly name: string
+  readonly displayPath?: string
   readonly state:
     | 'ready'
     | 'needs-authorization'
@@ -86,6 +87,7 @@ export type WorkspaceAuthorizationSelection =
 
 export interface CommittedWorkspaceGrant {
   readonly workspaceId: string
+  readonly displayPath?: string
   readonly state: WorkspaceGrantView['state']
 }
 
@@ -94,6 +96,7 @@ export interface WorkspaceGrantInspection {
   readonly generation?: number
   readonly operationId?: string
   readonly identityValid: boolean
+  readonly displayPath?: string
   readonly status?: WorkspaceGrantView['state'] | 'reauthorizing'
   readonly effectiveStatus?: WorkspaceGrantView['state']
 }

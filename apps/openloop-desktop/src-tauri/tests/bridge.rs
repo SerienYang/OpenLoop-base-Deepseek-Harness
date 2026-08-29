@@ -311,6 +311,7 @@ fn browser_safe_and_host_only_dispatch_tables_are_disjoint_and_complete() {
             "listWorkspaceGrants",
             "authorizeWorkspace",
             "reauthorizeWorkspace",
+            "renameWorkspace",
             "revokeWorkspace",
             "revealWorkspace",
         ],

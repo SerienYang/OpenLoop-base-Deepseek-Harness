@@ -225,7 +225,7 @@ describe('OpenLoop browser API policy manifest', () => {
     }
   })
 
-  it('lists exactly the 13 browser facade endpoints while denying all Host-only methods', () => {
+  it('lists exactly the browser facade endpoints while denying all Host-only methods', () => {
     const policy = createBrowserApiPolicy(shippedManifest())
 
     expect(BROWSER_SAFE_METHODS.map(method => `openloopDesktop/${method}`).sort()).toEqual([
@@ -239,6 +239,7 @@ describe('OpenLoop browser API policy manifest', () => {
       'openloopDesktop/listWorkspaceGrants',
       'openloopDesktop/openCredentialReplacement',
       'openloopDesktop/reauthorizeWorkspace',
+      'openloopDesktop/renameWorkspace',
       'openloopDesktop/revealWorkspace',
       'openloopDesktop/revokeWorkspace',
       'openloopDesktop/unsetCredential',
@@ -382,6 +383,37 @@ describe('OpenLoop browser API policy', () => {
       { workspaceId: 'workspace-1' },
       expect.any(AbortSignal),
     )
+    await ctx.fiber.dispose()
+  })
+
+  it('accepts only workspaceId and name on the dedicated rename Remote', async () => {
+    const ctx = new Context()
+    await ctx.plugin(TypertRegistry)
+    ctx.provide('browserApiPolicy', { version: 1 as const, allows: () => true })
+    await ctx.plugin(TypertGatewayService)
+    ctx.typert.register(await openloopTypert())
+    const rename = vi.fn(async () => ({
+      workspaceId: 'workspace-1',
+      name: 'Renamed',
+      displayPath: '~/Project Alpha',
+      state: 'ready' as const,
+    }))
+    ctx.provide('workspaceAuthority', { rename } as never)
+    new OpenloopDesktopRemoteService(ctx, {
+      call: vi.fn(async () => null),
+    } as unknown as DesktopBridgeClient)
+
+    await expect(ctx.typertGateway.invoke({
+      namespace: 'openloopDesktop',
+      method: 'renameWorkspace',
+      args: { workspaceId: 'workspace-1', name: 'Renamed' },
+    })).resolves.toMatchObject({ name: 'Renamed' })
+    await expect(ctx.typertGateway.invoke({
+      namespace: 'openloopDesktop',
+      method: 'renameWorkspace',
+      args: { workspaceId: 'workspace-1', name: 'Renamed', path: '/forbidden' },
+    })).rejects.toMatchObject({ code: 'arguments-invalid' })
+    expect(rename).toHaveBeenCalledOnce()
     await ctx.fiber.dispose()
   })
 
@@ -727,6 +759,33 @@ describe('OpenLoop browser API policy', () => {
       workspaceId: 'workspace-1',
       futureField: true,
     })).toBe(false)
+  })
+
+  it.each([
+    ['missing', false],
+    ['needs-authorization', false],
+    ['permission-denied', false],
+    ['identity-mismatch', false],
+    ['revoking', false],
+    ['reauthorizing', false],
+    ['ready', true],
+  ] as const)('admits session.create only when Host authority reports %s', async (_state, ready) => {
+    const ctx = new Context()
+    const disposeBootstrap = installBridgeBootstrap(ctx)
+    const isReady = vi.fn(async () => ready)
+    ctx.provide('workspaceAuthority', { isReady } as never)
+    const fiber = ctx.plugin(OpenloopBrowserApiPolicyService)
+    await fiber
+
+    await expect(ctx.browserApiPolicy.allowsInvocation?.(
+      'session.create',
+      { workspaceId: 'workspace-1', agentPreset: 'standard' },
+      new AbortController().signal,
+    )).resolves.toBe(ready)
+    expect(isReady).toHaveBeenCalledWith('workspace-1', expect.any(AbortSignal))
+
+    await fiber.dispose()
+    disposeBootstrap()
   })
 
   it('separates target admission from payload rules for legacy body preflight', () => {

@@ -36,6 +36,11 @@ export interface WorkspaceRegistryPort {
     workspaceId: string,
     expectedGeneration: number,
   ) => Promise<{ readonly deleted: boolean; readonly generation: number }>
+  renameExpected: (
+    workspaceId: string,
+    name: string,
+    expectedGeneration: number,
+  ) => Promise<{ readonly name: string; readonly generation: number }>
   markNeedsAuthorization: (workspaceId: string) => Promise<void>
   has: (workspaceId: string) => boolean
   get: (workspaceId: string) => {
@@ -51,6 +56,7 @@ export interface NativeWorkspaceAuthorityPort {
     readonly generation?: number
     readonly operationId?: string
     readonly identityValid: boolean
+    readonly displayPath?: string
     readonly status?: WorkspaceGrantView['state']
     readonly effectiveStatus?: WorkspaceGrantView['state']
   }>
@@ -190,6 +196,61 @@ export class WorkspaceAuthority {
     return this.#enqueue(() => this.#reauthorize(workspaceId, signal))
   }
 
+  rename(
+    workspaceId: string,
+    name: string,
+    signal: AbortSignal = NEVER_ABORTED,
+  ): Promise<WorkspaceGrantView> {
+    return this.#enqueue(() => this.#rename(workspaceId, name, signal))
+  }
+
+  isReady(workspaceId: string, signal: AbortSignal = NEVER_ABORTED): Promise<boolean> {
+    return this.#enqueue(async () => {
+      signal.throwIfAborted()
+      if (!this.#registry.has(workspaceId)) return false
+      const grant = await this.#native.inspectWorkspaceGrant(workspaceId, signal)
+      return grant.exists
+        && grant.status === 'ready'
+        && grant.identityValid
+        && grant.effectiveStatus === 'ready'
+    })
+  }
+
+  async #rename(
+    workspaceId: string,
+    name: string,
+    signal: AbortSignal,
+  ): Promise<WorkspaceGrantView> {
+    const normalized = name.trim()
+    if (normalized === '') throw new Error('Workspace name must be non-blank')
+    signal.throwIfAborted()
+    if (!this.#registry.has(workspaceId)) {
+      throw new Error(`cannot rename unknown Workspace ${JSON.stringify(workspaceId)}`)
+    }
+    const expectedCatalogGeneration = this.#registry.catalogGeneration()
+    const grant = await this.#native.inspectWorkspaceGrant(workspaceId, signal)
+    signal.throwIfAborted()
+    if (!grant.exists
+      || grant.status !== 'ready'
+      || !grant.identityValid
+      || grant.effectiveStatus !== 'ready'
+      || grant.displayPath === undefined) {
+      throw new Error(`Workspace ${JSON.stringify(workspaceId)} grant is not ready`)
+    }
+    const renamed = await this.#registry.renameExpected(
+      workspaceId,
+      normalized,
+      expectedCatalogGeneration,
+    )
+    signal.throwIfAborted()
+    return {
+      workspaceId,
+      name: renamed.name,
+      displayPath: grant.displayPath,
+      state: 'ready',
+    }
+  }
+
   async #add(signal: AbortSignal): Promise<WorkspaceGrantView | 'cancelled'> {
     signal.throwIfAborted()
     const expectedCatalogGeneration = this.#registry.catalogGeneration()
@@ -254,7 +315,12 @@ export class WorkspaceAuthority {
           && grant.identityValid
           && grant.effectiveStatus === 'ready') {
           pendingActive = false
-          view = { workspaceId: workspace.workspaceId, state: 'ready' }
+          if (grant.displayPath === undefined) throw error
+          view = {
+            workspaceId: workspace.workspaceId,
+            displayPath: grant.displayPath,
+            state: 'ready',
+          }
           transaction = await this.#native.advanceWorkspaceTransaction(
             transaction.operationId,
             transaction.generation,
@@ -647,7 +713,13 @@ export class WorkspaceAuthority {
           cleanup,
         )
         if (signal.aborted) signal.throwIfAborted()
-        return { workspaceId, name: workspace.name, state: 'ready' }
+        if (grant.displayPath === undefined) throw error
+        return {
+          workspaceId,
+          name: workspace.name,
+          displayPath: grant.displayPath,
+          state: 'ready',
+        }
       }
       await this.#native.abortWorkspaceAuthorization(pending.pendingGrantId, cleanup)
       if (ownedReplacement) {

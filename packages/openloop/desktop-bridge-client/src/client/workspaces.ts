@@ -28,6 +28,10 @@ export interface OpenloopWorkspaceRemote {
   reauthorizeWorkspace(
     workspaceId: string,
   ): Promise<RemoteResult<WorkspaceGrantView | 'cancelled'>>
+  renameWorkspace(
+    workspaceId: string,
+    name: string,
+  ): Promise<RemoteResult<WorkspaceGrantView>>
   revokeWorkspace(workspaceId: string): Promise<RemoteResult<'revoked' | 'cancelled'>>
   revealWorkspace(workspaceId: string): Promise<RemoteResult<void>>
 }
@@ -129,6 +133,13 @@ export class OpenloopWorkspaceService implements IWorkspaces {
         items: current.items.filter(item => item.workspaceId !== workspaceId),
       })
     }
+    return value
+  }
+
+  async renameWorkspace(workspaceId: string, name: string): Promise<WorkspaceGrantView> {
+    const remote = await this.remote()
+    const value = this.value(await remote.renameWorkspace(workspaceId, name), 'rename')
+    this.upsert(value)
     return value
   }
 

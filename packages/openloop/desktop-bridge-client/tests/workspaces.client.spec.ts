@@ -36,6 +36,12 @@ function remote(
     listWorkspaceGrants: vi.fn(() => ok([])),
     authorizeWorkspace: vi.fn(() => ok('cancelled' as const)),
     reauthorizeWorkspace: vi.fn(() => ok('cancelled' as const)),
+    renameWorkspace: vi.fn(() => ok({
+      workspaceId: 'workspace-1',
+      name: 'Renamed',
+      displayPath: '~/Project Alpha',
+      state: 'ready' as const,
+    })),
     revokeWorkspace: vi.fn(() => ok('cancelled' as const)),
     revealWorkspace: vi.fn(() => ok(undefined)),
     ...overrides,
@@ -72,6 +78,7 @@ describe('Openloop browser Workspace facade', () => {
     const listWorkspaceGrants = vi.fn(() => ok([{
       workspaceId: 'workspace-1',
       name: 'Project Alpha',
+      displayPath: '~/Project Alpha',
       state: 'ready' as const,
     }]))
     const service = new OpenloopWorkspaceService(
@@ -85,12 +92,15 @@ describe('Openloop browser Workspace facade', () => {
       items: [{
         workspaceId: 'workspace-1',
         name: 'Project Alpha',
+        displayPath: '~/Project Alpha',
         state: 'ready',
       }],
       state: 'idle',
       error: null,
     })
-    expect(JSON.stringify(service.grants.getSnapshot())).not.toContain('/')
+    expect(service.grants.getSnapshot().items[0]).not.toHaveProperty('canonicalPath')
+    expect(service.grants.getSnapshot().items[0]).not.toHaveProperty('pendingGrantId')
+    expect(service.grants.getSnapshot().items[0]).not.toHaveProperty('identity')
     expect(service.list.getSnapshot()).toEqual({
       items: [],
       archivedSessionIds: [],
@@ -119,6 +129,7 @@ describe('Openloop browser Workspace facade', () => {
     const first = {
       workspaceId: 'workspace-1',
       name: 'Project Alpha',
+      displayPath: '~/Project Alpha',
       state: 'ready' as const,
     }
     const authorizeWorkspace = vi.fn(() => ok('cancelled' as const))
@@ -145,6 +156,28 @@ describe('Openloop browser Workspace facade', () => {
     expect(revokeWorkspace).toHaveBeenCalledExactlyOnceWith('workspace-1')
     expect(revealWorkspace).toHaveBeenCalledExactlyOnceWith('workspace-1')
     expect(service.grants.getSnapshot()).toBe(before)
+  })
+
+  it('renames through the dedicated Host facade and updates only the safe grant projection', async () => {
+    const initial = {
+      workspaceId: 'workspace-1',
+      name: 'Project Alpha',
+      displayPath: '~/Project Alpha',
+      state: 'ready' as const,
+    }
+    const renamed = { ...initial, name: 'Renamed' }
+    const renameWorkspace = vi.fn(() => ok(renamed))
+    const service = new OpenloopWorkspaceService(remote({
+      listWorkspaceGrants: vi.fn(() => ok([initial])),
+      renameWorkspace,
+    }), sessions())
+    await service.refresh()
+
+    await expect(service.renameWorkspace('workspace-1', 'Renamed')).resolves.toEqual(renamed)
+
+    expect(renameWorkspace).toHaveBeenCalledExactlyOnceWith('workspace-1', 'Renamed')
+    expect(service.grants.getSnapshot().items).toEqual([renamed])
+    expect(JSON.stringify(renameWorkspace.mock.calls)).not.toContain('path')
   })
 
   it('creates sessions with only workspaceId and an explicitly selected agentPreset', async () => {

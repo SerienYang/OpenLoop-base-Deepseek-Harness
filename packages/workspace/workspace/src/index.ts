@@ -247,6 +247,22 @@ export class WorkspaceRegistry extends Service {
     })
   }
 
+  renameExpected(
+    id: WorkspaceId,
+    title: string,
+    expectedGeneration: number,
+  ): Promise<{ readonly workspace: Workspace; readonly generation: number }> {
+    return this.enqueueOperation(async () => {
+      this.assertGeneration(expectedGeneration)
+      const workspace = this.entities.get(id)
+      if (workspace === undefined) {
+        throw new Error(`cannot rename unknown workspace '${id}'`)
+      }
+      if (workspace.title !== title) await workspace.setTitle(title)
+      return { workspace, generation: this.requireState().generation }
+    })
+  }
+
   /**
    * Move one workspace within the durable display order, DOM-insertBefore-like.
    * With an anchor it lands before that workspace; without one it appends.

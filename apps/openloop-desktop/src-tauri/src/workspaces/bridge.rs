@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
@@ -229,6 +230,7 @@ pub fn install_workspace_authority_handlers(
                 registry.promote_validated(input.pending_grant_id, &input.workspace_id);
                 Ok(json!({
                     "workspaceId": input.workspace_id,
+                    "displayPath": validated_grant.display_path,
                     "state": "ready",
                 }))
             })
@@ -306,6 +308,7 @@ pub fn install_workspace_authority_handlers(
                     "generation": grant.generation,
                     "operationId": grant.operation_id,
                     "identityValid": identity_valid,
+                    "displayPath": grant.display_path,
                     "status": grant.status,
                     "effectiveStatus": effective_status,
                 })
@@ -319,6 +322,34 @@ pub fn install_workspace_authority_handlers(
     });
     tables
         .set_host_handler("inspectWorkspaceGrant", inspect)
+        .map_err(|error| error.to_string())?;
+
+    let reveal_store = store.clone();
+    let reveal_gate = operation_gate.clone();
+    let reveal: BridgeHandler = Arc::new(move |payload, cancellation| {
+        let input: WorkspaceGrantInput =
+            serde_json::from_value(payload).map_err(|_| BridgeHandlerError::invalid_request())?;
+        if input.workspace_id.is_empty() {
+            return Err(BridgeHandlerError::invalid_request());
+        }
+        let _lease = reveal_gate
+            .acquire(&input.workspace_id)
+            .map_err(|_| BridgeHandlerError::workspace_failure())?;
+        let grant = reveal_store
+            .get(&input.workspace_id)
+            .map_err(|_| BridgeHandlerError::workspace_failure())?
+            .ok_or_else(BridgeHandlerError::workspace_failure)?;
+        if grant.status != GrantStatus::Ready {
+            return Err(BridgeHandlerError::workspace_failure());
+        }
+        reopen_verified_grant(&grant).map_err(|_| BridgeHandlerError::workspace_failure())?;
+        cancellation
+            .commit_if_active(|| reveal_workspace_in_finder(&grant.canonical_path))
+            .ok_or_else(BridgeHandlerError::invalid_request)??;
+        Ok(Value::Null)
+    });
+    tables
+        .set_browser_handler("revealWorkspace", reveal)
         .map_err(|error| error.to_string())?;
 
     let needs_authorization_store = store.clone();
@@ -636,6 +667,18 @@ pub fn install_workspace_authority_handlers(
     tables
         .set_host_handler("deleteWorkspaceGrant", delete)
         .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn reveal_workspace_in_finder(path: &Path) -> Result<(), BridgeHandlerError> {
+    let status = Command::new("/usr/bin/open")
+        .arg("-R")
+        .arg(path)
+        .status()
+        .map_err(|_| BridgeHandlerError::workspace_failure())?;
+    if !status.success() {
+        return Err(BridgeHandlerError::workspace_failure());
+    }
     Ok(())
 }
 

@@ -35,6 +35,7 @@ export interface WorkspaceGrant {
 export interface WorkspaceGrantView {
   readonly workspaceId: string
   readonly name: string
+  readonly displayPath?: string
   readonly state: PersistedGrantStatus
 }
 

@@ -19,6 +19,15 @@ export interface BrowserApiPolicy {
    */
   allowsTarget?(method: string): boolean
   allows(method: string, payload: unknown): boolean
+  /**
+   * Optional asynchronous check performed after payload validation and before
+   * a legacy business handler is invoked.
+   */
+  allowsInvocation?(
+    method: string,
+    payload: unknown,
+    signal: AbortSignal,
+  ): Promise<boolean>
 }
 
 declare module '@deepseek-ai/cordis' {

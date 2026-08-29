@@ -74,6 +74,15 @@ function fixture(options: {
       catalogGeneration += 1
       return { deleted: true, generation: catalogGeneration }
     }),
+    renameExpected: vi.fn(async (workspaceId: string, name: string, expected: number) => {
+      if (expected !== catalogGeneration) {
+        throw new WorkspaceGenerationConflictError('catalog', expected, catalogGeneration)
+      }
+      const workspace = workspaces.get(workspaceId)
+      if (workspace === undefined) throw new Error('workspace not found')
+      workspace.name = name
+      return { name, generation: catalogGeneration }
+    }),
     markNeedsAuthorization: vi.fn(async () => {}),
     has: workspaceId => workspaces.has(workspaceId),
     get: (workspaceId) => {
@@ -116,6 +125,7 @@ function fixture(options: {
       }
       return {
         workspaceId,
+        displayPath: '/display/project',
         state: 'ready' as const,
       }
     }),
@@ -130,6 +140,8 @@ function fixture(options: {
         operationId: committedGrant.operationId,
         identityValid: committedGrant.identityValid,
         status: committedGrant.status,
+        effectiveStatus: committedGrant.status,
+        displayPath: '/display/project',
       }
     }),
     abortWorkspaceAuthorization: vi.fn(async () => {}),
@@ -241,12 +253,73 @@ function fixture(options: {
 }
 
 describe('WorkspaceAuthority', () => {
+  it('renames a ready Workspace through catalog generation CAS', async () => {
+    const value = fixture({ existingWorkspace: true })
+
+    await expect(value.authority.rename('workspace-1', '  Renamed  ')).resolves.toEqual({
+      workspaceId: 'workspace-1',
+      name: 'Renamed',
+      displayPath: '/display/project',
+      state: 'ready',
+    })
+    expect(value.registry.renameExpected).toHaveBeenCalledExactlyOnceWith(
+      'workspace-1',
+      'Renamed',
+      0,
+    )
+  })
+
+  it('rejects invalid rename names before inspecting Host authority', async () => {
+    const value = fixture({ existingWorkspace: true })
+
+    await expect(value.authority.rename('workspace-1', '   ')).rejects.toThrow(/non-blank/iu)
+    expect(value.native.inspectWorkspaceGrant).not.toHaveBeenCalled()
+    expect(value.registry.renameExpected).not.toHaveBeenCalled()
+  })
+
+  it('rejects rename when the grant is not currently ready', async () => {
+    const value = fixture({ existingWorkspace: true })
+    vi.mocked(value.native.inspectWorkspaceGrant).mockResolvedValueOnce({
+      exists: true,
+      generation: 0,
+      operationId: 'operation-1',
+      identityValid: true,
+      status: 'revoking',
+      effectiveStatus: 'ready',
+      displayPath: '/display/project',
+    })
+
+    await expect(value.authority.rename('workspace-1', 'Renamed')).rejects.toThrow(/not ready/iu)
+    expect(value.registry.renameExpected).not.toHaveBeenCalled()
+  })
+
+  it('rejects rename when the catalog generation changes during grant inspection', async () => {
+    const value = fixture({ existingWorkspace: true })
+    vi.mocked(value.native.inspectWorkspaceGrant).mockImplementationOnce(async () => {
+      value.setCatalogGeneration(1)
+      return {
+        exists: true,
+        generation: 0,
+        operationId: 'operation-1',
+        identityValid: true,
+        status: 'ready',
+        effectiveStatus: 'ready',
+        displayPath: '/display/project',
+      }
+    })
+
+    await expect(value.authority.rename('workspace-1', 'Renamed')).rejects.toEqual(
+      new WorkspaceGenerationConflictError('catalog', 0, 1),
+    )
+  })
+
   it('adds through pending grant, registry commit, grant commit, and journal completion', async () => {
     const value = fixture()
 
     await expect(value.authority.add()).resolves.toEqual({
       workspaceId: 'workspace-1',
       name: 'Project',
+      displayPath: '/display/project',
       state: 'ready',
     })
     expect(value.transactions).toEqual([
@@ -335,6 +408,7 @@ describe('WorkspaceAuthority', () => {
         identityValid: true,
         status: 'ready',
         effectiveStatus: 'ready',
+        displayPath: '/display/project',
       })
       throw new Error(`response lost for ${workspaceId}`)
     })
@@ -342,6 +416,7 @@ describe('WorkspaceAuthority', () => {
     await expect(value.authority.add()).resolves.toEqual({
       workspaceId: 'workspace-1',
       name: 'Project',
+      displayPath: '/display/project',
       state: 'ready',
     })
     expect(value.transactions).toEqual([
@@ -509,6 +584,7 @@ describe('WorkspaceAuthority', () => {
     await expect(value.authority.reauthorize('workspace-1')).resolves.toMatchObject({
       workspaceId: 'workspace-1',
       name: 'Project',
+      displayPath: '/display/project',
       state: 'ready',
     })
     expect(value.transactions).toEqual([
@@ -856,6 +932,7 @@ describe('WorkspaceAuthority', () => {
         identityValid: true,
         status: 'ready',
         effectiveStatus: 'ready',
+        displayPath: '/display/project',
       })
       throw new Error('commit response lost')
     })
@@ -863,6 +940,7 @@ describe('WorkspaceAuthority', () => {
     await expect(value.authority.reauthorize('workspace-1')).resolves.toEqual({
       workspaceId: 'workspace-1',
       name: 'Project',
+      displayPath: '/display/project',
       state: 'ready',
     })
     expect(value.native.markGrantNeedsAuthorization).not.toHaveBeenCalled()
@@ -1101,8 +1179,9 @@ describe('WorkspaceAuthority', () => {
         identityValid: true,
         status: 'ready',
         effectiveStatus: 'ready',
+        displayPath: '/display/project',
       })
-      return { workspaceId, state: 'ready' }
+      return { workspaceId, displayPath: '/display/project', state: 'ready' }
     })
     vi.mocked(value.native.advanceWorkspaceTransaction).mockImplementation(async (
       _operationId,

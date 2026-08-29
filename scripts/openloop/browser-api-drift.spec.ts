@@ -33,6 +33,7 @@ const openloopDesktopEndpoints = [
   'openloopDesktop/listWorkspaceGrants',
   'openloopDesktop/openCredentialReplacement',
   'openloopDesktop/reauthorizeWorkspace',
+  'openloopDesktop/renameWorkspace',
   'openloopDesktop/revealWorkspace',
   'openloopDesktop/revokeWorkspace',
   'openloopDesktop/unsetCredential',

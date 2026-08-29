@@ -328,6 +328,7 @@ describe('authenticated desktop bridge protocol', () => {
       'listWorkspaceGrants',
       'authorizeWorkspace',
       'reauthorizeWorkspace',
+      'renameWorkspace',
       'revokeWorkspace',
       'revealWorkspace',
     ])
@@ -396,16 +397,25 @@ describe('authenticated desktop bridge protocol', () => {
       list: vi.fn(async () => [{
         workspaceId: 'workspace-1',
         name: 'Project Alpha',
+        displayPath: '~/Project Alpha',
         state: 'ready' as const,
       }]),
       add: vi.fn(async () => ({
         workspaceId: 'workspace-1',
         name: 'Project Alpha',
+        displayPath: '~/Project Alpha',
         state: 'ready' as const,
       })),
       reauthorize: vi.fn(async () => ({
         workspaceId: 'workspace-1',
         name: 'Project Alpha',
+        displayPath: '~/Project Alpha',
+        state: 'ready' as const,
+      })),
+      rename: vi.fn(async () => ({
+        workspaceId: 'workspace-1',
+        name: 'Renamed',
+        displayPath: '~/Project Alpha',
         state: 'ready' as const,
       })),
       revoke: vi.fn(async () => 'revoked' as const),
@@ -422,7 +432,12 @@ describe('authenticated desktop bridge protocol', () => {
     const signal = new AbortController().signal
 
     await expect(service.listWorkspaceGrants(signal)).resolves.toEqual([
-      { workspaceId: 'workspace-1', name: 'Project Alpha', state: 'ready' },
+      {
+        workspaceId: 'workspace-1',
+        name: 'Project Alpha',
+        displayPath: '~/Project Alpha',
+        state: 'ready',
+      },
     ])
     await expect(service.authorizeWorkspace(signal)).resolves.toMatchObject({
       name: 'Project Alpha',
@@ -430,11 +445,15 @@ describe('authenticated desktop bridge protocol', () => {
     await expect(service.reauthorizeWorkspace('workspace-1', signal)).resolves.toMatchObject({
       name: 'Project Alpha',
     })
+    await expect(service.renameWorkspace('workspace-1', 'Renamed', signal)).resolves.toMatchObject({
+      name: 'Renamed',
+    })
     await expect(service.revokeWorkspace('workspace-1', signal)).resolves.toBe('revoked')
     expect(call).not.toHaveBeenCalled()
     expect(authority.list).toHaveBeenCalledWith(signal)
     expect(authority.add).toHaveBeenCalledWith(signal)
     expect(authority.reauthorize).toHaveBeenCalledWith('workspace-1', signal)
+    expect(authority.rename).toHaveBeenCalledWith('workspace-1', 'Renamed', signal)
     expect(authority.revoke).toHaveBeenCalledWith('workspace-1', signal)
   })
 

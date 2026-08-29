@@ -42,6 +42,7 @@ export const BROWSER_SAFE_METHODS = [
   'listWorkspaceGrants',
   'authorizeWorkspace',
   'reauthorizeWorkspace',
+  'renameWorkspace',
   'revokeWorkspace',
   'revealWorkspace',
 ] as const
@@ -101,6 +102,7 @@ interface WorkspaceBrowserOperations {
     workspaceId: string,
     signal: AbortSignal,
   ): Promise<WorkspaceGrantView | 'cancelled'>
+  rename(workspaceId: string, name: string, signal: AbortSignal): Promise<WorkspaceGrantView>
   revoke(workspaceId: string, signal: AbortSignal): Promise<'revoked' | 'cancelled'>
 }
 
@@ -243,6 +245,16 @@ export class OpenloopDesktopRemoteService extends TypertRemoteService {
   ): Promise<WorkspaceGrantView | 'cancelled'> {
     signal.throwIfAborted()
     return workspaceOperations(this).reauthorize(workspaceId, signal)
+  }
+
+  @Remote
+  renameWorkspace(
+    workspaceId: string,
+    name: string,
+    signal: AbortSignal,
+  ): Promise<WorkspaceGrantView> {
+    signal.throwIfAborted()
+    return workspaceOperations(this).rename(workspaceId, name, signal)
   }
 
   @Remote

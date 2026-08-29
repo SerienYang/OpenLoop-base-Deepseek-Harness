@@ -421,6 +421,24 @@ describe('WorkspaceRegistry create and lookup', () => {
     expect(registry.get(ignoredId)).toBeUndefined()
   })
 
+  it('renames through the expected catalog generation without changing Workspace identity', async () => {
+    const firstDir = await makeDir('rename-expected-first')
+    const secondDir = await makeDir('rename-expected-second')
+    const { registry } = await harness()
+    const first = await registry.createExpected(firstDir, 0, 'First')
+    const second = await registry.createExpected(secondDir, 1, 'Shared')
+
+    await expect(registry.renameExpected(first.workspace.id, 'Shared', 1))
+      .rejects.toEqual(new WorkspaceGenerationConflictError(1, 2))
+    await expect(registry.renameExpected(first.workspace.id, 'Shared', 2))
+      .resolves.toEqual({ workspace: first.workspace, generation: 2 })
+
+    expect(first.workspace.title).toBe('Shared')
+    expect(second.workspace.title).toBe('Shared')
+    expect(first.workspace.path).toBe(firstDir)
+    expect(registry.catalogGeneration()).toBe(2)
+  })
+
   it('creates newest-first and idempotently reuses a canonical path without retitling', async () => {
     const firstDir = await makeDir('first')
     const secondDir = await makeDir('second')

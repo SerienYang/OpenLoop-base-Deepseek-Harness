@@ -96,6 +96,32 @@ export class OpenloopBrowserApiPolicyService extends Service implements BrowserA
   allows(method: string, payload: unknown): boolean {
     return this.policy.allows(method, payload)
   }
+
+  /** Require a live, identity-valid Host grant before DSH creates a session. */
+  async allowsInvocation(
+    method: string,
+    payload: unknown,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    if (method !== 'session.create') return true
+    if (typeof payload !== 'object' || payload === null
+      || !Object.hasOwn(payload, 'workspaceId')
+      || typeof (payload as { workspaceId?: unknown }).workspaceId !== 'string') {
+      return false
+    }
+    const authority = this.ctx.get('workspaceAuthority') as
+      | { isReady(workspaceId: string, signal: AbortSignal): Promise<boolean> }
+      | undefined
+    if (authority === undefined) return false
+    try {
+      return await authority.isReady(
+        (payload as { workspaceId: string }).workspaceId,
+        signal,
+      )
+    } catch {
+      return false
+    }
+  }
 }
 
 export default OpenloopBrowserApiPolicyService

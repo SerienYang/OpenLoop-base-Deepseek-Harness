@@ -53,7 +53,7 @@ describe('Workspace authority contracts', () => {
     >()
     expectTypeOf<WorkspaceGrant['status']>().toEqualTypeOf<PersistedGrantStatus>()
     expectTypeOf<keyof WorkspaceGrantView>().toEqualTypeOf<
-      'workspaceId' | 'name' | 'state'
+      'workspaceId' | 'name' | 'displayPath' | 'state'
     >()
     expectTypeOf<WorkspaceGrantView>().not.toHaveProperty('canonicalPath')
     expectTypeOf<WorkspaceGrantView>().not.toHaveProperty('volumeId')

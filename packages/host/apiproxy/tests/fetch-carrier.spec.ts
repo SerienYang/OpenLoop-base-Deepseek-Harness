@@ -622,6 +622,38 @@ describe('handler carrier-layer statuses', () => {
     expect(unknown.status).toBe(403)
   })
 
+  it('runs asynchronous invocation admission before the DSH session handler', async () => {
+    const api = fakeApi()
+    const create = vi.spyOn(api.sessions, 'create')
+    const allowsInvocation = vi.fn(async () => false)
+    const restricted = toFetchHandler(api, {
+      version: 1,
+      allows: () => true,
+      allowsInvocation,
+    })
+    const payload = { workspaceId: 'workspace-1', agentPreset: 'standard' }
+
+    const denied = await restricted.fetch(new Request('http://x/api/session.create', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'r-session-create',
+        method: 'session.create',
+        payload,
+      }),
+    }))
+
+    expect(denied.status).toBe(403)
+    expect(await denied.text()).toBe('forbidden')
+    expect(allowsInvocation).toHaveBeenCalledExactlyOnceWith(
+      'session.create',
+      payload,
+      expect.any(AbortSignal),
+    )
+    expect(create).not.toHaveBeenCalled()
+  })
+
   it('gates no-envelope transport routes before touching their business objects', async () => {
     const api = fakeApi()
     const mux = vi.spyOn(api.events, 'mux')

@@ -75,6 +75,11 @@ interface BrowserApiPolicy {
   readonly version: 1
   allowsTarget?(method: string): boolean
   allows(method: string, payload: unknown): boolean
+  allowsInvocation?(
+    method: string,
+    payload: unknown,
+    signal: AbortSignal,
+  ): Promise<boolean>
 }
 
 /**
@@ -178,16 +183,23 @@ function fullResponse(narrow: RpcResponse<unknown>): Response {
  * Wire<> widening back to the exact payload (undefined-valued properties and
  * absent ones are indistinguishable after JSON transport).
  */
-// K appears once in the signature but ties the UNARY_ROUTES[K] row lookup to its own
-// schema/invoke pairing; a union parameter degrades the row to an uninvokable intersection.
-// oxlint-disable-next-line typescript/no-unnecessary-type-parameters
+// The route parameter keeps each map row paired with its own method type; a
+// union route degrades its invoke function to an uncallable intersection.
 async function handleUnary<K extends keyof RpcMethodMap>(
-  api: ApiProxy, method: K, message: ClientRequest, signal: AbortSignal,
+  api: ApiProxy,
+  method: K,
+  route: UnaryRoutes[K],
+  message: ClientRequest,
+  signal: AbortSignal,
+  policy?: BrowserApiPolicy,
 ): Promise<Response> {
-  const route = UNARY_ROUTES[method]
   const payload = route.schema.safeParse(message.payload)
   if (!payload.success) {
     return errorResponse(message.rpcId, { code: 'bad-request', message: `invalid payload for ${method}`, details: { issues: payload.error.issues } })
+  }
+  if (policy?.allowsInvocation !== undefined
+    && !await policy.allowsInvocation(method, payload.data, signal)) {
+    return new Response('forbidden', { status: 403 })
   }
   try {
     return fullResponse(await route.invoke(api, { rpcId: message.rpcId, payload: payload.data }, signal))
@@ -351,7 +363,7 @@ export function toFetchHandler(api: ApiProxy, policy?: BrowserApiPolicy): { fetc
       if (message.method !== method) {
         return errorResponse(message.rpcId, { code: 'bad-request', message: `method "${message.method}" does not match path "${method}"`, details: { issues: [] } })
       }
-      return handleUnary(api, method, message, req.signal)
+      return handleUnary(api, method, UNARY_ROUTES[method], message, req.signal, policy)
     },
   }
 }
