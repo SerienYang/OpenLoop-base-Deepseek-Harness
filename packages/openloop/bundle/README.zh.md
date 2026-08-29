@@ -20,12 +20,10 @@
 
 首发 profile 会禁用继承来的 `cordis-client-runner` 与 `ui-cordis` 两行，因此
 只加载静态签名的 Client roster。它还会禁用首版 policy 未开放其宽泛 Host 调用的
-上游设置呈现层、权限、agent-preset 与 Workspace Client owner。由于 locale、
-theme 与 conversation 需要 `settingsScope` 服务，无呈现内容的设置领域底座会以
-`openloop-settings-scope` 重新挂载；legacy `ui-settings` 行和所有 legacy 设置
-呈现行仍保持禁用。后续任务用专用 Host facade 替代前，这些界面不会加载。Openloop
-Desktop Bridge client 会提供由 profile 选择的 runtime adapter，因此共享 client
-runtime 不会构造 legacy Workspace runtime，也不会调用任何 `workspace.*` 方法。
+上游设置、权限、agent-preset 与 Workspace Client owner。后续任务用专用 Host
+facade 替代前，这些界面不会加载。Openloop Desktop Bridge client 会提供由
+profile 选择的 runtime adapter，因此共享 client runtime 不会构造 legacy
+Workspace runtime，也不会调用任何 `workspace.*` 方法。
 
 `ensureOpenloopProfile()` 仅在 `package.json` 不存在时创建 `openloop` profile。
 该清单一旦存在，profile 和所有同级文件即归用户所有，本包不会再改动其字节。

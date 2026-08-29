@@ -123,7 +123,7 @@ describe('web e2e: Openloop credential boundary', () => {
       expect(entry(id)?.disabled, `${id} must stay disabled in the Openloop profile`).toBe(true)
     }
     for (const id of [
-      'openloop-settings-scope',
+      'openloop-settings-foundation',
       'desktop-bridge-host',
       'credentials-keychain',
       'connection',

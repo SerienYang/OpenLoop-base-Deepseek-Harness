@@ -386,7 +386,7 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     const entries = [...scaffold.ctx.loader.entries()]
     const entry = (id: string) => entries.find(candidate => candidate.options.id === id)
     for (const id of [
-      'openloop-settings-scope',
+      'openloop-settings-foundation',
       'openloop-workspace-client',
       'desktop-bridge-client',
       'workspace-authority',

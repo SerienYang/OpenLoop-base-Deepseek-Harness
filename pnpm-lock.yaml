@@ -5619,9 +5619,6 @@ importers:
       '@deepseek-ai/dsh-base':
         specifier: workspace:^
         version: link:../../bundle/base
-      '@deepseek-ai/dsh-client-ui-settings':
-        specifier: workspace:^
-        version: link:../../client/ui-settings
       '@deepseek-ai/dsh-web-app':
         specifier: workspace:^
         version: link:../../bundle/web-app
@@ -5646,6 +5643,9 @@ importers:
       '@openloop/sandbox-workspace':
         specifier: workspace:^
         version: link:../sandbox-workspace
+      '@openloop/settings-foundation':
+        specifier: workspace:*
+        version: link:../settings-foundation
       '@openloop/workspace-authority':
         specifier: workspace:*
         version: link:../workspace-authority
@@ -5828,6 +5828,18 @@ importers:
       '@deepseek-ai/cordis':
         specifier: workspace:^
         version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-invariants':
+        specifier: workspace:^
+        version: link:../../runtime-diagnostics/invariants
+
+  packages/openloop/settings-foundation:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-client-runtime':
+        specifier: workspace:^
+        version: link:../../client/runtime
       '@deepseek-ai/dsh-invariants':
         specifier: workspace:^
         version: link:../../runtime-diagnostics/invariants
