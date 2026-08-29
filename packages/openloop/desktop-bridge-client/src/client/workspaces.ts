@@ -1,7 +1,13 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { SessionId, WorkspaceId } from '@deepseek-ai/dsh-api-remotes/client'
+import type {
+  DirectoryListing,
+  SessionId,
+  WorkspaceId,
+  WorkspaceView,
+} from '@deepseek-ai/dsh-api-remotes/client'
 import {
   createSnapshotStore,
+  type IWorkspaces,
   type SessionsPort,
   type SnapshotStore,
   type WorkspaceListState,
@@ -49,7 +55,7 @@ const EMPTY_WORKSPACE_LIST: WorkspaceListState = {
   recentWorkspaceId: undefined,
 }
 
-export class OpenloopWorkspaceService {
+export class OpenloopWorkspaceService implements IWorkspaces {
   /** Browser-safe Host grant projection used by Openloop-owned Workspace UI. */
   readonly grants: SnapshotStore<OpenloopWorkspaceListState> =
     createSnapshotStore<OpenloopWorkspaceListState>({
@@ -72,12 +78,21 @@ export class OpenloopWorkspaceService {
       state: 'loading',
       error: null,
     })
-    const remote = await this.remote()
-    const result = await remote.listWorkspaceGrants()
-    if (!result.ok) {
-      const error = new Error(
-        `Openloop Workspace list failed: ${result.error.code}: ${result.error.message}`,
-      )
+    try {
+      const remote = await this.remote()
+      const result = await remote.listWorkspaceGrants()
+      if (!result.ok) {
+        throw new Error(
+          `Openloop Workspace list failed: ${result.error.code}: ${result.error.message}`,
+        )
+      }
+      this.grants.set({
+        items: result.value,
+        state: 'idle',
+        error: null,
+      })
+    } catch (reason) {
+      const error = reason instanceof Error ? reason : new Error(String(reason))
       this.grants.set({
         ...this.grants.getSnapshot(),
         state: 'error',
@@ -85,11 +100,6 @@ export class OpenloopWorkspaceService {
       })
       throw error
     }
-    this.grants.set({
-      items: result.value,
-      state: 'idle',
-      error: null,
-    })
   }
 
   async authorize(): Promise<WorkspaceGrantView | 'cancelled'> {
@@ -145,6 +155,56 @@ export class OpenloopWorkspaceService {
     )
   }
 
+  create(_input: { path: string }): Promise<WorkspaceView> {
+    return this.unsupported('create')
+  }
+
+  pickDirectory(): Promise<string | null> {
+    return this.unsupported('pickDirectory')
+  }
+
+  listDirectory(
+    _path?: string,
+    _signal?: AbortSignal,
+  ): Promise<DirectoryListing> {
+    return this.unsupported('listDirectory')
+  }
+
+  createDirectory(_path: string, _name: string): Promise<string> {
+    return this.unsupported('createDirectory')
+  }
+
+  openPath(_path: string): Promise<void> {
+    return this.unsupported('openPath')
+  }
+
+  rename(_workspaceId: WorkspaceId, _title: string): Promise<WorkspaceView> {
+    return this.unsupported('rename')
+  }
+
+  delete(_workspaceId: WorkspaceId): Promise<void> {
+    return this.unsupported('delete')
+  }
+
+  insertBefore(
+    _workspaceId: WorkspaceId,
+    _beforeWorkspaceId?: WorkspaceId,
+  ): Promise<void> {
+    return this.unsupported('insertBefore')
+  }
+
+  insertSessionBefore(
+    _workspaceId: WorkspaceId,
+    _sessionId: SessionId,
+    _beforeSessionId?: SessionId,
+  ): Promise<WorkspaceView> {
+    return this.unsupported('insertSessionBefore')
+  }
+
+  archiveSession(_sessionId: SessionId): Promise<void> {
+    return this.unsupported('archiveSession')
+  }
+
   startInitialSelection(): () => void {
     return () => {}
   }
@@ -159,6 +219,12 @@ export class OpenloopWorkspaceService {
     return typeof this.remoteSource === 'function'
       ? this.remoteSource()
       : Promise.resolve(this.remoteSource)
+  }
+
+  private unsupported<T>(operation: string): Promise<T> {
+    return Promise.reject(new Error(
+      `Openloop Workspace ${operation} is unavailable through the legacy client face`,
+    ))
   }
 
   private value<T>(result: RemoteResult<T>, operation: string): T {

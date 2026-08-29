@@ -131,9 +131,15 @@ const OPENLOOP_WORKSPACE_ADAPTER_CLIENT = '@openloop/desktop-bridge-client'
 export function requiresWorkspaceRuntimeAdapter(source: unknown = globalThis): boolean {
   if (typeof source !== 'object' || source === null) return false
   const boot = (source as { __DSH_BOOT__?: unknown }).__DSH_BOOT__
-  if (typeof boot !== 'object' || boot === null) return false
+  if (boot === undefined) return false
+  if (typeof boot !== 'object' || boot === null) {
+    throw new Error('client runtime boot graph must be an object')
+  }
   const entries = (boot as { entries?: unknown }).entries
-  return Array.isArray(entries) && entries.some(entry =>
+  if (!Array.isArray(entries)) {
+    throw new Error('client runtime boot graph must contain an entries array')
+  }
+  return entries.some(entry =>
     typeof entry === 'object'
     && entry !== null
     && (entry as { id?: unknown }).id === OPENLOOP_WORKSPACE_ADAPTER_CLIENT)

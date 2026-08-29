@@ -55,6 +55,17 @@ async function flushMicrotasks(): Promise<void> {
 }
 
 describe('runtime client apply', () => {
+  it('fails closed for a malformed browser boot graph', () => {
+    expect(() => {
+      RuntimeClient.requiresWorkspaceRuntimeAdapter({
+        __DSH_BOOT__: { rev: 'malformed' },
+      })
+    }).toThrow(/boot graph/iu)
+    expect(RuntimeClient.requiresWorkspaceRuntimeAdapter({
+      __DSH_BOOT__: { rev: 'default', entries: [] },
+    })).toBe(false)
+  })
+
   it('waits for the signed Openloop Workspace adapter instead of falling back to legacy RPCs', async () => {
     const previousBoot = (globalThis as { __DSH_BOOT__?: unknown }).__DSH_BOOT__
     ;(globalThis as { __DSH_BOOT__?: unknown }).__DSH_BOOT__ = {

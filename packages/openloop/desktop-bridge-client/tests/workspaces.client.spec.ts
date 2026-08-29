@@ -13,7 +13,10 @@ import {
   type OpenloopWorkspaceRemote,
   type OpenloopWorkspaceSessions,
 } from '../src/client/workspaces.ts'
-import { apply as applyClient } from '../src/client/index.ts'
+import {
+  apply as applyClient,
+  OpenloopWorkspaceRemoteBinding,
+} from '../src/client/index.ts'
 
 function ok<T>(value: T) {
   return Promise.resolve({ ok: true as const, value })
@@ -48,6 +51,23 @@ function sessions(): OpenloopWorkspaceSessions {
 }
 
 describe('Openloop browser Workspace facade', () => {
+  it('rebinds Remote generations and rejects pending work on close', async () => {
+    const binding = new OpenloopWorkspaceRemoteBinding()
+    const first = binding.wait()
+    binding.fail(new Error('first mount failed'))
+    await expect(first).rejects.toThrow('first mount failed')
+
+    const second = binding.wait()
+    const unpublish = binding.publish(remote())
+    await expect(second).resolves.toBeDefined()
+    unpublish()
+
+    const afterUnload = binding.wait()
+    binding.close()
+    await expect(afterUnload).rejects.toThrow(/disposed/iu)
+    await expect(binding.wait()).rejects.toThrow(/disposed/iu)
+  })
+
   it('lists only the Host safe grant projection through the zero-argument Remote', async () => {
     const listWorkspaceGrants = vi.fn(() => ok([{
       workspaceId: 'workspace-1',
@@ -81,6 +101,18 @@ describe('Openloop browser Workspace facade', () => {
       recentWorkspaceId: undefined,
     })
     expect(listWorkspaceGrants).toHaveBeenCalledExactlyOnceWith()
+  })
+
+  it('publishes an error when the Remote generation is unavailable', async () => {
+    const service = new OpenloopWorkspaceService(
+      () => Promise.reject(new Error('Remote mount failed')),
+      sessions(),
+    )
+
+    await expect(service.refresh()).rejects.toThrow('Remote mount failed')
+    const snapshot = service.grants.getSnapshot()
+    expect(snapshot.state).toBe('error')
+    expect(snapshot.error?.message).toBe('Remote mount failed')
   })
 
   it('routes Workspace authority actions without paths and preserves state on cancellation', async () => {
@@ -132,6 +164,15 @@ describe('Openloop browser Workspace facade', () => {
       workspaceId: 'workspace-2',
       agentPreset: 'code',
     })
+  })
+
+  it('implements the shared Workspace face by rejecting legacy local operations', async () => {
+    const service = new OpenloopWorkspaceService(remote(), sessions())
+
+    await expect(service.create({ path: '/forbidden' })).rejects.toThrow(/unavailable/iu)
+    await expect(service.openPath('/forbidden')).rejects.toThrow(/unavailable/iu)
+    await expect(service.delete('workspace-1' as never)).rejects.toThrow(/unavailable/iu)
+    await expect(service.rename('workspace-1' as never, 'renamed')).rejects.toThrow(/unavailable/iu)
   })
 
   it('starts and reconnects without any legacy Workspace RPC', async () => {
