@@ -305,6 +305,77 @@ describe('OpenLoop browser API policy manifest', () => {
     expect(policy.projectStreamFrame?.(runtimeFrame)).toBe(runtimeFrame)
   })
 
+  it.each([
+    [
+      'legacy HTTP',
+      'session.history',
+      'session-not-found',
+      'session log is unavailable at /private/canonical/workspace/session.jsonl',
+      'session log is unavailable at [redacted path]',
+    ],
+    [
+      'Typert',
+      'goals/fail',
+      'internal',
+      'goal load failed for file:///Users/openloop/Projects/workspace/goal.json',
+      'goal load failed for [redacted path]',
+    ],
+    [
+      'stream/error',
+      'stream/error',
+      'internal',
+      'stream source failed at C:\\Users\\openloop\\Projects\\workspace\\events.jsonl',
+      'Internal stream error',
+    ],
+  ])('redacts paths from %s error messages while preserving error codes', (
+    _surface,
+    method,
+    code,
+    message,
+    expectedMessage,
+  ) => {
+    const policy = createBrowserApiPolicy(shippedManifest())
+    const projected = policy.projectError?.(method, {
+      code,
+      message,
+      details: {},
+    } as BrowserApiError)
+
+    expect(projected).toEqual({
+      code,
+      message: expectedMessage,
+      details: {},
+    })
+  })
+
+  it('preserves safe messages and display paths while recursively removing host paths', () => {
+    const policy = createBrowserApiPolicy(shippedManifest())
+
+    expect(policy.projectError?.('session.history', {
+      code: 'session-not-found',
+      message: 'session log is unavailable',
+      details: {
+        path: '/private/canonical/workspace/session.jsonl',
+        displayPath: '~/Projects/workspace',
+        nested: {
+          requestedCwd: '/private/requested',
+          displayPath: 'workspace/session.jsonl',
+          reason: 'not authorized',
+        },
+      },
+    } as unknown as BrowserApiError)).toEqual({
+      code: 'session-not-found',
+      message: 'session log is unavailable',
+      details: {
+        displayPath: '~/Projects/workspace',
+        nested: {
+          displayPath: 'workspace/session.jsonl',
+          reason: 'not authorized',
+        },
+      },
+    })
+  })
+
   it('denies the reviewed sensitive surfaces and allows the reviewed browser surface', () => {
     const policy = createBrowserApiPolicy(shippedManifest())
 

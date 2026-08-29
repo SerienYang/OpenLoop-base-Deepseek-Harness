@@ -44,6 +44,14 @@ const DROPPED_HOST_FRAMES = new Set([
   'host/workspace-order-changed',
   'host/archived-sessions-changed',
 ])
+const REDACTED_PATH = '[redacted path]'
+const INTERNAL_STREAM_ERROR = 'Internal stream error'
+const QUOTED_MESSAGE_PATH = /(["'`])(?:file:\/\/\/|[A-Za-z]:[\\/]|\/)[^"'`\r\n]*\1/gu
+const MESSAGE_PATH_PATTERNS = [
+  /\bfile:\/\/\/[^\s"'`<>{}[\]()]+/gu,
+  /(?<![A-Za-z0-9_])[A-Za-z]:[\\/][^\s"'`<>{}[\]()]+/gu,
+  /(?<![:/\\A-Za-z0-9_])\/[^\s"'`<>{}[\]()]+/gu,
+] as const
 
 /** Validate and detach an untrusted browser API manifest. */
 export function parseBrowserApiPolicyManifest(source: unknown): BrowserApiPolicyManifest {
@@ -148,9 +156,12 @@ export function createBrowserApiPolicy(source: unknown): BrowserApiPolicy {
       }
       return value
     },
-    projectError(_method: string, error: BrowserApiError): BrowserApiError {
+    projectError(method: string, error: BrowserApiError): BrowserApiError {
       return {
         ...error,
+        message: method === 'stream/error' && error.code === 'internal'
+          ? INTERNAL_STREAM_ERROR
+          : redactMessagePaths(error.message),
         details: redactPathDetails(error.details),
       } as BrowserApiError
     },
@@ -162,6 +173,17 @@ export function createBrowserApiPolicy(source: unknown): BrowserApiPolicy {
       return label === undefined ? projected : { ...projected, cwd: label }
     },
   })
+}
+
+function redactMessagePaths(message: string): string {
+  const unquoted = message.replace(
+    QUOTED_MESSAGE_PATH,
+    (_match, quote: string) => `${quote}${REDACTED_PATH}${quote}`,
+  )
+  return MESSAGE_PATH_PATTERNS.reduce(
+    (projected, pattern) => projected.replace(pattern, REDACTED_PATH),
+    unquoted,
+  )
 }
 
 function redactPathDetails(value: unknown): unknown {

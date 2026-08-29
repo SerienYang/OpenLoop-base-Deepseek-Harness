@@ -558,6 +558,33 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     await sessionRow.click()
     await expectComposerBlocked(false)
 
+    const events = scaffold.ctx.apiProxy.events
+    const originalMux = events.mux.bind(events)
+    const mutableEvents = events as { mux: typeof originalMux }
+    const streamErrorsBefore = browserStreamCaptures
+      .flatMap(capture => capture.observedFrames)
+      .filter(frame =>
+        (frame as { payload?: { type?: unknown } } | null)?.payload?.type === 'stream/error')
+      .length
+    let failureInjected = false
+    mutableEvents.mux = (request, signal) => {
+      if (failureInjected) return originalMux(request, signal)
+      failureInjected = true
+      return (async function * () {
+        throw new Error(`Openloop stream failed at ${canonicalPath}`)
+      })()
+    }
+    try {
+      await reconnectBrowserTransport(page)
+      await expect.poll(() => browserStreamCaptures
+        .flatMap(capture => capture.observedFrames)
+        .filter(frame =>
+          (frame as { payload?: { type?: unknown } } | null)?.payload?.type === 'stream/error')
+        .length, { timeout: 15_000 }).toBeGreaterThan(streamErrorsBefore)
+    } finally {
+      mutableEvents.mux = originalMux
+    }
+
     const preRemoveAria = await captureStableAria(page, '[class*="frame"]', scaffold.workspaceCwd)
     await compareOrRefreshGolden(UI_EXPECTED, preRemoveAria, MODE)
     expect(preRemoveAria).toContain('button "authority-project"')
@@ -768,6 +795,16 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     for (const frame of sessionAddedFrames) {
       expect((frame as { payload: object }).payload).toHaveProperty('cwd', 'authority-project')
     }
+    expect(websocketFrames).toContainEqual(expect.objectContaining({
+      payload: {
+        type: 'stream/error',
+        error: {
+          code: 'internal',
+          message: 'Internal stream error',
+          details: {},
+        },
+      },
+    }))
     expect(websocketFrames.some(frame => frameType(frame) === 'host/workspace-changed'))
       .toBe(false)
     const forbidden = [
@@ -790,6 +827,7 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     }
 
     expect(tripwire.warnings).toEqual([
+      '[web-runtime] connection lost, retry #1',
       '[web-runtime] connection lost, retry #1',
       '[web-runtime] connection lost, retry #1',
     ])
