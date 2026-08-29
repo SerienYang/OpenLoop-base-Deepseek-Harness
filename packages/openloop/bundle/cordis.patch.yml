@@ -7,6 +7,8 @@
   inject: [webRuntime, browserApiPolicy]
 - id: typert-gateway
   inject: [browserApiPolicy]
+- id: session-log-download
+  disabled: true
 - id: credentials
   disabled: true
 - id: code-runtime

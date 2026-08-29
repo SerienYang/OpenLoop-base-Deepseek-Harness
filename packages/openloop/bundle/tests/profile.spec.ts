@@ -170,6 +170,11 @@ describe('OpenLoop profile', () => {
       name: '@openloop/file-broker',
       inject: ['desktopBridge'],
     })
+    expect(entries.find(entry => entry.id === 'session-log-download')).toMatchObject({
+      id: 'session-log-download',
+      name: '@deepseek-ai/dsh-session-log-export',
+      disabled: true,
+    })
   })
 
   it('selects the path-free Workspace adapter before the shared client runtime starts', () => {
@@ -407,6 +412,7 @@ describe('OpenLoop profile', () => {
     expect(entries.find(entry => entry.id === 'desktop-bridge-host')).toBeUndefined()
     expect(entries.find(entry => entry.id === 'connection')?.inject).toEqual(['webRuntime'])
     expect(entries.find(entry => entry.id === 'typert-gateway')?.inject).toBeUndefined()
+    expect(entries.find(entry => entry.id === 'session-log-download')?.disabled).not.toBe(true)
     expect(entries.find(entry => entry.id === 'credentials')?.name)
       .toBe('@deepseek-ai/dsh-credentials-local')
     const defaultFs = entries.find(entry => entry.id === 'fs-sandbox')

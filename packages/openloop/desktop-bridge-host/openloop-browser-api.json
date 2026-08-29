@@ -68,14 +68,6 @@
     {
       "method": "POST",
       "path": "/api/respond"
-    },
-    {
-      "method": "GET",
-      "path": "/api/session.export"
-    },
-    {
-      "method": "HEAD",
-      "path": "/api/session.export"
     }
   ]
 }

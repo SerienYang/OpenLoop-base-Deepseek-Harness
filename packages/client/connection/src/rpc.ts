@@ -1,7 +1,16 @@
 /** Generic unary RPC contracts shared by the Host and Client Connection halves. */
 
 import type {} from '@deepseek-ai/cordis'
-import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type {
+  HostFrame,
+  MuxFrame,
+  RpcResult,
+} from '@deepseek-ai/dsh-host-apiproxy/api'
+
+/** One server-originated frame before a browser carrier serializes it. */
+export type BrowserApiStreamFrame = MuxFrame | HostFrame
+/** One legacy RPC business error before a browser carrier serializes it. */
+export type BrowserApiError = Extract<RpcResult<unknown>, { readonly ok: false }>['error']
 
 /**
  * Versioned Host policy for browser-reachable API targets.
@@ -33,6 +42,19 @@ export interface BrowserApiPolicy {
     | { readonly allowed: false }
     | { readonly allowed: true; readonly value: T }
   >
+  /**
+   * Project one successful legacy or Typert result before it reaches the
+   * browser. The caller remains responsible for validating the business
+   * result before this product-specific projection.
+   */
+  projectResult?(method: string, value: unknown): unknown
+  /** Project one failed legacy result without changing carrier status. */
+  projectError?(method: string, error: BrowserApiError): BrowserApiError
+  /**
+   * Project one server stream frame before serialization. Returning undefined
+   * drops the frame from the browser-visible stream.
+   */
+  projectStreamFrame?(frame: BrowserApiStreamFrame): BrowserApiStreamFrame | undefined
 }
 
 declare module '@deepseek-ai/cordis' {

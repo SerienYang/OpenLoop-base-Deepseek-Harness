@@ -439,6 +439,37 @@ describe('TypertGatewayService', () => {
     expect(allowsInvocation).toHaveBeenCalledOnce()
   })
 
+  it('projects a validated Typert result before returning it to the browser carrier', async () => {
+    const ctx = new Context()
+    await ctx.plugin(TypertRegistry)
+    const projectResult = vi.fn((endpoint: string, value: unknown) => ({
+      ...(value as object),
+      projectedBy: endpoint,
+    }))
+    ctx.provide('browserApiPolicy', {
+      version: 1,
+      allows: () => true,
+      projectResult,
+    } as never)
+    await ctx.plugin(TypertGatewayService)
+    await ctx.plugin(GoalService)
+    registerStrict(ctx, [passthroughDescriptor()])
+
+    await expect(ctx.typertGateway.invoke({
+      namespace: 'goals',
+      method: 'passthrough',
+      args: { value: { cwd: '/private/canonical/workspace', retained: true } },
+    })).resolves.toEqual({
+      cwd: '/private/canonical/workspace',
+      retained: true,
+      projectedBy: 'goals/passthrough',
+    })
+    expect(projectResult).toHaveBeenCalledExactlyOnceWith(
+      'goals/passthrough',
+      { cwd: '/private/canonical/workspace', retained: true },
+    )
+  })
+
   it('turns a rejected Typert invocation policy hook into policy denial', async () => {
     const ctx = new Context()
     await ctx.plugin(TypertRegistry)

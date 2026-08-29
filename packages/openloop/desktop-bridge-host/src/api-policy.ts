@@ -1,4 +1,8 @@
-import type { BrowserApiPolicy } from '@deepseek-ai/dsh-client-connection'
+import type {
+  BrowserApiError,
+  BrowserApiPolicy,
+  BrowserApiStreamFrame,
+} from '@deepseek-ai/dsh-client-connection'
 
 interface PayloadRule {
   readonly required: readonly string[]
@@ -34,6 +38,12 @@ const LEGACY_METHOD = /^[A-Za-z0-9_$-]+\.[A-Za-z0-9_$-]+$/u
 const TYPERT_ENDPOINT = /^[A-Za-z0-9_$.-]+\/[A-Za-z0-9_$.-]+$/u
 const TRANSPORT_PATH = /^\/api\/[A-Za-z0-9_$-]+(?:\.[A-Za-z0-9_$-]+)*$/u
 const TRANSPORT_METHODS = new Set(['GET', 'HEAD', 'POST'])
+const DROPPED_HOST_FRAMES = new Set([
+  'host/workspace-changed',
+  'host/workspace-removed',
+  'host/workspace-order-changed',
+  'host/archived-sessions-changed',
+])
 
 /** Validate and detach an untrusted browser API manifest. */
 export function parseBrowserApiPolicyManifest(source: unknown): BrowserApiPolicyManifest {
@@ -120,14 +130,59 @@ export function createBrowserApiPolicy(source: unknown): BrowserApiPolicy {
       if (actual.some(key => !expected.has(key as string))) return false
       return rule.required.every(key => Object.hasOwn(payload, key))
     },
+    projectResult(method: string, value: unknown): unknown {
+      if (method === 'host.describe' && isRecord(value)) {
+        return { ...value, cwd: '' }
+      }
+      if (method === 'session.list' && isRecord(value) && Array.isArray(value.items)) {
+        const items: unknown[] = value.items
+        return {
+          ...value,
+          items: items.map((item) => {
+            if (!isRecord(item)) return item
+            const { cwd: _cwd, ...projected } = item
+            return projected
+          }),
+        }
+      }
+      return value
+    },
+    projectError(_method: string, error: BrowserApiError): BrowserApiError {
+      return {
+        ...error,
+        details: redactPathDetails(error.details),
+      } as BrowserApiError
+    },
+    projectStreamFrame(frame: BrowserApiStreamFrame): BrowserApiStreamFrame | undefined {
+      if (DROPPED_HOST_FRAMES.has(frame.type)) return undefined
+      if (frame.type !== 'host/session-added') return frame
+      const { cwd: _cwd, ...projected } = frame
+      return projected
+    },
   })
 }
 
+function redactPathDetails(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactPathDetails)
+  if (!isRecord(value)) return value
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== 'cwd'
+        && key !== 'path'
+        && (key === 'displayPath' || !key.endsWith('Path')))
+      .map(([key, entry]) => [key, redactPathDetails(entry)]),
+  )
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 function record(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+  if (!isRecord(value)) {
     throw new TypeError(`${label} must be an object`)
   }
-  return value as Record<string, unknown>
+  return value
 }
 
 function assertExactFields(

@@ -120,6 +120,7 @@ interface BrowserApiResponseCapture {
 interface BrowserStreamCapture {
   readonly transport: 'sse' | 'websocket'
   readonly url: string
+  readonly observedFrames?: unknown[]
   bytes: number
   frameCount: number
   text: string
@@ -224,6 +225,11 @@ function recordStreamFrame(
 ): void {
   capture.frameCount += 1
   const bytes = typeof payload === 'string' ? Buffer.from(payload) : payload
+  try {
+    capture.observedFrames?.push(JSON.parse(bytes.toString('utf8')) as unknown)
+  } catch {
+    capture.observedFrames?.push({ malformed: true })
+  }
   const remaining = STREAM_CAPTURE_LIMIT_BYTES - budget.bytes
   if (remaining > 0) {
     const recorded = bytes.subarray(0, remaining)
@@ -340,6 +346,7 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
       const capture: BrowserStreamCapture = {
         transport: 'websocket',
         url: socket.url(),
+        observedFrames: [],
         bytes: 0,
         frameCount: 0,
         text: '',
@@ -787,13 +794,30 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     const responseMethods = browserApiResponses.map(response => response.rpcMethod)
     expect(responseMethods, 'API response capture omitted session.create')
       .toContain('session.create')
+    expect(responseMethods, 'API response capture omitted host.describe')
+      .toContain('host.describe')
+    expect(responseMethods, 'API response capture omitted session.list')
+      .toContain('session.list')
     expect(responseMethods, 'API response capture omitted renameWorkspace')
       .toContain('openloopDesktop/renameWorkspace')
     const browserApiRequestTraffic = JSON.stringify(browserApiRequests)
-    const browserApiResponseTraffic = JSON.stringify(browserApiResponses.filter(
-      response => response.rpcMethod?.startsWith('openloopDesktop/') === true,
-    ))
+    const browserApiResponseTraffic = JSON.stringify(browserApiResponses)
     const browserStreamTraffic = JSON.stringify(browserStreams)
+    const websocketFrames = browserStreams
+      .filter(capture => capture.transport === 'websocket')
+      .flatMap(capture => capture.observedFrames ?? [])
+    const frameType = (frame: unknown): unknown =>
+      (frame as { payload?: { type?: unknown } } | null)?.payload?.type
+    const sessionAddedFrames = websocketFrames.filter(
+      frame => frameType(frame) === 'host/session-added',
+    )
+    expect(sessionAddedFrames.length, 'WebSocket capture omitted projected host/session-added')
+      .toBeGreaterThan(0)
+    for (const frame of sessionAddedFrames) {
+      expect((frame as { payload: object }).payload).not.toHaveProperty('cwd')
+    }
+    expect(websocketFrames.some(frame => frameType(frame) === 'host/workspace-changed'))
+      .toBe(false)
     const forbidden = [
       ['canonicalPath field', 'canonicalPath'],
       ['pendingGrantId field', 'pendingGrantId'],
@@ -807,9 +831,7 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
       expect(browserApiRequestTraffic, `browser API requests leaked ${label}`).not.toContain(value)
       expect(browserApiResponseTraffic, `browser API responses leaked ${label}`)
         .not.toContain(value)
-      if (label !== 'canonical path') {
-        expect(browserStreamTraffic, `browser API streams leaked ${label}`).not.toContain(value)
-      }
+      expect(browserStreamTraffic, `browser API streams leaked ${label}`).not.toContain(value)
       expect(preRemoveAria, `pre-remove ARIA snapshot leaked ${label}`).not.toContain(value)
       expect(finalAria, `final ARIA snapshot leaked ${label}`).not.toContain(value)
       expect(finalDom, `final DOM snapshot leaked ${label}`).not.toContain(value)

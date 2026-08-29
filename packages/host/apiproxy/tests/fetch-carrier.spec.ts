@@ -587,6 +587,113 @@ describe('unary round trip (handler ⇄ client, no network)', () => {
 describe('handler carrier-layer statuses', () => {
   const handler = toFetchHandler(fakeApi())
 
+  it('projects successful unary values before returning them and preserves default responses', async () => {
+    const api = fakeApi()
+    api.host.describe = async request => ({
+      rpcId: request.rpcId,
+      result: {
+        ok: true,
+        value: {
+          version: 'projection-test',
+          cwd: '/private/canonical/workspace',
+          attachedSessions: 1,
+          canOpenPath: true,
+        },
+      },
+    })
+    const projectResult = vi.fn((method: string, value: unknown) => {
+      if (method !== 'host.describe') return value
+      return { ...(value as object), cwd: '' }
+    })
+    const request = new Request('http://x/api/host.describe', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'r-projected-describe',
+        method: 'host.describe',
+        payload: {},
+      }),
+    })
+
+    const projected = await toFetchHandler(api, {
+      version: 1,
+      allows: () => true,
+      projectResult,
+    } as never).fetch(request.clone())
+    const projectedBody = await projected.json() as {
+      result: { ok: true; value: { cwd: string; attachedSessions: number } }
+    }
+    expect(projectedBody.result.value).toMatchObject({ cwd: '', attachedSessions: 1 })
+    expect(projectResult).toHaveBeenCalledExactlyOnceWith(
+      'host.describe',
+      expect.objectContaining({ cwd: '/private/canonical/workspace' }),
+    )
+
+    const unchanged = await toFetchHandler(api).fetch(request)
+    const unchangedBody = await unchanged.json() as {
+      result: { ok: true; value: { cwd: string } }
+    }
+    expect(unchangedBody.result.value.cwd).toBe('/private/canonical/workspace')
+  })
+
+  it('applies the policy error projection while preserving default business errors', async () => {
+    const api = fakeApi()
+    api.sessions.history = async request => ({
+      rpcId: request.rpcId,
+      result: {
+        ok: false,
+        error: {
+          code: 'session-not-found',
+          message: 'session log is unavailable',
+          details: {
+            sessionId: 'missing-session' as never,
+            path: '/private/canonical/workspace/session.jsonl',
+          },
+        },
+      },
+    })
+    const request = new Request('http://x/api/session.history', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'r-projected-error',
+        method: 'session.history',
+        payload: { sessionId: 'missing-session' },
+      }),
+    })
+
+    const projected = await toFetchHandler(api, {
+      version: 1,
+      allows: () => true,
+      projectResult: (_method: string, value: unknown) => value,
+      projectError: (_method: string, error: {
+        code: string
+        message: string
+        details: Record<string, unknown>
+      }) => {
+        const { path: _path, ...details } = error.details
+        return { ...error, details }
+      },
+    } as never).fetch(request.clone())
+    const projectedText = await projected.text()
+    expect(projectedText).not.toContain('/private/canonical/workspace')
+    expect(JSON.parse(projectedText)).toMatchObject({
+      result: {
+        ok: false,
+        error: {
+          code: 'session-not-found',
+          message: 'session log is unavailable',
+          details: { sessionId: 'missing-session' },
+        },
+      },
+    })
+
+    const unchanged = await toFetchHandler(api).fetch(request)
+    expect(await unchanged.text()).toContain('/private/canonical/workspace')
+  })
+
   it('checks an optional browser policy before payload parsing, route lookup, or business dispatch', async () => {
     const api = fakeApi()
     const set = vi.spyOn(api.credentials, 'set')

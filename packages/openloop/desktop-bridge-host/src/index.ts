@@ -3,7 +3,11 @@
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { Context, Service } from '@deepseek-ai/cordis'
-import type { BrowserApiPolicy } from '@deepseek-ai/dsh-client-connection'
+import type {
+  BrowserApiError,
+  BrowserApiPolicy,
+  BrowserApiStreamFrame,
+} from '@deepseek-ai/dsh-client-connection'
 import type { RuntimeBootstrap } from '@openloop/runtime-bootstrap'
 import {
   createBrowserApiPolicy,
@@ -95,6 +99,24 @@ export class OpenloopBrowserApiPolicyService extends Service implements BrowserA
   /** Decide one exact legacy, Typert, or physical-route target. */
   allows(method: string, payload: unknown): boolean {
     return this.policy.allows(method, payload)
+  }
+
+  /** Project a successful browser-visible result through the reviewed policy. */
+  projectResult(method: string, value: unknown): unknown {
+    if (this.policy.projectResult === undefined) return value
+    return this.policy.projectResult(method, value)
+  }
+
+  /** Remove Host filesystem metadata from a failed browser-visible result. */
+  projectError(method: string, error: BrowserApiError): BrowserApiError {
+    if (this.policy.projectError === undefined) return error
+    return this.policy.projectError(method, error)
+  }
+
+  /** Project or drop one browser-visible server stream frame. */
+  projectStreamFrame(frame: BrowserApiStreamFrame): BrowserApiStreamFrame | undefined {
+    if (this.policy.projectStreamFrame === undefined) return frame
+    return this.policy.projectStreamFrame(frame)
   }
 
   /** Keep session creation inside the same authority queue lease as its ready check. */

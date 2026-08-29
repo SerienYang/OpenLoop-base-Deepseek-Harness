@@ -8,6 +8,7 @@ import type {
   ApiProxy, HostFrame, MuxFrame, RpcRequest, ServerRequest,
 } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type { BrowserApiPolicy } from './rpc.ts'
 
 type Frame = MuxFrame | HostFrame
 
@@ -52,8 +53,14 @@ export class WebSocketDownlinks {
   private readonly server = new WebSocketServer({ noServer: true })
   private readonly pumps = new Set<Promise<void>>()
 
-  /** @param api - host API supplying the typed event streams. */
-  constructor(private readonly api: ApiProxy) {}
+  /**
+   * @param api - host API supplying the typed event streams.
+   * @param policy - optional product projection applied before wire serialization.
+   */
+  constructor(
+    private readonly api: ApiProxy,
+    private readonly policy?: BrowserApiPolicy,
+  ) {}
 
   /**
    * Upgrade one socket and pump the mux stream until either side closes.
@@ -121,7 +128,13 @@ export class WebSocketDownlinks {
     abort: AbortController,
   ): Promise<void> {
     try {
-      for await (const frame of frames) await send(socket, frame)
+      for await (const frame of frames) {
+        const payload = this.policy?.projectStreamFrame === undefined
+          ? frame.payload
+          : this.policy.projectStreamFrame(frame.payload)
+        if (payload === undefined) continue
+        await send(socket, { ...frame, payload })
+      }
     } catch (error) {
       if (!abort.signal.aborted) {
         try {

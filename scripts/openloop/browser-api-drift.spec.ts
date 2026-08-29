@@ -471,6 +471,8 @@ describe('Openloop assembled browser API drift gate', () => {
     expect(surface.legacyRpcMethods.has('workspace.list')).toBe(false)
     expect(surface.legacyRpcMethods.has('workspace.create')).toBe(false)
     expect(surface.legacyRpcMethods.has('workspace.delete')).toBe(false)
+    expect(surface.transportRoutes.has('GET /api/session.export')).toBe(false)
+    expect(surface.transportRoutes.has('HEAD /api/session.export')).toBe(false)
   })
 
   it('requires every reviewed OpenLoop Remote facade and excludes every Host-only method', async () => {

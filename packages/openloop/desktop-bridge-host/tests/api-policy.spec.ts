@@ -11,6 +11,8 @@ import {
   API_PATH,
   apply as applyConnection,
   inject as connectionInject,
+  type BrowserApiError,
+  type BrowserApiPolicy,
 } from '@deepseek-ai/dsh-client-connection'
 import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
@@ -151,6 +153,125 @@ describe('OpenLoop browser API policy manifest', () => {
     })
   })
 
+  it('projects only the reviewed path-bearing responses and stream frames', () => {
+    const policy = createBrowserApiPolicy(shippedManifest()) as BrowserApiPolicy & {
+      projectResult?(method: string, value: unknown): unknown
+      projectError?(method: string, error: BrowserApiError): BrowserApiError
+      projectStreamFrame?(frame: unknown): unknown
+    }
+    const describe = {
+      version: 'projection-test',
+      cwd: '/private/canonical/workspace',
+      provider: 'deepseek',
+      model: 'deepseek-chat',
+      attachedSessions: 2,
+      canOpenPath: true,
+    }
+    const list = {
+      items: [
+        {
+          sessionId: 'session-1',
+          updatedAt: 1,
+          running: false,
+          blank: true,
+          cwd: '/private/canonical/workspace',
+          agentPreset: 'standard',
+        },
+        {
+          sessionId: 'session-2',
+          updatedAt: 2,
+          running: true,
+          blank: false,
+        },
+      ],
+    }
+    const search = {
+      items: [{ sessionId: 'session-1', snippet: 'public search result' }],
+      hasMore: false,
+    }
+
+    expect(policy.projectResult?.('host.describe', describe)).toEqual({
+      ...describe,
+      cwd: '',
+    })
+    expect(policy.projectResult?.('session.list', list)).toEqual({
+      items: [
+        {
+          sessionId: 'session-1',
+          updatedAt: 1,
+          running: false,
+          blank: true,
+          agentPreset: 'standard',
+        },
+        {
+          sessionId: 'session-2',
+          updatedAt: 2,
+          running: true,
+          blank: false,
+        },
+      ],
+    })
+    expect(policy.projectResult?.('session.search', search)).toBe(search)
+    expect(describe.cwd).toBe('/private/canonical/workspace')
+    expect(list.items[0]).toHaveProperty('cwd', '/private/canonical/workspace')
+    expect(policy.projectError?.('session.history', {
+      code: 'session-not-found',
+      message: 'session log is unavailable',
+      details: {
+        sessionId: 'session-1',
+        path: '/private/canonical/workspace/session.jsonl',
+        nested: {
+          cwd: '/private/canonical/workspace',
+          displayPath: '~/Projects/workspace',
+        },
+      },
+    } as unknown as BrowserApiError)).toEqual({
+      code: 'session-not-found',
+      message: 'session log is unavailable',
+      details: {
+        sessionId: 'session-1',
+        nested: { displayPath: '~/Projects/workspace' },
+      },
+    })
+
+    expect(policy.projectStreamFrame?.({
+      type: 'host/session-added',
+      sessionId: 'session-1',
+      blank: true,
+      cwd: '/private/canonical/workspace',
+      agentPreset: 'standard',
+    })).toEqual({
+      type: 'host/session-added',
+      sessionId: 'session-1',
+      blank: true,
+      agentPreset: 'standard',
+    })
+    for (const frame of [
+      {
+        type: 'host/workspace-changed',
+        workspace: {
+          workspaceId: 'workspace-1',
+          path: '/private/canonical/workspace',
+          title: 'Workspace',
+          sessionIds: ['session-1'],
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      },
+      { type: 'host/workspace-removed', workspaceId: 'workspace-1' },
+      { type: 'host/workspace-order-changed', workspaceIds: ['workspace-1'] },
+      { type: 'host/archived-sessions-changed', archivedSessionIds: ['session-1'] },
+    ]) {
+      expect(policy.projectStreamFrame?.(frame), frame.type).toBeUndefined()
+    }
+    const runtimeFrame = {
+      type: 'session/subscribed',
+      sessionId: 'session-1',
+      lastSeq: 4,
+    }
+    expect(policy.projectStreamFrame?.(runtimeFrame)).toBe(runtimeFrame)
+  })
+
   it('denies the reviewed sensitive surfaces and allows the reviewed browser surface', () => {
     const policy = createBrowserApiPolicy(shippedManifest())
 
@@ -202,11 +323,11 @@ describe('OpenLoop browser API policy manifest', () => {
       'GET /api/events.mux',
       'GET /api/events.host',
       'POST /api/respond',
-      'GET /api/session.export',
-      'HEAD /api/session.export',
     ]) {
       expect([allowed, policy.allows(allowed, {})]).toEqual([allowed, true])
     }
+    expect(policy.allows('GET /api/session.export', undefined)).toBe(false)
+    expect(policy.allows('HEAD /api/session.export', undefined)).toBe(false)
   })
 
   it('blocks every legacy Workspace API in the OpenLoop browser profile', () => {

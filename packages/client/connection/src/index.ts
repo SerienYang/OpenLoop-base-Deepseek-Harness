@@ -13,7 +13,9 @@ import type { BrowserApiPolicy } from './rpc.ts'
 import { rejectWebSocketUpgrade, WebSocketDownlinks } from './websocket-downlink.ts'
 
 export type {
+  BrowserApiError,
   BrowserApiPolicy,
+  BrowserApiStreamFrame,
   ConnectionRpcAuthority,
   ConnectionRpcEndpointMatcher,
   ConnectionRpcHandler,
@@ -216,7 +218,10 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
   ctx.effect(() => ctx.webServer.register(route), 'client-connection: /api route')
   ctx.inject(['apiProxy'], (apiCtx) => {
     assertImageBodyCapacity(apiCtx, maxRequestBodyBytes)
-    const downlinks = new WebSocketDownlinks(apiCtx.apiProxy)
+    const downlinks = new WebSocketDownlinks(
+      apiCtx.apiProxy,
+      apiCtx.get('browserApiPolicy'),
+    )
     const registerDownlink = (
       path: string,
       handle: WebUpgradeRoute['handler'],

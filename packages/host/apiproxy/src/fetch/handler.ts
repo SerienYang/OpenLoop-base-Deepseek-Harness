@@ -84,6 +84,9 @@ interface BrowserApiPolicy {
     | { readonly allowed: false }
     | { readonly allowed: true; readonly value: T }
   >
+  projectResult?(method: string, value: unknown): unknown
+  projectError?(method: string, error: RpcError): RpcError
+  projectStreamFrame?(frame: MuxFrame | HostFrame): MuxFrame | HostFrame | undefined
 }
 
 /**
@@ -181,6 +184,31 @@ function fullResponse(narrow: RpcResponse<unknown>): Response {
   return Response.json(body)
 }
 
+function projectedResponse(
+  method: string,
+  narrow: RpcResponse<unknown>,
+  policy?: BrowserApiPolicy,
+): Response {
+  if (!narrow.result.ok) {
+    if (policy?.projectError === undefined) return fullResponse(narrow)
+    return fullResponse({
+      rpcId: narrow.rpcId,
+      result: {
+        ok: false,
+        error: policy.projectError(method, narrow.result.error),
+      },
+    })
+  }
+  if (policy?.projectResult === undefined) return fullResponse(narrow)
+  return fullResponse({
+    rpcId: narrow.rpcId,
+    result: {
+      ok: true,
+      value: policy.projectResult(method, narrow.result.value),
+    },
+  })
+}
+
 /**
  * Parse the payload and invoke one unary route. Generic over the map key so
  * the row's schema/invoke pairing typechecks; the only cast collapses the
@@ -211,10 +239,12 @@ async function handleUnary<K extends keyof RpcMethodMap>(
     }
   }
   try {
-    if (policy?.allowsInvocation === undefined) return fullResponse(await invoke())
+    if (policy?.allowsInvocation === undefined) {
+      return projectedResponse(method, await invoke(), policy)
+    }
     const admission = await policy.allowsInvocation(method, payload.data, signal, invoke)
     if (!admission.allowed) return new Response('forbidden', { status: 403 })
-    return fullResponse(admission.value)
+    return projectedResponse(method, admission.value, policy)
   } catch {
     if (businessFailure === undefined) {
       return new Response('forbidden', { status: 403 })
@@ -233,7 +263,10 @@ function fullFrame(narrow: RpcRequest<MuxFrame | HostFrame>): ServerRequest {
  * Wrap a frame stream as an SSE Response; stops when req.signal aborts. An
  * impl throw mid-stream emits one stream/error frame and then closes.
  */
-function sseResponse(frames: AsyncIterable<RpcRequest<MuxFrame | HostFrame>>): Response {
+function sseResponse(
+  frames: AsyncIterable<RpcRequest<MuxFrame | HostFrame>>,
+  policy?: BrowserApiPolicy,
+): Response {
   const encoder = new TextEncoder()
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -243,7 +276,14 @@ function sseResponse(frames: AsyncIterable<RpcRequest<MuxFrame | HostFrame>>): R
         // a comment line is not a frame, so client frame parsing skips it naturally).
         controller.enqueue(encoder.encode(': connected\n\n'))
         for await (const narrow of frames) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(fullFrame(narrow))}\n\n`))
+          const payload = policy?.projectStreamFrame === undefined
+            ? narrow.payload
+            : policy.projectStreamFrame(narrow.payload)
+          if (payload === undefined) continue
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(fullFrame({
+            ...narrow,
+            payload,
+          }))}\n\n`))
         }
       } catch (error: unknown) {
         // Mid-stream impl failure → one stream/error frame, then close: the client must see
@@ -289,13 +329,19 @@ export function toFetchHandler(api: ApiProxy, policy?: BrowserApiPolicy): { fetc
         if (policy !== undefined && !policy.allows('GET /api/events.mux', undefined)) {
           return new Response('forbidden', { status: 403 })
         }
-        return sseResponse(api.events.mux({ rpcId: RpcId(randomUUID()), payload: {} }, req.signal))
+        return sseResponse(
+          api.events.mux({ rpcId: RpcId(randomUUID()), payload: {} }, req.signal),
+          policy,
+        )
       }
       if (path === '/api/events.host' && req.method === 'GET') {
         if (policy !== undefined && !policy.allows('GET /api/events.host', undefined)) {
           return new Response('forbidden', { status: 403 })
         }
-        return sseResponse(api.events.host({ rpcId: RpcId(randomUUID()), payload: {} }, req.signal))
+        return sseResponse(
+          api.events.host({ rpcId: RpcId(randomUUID()), payload: {} }, req.signal),
+          policy,
+        )
       }
       if (path === '/api/session.export' && (req.method === 'GET' || req.method === 'HEAD')) {
         if (policy !== undefined && !policy.allows(`${req.method} /api/session.export`, undefined)) {

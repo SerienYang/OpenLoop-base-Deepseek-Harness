@@ -228,8 +228,20 @@ export class TypertGatewayService extends Service implements TypertGateway {
     // A weak descriptor declares no return type, so nothing returned is a void
     // result and rides the wire as an absent value field. A strict descriptor
     // keeps its schema: there, undefined has to be a declared result.
-    if (result === undefined && descriptor.result.mode !== 'strict') return result
-    return decode(descriptor.result, result, 'result-invalid', endpoint, 'result')
+    const decoded = result === undefined && descriptor.result.mode !== 'strict'
+      ? result
+      : decode(descriptor.result, result, 'result-invalid', endpoint, 'result')
+    if (policy?.projectResult === undefined) return decoded
+    try {
+      return policy.projectResult(endpoint, decoded)
+    } catch (error) {
+      throw new TypertGatewayError(
+        'policy-denied',
+        endpoint,
+        'browser API policy could not project this endpoint',
+        { cause: error },
+      )
+    }
   }
 
   private async dispatchRpc(
