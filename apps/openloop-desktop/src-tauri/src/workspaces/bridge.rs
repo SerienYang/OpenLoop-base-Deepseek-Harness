@@ -113,6 +113,10 @@ pub fn install_workspace_authority_handlers(
 }
 
 #[doc(hidden)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "test-only reveal injection mirrors the production handler dependencies"
+)]
 pub fn install_workspace_authority_handlers_with_reveal(
     tables: &mut BridgeDispatchTables,
     launch_id: Uuid,

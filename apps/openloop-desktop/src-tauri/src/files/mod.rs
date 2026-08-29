@@ -520,11 +520,7 @@ impl FileBroker {
                     &write.temporary,
                     &write.target,
                 );
-                if let Err(error) =
-                    swap_at(write.parent.as_raw_fd(), &write.temporary, &write.target)
-                {
-                    return Err(error);
-                }
+                swap_at(write.parent.as_raw_fd(), &write.temporary, &write.target)?;
                 let rollback_succeeded =
                     path_inode_identity(write.parent.as_raw_fd(), &write.target)?
                         == Some(displaced_identity)
