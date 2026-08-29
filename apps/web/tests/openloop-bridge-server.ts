@@ -12,6 +12,13 @@ import {
   type AuthenticatedBridgeRequest,
   type BridgeRequest,
 } from '@openloop/desktop-bridge-host/test-support'
+import type {
+  WorkspaceGrantInspection,
+  WorkspaceGrantView,
+  WorkspaceTransaction,
+  WorkspaceTransactionInput,
+  WorkspaceTransactionStage,
+} from '@openloop/desktop-bridge-host'
 
 export interface RecordedBridgeCall {
   readonly method: string
@@ -21,6 +28,50 @@ export interface RecordedBridgeCall {
 interface AuthenticatedUnixBridgeOptions {
   readonly launchId: string
   readonly secret: Uint8Array
+}
+
+interface WorkspaceAuthorizationPlan {
+  readonly outcome: 'cancelled' | 'pending'
+  readonly pendingGrantId?: string
+  readonly canonicalPath?: string
+  readonly displayPath?: string
+  readonly deferred?: boolean
+  released: boolean
+  release: ((outcome: 'released' | 'cancelled') => void) | undefined
+}
+
+export type WorkspaceAuthorizationInput =
+  | { readonly outcome: 'cancelled'; readonly deferred?: boolean }
+  | {
+    readonly outcome: 'pending'
+    readonly canonicalPath: string
+    readonly displayPath: string
+    readonly deferred?: boolean
+  }
+
+export interface WorkspaceAuthorizationControl {
+  readonly pendingGrantId: string
+  release(): void
+}
+
+interface StoredWorkspaceGrant {
+  exists: boolean
+  readonly workspaceId: string
+  readonly canonicalPath: string
+  readonly displayPath: string
+  generation: number
+  operationId: string
+  status: WorkspaceGrantView['state']
+  effectiveStatus: WorkspaceGrantView['state']
+  identityValid: boolean
+}
+
+interface BridgeCallWaiter {
+  readonly method: string
+  readonly count: number
+  readonly resolve: () => void
+  readonly reject: (error: Error) => void
+  readonly timer: NodeJS.Timeout
 }
 
 /** Authenticated native-boundary double backed by a real Unix domain socket. */
@@ -35,9 +86,20 @@ export class AuthenticatedUnixBridgeServer {
   readonly #nonces = new NonceReplayGuard()
   readonly #server: Server
   readonly #sockets = new Set<Socket>()
+  readonly #authorizationQueue: WorkspaceAuthorizationPlan[] = []
+  readonly #pendingAuthorizations = new Map<string, WorkspaceAuthorizationPlan>()
+  readonly #revokeQueue: Array<'cancelled' | 'confirmed'> = []
+  readonly #grants = new Map<string, StoredWorkspaceGrant>()
+  readonly #pendingRequestCancels = new Map<string, () => void>()
+  readonly #callWaiters = new Set<BridgeCallWaiter>()
   readonly #replacementOpened: Promise<void>
   #resolveReplacementOpened!: () => void
-  #resolveReplacement: ((result: 'saved') => void) | undefined
+  #resolveReplacement: ((result: 'saved' | 'cancelled') => void) | undefined
+  #grantGeneration = 0
+  #transactionGeneration = 0
+  #transaction: WorkspaceTransaction | null = null
+  #authorizationSequence = 0
+  #operationSequence = 0
 
   private constructor(
     directory: string,
@@ -77,6 +139,84 @@ export class AuthenticatedUnixBridgeServer {
     return this.#replacementOpened
   }
 
+  enqueueWorkspaceAuthorization(
+    input: WorkspaceAuthorizationInput,
+  ): WorkspaceAuthorizationControl {
+    const pendingGrantId = input.outcome === 'pending'
+      ? `pending-workspace-${++this.#authorizationSequence}`
+      : ''
+    const plan: WorkspaceAuthorizationPlan = {
+      ...input,
+      ...(pendingGrantId === '' ? {} : { pendingGrantId }),
+      released: input.deferred !== true,
+      release: undefined,
+    }
+    this.#authorizationQueue.push(plan)
+    return {
+      pendingGrantId,
+      release: () => {
+        plan.released = true
+        plan.release?.('released')
+        plan.release = undefined
+      },
+    }
+  }
+
+  enqueueWorkspaceRevoke(outcome: 'cancelled' | 'confirmed'): void {
+    this.#revokeQueue.push(outcome)
+  }
+
+  setWorkspaceGrantState(
+    workspaceId: string,
+    state: WorkspaceGrantView['state'] | 'absent',
+  ): void {
+    const grant = this.#grants.get(workspaceId)
+    if (grant === undefined) {
+      throw new Error(`cannot set state for unknown fake Workspace grant ${workspaceId}`)
+    }
+    if (state === 'absent') {
+      grant.exists = false
+      return
+    }
+    grant.exists = true
+    grant.status = state === 'identity-mismatch' ? 'ready' : state
+    grant.effectiveStatus = state
+    grant.identityValid = state === 'ready'
+      || state === 'revoking'
+      || state === 'reauthorizing'
+  }
+
+  workspaceGrantCount(): number {
+    return [...this.#grants.values()].filter(grant => grant.exists).length
+  }
+
+  workspaceGrantState(workspaceId: string): WorkspaceGrantView['state'] | undefined {
+    const grant = this.#grants.get(workspaceId)
+    return grant?.exists === true ? grant.effectiveStatus : undefined
+  }
+
+  whenCalled(method: string, count = 1): Promise<void> {
+    if (this.calls.filter(call => call.method === method).length >= count) {
+      return Promise.resolve()
+    }
+    return new Promise<void>((resolve, reject) => {
+      const waiter: BridgeCallWaiter = {
+        method,
+        count,
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          this.#callWaiters.delete(waiter)
+          reject(new Error(
+            `timed out waiting for fake native call ${method} #${count}; saw `
+            + this.calls.map(call => call.method).join(', '),
+          ))
+        }, 10_000),
+      }
+      this.#callWaiters.add(waiter)
+    })
+  }
+
   completeCredentialReplacement(): void {
     if (this.#resolveReplacement === undefined) {
       throw new Error('credential replacement sheet is not pending')
@@ -88,6 +228,15 @@ export class AuthenticatedUnixBridgeServer {
 
   async close(): Promise<void> {
     const failures: unknown[] = []
+    for (const cancel of this.#pendingRequestCancels.values()) cancel()
+    this.#pendingRequestCancels.clear()
+    this.#resolveReplacement?.('cancelled')
+    this.#resolveReplacement = undefined
+    for (const waiter of this.#callWaiters) {
+      clearTimeout(waiter.timer)
+      waiter.reject(new Error('authenticated bridge closed before expected call'))
+    }
+    this.#callWaiters.clear()
     for (const socket of this.#sockets) socket.destroy()
     this.#secret.fill(0)
     await new Promise<void>((resolve, reject) => {
@@ -175,6 +324,7 @@ export class AuthenticatedUnixBridgeServer {
 
   async #dispatch(request: BridgeRequest): Promise<unknown> {
     this.calls.push({ method: request.method, payload: request.payload })
+    this.#resolveCallWaiters()
     switch (request.method) {
       case 'describeCredential':
         return {
@@ -184,8 +334,14 @@ export class AuthenticatedUnixBridgeServer {
         }
       case 'openCredentialReplacement':
         this.#resolveReplacementOpened()
-        return await new Promise<'saved'>((resolve) => {
+        return await new Promise<'saved' | 'cancelled'>((resolve) => {
           this.#resolveReplacement = resolve
+          this.#pendingRequestCancels.set(request.requestId, () => {
+            if (this.#resolveReplacement === resolve) this.#resolveReplacement = undefined
+            resolve('cancelled')
+          })
+        }).finally(() => {
+          this.#pendingRequestCancels.delete(request.requestId)
         })
       case 'resolveCredential':
         return null
@@ -194,10 +350,288 @@ export class AuthenticatedUnixBridgeServer {
       case 'getCandidateCredentialHealthPlan':
         return { migrationTransactionId: null, references: [] }
       case 'acknowledgeMainWebviewHealth':
-      case '$cancel':
         return null
+      case 'readWorkspaceTransaction':
+        return this.#transaction
+      case 'getWorkspaceGrantGeneration':
+        return this.#grantGeneration
+      case 'inspectWorkspaceGrant':
+        return this.#inspectWorkspaceGrant(this.#stringField(request.payload, 'workspaceId'))
+      case 'beginWorkspaceAuthorization':
+        return await this.#beginWorkspaceAuthorization(request.requestId)
+      case 'prepareWorkspaceTransaction':
+        return this.#prepareWorkspaceTransaction(request.payload)
+      case 'advanceWorkspaceTransaction':
+        return this.#advanceWorkspaceTransaction(request.payload)
+      case 'completeWorkspaceTransaction':
+      case 'abortWorkspaceTransaction':
+        this.#finishWorkspaceTransaction(request.payload)
+        return null
+      case 'commitWorkspaceAuthorization':
+        return this.#commitWorkspaceAuthorization(request.payload)
+      case 'abortWorkspaceAuthorization':
+        this.#pendingAuthorizations.delete(this.#stringField(request.payload, 'pendingGrantId'))
+        return null
+      case 'confirmWorkspaceRevoke':
+        return this.#revokeQueue.shift()
+          ?? (() => { throw new Error('no fake Workspace revoke result is queued') })()
+      case 'markWorkspaceGrantRevoking':
+        return this.#markWorkspaceGrant(request.payload, 'revoking')
+      case 'markWorkspaceGrantReauthorizing':
+        return this.#markWorkspaceGrant(request.payload, 'reauthorizing')
+      case 'restoreWorkspaceGrantReady':
+        return this.#markWorkspaceGrant(request.payload, 'ready')
+      case 'markWorkspaceGrantNeedsAuthorization':
+        return this.#markWorkspaceGrant(request.payload, 'needs-authorization')
+      case 'deleteWorkspaceGrant':
+        return this.#deleteWorkspaceGrant(request.payload)
+      case 'revealWorkspace':
+        this.#stringField(request.payload, 'workspaceId')
+        return null
+      case '$cancel': {
+        const requestId = this.#stringField(request.payload, 'requestId')
+        this.#pendingRequestCancels.get(requestId)?.()
+        this.#pendingRequestCancels.delete(requestId)
+        return null
+      }
       default:
         throw new Error(`unexpected fake native bridge method ${request.method}`)
     }
+  }
+
+  #resolveCallWaiters(): void {
+    for (const waiter of this.#callWaiters) {
+      if (this.calls.filter(call => call.method === waiter.method).length < waiter.count) continue
+      this.#callWaiters.delete(waiter)
+      clearTimeout(waiter.timer)
+      waiter.resolve()
+    }
+  }
+
+  async #beginWorkspaceAuthorization(
+    requestId: string,
+  ): Promise<
+    | { readonly outcome: 'cancelled' }
+    | { readonly outcome: 'pending'; readonly pendingGrantId: string; readonly path: string }
+  > {
+    const plan = this.#authorizationQueue.shift()
+    if (plan === undefined) throw new Error('no fake Workspace authorization result is queued')
+    if (plan.deferred === true && !plan.released) {
+      const outcome = await new Promise<'released' | 'cancelled'>((resolve) => {
+        plan.release = resolve
+        this.#pendingRequestCancels.set(requestId, () => { resolve('cancelled') })
+      }).finally(() => {
+        plan.release = undefined
+        this.#pendingRequestCancels.delete(requestId)
+      })
+      if (outcome === 'cancelled') return { outcome: 'cancelled' }
+    }
+    if (plan.outcome === 'cancelled') return { outcome: 'cancelled' }
+    if (plan.pendingGrantId === undefined || plan.canonicalPath === undefined) {
+      throw new Error('fake pending Workspace authorization is incomplete')
+    }
+    this.#pendingAuthorizations.set(plan.pendingGrantId, plan)
+    return {
+      outcome: 'pending',
+      pendingGrantId: plan.pendingGrantId,
+      path: plan.canonicalPath,
+    }
+  }
+
+  #prepareWorkspaceTransaction(payload: unknown): {
+    readonly operationId: string
+    readonly generation: number
+    readonly stage: WorkspaceTransactionStage
+  } {
+    if (this.#transaction !== null) {
+      throw new Error('fake Workspace transaction is already pending')
+    }
+    const input = this.#record(payload) as unknown as WorkspaceTransactionInput
+    if (input.expectedGrantGeneration !== this.#grantGeneration) {
+      throw new Error(
+        `fake Workspace grant generation conflict: expected ${input.expectedGrantGeneration}, actual ${this.#grantGeneration}`,
+      )
+    }
+    const operationId = input.operationId ?? `workspace-operation-${++this.#operationSequence}`
+    this.#transactionGeneration += 1
+    this.#transaction = {
+      version: 1,
+      operationId,
+      generation: this.#transactionGeneration,
+      kind: input.kind,
+      ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
+      expectedCatalogGeneration: input.expectedCatalogGeneration,
+      expectedGrantGeneration: input.expectedGrantGeneration,
+      stage: input.stage,
+    } as WorkspaceTransaction
+    return this.#transactionVersion()
+  }
+
+  #advanceWorkspaceTransaction(payload: unknown): {
+    readonly operationId: string
+    readonly generation: number
+    readonly stage: WorkspaceTransactionStage
+  } {
+    const input = this.#record(payload)
+    const transaction = this.#requireTransaction(input)
+    const nextStage = this.#stringField(input, 'nextStage') as WorkspaceTransactionStage
+    const workspaceId = typeof input.workspaceId === 'string'
+      ? input.workspaceId
+      : transaction.workspaceId
+    this.#transactionGeneration += 1
+    this.#transaction = {
+      ...transaction,
+      generation: this.#transactionGeneration,
+      stage: nextStage,
+      ...(workspaceId === undefined ? {} : { workspaceId }),
+    } as WorkspaceTransaction
+    return this.#transactionVersion()
+  }
+
+  #finishWorkspaceTransaction(payload: unknown): void {
+    this.#requireTransaction(this.#record(payload))
+    this.#transactionGeneration += 1
+    this.#transaction = null
+  }
+
+  #commitWorkspaceAuthorization(payload: unknown): {
+    readonly workspaceId: string
+    readonly displayPath: string
+    readonly state: 'ready'
+  } {
+    const input = this.#record(payload)
+    const pendingGrantId = this.#stringField(input, 'pendingGrantId')
+    const workspaceId = this.#stringField(input, 'workspaceId')
+    const expectedGrantGeneration = this.#numberField(input, 'expectedGrantGeneration')
+    const operationId = this.#stringField(input, 'operationId')
+    this.#expectGrantGeneration(expectedGrantGeneration)
+    const pending = this.#pendingAuthorizations.get(pendingGrantId)
+    if (pending?.canonicalPath === undefined || pending.displayPath === undefined) {
+      throw new Error(`unknown fake pending Workspace grant ${pendingGrantId}`)
+    }
+    if (input.expectedCanonicalPath !== undefined
+      && input.expectedCanonicalPath !== pending.canonicalPath) {
+      throw new Error('fake Workspace authorization selected a different directory')
+    }
+    this.#grantGeneration += 1
+    this.#grants.set(workspaceId, {
+      exists: true,
+      workspaceId,
+      canonicalPath: pending.canonicalPath,
+      displayPath: pending.displayPath,
+      generation: this.#grantGeneration,
+      operationId,
+      status: 'ready',
+      effectiveStatus: 'ready',
+      identityValid: true,
+    })
+    this.#pendingAuthorizations.delete(pendingGrantId)
+    return { workspaceId, displayPath: pending.displayPath, state: 'ready' }
+  }
+
+  #markWorkspaceGrant(payload: unknown, state: 'ready' | 'needs-authorization' | 'revoking' | 'reauthorizing'): number {
+    const input = this.#record(payload)
+    const workspaceId = this.#stringField(input, 'workspaceId')
+    const expectedGrantGeneration = this.#numberField(input, 'expectedGrantGeneration')
+    const operationId = this.#stringField(input, 'operationId')
+    this.#expectGrantGeneration(expectedGrantGeneration)
+    const grant = this.#grants.get(workspaceId)
+    if (grant?.exists !== true) throw new Error(`unknown fake Workspace grant ${workspaceId}`)
+    this.#grantGeneration += 1
+    grant.generation = this.#grantGeneration
+    grant.operationId = operationId
+    grant.status = state
+    grant.effectiveStatus = state === 'revoking' || state === 'reauthorizing'
+      ? 'ready'
+      : state
+    grant.identityValid = state !== 'needs-authorization'
+    return this.#grantGeneration
+  }
+
+  #deleteWorkspaceGrant(payload: unknown): number {
+    const input = this.#record(payload)
+    const workspaceId = this.#stringField(input, 'workspaceId')
+    const expectedGrantGeneration = this.#numberField(input, 'expectedGrantGeneration')
+    this.#expectGrantGeneration(expectedGrantGeneration)
+    const grant = this.#grants.get(workspaceId)
+    if (grant?.exists !== true) throw new Error(`unknown fake Workspace grant ${workspaceId}`)
+    grant.exists = false
+    this.#grantGeneration += 1
+    return this.#grantGeneration
+  }
+
+  #inspectWorkspaceGrant(workspaceId: string): WorkspaceGrantInspection {
+    const grant = this.#grants.get(workspaceId)
+    if (grant?.exists !== true) return { exists: false, identityValid: false }
+    return {
+      exists: true,
+      generation: grant.generation,
+      operationId: grant.operationId,
+      identityValid: grant.identityValid,
+      displayPath: grant.displayPath,
+      status: grant.status,
+      effectiveStatus: grant.effectiveStatus,
+    }
+  }
+
+  #transactionVersion(): {
+    readonly operationId: string
+    readonly generation: number
+    readonly stage: WorkspaceTransactionStage
+  } {
+    const transaction = this.#transaction
+    if (transaction === null) throw new Error('fake Workspace transaction is missing')
+    return {
+      operationId: transaction.operationId,
+      generation: transaction.generation,
+      stage: transaction.stage,
+    }
+  }
+
+  #requireTransaction(input: Record<string, unknown>): WorkspaceTransaction {
+    const transaction = this.#transaction
+    if (transaction === null) throw new Error('fake Workspace transaction is missing')
+    const operationId = this.#stringField(input, 'operationId')
+    const expectedGeneration = this.#numberField(input, 'expectedGeneration')
+    const expectedStage = this.#stringField(input, 'expectedStage')
+    if (transaction.operationId !== operationId
+      || transaction.generation !== expectedGeneration
+      || transaction.stage !== expectedStage) {
+      throw new Error('fake Workspace transaction compare-and-set failed')
+    }
+    return transaction
+  }
+
+  #expectGrantGeneration(expected: number): void {
+    if (expected !== this.#grantGeneration) {
+      throw new Error(
+        `fake Workspace grant generation conflict: expected ${expected}, actual ${this.#grantGeneration}`,
+      )
+    }
+  }
+
+  #record(value: unknown): Record<string, unknown> {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      throw new TypeError('fake native bridge payload must be an object')
+    }
+    return value as Record<string, unknown>
+  }
+
+  #stringField(value: unknown, field: string): string {
+    const record = this.#record(value)
+    const result = record[field]
+    if (typeof result !== 'string' || result === '') {
+      throw new TypeError(`fake native bridge payload requires ${field}`)
+    }
+    return result
+  }
+
+  #numberField(value: unknown, field: string): number {
+    const record = this.#record(value)
+    const result = record[field]
+    if (typeof result !== 'number' || !Number.isSafeInteger(result) || result < 0) {
+      throw new TypeError(`fake native bridge payload requires non-negative integer ${field}`)
+    }
+    return result
   }
 }

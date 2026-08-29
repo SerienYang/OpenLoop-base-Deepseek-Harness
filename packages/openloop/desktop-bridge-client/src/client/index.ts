@@ -74,9 +74,12 @@ export function apply(ctx: Context): () => Promise<void> {
   const remoteFiber = ctx.inject(['remote'], async (remoteCtx) => {
     try {
       const disposeRemote = await remoteCtx.remote.$mount(desktopRemote)
-      const unpublish = binding.publish(remoteCtx.remote.openloopDesktop)
+      const namespaceFiber = remoteCtx.inject(
+        ['remote', 'remote.openloopDesktop'],
+        namespaceCtx => binding.publish(namespaceCtx.remote.openloopDesktop),
+      )
       return async () => {
-        unpublish()
+        await namespaceFiber.dispose()
         await disposeRemote()
       }
     } catch (error) {

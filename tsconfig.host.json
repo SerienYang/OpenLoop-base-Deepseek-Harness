@@ -32,6 +32,7 @@
     "apps/web/tests/onboarding-usable-provider.e2e.ts",
     "apps/web/tests/openloop-bridge-server.ts",
     "apps/web/tests/openloop-credential-boundary.e2e.ts",
+    "apps/web/tests/openloop-workspace-authority.e2e.ts",
     "apps/web/tests/remote-welcome.e2e.ts",
     "apps/web/tests/workspace-management.e2e.ts",
     "apps/web/tests/replay-round-trip.e2e.ts",

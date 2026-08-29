@@ -4,6 +4,7 @@ import type {
   ConnectionSinks,
   IApiClient,
 } from '@deepseek-ai/dsh-api-remotes/client'
+import * as ApiGatewayClient from '@deepseek-ai/dsh-api-gateway/client'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import * as RuntimeClient from '@deepseek-ai/dsh-client-runtime/client'
 import { describe, expect, it, vi } from 'vitest'
@@ -623,25 +624,46 @@ describe('Openloop browser Workspace facade', () => {
     expect(ctx.openloopWorkspaces).toBeInstanceOf(OpenloopWorkspaceService)
   })
 
-  it('publishes the adapter before mounting the generated desktop Remote', async () => {
+  it('publishes the adapter before mounting and binds the generated Remote namespace', async () => {
     const ctx = new Context()
-    const dispose = vi.fn(async () => {})
-    const mount = vi.fn(async (_remote: unknown) => dispose)
+    await ctx.plugin(TypertRegistry)
+    const call = vi.fn<ConnectionHandle['rpc']['call']>(async (
+      _path,
+      endpoint,
+    ) => {
+      if (endpoint === 'openloopDesktop/authorizeWorkspace') {
+        return { ok: true, value: 'cancelled' }
+      }
+      throw new Error(`unexpected Remote call ${endpoint}`)
+    })
+    ctx.provide('connection', { rpc: { call } } as unknown as ConnectionHandle)
+    await ctx.plugin(ApiGatewayClient)
     const cleanup = applyClient(ctx)
 
-    expect(ctx.get('workspaceRuntimeAdapter')).toBeInstanceOf(
-      OpenloopWorkspaceRuntimeAdapter,
+    const adapter = ctx.get('workspaceRuntimeAdapter')
+    if (!(adapter instanceof OpenloopWorkspaceRuntimeAdapter)) {
+      throw new Error('Openloop Workspace adapter was not published before Remote mount')
+    }
+    const service = adapter.create(ctx, {}, sessions() as never)
+    const authorization = service.authorize().then(
+      value => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
     )
-    ctx.reflect.provide('remote', {
-      $mount: mount,
-      openloopDesktop: remote(),
-    })
-
-    await vi.waitFor(() => { expect(mount).toHaveBeenCalledOnce() })
-    expect(mount.mock.calls[0]?.[0]).toMatchObject({
-      package: '@openloop/desktop-bridge-host',
-    })
-    await cleanup()
-    expect(dispose).toHaveBeenCalledOnce()
+    try {
+      await vi.waitFor(() => {
+        expect(call).toHaveBeenCalledWith(
+          '/api',
+          'openloopDesktop/authorizeWorkspace',
+          { args: {} },
+          expect.any(AbortSignal),
+        )
+      }, {
+        timeout: 1_000,
+      })
+      await expect(authorization).resolves.toEqual({ ok: true, value: 'cancelled' })
+    } finally {
+      await cleanup()
+      await authorization
+    }
   })
 })
