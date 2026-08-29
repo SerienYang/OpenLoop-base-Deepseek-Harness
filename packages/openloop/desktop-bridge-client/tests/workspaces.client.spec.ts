@@ -75,7 +75,7 @@ describe('Openloop browser Workspace facade', () => {
     await expect(binding.wait()).rejects.toThrow(/disposed/iu)
   })
 
-  it('lists only the Host safe grant projection through the zero-argument Remote', async () => {
+  it('lists the Host grant and a structurally complete safe Workspace compatibility projection', async () => {
     const listWorkspaceGrants = vi.fn(() => ok([{
       workspaceId: 'workspace-1',
       name: 'Project Alpha',
@@ -107,7 +107,14 @@ describe('Openloop browser Workspace facade', () => {
     expect(service.grants.getSnapshot().items[0]?.sessionIds)
       .toEqual(['session-current', 'session-history'])
     expect(service.list.getSnapshot()).toEqual({
-      items: [],
+      items: [{
+        workspaceId: 'workspace-1',
+        path: '~/Project Alpha',
+        title: 'Project Alpha',
+        sessionIds: ['session-current', 'session-history'],
+        createdAt: '1970-01-01T00:00:00.000Z',
+        updatedAt: '1970-01-01T00:00:00.000Z',
+      }],
       archivedSessionIds: [],
       state: 'idle',
       phase: 'ready',
@@ -116,6 +123,32 @@ describe('Openloop browser Workspace facade', () => {
       recentWorkspaceId: undefined,
     })
     expect(listWorkspaceGrants).toHaveBeenCalledExactlyOnceWith()
+  })
+
+  it('keeps non-ready and pathless grants out of the routable compatibility projection', async () => {
+    const service = new OpenloopWorkspaceService(remote({
+      listWorkspaceGrants: vi.fn(() => ok([
+        {
+          workspaceId: 'permission-denied',
+          name: 'Denied',
+          displayPath: '~/Denied',
+          state: 'permission-denied' as const,
+          sessionIds: ['denied-session'] as never,
+        },
+        {
+          workspaceId: 'pathless',
+          name: 'Pathless',
+          state: 'ready' as const,
+          sessionIds: ['pathless-session'] as never,
+        },
+      ])),
+    }), sessions())
+
+    await service.refresh()
+
+    expect(service.grants.getSnapshot().items).toHaveLength(2)
+    expect(service.list.getSnapshot().items).toEqual([])
+    expect(JSON.stringify(service.list.getSnapshot())).not.toContain('/host/')
   })
 
   it('publishes an error when the Remote generation is unavailable', async () => {
@@ -187,23 +220,72 @@ describe('Openloop browser Workspace facade', () => {
     expect(JSON.stringify(renameWorkspace.mock.calls)).not.toContain('path')
   })
 
-  it('creates sessions with only workspaceId and an explicitly selected agentPreset', async () => {
+  it('refreshes grant membership after creating a session before resolving it for opening', async () => {
     const createSession = vi.fn(async () => 'session-1' as never)
+    const listWorkspaceGrants = vi.fn()
+      .mockImplementationOnce(() => ok([{
+        workspaceId: 'workspace-1',
+        name: 'Project Alpha',
+        displayPath: '~/Project Alpha',
+        state: 'ready' as const,
+        sessionIds: [],
+      }]))
+      .mockImplementationOnce(() => ok([{
+        workspaceId: 'workspace-1',
+        name: 'Project Alpha',
+        displayPath: '~/Project Alpha',
+        state: 'ready' as const,
+        sessionIds: ['session-1'] as never,
+      }]))
     const sessionPort: OpenloopWorkspaceSessions = {
       create: createSession,
       open: vi.fn(),
       clear: vi.fn(),
     }
-    const service = new OpenloopWorkspaceService(remote(), sessionPort)
+    const service = new OpenloopWorkspaceService(
+      remote({ listWorkspaceGrants }),
+      sessionPort,
+    )
+    await service.refresh()
 
     await expect(service.connectWorkspace('workspace-1' as never)).resolves.toBe('session-1')
-    await expect(service.connectWorkspace('workspace-2' as never, 'code')).resolves.toBe('session-1')
 
-    expect(createSession).toHaveBeenNthCalledWith(1, { workspaceId: 'workspace-1' })
-    expect(createSession).toHaveBeenNthCalledWith(2, {
-      workspaceId: 'workspace-2',
-      agentPreset: 'code',
-    })
+    expect(createSession).toHaveBeenCalledExactlyOnceWith({ workspaceId: 'workspace-1' })
+    expect(listWorkspaceGrants).toHaveBeenCalledTimes(2)
+    expect(service.list.getSnapshot().items[0]?.sessionIds).toEqual(['session-1'])
+  })
+
+  it('rejects unknown Workspaces and refresh failures without opening an unowned session', async () => {
+    const create = vi.fn(async () => 'session-1' as never)
+    const open = vi.fn()
+    const sessionPort: OpenloopWorkspaceSessions = {
+      create,
+      open,
+      clear: vi.fn(),
+    }
+    const listWorkspaceGrants = vi.fn()
+      .mockImplementationOnce(() => ok([{
+        workspaceId: 'workspace-1',
+        name: 'Project Alpha',
+        displayPath: '~/Project Alpha',
+        state: 'ready' as const,
+        sessionIds: [],
+      }]))
+      .mockRejectedValueOnce(new Error('grant refresh failed'))
+    const service = new OpenloopWorkspaceService(
+      remote({ listWorkspaceGrants }),
+      sessionPort,
+    )
+    await service.refresh()
+
+    await expect(service.connectWorkspace('unknown' as never))
+      .rejects.toThrow(/unknown Workspace/iu)
+    expect(create).not.toHaveBeenCalled()
+
+    await expect(service.connectWorkspace('workspace-1' as never))
+      .rejects.toThrow('grant refresh failed')
+    expect(create).toHaveBeenCalledExactlyOnceWith({ workspaceId: 'workspace-1' })
+    expect(open).not.toHaveBeenCalled()
   })
 
   it('implements the shared Workspace face by rejecting legacy local operations', async () => {
@@ -229,7 +311,13 @@ describe('Openloop browser Workspace facade', () => {
         },
       },
     } as unknown as IApiClient
-    const listWorkspaceGrants = vi.fn(() => ok([]))
+    const listWorkspaceGrants = vi.fn(() => ok([{
+      workspaceId: 'workspace-1',
+      name: 'Project Alpha',
+      displayPath: '~/Project Alpha',
+      state: 'ready' as const,
+      sessionIds: ['session-1'] as never,
+    }]))
     const ctx = new Context()
     await ctx.plugin(TypertRegistry)
     let sinks: ConnectionSinks | undefined
@@ -283,7 +371,14 @@ describe('Openloop browser Workspace facade', () => {
       payload: { workspaceId: 'workspace-1', agentPreset: 'code' },
     }])
     expect(ctx.workspaces.list.getSnapshot()).toEqual({
-      items: [],
+      items: [{
+        workspaceId: 'workspace-1',
+        path: '~/Project Alpha',
+        title: 'Project Alpha',
+        sessionIds: ['session-1'],
+        createdAt: '1970-01-01T00:00:00.000Z',
+        updatedAt: '1970-01-01T00:00:00.000Z',
+      }],
       archivedSessionIds: [],
       state: 'idle',
       phase: 'ready',

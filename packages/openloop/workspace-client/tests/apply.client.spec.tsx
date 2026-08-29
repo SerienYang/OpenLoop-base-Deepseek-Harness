@@ -139,4 +139,71 @@ describe('Openloop Workspace client plugin', () => {
       undefined,
     )
   })
+
+  it('blocks the current session when its ready grant is removed', async () => {
+    const b = await bench()
+    b.grants.set({
+      ...b.grants.getSnapshot(),
+      items: [{ ...b.grants.getSnapshot().items[0]!, state: 'ready' }],
+    })
+    const fiber = b.ctx.plugin({ inject: [...inject], apply })
+    await fiber.await()
+
+    b.setOwned.mockClear()
+    b.grants.set({ ...b.grants.getSnapshot(), items: [] })
+
+    expect(b.setOwned).toHaveBeenLastCalledWith(
+      sid('session-1'),
+      WORKSPACE_BLOCK_OWNER,
+      { reason: 'Workspace authorization is required before sending.' },
+    )
+    await fiber.dispose()
+  })
+
+  it('blocks orphan and legacy sessions when ready membership no longer includes current', async () => {
+    const b = await bench()
+    b.grants.set({
+      ...b.grants.getSnapshot(),
+      items: [{ ...b.grants.getSnapshot().items[0]!, state: 'ready' }],
+    })
+    const fiber = b.ctx.plugin({ inject: [...inject], apply })
+    await fiber.await()
+
+    b.setOwned.mockClear()
+    b.grants.set({
+      ...b.grants.getSnapshot(),
+      items: [{ ...b.grants.getSnapshot().items[0]!, sessionIds: [] }],
+    })
+
+    expect(b.setOwned).toHaveBeenLastCalledWith(
+      sid('session-1'),
+      WORKSPACE_BLOCK_OWNER,
+      { reason: 'Workspace authorization is required before sending.' },
+    )
+    await fiber.dispose()
+  })
+
+  it('blocks a ready grant that has no browser-safe display path', async () => {
+    const b = await bench()
+    const current = b.grants.getSnapshot().items[0]!
+    b.grants.set({
+      ...b.grants.getSnapshot(),
+      items: [{
+        workspaceId: current.workspaceId,
+        name: current.name,
+        state: 'ready',
+        sessionIds: current.sessionIds,
+      }],
+    })
+
+    const fiber = b.ctx.plugin({ inject: [...inject], apply })
+    await fiber.await()
+
+    expect(b.setOwned).toHaveBeenLastCalledWith(
+      sid('session-1'),
+      WORKSPACE_BLOCK_OWNER,
+      { reason: 'Workspace authorization is required before sending.' },
+    )
+    await fiber.dispose()
+  })
 })

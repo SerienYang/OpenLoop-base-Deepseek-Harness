@@ -54,7 +54,10 @@ function installComposerGuard(ctx: ClientContext, reason: () => string): () => v
       ctx.conversation.blocks.setOwned(sessionId, WORKSPACE_BLOCK_OWNER, undefined)
       owned.delete(sessionId)
     }
-    if (current === undefined || active === undefined || active.state === 'ready') return
+    if (current === undefined
+      || (active?.state === 'ready' && active.displayPath !== undefined && active.displayPath !== '')) {
+      return
+    }
     ctx.conversation.blocks.setOwned(
       current,
       WORKSPACE_BLOCK_OWNER,

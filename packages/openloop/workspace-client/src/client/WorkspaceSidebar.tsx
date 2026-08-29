@@ -46,7 +46,7 @@ export function WorkspaceSidebar({
               type="button"
               className={css.railButton}
               aria-label={copy(t, 'openWorkspace', { name: workspace.name })}
-              disabled={isBusy(workspace.state)}
+              disabled={isBusy(workspace.state) || operation.pending !== null}
               onClick={() => {
                 expandSidebar()
                 if (workspace.state === 'ready') {
@@ -89,6 +89,7 @@ export function WorkspaceSidebar({
         useSessions={useSessions}
         actions={actions}
         t={t}
+        operation={operation}
         showSessions
       />
       {operation.error !== null && <ActionError>{operation.error}</ActionError>}

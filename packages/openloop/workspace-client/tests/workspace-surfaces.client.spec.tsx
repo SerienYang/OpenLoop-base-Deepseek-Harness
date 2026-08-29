@@ -56,6 +56,15 @@ function deferred<T>() {
   return Promise.withResolvers<T>()
 }
 
+function anchor() {
+  const element = document.createElement('button')
+  const anchorRef = { current: element }
+  const rect = new DOMRect(24, 36, 120, 32)
+  const getAnchorRect = vi.spyOn(element, 'getBoundingClientRect').mockReturnValue(rect)
+  anchorRef.current = element
+  return { anchorRef, getAnchorRect }
+}
+
 function harness(
   items: readonly WorkspaceGrantView[],
   current: SessionId | undefined = sid('session-current'),
@@ -152,10 +161,12 @@ describe('Openloop Workspace surfaces', () => {
   it('runs Add once, treats native cancellation as stable, and surfaces real failures', async () => {
     const pending = deferred<'cancelled'>()
     const h = harness([])
+    const { anchorRef } = anchor()
     h.authorize.mockReturnValueOnce(pending.promise)
     render(
       <WorkspaceHero
         open
+        anchorRef={anchorRef}
         onPick={vi.fn()}
         onClose={vi.fn()}
         useGrants={h.useGrants}
@@ -163,7 +174,7 @@ describe('Openloop Workspace surfaces', () => {
         actions={h.actions}
       />,
     )
-    const add = screen.getByRole<HTMLButtonElement>('button', { name: 'Add Workspace' })
+    const add = screen.getByRole<HTMLButtonElement>('menuitem', { name: 'Add Workspace' })
     fireEvent.click(add)
     fireEvent.click(add)
     expect(h.authorize).toHaveBeenCalledOnce()
@@ -183,10 +194,12 @@ describe('Openloop Workspace surfaces', () => {
       grant('alpha'),
       grant('missing-workspace', 'missing'),
     ])
+    const { anchorRef } = anchor()
     const onPick = vi.fn()
     render(
       <WorkspaceHero
         open
+        anchorRef={anchorRef}
         onPick={onPick}
         onClose={vi.fn()}
         useGrants={h.useGrants}
@@ -195,13 +208,47 @@ describe('Openloop Workspace surfaces', () => {
       />,
     )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Alpha' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Alpha' }))
     expect(onPick).toHaveBeenCalledWith('alpha')
-    fireEvent.click(screen.getByRole('button', { name: 'Reauthorize missing-workspace' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Reauthorize missing-workspace' }))
     await waitFor(() => {
       expect(h.reauthorize).toHaveBeenCalledWith('missing-workspace')
     })
     expect(onPick).not.toHaveBeenCalledWith('missing-workspace')
+  })
+
+  it('anchors the Hero Menu and closes on outside click, Escape, selection, and cancellation', async () => {
+    const h = harness([grant('alpha')])
+    const { anchorRef, getAnchorRect } = anchor()
+    const onPick = vi.fn()
+    const onClose = vi.fn()
+    h.authorize.mockResolvedValueOnce('cancelled')
+    render(
+      <WorkspaceHero
+        open
+        anchorRef={anchorRef}
+        onPick={onPick}
+        onClose={onClose}
+        useGrants={h.useGrants}
+        useSessions={h.useSessions}
+        actions={h.actions}
+      />,
+    )
+
+    expect(getAnchorRect).toHaveBeenCalled()
+    expect(screen.getByRole('menu').parentElement).toBe(document.body)
+    fireEvent.pointerDown(document.body)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(2)
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Alpha' }))
+    expect(onPick).toHaveBeenCalledWith('alpha')
+    expect(onClose).toHaveBeenCalledTimes(3)
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Add Workspace' }))
+    await waitFor(() => { expect(h.authorize).toHaveBeenCalledOnce() })
+    expect(onClose).toHaveBeenCalledTimes(4)
+    expect(onPick).toHaveBeenCalledTimes(1)
   })
 
   it('provides settings actions and states the non-destructive Remove boundary', async () => {
@@ -262,5 +309,100 @@ describe('Openloop Workspace surfaces', () => {
       name: 'Workspace actions for reauthorizing-workspace',
     }).disabled).toBe(true)
     expect(screen.getAllByRole('status')).toHaveLength(2)
+  })
+
+  it('disables Settings row actions while Add is pending', () => {
+    const pending = deferred<'cancelled'>()
+    const h = harness([
+      grant('alpha'),
+      grant('missing-workspace', 'missing'),
+    ], undefined)
+    h.authorize.mockReturnValueOnce(pending.promise)
+    render(
+      <WorkspaceSettings
+        wide
+        useGrants={h.useGrants}
+        useSessions={h.useSessions}
+        actions={h.actions}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    const dialog = screen.getByRole('dialog', { name: 'Workspace settings' })
+    const add = within(dialog).getByRole<HTMLButtonElement>('button', { name: 'Add Workspace' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Workspace actions for Alpha' }))
+    fireEvent.click(add)
+
+    expect(within(dialog).getByRole<HTMLButtonElement>('button', { name: 'Switch to Alpha' }).disabled)
+      .toBe(true)
+    expect(screen.getByRole<HTMLButtonElement>('menuitem', { name: 'Rename' }).disabled).toBe(true)
+    expect(screen.getByRole<HTMLButtonElement>('menuitem', { name: 'Reveal in Finder' }).disabled)
+      .toBe(true)
+    expect(screen.getByRole<HTMLButtonElement>('menuitem', { name: 'Remove' }).disabled).toBe(true)
+    expect(within(dialog).getByRole<HTMLButtonElement>('button', {
+      name: 'Workspace actions for Alpha',
+    }).disabled).toBe(true)
+    expect(within(dialog).getByRole<HTMLButtonElement>('button', {
+      name: 'Workspace actions for missing-workspace',
+    }).disabled).toBe(true)
+    expect(add.disabled).toBe(true)
+  })
+
+  it('disables reauthorization while Settings Add is pending', () => {
+    const pending = deferred<'cancelled'>()
+    const h = harness([grant('missing-workspace', 'missing')], undefined)
+    h.authorize.mockReturnValueOnce(pending.promise)
+    render(
+      <WorkspaceSettings
+        wide
+        useGrants={h.useGrants}
+        useSessions={h.useSessions}
+        actions={h.actions}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    const dialog = screen.getByRole('dialog', { name: 'Workspace settings' })
+    fireEvent.click(within(dialog).getByRole('button', {
+      name: 'Workspace actions for missing-workspace',
+    }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add Workspace' }))
+
+    expect(screen.getByRole<HTMLButtonElement>('menuitem', {
+      name: 'Reauthorize missing-workspace',
+    }).disabled).toBe(true)
+    expect(within(dialog).getByRole<HTMLButtonElement>('button', {
+      name: 'Reauthorize missing-workspace',
+    }).disabled).toBe(true)
+  })
+
+  it('disables Sidebar Add and every conflicting row control while a row action is pending', () => {
+    const pending = deferred<undefined>()
+    const h = harness([
+      grant('alpha'),
+      grant('beta'),
+    ], undefined)
+    h.reveal.mockReturnValueOnce(pending.promise)
+    render(
+      <WorkspaceSidebar
+        wide
+        expandSidebar={vi.fn()}
+        useGrants={h.useGrants}
+        useSessions={h.useSessions}
+        actions={h.actions}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Workspace actions for Alpha' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Reveal in Finder' }))
+
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Add Workspace' }).disabled)
+      .toBe(true)
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Switch to Alpha' }).disabled)
+      .toBe(true)
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Switch to beta' }).disabled)
+      .toBe(true)
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'New session in beta' }).disabled)
+      .toBe(true)
+    expect(screen.getByRole<HTMLButtonElement>('button', {
+      name: 'Workspace actions for beta',
+    }).disabled).toBe(true)
   })
 })

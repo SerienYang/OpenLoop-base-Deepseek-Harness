@@ -88,7 +88,7 @@ export function grantForCurrent(
     : grants.find(grant => grant.sessionIds.includes(current))
 }
 
-interface ActionState {
+export interface ActionState {
   readonly pending: string | null
   readonly error: string | null
   run(key: string, action: () => Promise<unknown>): void
@@ -121,6 +121,7 @@ export function useActionState(): ActionState {
 }
 
 interface WorkspaceRowsProps extends WorkspaceDataProps {
+  readonly operation: ActionState
   readonly showSessions?: boolean
   readonly onReadyWorkspace?: (workspace: WorkspaceGrantView) => void
 }
@@ -130,13 +131,13 @@ export function WorkspaceRows({
   useSessions,
   actions,
   t,
+  operation,
   showSessions = false,
   onReadyWorkspace,
 }: WorkspaceRowsProps) {
   const grants = useGrants(snapshot => snapshot.items)
   const sessions = useSessions(snapshot => snapshot)
   const active = grantForCurrent(grants, sessions.current)
-  const operation = useActionState()
   const [menuId, setMenuId] = useState<string | null>(null)
   const [renameTarget, setRenameTarget] = useState<WorkspaceGrantView | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -163,23 +164,36 @@ export function WorkspaceRows({
     <>
       <div className={css.rows}>
         {grants.map((workspace) => {
-          const busy = isBusy(workspace.state)
-            || operation.pending?.endsWith(`:${workspace.workspaceId}`) === true
+          const authorityBusy = isBusy(workspace.state)
+          const surfaceBusy = operation.pending !== null
+          const busy = authorityBusy || surfaceBusy
           const workspaceSessions = workspace.sessionIds
             .map(sessionId => sessions.byId[sessionId])
             .filter(summary => summary !== undefined)
           const menuItems = [
             ...(workspace.state === 'ready'
-              ? [{ id: 'rename', label: copy(t, 'rename') }]
-              : busy
+              ? [{ id: 'rename', label: copy(t, 'rename'), disabled: surfaceBusy }]
+              : authorityBusy
                 ? []
                 : [{
                   id: 'reauthorize',
                   label: copy(t, 'reauthorize', { name: workspace.name }),
                   icon: <IconRefreshOutline14 />,
+                  disabled: surfaceBusy,
                 }]),
-            { id: 'reveal', label: copy(t, 'reveal'), icon: <IconFolderOpenOutline16 /> },
-            { id: 'remove', label: copy(t, 'remove'), icon: <IconTrashOutline16 />, danger: true },
+            {
+              id: 'reveal',
+              label: copy(t, 'reveal'),
+              icon: <IconFolderOpenOutline16 />,
+              disabled: busy,
+            },
+            {
+              id: 'remove',
+              label: copy(t, 'remove'),
+              icon: <IconTrashOutline16 />,
+              danger: true,
+              disabled: busy,
+            },
           ]
           return (
             <div className={css.workspaceGroup} key={workspace.workspaceId}>
@@ -260,6 +274,7 @@ export function WorkspaceRows({
                       className={css.sessionRow}
                       key={summary.id}
                       aria-current={sessions.current === summary.id ? 'true' : undefined}
+                      disabled={surfaceBusy}
                       onClick={() => { actions.openSession(summary.id) }}
                     >
                       {summary.displayTitle}

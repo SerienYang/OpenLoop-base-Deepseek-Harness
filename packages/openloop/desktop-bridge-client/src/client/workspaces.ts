@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {
   DirectoryListing,
+  RpcError,
   SessionId,
   WorkspaceId,
   WorkspaceView,
@@ -59,6 +60,39 @@ const EMPTY_WORKSPACE_LIST: WorkspaceListState = {
   recentWorkspaceId: undefined,
 }
 
+const SYNTHETIC_WORKSPACE_TIMESTAMP = '1970-01-01T00:00:00.000Z'
+
+function isRoutableGrant(
+  grant: WorkspaceGrantView | undefined,
+): grant is WorkspaceGrantView & {
+  readonly workspaceId: WorkspaceId
+  readonly displayPath: string
+  readonly state: 'ready'
+} {
+  return grant !== undefined
+    && grant.state === 'ready'
+    && grant.workspaceId.length > 0
+    && grant.displayPath !== undefined
+    && grant.displayPath.length > 0
+}
+
+function compatibilityItems(grants: readonly WorkspaceGrantView[]): WorkspaceView[] {
+  return grants.filter(isRoutableGrant).map(grant => ({
+    workspaceId: grant.workspaceId,
+    path: grant.displayPath,
+    title: grant.name,
+    sessionIds: [...grant.sessionIds],
+    createdAt: SYNTHETIC_WORKSPACE_TIMESTAMP,
+    updatedAt: SYNTHETIC_WORKSPACE_TIMESTAMP,
+  }))
+}
+
+function compatibilityError(error: Error | null): RpcError | null {
+  return error === null
+    ? null
+    : { code: 'internal', message: error.message, details: {} }
+}
+
 export class OpenloopWorkspaceService implements IWorkspaces {
   /** Browser-safe Host grant projection used by Openloop-owned Workspace UI. */
   readonly grants: SnapshotStore<OpenloopWorkspaceListState> =
@@ -67,7 +101,7 @@ export class OpenloopWorkspaceService implements IWorkspaces {
       state: 'idle',
       error: null,
     })
-  /** Empty DSH-compatible projection for shared renderer infrastructure. */
+  /** Browser-safe DSH-compatible projection for shared renderer infrastructure. */
   readonly list: SnapshotStore<WorkspaceListState> =
     createSnapshotStore<WorkspaceListState>(EMPTY_WORKSPACE_LIST)
 
@@ -77,7 +111,7 @@ export class OpenloopWorkspaceService implements IWorkspaces {
   ) {}
 
   async refresh(): Promise<void> {
-    this.grants.set({
+    this.publish({
       ...this.grants.getSnapshot(),
       state: 'loading',
       error: null,
@@ -90,14 +124,14 @@ export class OpenloopWorkspaceService implements IWorkspaces {
           `Openloop Workspace list failed: ${result.error.code}: ${result.error.message}`,
         )
       }
-      this.grants.set({
+      this.publish({
         items: result.value,
         state: 'idle',
         error: null,
       })
     } catch (reason) {
       const error = reason instanceof Error ? reason : new Error(String(reason))
-      this.grants.set({
+      this.publish({
         ...this.grants.getSnapshot(),
         state: 'error',
         error,
@@ -128,7 +162,7 @@ export class OpenloopWorkspaceService implements IWorkspaces {
     const value = this.value(await remote.revokeWorkspace(workspaceId), 'revoke')
     if (value === 'revoked') {
       const current = this.grants.getSnapshot()
-      this.grants.set({
+      this.publish({
         ...current,
         items: current.items.filter(item => item.workspaceId !== workspaceId),
       })
@@ -148,11 +182,31 @@ export class OpenloopWorkspaceService implements IWorkspaces {
     this.value(await remote.revealWorkspace(workspaceId), 'reveal')
   }
 
-  connectWorkspace(workspaceId: WorkspaceId, agentPreset?: string): Promise<SessionId> {
-    return this.sessions.create({
+  async connectWorkspace(workspaceId: WorkspaceId, agentPreset?: string): Promise<SessionId> {
+    const current = this.grants.getSnapshot().items.find(
+      grant => grant.workspaceId === workspaceId,
+    )
+    if (current === undefined) {
+      throw new Error(`Openloop Workspace connect failed: unknown Workspace ${workspaceId}`)
+    }
+    if (!isRoutableGrant(current)) {
+      throw new Error(`Openloop Workspace connect failed: Workspace ${workspaceId} is not ready`)
+    }
+
+    const sessionId = await this.sessions.create({
       workspaceId,
       ...(agentPreset === undefined ? {} : { agentPreset }),
     })
+    await this.refresh()
+    const refreshed = this.grants.getSnapshot().items.find(
+      grant => grant.workspaceId === workspaceId,
+    )
+    if (!isRoutableGrant(refreshed) || !refreshed.sessionIds.includes(sessionId)) {
+      throw new Error(
+        `Openloop Workspace connect failed: session ${sessionId} has no ready Workspace grant`,
+      )
+    }
+    return sessionId
   }
 
   startSession(workspaceId?: WorkspaceId, agentPreset?: string): void {
@@ -251,7 +305,20 @@ export class OpenloopWorkspaceService implements IWorkspaces {
     const items = index === -1
       ? [workspace, ...current.items]
       : current.items.map(item => item.workspaceId === workspace.workspaceId ? workspace : item)
-    this.grants.set({ ...current, items })
+    this.publish({ ...current, items })
+  }
+
+  private publish(snapshot: OpenloopWorkspaceListState): void {
+    this.grants.set(snapshot)
+    this.list.set({
+      items: compatibilityItems(snapshot.items),
+      archivedSessionIds: [],
+      state: snapshot.state,
+      phase: 'ready',
+      error: compatibilityError(snapshot.error),
+      baselinesReady: true,
+      recentWorkspaceId: undefined,
+    })
   }
 }
 

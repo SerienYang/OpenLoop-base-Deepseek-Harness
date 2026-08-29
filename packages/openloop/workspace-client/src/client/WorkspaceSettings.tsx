@@ -62,6 +62,7 @@ export function WorkspaceSettings({
           useSessions={useSessions}
           actions={actions}
           t={t}
+          operation={operation}
         />
         {operation.error !== null && <ActionError>{operation.error}</ActionError>}
       </Modal>
