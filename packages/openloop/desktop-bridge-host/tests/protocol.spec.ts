@@ -399,6 +399,7 @@ describe('authenticated desktop bridge protocol', () => {
         name: 'Project Alpha',
         displayPath: '~/Project Alpha',
         state: 'ready' as const,
+        sessionIds: ['session-current', 'session-history'] as never,
       }]),
       add: vi.fn(async () => ({
         workspaceId: 'workspace-1',
@@ -437,6 +438,7 @@ describe('authenticated desktop bridge protocol', () => {
         name: 'Project Alpha',
         displayPath: '~/Project Alpha',
         state: 'ready',
+        sessionIds: ['session-current', 'session-history'],
       },
     ])
     await expect(service.authorizeWorkspace(signal)).resolves.toMatchObject({

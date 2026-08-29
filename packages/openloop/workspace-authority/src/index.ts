@@ -54,6 +54,7 @@ function registryPort(registry: WorkspaceRegistry): WorkspaceRegistryPort {
       return {
         workspaceId: result.workspace.id,
         name: result.workspace.title,
+        sessionIds: [...result.workspace.sessionIds],
         created: result.created,
         generation: result.generation,
       }
@@ -76,7 +77,11 @@ function registryPort(registry: WorkspaceRegistry): WorkspaceRegistryPort {
       const workspace = registry.get(WorkspaceId(workspaceId))
       return workspace === undefined
         ? undefined
-        : { name: workspace.title, canonicalPath: workspace.path }
+        : {
+          name: workspace.title,
+          canonicalPath: workspace.path,
+          sessionIds: [...workspace.sessionIds],
+        }
     },
   }
 }
@@ -272,6 +277,7 @@ export class WorkspaceAuthorityService extends Service {
         name: workspace.title,
         ...(grant.displayPath === undefined ? {} : { displayPath: grant.displayPath }),
         state,
+        sessionIds: [...workspace.sessionIds],
       }
     }))
   }

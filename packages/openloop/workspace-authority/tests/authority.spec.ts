@@ -261,6 +261,7 @@ describe('WorkspaceAuthority', () => {
       name: 'Renamed',
       displayPath: '/display/project',
       state: 'ready',
+      sessionIds: [],
     })
     expect(value.registry.renameExpected).toHaveBeenCalledExactlyOnceWith(
       'workspace-1',
@@ -288,6 +289,7 @@ describe('WorkspaceAuthority', () => {
       name: 'Committed Name',
       displayPath: '/display/project',
       state: 'ready',
+      sessionIds: [],
     })
     expect(value.workspaces.get('workspace-1')?.name).toBe('Committed Name')
   })
@@ -413,6 +415,7 @@ describe('WorkspaceAuthority', () => {
       name: 'Project',
       displayPath: '/display/project',
       state: 'ready',
+      sessionIds: [],
     })
     expect(value.transactions).toEqual([
       'prepare:add',
@@ -510,6 +513,7 @@ describe('WorkspaceAuthority', () => {
       name: 'Project',
       displayPath: '/display/project',
       state: 'ready',
+      sessionIds: [],
     })
     expect(value.transactions).toEqual([
       'prepare:add',
@@ -678,6 +682,7 @@ describe('WorkspaceAuthority', () => {
       name: 'Project',
       displayPath: '/display/project',
       state: 'ready',
+      sessionIds: [],
     })
     expect(value.transactions).toEqual([
       'prepare:reauthorize',
@@ -1034,6 +1039,7 @@ describe('WorkspaceAuthority', () => {
       name: 'Project',
       displayPath: '/display/project',
       state: 'ready',
+      sessionIds: [],
     })
     expect(value.native.markGrantNeedsAuthorization).not.toHaveBeenCalled()
     expect(value.transactions).toEqual([

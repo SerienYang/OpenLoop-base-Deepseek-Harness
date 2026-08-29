@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { matchesGlob } from 'node:path'
-import type { AppInfo } from '@openloop/desktop-bridge-host/types'
-import { describe, expect, it } from 'vitest'
+import type { AppInfo, WorkspaceGrantView } from '@openloop/desktop-bridge-host/types'
+import { describe, expect, expectTypeOf, it } from 'vitest'
 
 interface PackageManifest {
   readonly exports: Readonly<Record<string, Readonly<Record<string, string>>>>
@@ -30,5 +30,15 @@ describe('desktop bridge Host package artifact', () => {
       types: './lib/types/types.d.ts',
     })
     expect(isIncludedInPackage(typesExport?.types ?? '')).toBe(true)
+  })
+
+  it('publishes only the browser-safe Workspace grant projection', () => {
+    expectTypeOf<keyof WorkspaceGrantView>().toEqualTypeOf<
+      'workspaceId' | 'name' | 'displayPath' | 'state' | 'sessionIds'
+    >()
+    expectTypeOf<WorkspaceGrantView>().not.toHaveProperty('canonicalPath')
+    expectTypeOf<WorkspaceGrantView>().not.toHaveProperty('identity')
+    expectTypeOf<WorkspaceGrantView>().not.toHaveProperty('fd')
+    expectTypeOf<WorkspaceGrantView>().not.toHaveProperty('pendingGrantId')
   })
 })

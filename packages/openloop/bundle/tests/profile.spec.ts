@@ -330,6 +330,26 @@ describe('OpenLoop profile', () => {
     }
   })
 
+  it('enables the Openloop Workspace client while legacy Workspace and Settings rows stay disabled', () => {
+    const entries = openloopEntries()
+
+    expect(entries.find(entry => entry.id === 'openloop-workspace-client')).toEqual({
+      id: 'openloop-workspace-client',
+      name: '@openloop/workspace-client',
+    })
+    expect(enabledClientPackages()).toContain('@openloop/workspace-client')
+    for (const id of [
+      'ui-workspace',
+      'ui-settings',
+      'ui-settings-general',
+      'ui-settings-models',
+      'ui-settings-plugin-inventory',
+      'ui-settings-plugins',
+    ]) {
+      expect(entries.find(entry => entry.id === id)?.disabled).toBe(true)
+    }
+  })
+
   it('denies every Dynamic Cordis browser endpoint while its Client plugins are disabled', async () => {
     const policy = createBrowserApiPolicy(JSON.parse(
       readFileSync(

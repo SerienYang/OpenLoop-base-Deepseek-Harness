@@ -117,6 +117,8 @@
       inject: [runtimeBootstrap]
     - id: desktop-bridge-client
       name: '@openloop/desktop-bridge-client'
+    - id: openloop-workspace-client
+      name: '@openloop/workspace-client'
     - id: credentials-keychain
       name: '@openloop/credentials-keychain'
       inject: [desktopBridge]

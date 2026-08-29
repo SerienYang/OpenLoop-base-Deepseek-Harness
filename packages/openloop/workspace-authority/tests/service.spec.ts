@@ -27,6 +27,7 @@ describe('WorkspaceAuthorityService recovery lifecycle', () => {
         id: 'workspace-1',
         title: 'Project Alpha',
         path: '/host/project',
+        sessionIds: ['session-current', 'session-history'],
       }],
     } as never)
     ctx.provide('desktopBridge', {
@@ -51,7 +52,12 @@ describe('WorkspaceAuthorityService recovery lifecycle', () => {
       name: 'Project Alpha',
       displayPath: '/Users/example/Project Alpha',
       state: 'ready',
+      sessionIds: ['session-current', 'session-history'],
     }])
+    const serialized = JSON.stringify(await ctx.workspaceAuthority.list())
+    expect(serialized).not.toContain('/host/project')
+    expect(serialized).not.toContain('identityValid')
+    expect(serialized).not.toContain('operation-1')
     await fiber.dispose()
   })
 
@@ -74,6 +80,7 @@ describe('WorkspaceAuthorityService recovery lifecycle', () => {
         id: 'workspace-1',
         title: 'Project Alpha',
         path: '/canonical/private/project',
+        sessionIds: ['session-1'],
       }),
       list: () => [],
     } as never)
@@ -100,6 +107,7 @@ describe('WorkspaceAuthorityService recovery lifecycle', () => {
       name: 'Renamed',
       displayPath: '~/Project Alpha',
       state: 'ready',
+      sessionIds: ['session-1'],
     })
     expect(JSON.stringify(renamed)).not.toContain('canonical')
     expect(renameExpected).toHaveBeenCalledWith(
@@ -217,6 +225,7 @@ describe('WorkspaceAuthorityService recovery lifecycle', () => {
         id: 'workspace-1',
         title: 'Project Alpha',
         path: '/host/project',
+        sessionIds: [],
       }],
     } as never)
     ctx.provide('desktopBridge', {
@@ -248,6 +257,7 @@ describe('WorkspaceAuthorityService recovery lifecycle', () => {
         id: 'workspace-1',
         title: 'Project Alpha',
         path: '/host/project',
+        sessionIds: [],
       }],
     } as never)
     ctx.provide('desktopBridge', {
@@ -268,6 +278,7 @@ describe('WorkspaceAuthorityService recovery lifecycle', () => {
       workspaceId: 'workspace-1',
       name: 'Project Alpha',
       state: 'identity-mismatch',
+      sessionIds: [],
     }])
     await fiber.dispose()
   })
@@ -288,6 +299,7 @@ describe('WorkspaceAuthorityService recovery lifecycle', () => {
           id: 'workspace-1',
           title: 'Project Alpha',
           path: '/host/project',
+          sessionIds: [],
         }],
       } as never)
       ctx.provide('desktopBridge', {
@@ -309,6 +321,7 @@ describe('WorkspaceAuthorityService recovery lifecycle', () => {
         workspaceId: 'workspace-1',
         name: 'Project Alpha',
         state: status,
+        sessionIds: [],
       }])
       await fiber.dispose()
     },
@@ -325,6 +338,7 @@ describe('WorkspaceAuthorityService recovery lifecycle', () => {
         id: 'workspace-1',
         title: 'Project Alpha',
         path: '/host/project',
+        sessionIds: [],
       }],
     } as never)
     ctx.provide('desktopBridge', {
@@ -346,6 +360,7 @@ describe('WorkspaceAuthorityService recovery lifecycle', () => {
       workspaceId: 'workspace-1',
       name: 'Project Alpha',
       state: 'identity-mismatch',
+      sessionIds: [],
     }])
     await fiber.dispose()
   })

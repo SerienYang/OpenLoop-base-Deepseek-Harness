@@ -29,6 +29,7 @@ export interface WorkspaceRegistryPort {
   ) => Promise<{
     readonly workspaceId: string
     readonly name: string
+    readonly sessionIds?: WorkspaceGrantView['sessionIds']
     readonly created: boolean
     readonly generation: number
   }>
@@ -46,6 +47,7 @@ export interface WorkspaceRegistryPort {
   get: (workspaceId: string) => {
     readonly name: string
     readonly canonicalPath: string
+    readonly sessionIds?: WorkspaceGrantView['sessionIds']
   } | undefined
 }
 
@@ -75,7 +77,7 @@ export interface NativeWorkspaceAuthorityPort {
     operationId: string,
     expectedCanonicalPath?: string,
     signal?: AbortSignal,
-  ) => Promise<Omit<WorkspaceGrantView, 'name'>>
+  ) => Promise<Omit<WorkspaceGrantView, 'name' | 'sessionIds'>>
   abortWorkspaceAuthorization: (pendingGrantId: string, signal: AbortSignal) => Promise<void>
   confirmWorkspaceRevoke: (
     workspaceId: string,
@@ -265,6 +267,7 @@ export class WorkspaceAuthority {
       name: renamed.name,
       displayPath: grant.displayPath,
       state: 'ready',
+      sessionIds: [...(this.#registry.get(workspaceId)?.sessionIds ?? [])],
     }
   }
 
@@ -307,7 +310,7 @@ export class WorkspaceAuthority {
         signal,
       )
       signal.throwIfAborted()
-      let view: Omit<WorkspaceGrantView, 'name'>
+      let view: Omit<WorkspaceGrantView, 'name' | 'sessionIds'>
       try {
         view = await this.#native.commitWorkspaceAuthorization(
           pending.pendingGrantId,
@@ -352,7 +355,11 @@ export class WorkspaceAuthority {
             cleanup,
           )
           if (signal.aborted) signal.throwIfAborted()
-          return { ...view, name: workspace.name }
+          return {
+            ...view,
+            name: workspace.name,
+            sessionIds: [...(workspace.sessionIds ?? [])],
+          }
         } else if (ownedGrant) {
           pendingActive = false
           await this.#native.markGrantNeedsAuthorization(
@@ -409,7 +416,11 @@ export class WorkspaceAuthority {
         signal,
       )
       signal.throwIfAborted()
-      return { ...view, name: workspace.name }
+      return {
+        ...view,
+        name: workspace.name,
+        sessionIds: [...(workspace.sessionIds ?? [])],
+      }
     } catch (error) {
       const cleanup = cleanupSignal()
       if (pendingActive) {
@@ -703,7 +714,11 @@ export class WorkspaceAuthority {
         signal,
       )
       signal.throwIfAborted()
-      return { ...view, name: workspace.name }
+      return {
+        ...view,
+        name: workspace.name,
+        sessionIds: [...(workspace.sessionIds ?? [])],
+      }
     } catch (error) {
       const cleanup = cleanupSignal()
       const grant = await this.#native.inspectWorkspaceGrant(workspaceId, cleanup)
@@ -736,6 +751,7 @@ export class WorkspaceAuthority {
           name: workspace.name,
           displayPath: grant.displayPath,
           state: 'ready',
+          sessionIds: [...(workspace.sessionIds ?? [])],
         }
       }
       await this.#native.abortWorkspaceAuthorization(pending.pendingGrantId, cleanup)

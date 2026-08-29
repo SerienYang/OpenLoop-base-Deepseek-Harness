@@ -53,7 +53,10 @@ describe('Workspace authority contracts', () => {
     >()
     expectTypeOf<WorkspaceGrant['status']>().toEqualTypeOf<PersistedGrantStatus>()
     expectTypeOf<keyof WorkspaceGrantView>().toEqualTypeOf<
-      'workspaceId' | 'name' | 'displayPath' | 'state'
+      'workspaceId' | 'name' | 'displayPath' | 'state' | 'sessionIds'
+    >()
+    expectTypeOf<WorkspaceGrantView['sessionIds']>().toEqualTypeOf<
+      readonly import('@deepseek-ai/dsh-session').SessionId[]
     >()
     expectTypeOf<WorkspaceGrantView>().not.toHaveProperty('canonicalPath')
     expectTypeOf<WorkspaceGrantView>().not.toHaveProperty('volumeId')

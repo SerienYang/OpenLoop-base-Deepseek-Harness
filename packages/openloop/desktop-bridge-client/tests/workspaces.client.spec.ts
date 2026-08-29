@@ -41,6 +41,7 @@ function remote(
       name: 'Renamed',
       displayPath: '~/Project Alpha',
       state: 'ready' as const,
+      sessionIds: [],
     })),
     revokeWorkspace: vi.fn(() => ok('cancelled' as const)),
     revealWorkspace: vi.fn(() => ok(undefined)),
@@ -80,6 +81,7 @@ describe('Openloop browser Workspace facade', () => {
       name: 'Project Alpha',
       displayPath: '~/Project Alpha',
       state: 'ready' as const,
+      sessionIds: ['session-current', 'session-history'] as never,
     }]))
     const service = new OpenloopWorkspaceService(
       remote({ listWorkspaceGrants }),
@@ -94,6 +96,7 @@ describe('Openloop browser Workspace facade', () => {
         name: 'Project Alpha',
         displayPath: '~/Project Alpha',
         state: 'ready',
+        sessionIds: ['session-current', 'session-history'],
       }],
       state: 'idle',
       error: null,
@@ -101,6 +104,8 @@ describe('Openloop browser Workspace facade', () => {
     expect(service.grants.getSnapshot().items[0]).not.toHaveProperty('canonicalPath')
     expect(service.grants.getSnapshot().items[0]).not.toHaveProperty('pendingGrantId')
     expect(service.grants.getSnapshot().items[0]).not.toHaveProperty('identity')
+    expect(service.grants.getSnapshot().items[0]?.sessionIds)
+      .toEqual(['session-current', 'session-history'])
     expect(service.list.getSnapshot()).toEqual({
       items: [],
       archivedSessionIds: [],
@@ -131,6 +136,7 @@ describe('Openloop browser Workspace facade', () => {
       name: 'Project Alpha',
       displayPath: '~/Project Alpha',
       state: 'ready' as const,
+      sessionIds: [],
     }
     const authorizeWorkspace = vi.fn(() => ok('cancelled' as const))
     const reauthorizeWorkspace = vi.fn(() => ok('cancelled' as const))
@@ -164,6 +170,7 @@ describe('Openloop browser Workspace facade', () => {
       name: 'Project Alpha',
       displayPath: '~/Project Alpha',
       state: 'ready' as const,
+      sessionIds: [],
     }
     const renamed = { ...initial, name: 'Renamed' }
     const renameWorkspace = vi.fn(() => ok(renamed))

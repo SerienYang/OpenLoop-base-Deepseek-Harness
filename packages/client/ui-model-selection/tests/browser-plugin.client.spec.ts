@@ -83,7 +83,14 @@ async function bench() {
   const blocks = new Map<SessionId, { reason: string } | undefined>()
   ctx.provide('conversation', {
     blocks: {
-      set: (id: SessionId, block: { reason: string } | undefined) => { blocks.set(id, block) },
+      setOwned: (
+        id: SessionId,
+        owner: string,
+        block: { reason: string } | undefined,
+      ) => {
+        expect(owner).toBe('ui-model-selection')
+        blocks.set(id, block)
+      },
     },
   })
   let contribution: CommandContribution | undefined

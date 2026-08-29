@@ -1,3 +1,5 @@
+import type { SessionId } from '@deepseek-ai/dsh-session'
+
 /** Browser-safe result contracts for the Openloop desktop Remote facade. */
 
 export interface AppInfo {
@@ -61,6 +63,7 @@ export interface WorkspaceGrantView {
   readonly workspaceId: string
   readonly name: string
   readonly displayPath?: string
+  readonly sessionIds: readonly SessionId[]
   readonly state:
     | 'ready'
     | 'needs-authorization'

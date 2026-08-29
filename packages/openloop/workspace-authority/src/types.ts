@@ -1,3 +1,5 @@
+import type { SessionId } from '@deepseek-ai/dsh-session'
+
 /** Stable grant states that may survive a restart. */
 export const GRANT_STATUSES = [
   'ready',
@@ -37,6 +39,7 @@ export interface WorkspaceGrantView {
   readonly name: string
   readonly displayPath?: string
   readonly state: PersistedGrantStatus
+  readonly sessionIds: readonly SessionId[]
 }
 
 export const TRANSACTION_STAGES = {
