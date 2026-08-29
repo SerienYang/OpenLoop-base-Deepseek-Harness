@@ -626,6 +626,7 @@ fn inspect_workspace_grant_separates_persisted_and_effective_status() {
     let moved = root.path().join("moved-workspace");
     secure_root(&channel);
     secure_root(&workspace);
+    let canonical_workspace = fs::canonicalize(&workspace).expect("canonical workspace");
     let store = GrantStore::open(&channel, ReleaseChannel::Test).expect("store");
     store
         .commit(grant(&workspace, "workspace-1", 0), 0)
@@ -711,9 +712,11 @@ fn inspect_workspace_grant_separates_persisted_and_effective_status() {
             "identityValid": false,
             "status": "revoking",
             "effectiveStatus": "identity-mismatch",
-            "displayPath": fs::canonicalize(&workspace).expect("canonical display path"),
+            "displayPath": "workspace",
         })
     );
+    let serialized = inspected.to_string();
+    assert!(!serialized.contains(canonical_workspace.to_string_lossy().as_ref()));
     assert!(inspected["result"].get("canonicalPath").is_none());
     assert!(inspected["result"].get("identity").is_none());
     assert!(inspected["result"].get("pendingGrantId").is_none());
@@ -2114,9 +2117,10 @@ fn reveal_workspace_child_inherits_verified_descriptor_across_path_replacement()
 fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_leaks() {
     let root = tempdir().expect("root");
     let channel = root.path().join("channel");
-    let workspace = root.path().join("Project Alpha");
+    let workspace = root.path().join("workspace");
     secure_root(&channel);
     secure_root(&workspace);
+    let canonical_workspace = fs::canonicalize(&workspace).expect("canonical workspace");
     let store = GrantStore::open(&channel, ReleaseChannel::Test).expect("store");
     let journal = WorkspaceJournal::open(&channel, ReleaseChannel::Test).expect("journal");
     let launch_id = Uuid::new_v4();
@@ -2240,11 +2244,13 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
         committed["result"],
         serde_json::json!({
             "workspaceId": "workspace-1",
-            "displayPath": workspace,
+            "displayPath": "workspace",
             "state": "ready",
         })
     );
     let serialized = committed["result"].to_string();
+    assert!(!serialized.contains(canonical_workspace.to_string_lossy().as_ref()));
+    assert!(!serialized.contains(workspace.to_string_lossy().as_ref()));
     assert!(!serialized.contains("canonicalPath"));
     assert!(!serialized.contains("pendingGrantId"));
     assert!(!serialized.contains("identity"));
@@ -2252,6 +2258,8 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
         .get("workspace-1")
         .expect("read grant")
         .expect("committed grant");
+    assert_eq!(committed_grant.canonical_path, canonical_workspace);
+    assert_eq!(committed_grant.display_path, workspace);
     assert_eq!(committed_grant.status, GrantStatus::Ready);
     assert_eq!(committed_grant.operation_id, operation_id);
     assert!(registry
@@ -2276,11 +2284,14 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
             "generation": 1,
             "operationId": operation_id,
             "identityValid": true,
-            "displayPath": workspace,
+            "displayPath": "workspace",
             "status": "ready",
             "effectiveStatus": "ready",
         })
     );
+    let serialized = inspected.to_string();
+    assert!(!serialized.contains(canonical_workspace.to_string_lossy().as_ref()));
+    assert!(!serialized.contains(workspace.to_string_lossy().as_ref()));
     assert!(inspected["result"].get("canonicalPath").is_none());
     assert!(inspected["result"].get("identity").is_none());
     assert!(inspected["result"].get("pendingGrantId").is_none());
@@ -2365,11 +2376,14 @@ fn installed_workspace_authority_handlers_dispatch_real_mutations_without_path_l
             "generation": 4,
             "operationId": reauthorize_operation_id,
             "identityValid": true,
-            "displayPath": workspace,
+            "displayPath": "workspace",
             "status": "reauthorizing",
             "effectiveStatus": "ready",
         })
     );
+    let serialized = inspected_frozen.to_string();
+    assert!(!serialized.contains(canonical_workspace.to_string_lossy().as_ref()));
+    assert!(!serialized.contains(workspace.to_string_lossy().as_ref()));
     let restored = dispatch_workspace(
         &dispatcher,
         launch_id,

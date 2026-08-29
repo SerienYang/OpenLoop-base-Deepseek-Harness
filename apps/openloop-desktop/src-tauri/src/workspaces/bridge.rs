@@ -1,6 +1,6 @@
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
@@ -89,6 +89,13 @@ struct FinishInput {
     operation_id: Uuid,
     expected_generation: u64,
     expected_stage: String,
+}
+
+fn browser_workspace_display_path(path: &Path) -> String {
+    path.file_name()
+        .filter(|name| !name.is_empty())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Workspace".to_owned())
 }
 
 pub fn install_workspace_authority_handlers(
@@ -261,7 +268,7 @@ pub fn install_workspace_authority_handlers_with_reveal(
                 registry.promote_validated(input.pending_grant_id, &input.workspace_id);
                 Ok(json!({
                     "workspaceId": input.workspace_id,
-                    "displayPath": validated_grant.display_path,
+                    "displayPath": browser_workspace_display_path(&validated_grant.display_path),
                     "state": "ready",
                 }))
             })
@@ -339,7 +346,7 @@ pub fn install_workspace_authority_handlers_with_reveal(
                     "generation": grant.generation,
                     "operationId": grant.operation_id,
                     "identityValid": identity_valid,
-                    "displayPath": grant.display_path,
+                    "displayPath": browser_workspace_display_path(&grant.display_path),
                     "status": grant.status,
                     "effectiveStatus": effective_status,
                 })
