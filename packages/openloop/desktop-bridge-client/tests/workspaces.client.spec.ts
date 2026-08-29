@@ -420,6 +420,29 @@ describe('Openloop browser Workspace facade', () => {
     }])
   })
 
+  it('does not replace newer Workspace session membership with a stale connection response', async () => {
+    const connectedList = deferred<
+      Awaited<ReturnType<OpenloopWorkspaceRemote['listWorkspaceGrants']>>
+    >()
+    const latest = readyGrant(['session-1', 'session-2'])
+    const listWorkspaceGrants = vi.fn()
+      .mockImplementationOnce(() => ok([readyGrant()]))
+      .mockReturnValueOnce(connectedList.promise)
+    const service = new OpenloopWorkspaceService(remote({
+      listWorkspaceGrants,
+      reauthorizeWorkspace: vi.fn(() => ok(latest)),
+    }), sessions())
+    await service.refresh()
+
+    const connection = service.connectWorkspace('workspace-1' as never)
+    await vi.waitFor(() => { expect(listWorkspaceGrants).toHaveBeenCalledTimes(2) })
+    await service.reauthorize('workspace-1')
+    connectedList.resolve({ ok: true, value: [readyGrant(['session-1'])] })
+
+    await expect(connection).resolves.toBe('session-1')
+    expect(service.grants.getSnapshot().items).toEqual([latest])
+  })
+
   it('does not resurrect a Workspace removed while its connection refresh is pending', async () => {
     const connectedList = deferred<
       Awaited<ReturnType<OpenloopWorkspaceRemote['listWorkspaceGrants']>>

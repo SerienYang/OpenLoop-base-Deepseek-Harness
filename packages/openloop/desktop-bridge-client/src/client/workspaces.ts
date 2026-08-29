@@ -242,7 +242,7 @@ export class OpenloopWorkspaceService implements IWorkspaces {
         `Openloop Workspace connect failed: session ${sessionId} has no ready Workspace grant`,
       )
     }
-    this.mergeWorkspaceSessionIds(workspaceId, refreshed.sessionIds)
+    this.mergeWorkspaceSessionId(workspaceId, sessionId)
     return sessionId
   }
 
@@ -345,17 +345,23 @@ export class OpenloopWorkspaceService implements IWorkspaces {
     this.publish({ ...current, items })
   }
 
-  private mergeWorkspaceSessionIds(
+  private mergeWorkspaceSessionId(
     workspaceId: WorkspaceId,
-    sessionIds: readonly SessionId[],
+    sessionId: SessionId,
   ): void {
     const current = this.grants.getSnapshot()
-    if (!current.items.some(item => item.workspaceId === workspaceId)) return
+    const index = current.items.findIndex(item => item.workspaceId === workspaceId)
+    const workspace = current.items[index]
+    if (workspace === undefined) return
+    if (workspace.sessionIds.includes(sessionId)) return
+    const items = [...current.items]
+    items[index] = {
+      ...workspace,
+      sessionIds: [...workspace.sessionIds, sessionId],
+    }
     this.publish({
       ...current,
-      items: current.items.map(item => item.workspaceId === workspaceId
-        ? { ...item, sessionIds: [...sessionIds] }
-        : item),
+      items,
     })
   }
 
