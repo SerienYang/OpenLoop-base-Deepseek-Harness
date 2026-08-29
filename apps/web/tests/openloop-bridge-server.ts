@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { createServer, type Server, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -19,6 +20,8 @@ import type {
   WorkspaceTransactionInput,
   WorkspaceTransactionStage,
 } from '@openloop/desktop-bridge-host'
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 
 export interface RecordedBridgeCall {
   readonly method: string
@@ -92,14 +95,13 @@ export class AuthenticatedUnixBridgeServer {
   readonly #grants = new Map<string, StoredWorkspaceGrant>()
   readonly #pendingRequestCancels = new Map<string, () => void>()
   readonly #callWaiters = new Set<BridgeCallWaiter>()
+  readonly #callRequestIds: string[] = []
   readonly #replacementOpened: Promise<void>
   #resolveReplacementOpened!: () => void
   #resolveReplacement: ((result: 'saved' | 'cancelled') => void) | undefined
   #grantGeneration = 0
-  #transactionGeneration = 0
   #transaction: WorkspaceTransaction | null = null
   #authorizationSequence = 0
-  #operationSequence = 0
 
   private constructor(
     directory: string,
@@ -179,11 +181,18 @@ export class AuthenticatedUnixBridgeServer {
       return
     }
     grant.exists = true
-    grant.status = state === 'identity-mismatch' ? 'ready' : state
-    grant.effectiveStatus = state
-    grant.identityValid = state === 'ready'
-      || state === 'revoking'
-      || state === 'reauthorizing'
+    if (state === 'missing'
+      || state === 'permission-denied'
+      || state === 'identity-mismatch') {
+      grant.effectiveStatus = state
+      grant.identityValid = false
+      return
+    }
+    grant.status = state
+    grant.effectiveStatus = state === 'revoking' || state === 'reauthorizing'
+      ? 'ready'
+      : state
+    grant.identityValid = true
   }
 
   workspaceGrantCount(): number {
@@ -193,6 +202,19 @@ export class AuthenticatedUnixBridgeServer {
   workspaceGrantState(workspaceId: string): WorkspaceGrantView['state'] | undefined {
     const grant = this.#grants.get(workspaceId)
     return grant?.exists === true ? grant.effectiveStatus : undefined
+  }
+
+  pendingRequestCount(): number {
+    return this.#pendingRequestCancels.size
+  }
+
+  requestIdForCall(method: string, count = 1): string | undefined {
+    let matched = 0
+    for (const [index, call] of this.calls.entries()) {
+      if (call.method !== method || ++matched !== count) continue
+      return this.#callRequestIds[index]
+    }
+    return undefined
   }
 
   whenCalled(method: string, count = 1): Promise<void> {
@@ -324,6 +346,7 @@ export class AuthenticatedUnixBridgeServer {
 
   async #dispatch(request: BridgeRequest): Promise<unknown> {
     this.calls.push({ method: request.method, payload: request.payload })
+    this.#callRequestIds.push(request.requestId)
     this.#resolveCallWaiters()
     switch (request.method) {
       case 'describeCredential':
@@ -364,8 +387,10 @@ export class AuthenticatedUnixBridgeServer {
       case 'advanceWorkspaceTransaction':
         return this.#advanceWorkspaceTransaction(request.payload)
       case 'completeWorkspaceTransaction':
+        this.#finishWorkspaceTransaction(request.payload, 'complete')
+        return null
       case 'abortWorkspaceTransaction':
-        this.#finishWorkspaceTransaction(request.payload)
+        this.#finishWorkspaceTransaction(request.payload, 'abort')
         return null
       case 'commitWorkspaceAuthorization':
         return this.#commitWorkspaceAuthorization(request.payload)
@@ -443,21 +468,19 @@ export class AuthenticatedUnixBridgeServer {
     readonly generation: number
     readonly stage: WorkspaceTransactionStage
   } {
+    const record = this.#record(payload)
+    const input = record as unknown as WorkspaceTransactionInput
+    if (!this.#validInitialTransaction(input)) {
+      throw new Error('fake Workspace transaction initial payload is invalid')
+    }
     if (this.#transaction !== null) {
       throw new Error('fake Workspace transaction is already pending')
     }
-    const input = this.#record(payload) as unknown as WorkspaceTransactionInput
-    if (input.expectedGrantGeneration !== this.#grantGeneration) {
-      throw new Error(
-        `fake Workspace grant generation conflict: expected ${input.expectedGrantGeneration}, actual ${this.#grantGeneration}`,
-      )
-    }
-    const operationId = input.operationId ?? `workspace-operation-${++this.#operationSequence}`
-    this.#transactionGeneration += 1
+    const operationId = input.operationId ?? randomUUID()
     this.#transaction = {
       version: 1,
       operationId,
-      generation: this.#transactionGeneration,
+      generation: 1,
       kind: input.kind,
       ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
       expectedCatalogGeneration: input.expectedCatalogGeneration,
@@ -475,22 +498,33 @@ export class AuthenticatedUnixBridgeServer {
     const input = this.#record(payload)
     const transaction = this.#requireTransaction(input)
     const nextStage = this.#stringField(input, 'nextStage') as WorkspaceTransactionStage
-    const workspaceId = typeof input.workspaceId === 'string'
-      ? input.workspaceId
-      : transaction.workspaceId
-    this.#transactionGeneration += 1
+    const requestedWorkspaceId = input.workspaceId === undefined
+      ? undefined
+      : this.#stringField(input, 'workspaceId')
+    if (!this.#validTransactionTransition(transaction.kind, transaction.stage, nextStage)
+      || !this.#validWorkspaceBinding(
+        transaction,
+        nextStage,
+        requestedWorkspaceId,
+      )) {
+      throw new Error('fake Workspace transaction transition is invalid')
+    }
+    const workspaceId = requestedWorkspaceId ?? transaction.workspaceId
     this.#transaction = {
       ...transaction,
-      generation: this.#transactionGeneration,
+      generation: transaction.generation + 1,
       stage: nextStage,
       ...(workspaceId === undefined ? {} : { workspaceId }),
     } as WorkspaceTransaction
     return this.#transactionVersion()
   }
 
-  #finishWorkspaceTransaction(payload: unknown): void {
-    this.#requireTransaction(this.#record(payload))
-    this.#transactionGeneration += 1
+  #finishWorkspaceTransaction(payload: unknown, finish: 'abort' | 'complete'): void {
+    const transaction = this.#requireTransaction(this.#record(payload))
+    const valid = finish === 'abort'
+      ? this.#validAbortStage(transaction.kind, transaction.stage)
+      : this.#validCompleteStage(transaction.kind, transaction.stage)
+    if (!valid) throw new Error(`fake Workspace transaction cannot ${finish} from this stage`)
     this.#transaction = null
   }
 
@@ -600,6 +634,76 @@ export class AuthenticatedUnixBridgeServer {
       throw new Error('fake Workspace transaction compare-and-set failed')
     }
     return transaction
+  }
+
+  #validInitialTransaction(input: WorkspaceTransactionInput): boolean {
+    const workspaceId = input.workspaceId
+    if (workspaceId === undefined
+      || workspaceId === ''
+      || !Number.isSafeInteger(input.expectedCatalogGeneration)
+      || input.expectedCatalogGeneration < 0
+      || !Number.isSafeInteger(input.expectedGrantGeneration)
+      || input.expectedGrantGeneration < 0
+      || (input.operationId !== undefined && !UUID_PATTERN.test(input.operationId))) {
+      return false
+    }
+    if (input.kind === 'add') return input.stage === 'prepared'
+    if (input.kind === 'revoke') return input.stage === 'revoke-prepared'
+    return input.kind === 'reauthorize' && input.stage === 'reauthorize-prepared'
+  }
+
+  #validTransactionTransition(
+    kind: WorkspaceTransaction['kind'],
+    current: WorkspaceTransactionStage,
+    next: WorkspaceTransactionStage,
+  ): boolean {
+    return (kind === 'add' && current === 'prepared' && next === 'registry-committed')
+      || (kind === 'add'
+        && current === 'registry-committed'
+        && (next === 'grant-committed' || next === 'authorization-failed'))
+      || (kind === 'revoke'
+        && current === 'revoke-prepared'
+        && next === 'registry-deleted')
+      || (kind === 'revoke'
+        && current === 'registry-deleted'
+        && next === 'grant-deleted')
+      || (kind === 'reauthorize'
+        && current === 'reauthorize-prepared'
+        && next === 'grant-committed')
+  }
+
+  #validWorkspaceBinding(
+    transaction: WorkspaceTransaction,
+    nextStage: WorkspaceTransactionStage,
+    requestedWorkspaceId: string | undefined,
+  ): boolean {
+    if (transaction.kind === 'add'
+      && transaction.stage === 'prepared'
+      && nextStage === 'registry-committed') {
+      return transaction.workspaceId === undefined
+        ? requestedWorkspaceId !== undefined
+        : requestedWorkspaceId === undefined
+    }
+    return requestedWorkspaceId === undefined
+  }
+
+  #validAbortStage(
+    kind: WorkspaceTransaction['kind'],
+    stage: WorkspaceTransactionStage,
+  ): boolean {
+    return (kind === 'add' && stage === 'prepared')
+      || (kind === 'revoke' && stage === 'revoke-prepared')
+      || (kind === 'reauthorize' && stage === 'reauthorize-prepared')
+  }
+
+  #validCompleteStage(
+    kind: WorkspaceTransaction['kind'],
+    stage: WorkspaceTransactionStage,
+  ): boolean {
+    return (kind === 'add'
+      && (stage === 'grant-committed' || stage === 'authorization-failed'))
+      || (kind === 'revoke' && stage === 'grant-deleted')
+      || (kind === 'reauthorize' && stage === 'grant-committed')
   }
 
   #expectGrantGeneration(expected: number): void {

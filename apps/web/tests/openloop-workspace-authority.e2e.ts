@@ -4,7 +4,12 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
-import type { Browser, Page, Request, Response } from 'playwright'
+import type {
+  Browser,
+  Page,
+  Request,
+  Response as PlaywrightResponse,
+} from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
@@ -33,6 +38,7 @@ const LAUNCH_ID = 'f11b8617-c090-4f86-a670-d98c5e147345'
 const BOOTSTRAP_TOKEN = Uint8Array.from({ length: 32 }, (_, index) => index + 9)
 const BRIDGE_SECRET = Uint8Array.from({ length: 32 }, (_, index) => index + 97)
 const CORE_MANIFEST_SHA256 = 'b'.repeat(64)
+const STREAM_CAPTURE_LIMIT_BYTES = 64 * 1024
 const CORE_MANIFEST = {
   appVersion: '0.1.0',
   channel: 'test',
@@ -50,9 +56,13 @@ async function closeAll(
   resources: ReadonlyArray<() => Promise<void> | undefined>,
 ): Promise<void> {
   const failures: unknown[] = []
-  for (const close of resources) {
+  for (const [index, close] of resources.entries()) {
     try {
-      await close()
+      await withTimeout(
+        Promise.resolve(close()),
+        `Workspace authority cleanup resource ${index + 1}`,
+        15_000,
+      )
     } catch (error) {
       failures.push(error)
     }
@@ -76,15 +86,9 @@ function isBusinessApiUrl(url: string): boolean {
   return new URL(url).pathname.startsWith('/api/')
 }
 
-function isStreamingApiResponse(
-  url: string,
-  headers: Readonly<Record<string, string>>,
-): boolean {
-  const pathname = new URL(url).pathname
+function isStreamingApiResponse(headers: Readonly<Record<string, string>>): boolean {
   const contentType = headers['content-type']?.toLowerCase() ?? ''
-  return pathname === '/api/events.mux'
-    || pathname === '/api/events.host'
-    || contentType.includes('text/event-stream')
+  return contentType.includes('text/event-stream')
 }
 
 function shouldReadApiResponseBody(
@@ -113,6 +117,123 @@ interface BrowserApiResponseCapture {
   body: string | undefined
 }
 
+interface BrowserStreamCapture {
+  readonly transport: 'sse' | 'websocket'
+  readonly url: string
+  bytes: number
+  frameCount: number
+  text: string
+  truncated: boolean
+}
+
+async function installSseCapture(page: Page): Promise<void> {
+  await page.addInitScript((maximumBytes) => {
+    interface SseCapture {
+      readonly transport: 'sse'
+      readonly url: string
+      bytes: number
+      frameCount: number
+      text: string
+      truncated: boolean
+    }
+    interface CaptureGlobal {
+      __openloopSseCaptures?: SseCapture[]
+      __openloopCloseDownlinks?: () => void
+    }
+    const state = globalThis as typeof globalThis & CaptureGlobal
+    state.__openloopSseCaptures = []
+    let capturedBytes = 0
+    const sockets = new Set<WebSocket>()
+    const NativeWebSocket = globalThis.WebSocket
+    globalThis.WebSocket = new Proxy(NativeWebSocket, {
+      construct(Target, args: ConstructorParameters<typeof WebSocket>) {
+        const socket = new Target(...args)
+        sockets.add(socket)
+        socket.addEventListener('close', () => { sockets.delete(socket) }, { once: true })
+        return socket
+      },
+    })
+    state.__openloopCloseDownlinks = () => {
+      for (const socket of sockets) socket.close()
+    }
+    const originalFetch = globalThis.fetch.bind(globalThis)
+    globalThis.fetch = async (...args): Promise<Response> => {
+      const response = await originalFetch(...args)
+      if (!response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')
+        || response.body === null) {
+        return response
+      }
+      const capture: SseCapture = {
+        transport: 'sse',
+        url: response.url,
+        bytes: 0,
+        frameCount: 0,
+        text: '',
+        truncated: false,
+      }
+      state.__openloopSseCaptures?.push(capture)
+      const decoder = new TextDecoder()
+      const observed = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          capture.frameCount += 1
+          const remaining = maximumBytes - capturedBytes
+          if (remaining > 0) {
+            const recorded = chunk.subarray(0, remaining)
+            capture.text += decoder.decode(recorded, { stream: recorded.length === chunk.length })
+            capture.bytes += recorded.byteLength
+            capturedBytes += recorded.byteLength
+          }
+          if (chunk.byteLength > remaining) capture.truncated = true
+          controller.enqueue(chunk)
+        },
+        flush() {
+          if (!capture.truncated) capture.text += decoder.decode()
+        },
+      }))
+      return new Response(observed, {
+        headers: response.headers,
+        status: response.status,
+        statusText: response.statusText,
+      })
+    }
+  }, STREAM_CAPTURE_LIMIT_BYTES)
+}
+
+async function readSseCaptures(page: Page): Promise<BrowserStreamCapture[]> {
+  return await page.evaluate(() => {
+    return [...((globalThis as typeof globalThis & {
+      __openloopSseCaptures?: BrowserStreamCapture[]
+    }).__openloopSseCaptures ?? [])]
+  })
+}
+
+async function reconnectBrowserTransport(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const close = (globalThis as typeof globalThis & {
+      __openloopCloseDownlinks?: () => void
+    }).__openloopCloseDownlinks
+    if (close === undefined) throw new Error('browser downlink lifecycle control is unavailable')
+    close()
+  })
+}
+
+function recordStreamFrame(
+  capture: BrowserStreamCapture,
+  payload: string | Buffer,
+  budget: { bytes: number },
+): void {
+  capture.frameCount += 1
+  const bytes = typeof payload === 'string' ? Buffer.from(payload) : payload
+  const remaining = STREAM_CAPTURE_LIMIT_BYTES - budget.bytes
+  if (remaining > 0) {
+    const recorded = bytes.subarray(0, remaining)
+    capture.text += recorded.toString('utf8')
+    capture.bytes += recorded.byteLength
+    budget.bytes += recorded.byteLength
+  }
+  if (bytes.byteLength > remaining) capture.truncated = true
+}
+
 async function drainDynamicReads(
   readGroups: ReadonlyArray<readonly Promise<void>[]>,
 ): Promise<void> {
@@ -129,11 +250,11 @@ async function drainDynamicReads(
   }
 }
 
-function withReadTimeout(read: Promise<void>, label: string): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
+function withTimeout<T>(read: Promise<T>, label: string, timeoutMs = 5_000): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(`timed out reading ${label}`))
-    }, 5_000)
+    }, timeoutMs)
     read.then(resolve, reject).finally(() => {
       clearTimeout(timer)
     })
@@ -151,8 +272,10 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
   const browserApiResponses: BrowserApiResponseCapture[] = []
   const requestReads: Promise<void>[] = []
   const responseReads: Promise<void>[] = []
+  const browserStreamCaptures: BrowserStreamCapture[] = []
+  const browserStreamBudget = { bytes: 0 }
   const apiResponsesByRequest = new Map<Request, {
-    readonly response: Response
+    readonly response: PlaywrightResponse
     readonly capture: BrowserApiResponseCapture
   }>()
 
@@ -176,14 +299,14 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
   async function expectComposerBlocked(blocked: boolean): Promise<void> {
     const composer = page.locator('textarea').last()
     await composer.waitFor({ timeout: 15_000 })
-    await expect.poll(() => composer.isDisabled(), { timeout: 10_000 }).toBe(blocked)
+    await expect.poll(() => composer.evaluate((element) => {
+      const textarea = element as HTMLTextAreaElement
+      return textarea.disabled || textarea.readOnly
+    }), { timeout: 10_000 }).toBe(blocked)
     if (blocked) {
-      await expect.poll(
-        () => page.getByText('Workspace authorization is required before sending.', {
-          exact: true,
-        }).count(),
-        { timeout: 10_000 },
-      ).toBeGreaterThan(0)
+      expect(await composer.getAttribute('placeholder')).toMatch(
+        /Workspace authorization is required before sending|Choose a workspace to start/u,
+      )
     }
   }
 
@@ -209,7 +332,24 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     browser = await chromium.launch()
     page = await newEnglishPage(browser)
     page.setDefaultTimeout(10_000)
+    await installSseCapture(page)
     tripwire = watchConsole(page)
+    page.on('websocket', (socket) => {
+      const pathname = new URL(socket.url()).pathname
+      if (pathname !== '/api/events.mux' && pathname !== '/api/events.host') return
+      const capture: BrowserStreamCapture = {
+        transport: 'websocket',
+        url: socket.url(),
+        bytes: 0,
+        frameCount: 0,
+        text: '',
+        truncated: false,
+      }
+      browserStreamCaptures.push(capture)
+      socket.on('framereceived', ({ payload }) => {
+        recordStreamFrame(capture, payload, browserStreamBudget)
+      })
+    })
     page.on('request', (request) => {
       if (!isBusinessApiUrl(request.url())) return
       const postData = request.postData()
@@ -221,9 +361,12 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
         headers: request.headers(),
       }
       browserApiRequests.push(capture)
-      requestReads.push(request.allHeaders().then((headers) => {
-        capture.headers = headers
-      }))
+      requestReads.push(withTimeout(
+        request.allHeaders().then((headers) => {
+          capture.headers = headers
+        }),
+        `request headers for ${capture.method} ${capture.url}`,
+      ))
     })
     page.on('response', (response) => {
       if (!isBusinessApiUrl(response.url())) return
@@ -238,11 +381,11 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
       }
       browserApiResponses.push(capture)
       apiResponsesByRequest.set(request, { response, capture })
-      if (isStreamingApiResponse(capture.url, capture.headers)) return
+      if (isStreamingApiResponse(capture.headers)) return
       const read = response.allHeaders().then((headers) => {
         capture.headers = headers
       })
-      responseReads.push(withReadTimeout(
+      responseReads.push(withTimeout(
         read,
         `headers for ${capture.requestMethod} ${capture.url}`,
       ))
@@ -250,14 +393,14 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     page.on('requestfinished', (request) => {
       const entry = apiResponsesByRequest.get(request)
       if (entry === undefined
-        || isStreamingApiResponse(entry.capture.url, entry.capture.headers)
+        || isStreamingApiResponse(entry.capture.headers)
         || !shouldReadApiResponseBody(entry.capture.requestMethod, entry.capture.headers)) {
         return
       }
       const read = entry.response.text().then((body) => {
         entry.capture.body = body
       })
-      responseReads.push(withReadTimeout(
+      responseReads.push(withTimeout(
         read,
         `${entry.capture.requestMethod} ${entry.capture.url}`
           + ` (${entry.capture.rpcMethod ?? 'no RPC method'})`,
@@ -312,7 +455,7 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     expect(scaffold.ctx.workspaceRegistry.list()).toEqual([])
   })
 
-  it('cancels and completes Add with a standard Session through the real UI', async () => {
+  it('runs a self-contained Workspace add and lifecycle through the real UI', async () => {
     const canonicalPath = join(scaffold.workspaceCwd, 'authority-project')
     const displayPath = '~/Projects/authority-project'
     await mkdir(canonicalPath, { recursive: true })
@@ -390,14 +533,7 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     await expect.poll(() => sessionRow.getAttribute('aria-current'), {
       timeout: 10_000,
     }).toBe('true')
-  }, 120_000)
 
-  it('drives Workspace authority states and lifecycle actions through the real UI', async () => {
-    const canonicalPath = join(scaffold.workspaceCwd, 'authority-project')
-    const workspace = scaffold.ctx.workspaceRegistry.list()[0]
-    if (workspace === undefined) throw new Error('Workspace add prerequisite is missing')
-    const initialSessionId = workspace.sessionIds[0]
-    if (initialSessionId === undefined) throw new Error('Workspace Session prerequisite is missing')
     await openWorkspaceSettings()
     await openWorkspaceActions('authority-project')
     await page.getByRole('menuitem', { name: 'Rename' }).click()
@@ -421,6 +557,26 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
       .getByRole('button', { name: 'Close' }).click()
 
     bridge.setWorkspaceGrantState(workspace.id, 'missing')
+    const missingRefreshes = browserApiRequests.filter(
+      request => request.rpcMethod === 'openloopDesktop/listWorkspaceGrants',
+    ).length
+    await reconnectBrowserTransport(page)
+    await expect.poll(() => browserApiRequests.filter(
+      request => request.rpcMethod === 'openloopDesktop/listWorkspaceGrants',
+    ).length, { timeout: 15_000 }).toBeGreaterThan(missingRefreshes)
+    await page.getByText('Missing', { exact: true }).waitFor({ timeout: 15_000 })
+    await sessionRow.click()
+    await expect.poll(() => sessionRow.getAttribute('aria-current'), {
+      timeout: 10_000,
+    }).toBe('true')
+    await expectComposerBlocked(true)
+    await expect(scaffold.ctx.desktopBridge.inspectWorkspaceGrant(workspace.id))
+      .resolves.toMatchObject({
+        exists: true,
+        status: 'ready',
+        effectiveStatus: 'missing',
+        identityValid: false,
+      })
     const create = vi.spyOn(scaffold.ctx.apiProxy.sessions, 'create')
     const createCallsBefore = create.mock.calls.length
     const denied = await fetch(`${scaffold.baseUrl}/api/session.create`, {
@@ -435,7 +591,26 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     })
     expect(denied.status).toBe(403)
     expect(create.mock.calls).toHaveLength(createCallsBefore)
+    for (const state of ['permission-denied', 'identity-mismatch'] as const) {
+      bridge.setWorkspaceGrantState(workspace.id, state)
+      await expect(scaffold.ctx.desktopBridge.inspectWorkspaceGrant(workspace.id))
+        .resolves.toMatchObject({
+          exists: true,
+          status: 'ready',
+          effectiveStatus: state,
+          identityValid: false,
+        })
+    }
     bridge.setWorkspaceGrantState(workspace.id, 'ready')
+    const readyRefreshes = browserApiRequests.filter(
+      request => request.rpcMethod === 'openloopDesktop/listWorkspaceGrants',
+    ).length
+    await reconnectBrowserTransport(page)
+    await expect.poll(() => browserApiRequests.filter(
+      request => request.rpcMethod === 'openloopDesktop/listWorkspaceGrants',
+    ).length, { timeout: 15_000 }).toBeGreaterThan(readyRefreshes)
+    await sessionRow.click()
+    await expectComposerBlocked(false)
 
     const preRemoveAria = await captureStableAria(page, '[class*="frame"]', scaffold.workspaceCwd)
     await compareOrRefreshGolden(UI_EXPECTED, preRemoveAria, MODE)
@@ -472,21 +647,153 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     expect(await readFile(join(canonicalPath, 'keep.txt'), 'utf8')).toBe('retained\n')
     expect(scaffold.ctx.sessions.get(initialSessionId)).toBeDefined()
 
+    const transactionCalls = bridge.calls.filter(call => [
+      'prepareWorkspaceTransaction',
+      'advanceWorkspaceTransaction',
+      'abortWorkspaceTransaction',
+      'completeWorkspaceTransaction',
+    ].includes(call.method))
+    expect(transactionCalls.map(call => call.method)).toEqual([
+      'prepareWorkspaceTransaction',
+      'advanceWorkspaceTransaction',
+      'advanceWorkspaceTransaction',
+      'completeWorkspaceTransaction',
+      'prepareWorkspaceTransaction',
+      'advanceWorkspaceTransaction',
+      'advanceWorkspaceTransaction',
+      'completeWorkspaceTransaction',
+    ])
+    const addOperationId = (transactionCalls[1]?.payload as { operationId?: unknown }).operationId
+    const revokeOperationId = (transactionCalls[5]?.payload as { operationId?: unknown }).operationId
+    expect(transactionCalls[0]?.payload).toEqual(expect.objectContaining({
+      kind: 'add',
+      workspaceId: workspace.id,
+      stage: 'prepared',
+    }))
+    expect(transactionCalls.slice(1, 4).map(call => call.payload)).toEqual([
+      expect.objectContaining({
+        operationId: addOperationId,
+        expectedGeneration: 1,
+        expectedStage: 'prepared',
+        nextStage: 'registry-committed',
+      }),
+      expect.objectContaining({
+        operationId: addOperationId,
+        expectedGeneration: 2,
+        expectedStage: 'registry-committed',
+        nextStage: 'grant-committed',
+      }),
+      {
+        operationId: addOperationId,
+        expectedGeneration: 3,
+        expectedStage: 'grant-committed',
+      },
+    ])
+    expect(transactionCalls[4]?.payload).toEqual(expect.objectContaining({
+      kind: 'revoke',
+      workspaceId: workspace.id,
+      stage: 'revoke-prepared',
+    }))
+    expect(transactionCalls.slice(5).map(call => call.payload)).toEqual([
+      expect.objectContaining({
+        operationId: revokeOperationId,
+        expectedGeneration: 1,
+        expectedStage: 'revoke-prepared',
+        nextStage: 'registry-deleted',
+      }),
+      expect.objectContaining({
+        operationId: revokeOperationId,
+        expectedGeneration: 2,
+        expectedStage: 'registry-deleted',
+        nextStage: 'grant-deleted',
+      }),
+      {
+        operationId: revokeOperationId,
+        expectedGeneration: 3,
+        expectedStage: 'grant-deleted',
+      },
+    ])
+
+    const grantGeneration = await scaffold.ctx.desktopBridge.getWorkspaceGrantGeneration()
+    const invalidOrder = await scaffold.ctx.desktopBridge.prepareWorkspaceTransaction({
+      kind: 'add',
+      workspaceId: 'transaction-contract-workspace',
+      expectedCatalogGeneration: 0,
+      expectedGrantGeneration: grantGeneration,
+      stage: 'prepared',
+    })
+    expect(invalidOrder.generation).toBe(1)
+    await expect(scaffold.ctx.desktopBridge.completeWorkspaceTransaction(
+      invalidOrder.operationId,
+      invalidOrder.generation,
+      invalidOrder.stage,
+    )).rejects.toThrow('cannot complete')
+    await expect(scaffold.ctx.desktopBridge.advanceWorkspaceTransaction(
+      invalidOrder.operationId,
+      invalidOrder.generation,
+      invalidOrder.stage,
+      'grant-committed',
+    )).rejects.toThrow('transition is invalid')
+    await expect(scaffold.ctx.desktopBridge.advanceWorkspaceTransaction(
+      invalidOrder.operationId,
+      invalidOrder.generation,
+      invalidOrder.stage,
+      'registry-committed',
+      'rebound-workspace',
+    )).rejects.toThrow('transition is invalid')
+    await scaffold.ctx.desktopBridge.abortWorkspaceTransaction(
+      invalidOrder.operationId,
+      invalidOrder.generation,
+      invalidOrder.stage,
+    )
+    const resetGeneration = await scaffold.ctx.desktopBridge.prepareWorkspaceTransaction({
+      kind: 'revoke',
+      workspaceId: 'transaction-contract-workspace',
+      expectedCatalogGeneration: 0,
+      expectedGrantGeneration: grantGeneration,
+      stage: 'revoke-prepared',
+    })
+    expect(resetGeneration.generation).toBe(1)
+    await scaffold.ctx.desktopBridge.abortWorkspaceTransaction(
+      resetGeneration.operationId,
+      resetGeneration.generation,
+      resetGeneration.stage,
+    )
+
     const finalAria = await captureStableAria(page, '[class*="frame"]', scaffold.workspaceCwd)
     const finalDom = await page.content()
-    await drainDynamicReads([requestReads, responseReads])
+    await withTimeout(
+      drainDynamicReads([requestReads, responseReads]),
+      'dynamic browser API reads',
+      15_000,
+    )
     await expect.poll(
       () => browserApiResponses.length,
       { timeout: 10_000 },
     ).toBe(browserApiRequests.length)
-    await drainDynamicReads([requestReads, responseReads])
+    await withTimeout(
+      drainDynamicReads([requestReads, responseReads]),
+      'final dynamic browser API reads',
+      15_000,
+    )
+    const browserStreams = [...browserStreamCaptures, ...await readSseCaptures(page)]
+    for (const path of ['/api/events.mux', '/api/events.host']) {
+      expect(
+        browserStreams.some(capture =>
+          new URL(capture.url).pathname === path && capture.frameCount > 0),
+        `browser capture did not observe a real ${path} frame`,
+      ).toBe(true)
+    }
     const responseMethods = browserApiResponses.map(response => response.rpcMethod)
     expect(responseMethods, 'API response capture omitted session.create')
       .toContain('session.create')
     expect(responseMethods, 'API response capture omitted renameWorkspace')
       .toContain('openloopDesktop/renameWorkspace')
     const browserApiRequestTraffic = JSON.stringify(browserApiRequests)
-    const browserApiResponseTraffic = JSON.stringify(browserApiResponses)
+    const browserApiResponseTraffic = JSON.stringify(browserApiResponses.filter(
+      response => response.rpcMethod?.startsWith('openloopDesktop/') === true,
+    ))
+    const browserStreamTraffic = JSON.stringify(browserStreams)
     const forbidden = [
       ['canonicalPath field', 'canonicalPath'],
       ['pendingGrantId field', 'pendingGrantId'],
@@ -500,16 +807,93 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
       expect(browserApiRequestTraffic, `browser API requests leaked ${label}`).not.toContain(value)
       expect(browserApiResponseTraffic, `browser API responses leaked ${label}`)
         .not.toContain(value)
+      if (label !== 'canonical path') {
+        expect(browserStreamTraffic, `browser API streams leaked ${label}`).not.toContain(value)
+      }
       expect(preRemoveAria, `pre-remove ARIA snapshot leaked ${label}`).not.toContain(value)
       expect(finalAria, `final ARIA snapshot leaked ${label}`).not.toContain(value)
       expect(finalDom, `final DOM snapshot leaked ${label}`).not.toContain(value)
     }
 
-    expect(tripwire.warnings).toEqual([])
+    expect(tripwire.warnings).toEqual([
+      '[web-runtime] connection lost, retry #1',
+      '[web-runtime] connection lost, retry #1',
+    ])
     expect(tripwire.pageErrors).toEqual([])
-  }, 240_000)
+  }, 300_000)
 
   it('keeps the fixture inventory exact', async () => {
     await assertFixtureInventory(SNAPSHOT_DIR, ['ui.expected.md'])
   })
+})
+
+describe('web e2e: Workspace authorization cancellation lifecycle', () => {
+  it('sends $cancel for the deferred native request when its browser page closes', async () => {
+    const launchId = '1cb4b3b2-2ab3-42f7-ad40-e728f9ec1bbc'
+    const bootstrapToken = Uint8Array.from({ length: 32 }, (_, index) => index + 17)
+    const bridgeSecret = Uint8Array.from({ length: 32 }, (_, index) => index + 113)
+    let bridge: AuthenticatedUnixBridgeServer | undefined
+    let scaffold: WebScaffold | undefined
+    let browser: Browser | undefined
+    let page: Page | undefined
+    try {
+      bridge = await AuthenticatedUnixBridgeServer.start({
+        launchId,
+        secret: bridgeSecret,
+      })
+      scaffold = await launchWebScaffold({
+        agentPresets: {
+          roots: [{ path: PRESET_ROOT, trust: 'system' }],
+          default: 'standard',
+        },
+        openloop: {
+          launchId,
+          bootstrapToken,
+          bridgeSecret,
+          socketPath: bridge.socketPath,
+          coreManifest: CORE_MANIFEST,
+          coreManifestSha256: CORE_MANIFEST_SHA256,
+        },
+      })
+      browser = await chromium.launch()
+      page = await newEnglishPage(browser)
+      page.setDefaultTimeout(10_000)
+      bridge.enqueueWorkspaceAuthorization({
+        outcome: 'pending',
+        canonicalPath: join(scaffold.workspaceCwd, 'cancelled-workspace'),
+        displayPath: '~/Projects/cancelled-workspace',
+        deferred: true,
+      })
+      const bootstrap = Buffer.from(bootstrapToken).toString('hex')
+      await page.goto(
+        `${scaffold.baseUrl}/#bootstrap=${bootstrap}&launch=${launchId}`,
+        { waitUntil: 'load' },
+      )
+      await page.waitForFunction(
+        () => document.documentElement.dataset.openloopBootstrap === 'ready',
+        undefined,
+        { timeout: 30_000 },
+      )
+      await page.getByRole('textbox', { name: /choose workspace/iu }).click()
+      await page.getByRole('menuitem', { name: 'Add Workspace' }).click()
+      await bridge.whenCalled('beginWorkspaceAuthorization')
+      const beginRequestId = bridge.requestIdForCall('beginWorkspaceAuthorization')
+      expect(beginRequestId).toBeTypeOf('string')
+      expect(bridge.pendingRequestCount()).toBe(1)
+
+      await withTimeout(page.close(), 'cancel fixture page close', 10_000)
+      await bridge.whenCalled('$cancel')
+      await expect.poll(() => bridge?.pendingRequestCount(), { timeout: 10_000 }).toBe(0)
+      expect(bridge.calls.find(call => call.method === '$cancel')?.payload).toEqual({
+        requestId: beginRequestId,
+      })
+    } finally {
+      await closeAll([
+        () => page?.isClosed() === false ? page.close() : undefined,
+        () => browser?.close(),
+        () => scaffold?.close(),
+        () => bridge?.close(),
+      ])
+    }
+  }, 120_000)
 })
