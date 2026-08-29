@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useRef, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
@@ -10,6 +11,7 @@ import {
   WorkspaceSettings,
   WorkspaceSidebar,
   type WorkspaceClientActions,
+  type WorkspaceGrantListState,
 } from '../src/client/index.ts'
 
 afterEach(cleanup)
@@ -69,7 +71,7 @@ function harness(
   items: readonly WorkspaceGrantView[],
   current: SessionId | undefined = sid('session-current'),
 ) {
-  const grants = createSnapshotStore({
+  const grants = createSnapshotStore<WorkspaceGrantListState>({
     items,
     state: 'idle' as const,
     error: null,
@@ -132,7 +134,15 @@ describe('Openloop Workspace surfaces', () => {
       />,
     )
 
-    for (const state of allStates) expect(screen.getByText(state)).toBeTruthy()
+    for (const label of [
+      'Ready',
+      'Needs authorization',
+      'Missing',
+      'Permission denied',
+      'Identity mismatch',
+      'Removing',
+      'Reauthorizing',
+    ]) expect(screen.getByText(label)).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Switch to Alpha' }).getAttribute('aria-current')).toBe('true')
     fireEvent.click(screen.getByRole('button', { name: 'Historical discussion' }))
     expect(h.openSession).toHaveBeenCalledWith(sid('session-history'))
@@ -156,6 +166,100 @@ describe('Openloop Workspace surfaces', () => {
     expect(screen.getByRole('button', { name: 'Add Workspace' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Open Workspace Alpha' })).toBeTruthy()
     expect(screen.queryByText('~/Projects/alpha')).toBeNull()
+  })
+
+  it('surfaces and clears an authorize failure after a controlled Hero owner closes the Menu', async () => {
+    const failure = deferred<'cancelled'>()
+    const h = harness([])
+    h.authorize.mockReturnValueOnce(failure.promise)
+    function ControlledHero() {
+      const [open, setOpen] = useState(true)
+      const anchorRef = useRef<HTMLButtonElement>(null)
+      return (
+        <>
+          <button
+            ref={anchorRef}
+            type="button"
+            aria-label="Workspace picker"
+            aria-haspopup="menu"
+            aria-expanded={open}
+            onClick={() => { setOpen(value => !value) }}
+          />
+          <WorkspaceHero
+            open={open}
+            anchorRef={anchorRef}
+            onPick={vi.fn()}
+            onClose={() => { setOpen(false) }}
+            useGrants={h.useGrants}
+            useSessions={h.useSessions}
+            actions={h.actions}
+          />
+        </>
+      )
+    }
+    render(<ControlledHero />)
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Add Workspace' }))
+    expect(screen.queryByRole('menu')).toBeNull()
+    failure.reject(new Error('chooser unavailable after close'))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('chooser unavailable after close')
+    fireEvent.click(within(alert).getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('surfaces a reauthorize failure after a controlled Hero owner closes the Menu', async () => {
+    const failure = deferred<'cancelled'>()
+    const h = harness([grant('missing-workspace', 'missing')])
+    h.reauthorize.mockReturnValueOnce(failure.promise)
+    function ControlledHero() {
+      const [open, setOpen] = useState(true)
+      const anchorRef = useRef<HTMLButtonElement>(null)
+      return (
+        <>
+          <button ref={anchorRef} type="button" aria-label="Workspace picker" />
+          <WorkspaceHero
+            open={open}
+            anchorRef={anchorRef}
+            onPick={vi.fn()}
+            onClose={() => { setOpen(false) }}
+            useGrants={h.useGrants}
+            useSessions={h.useSessions}
+            actions={h.actions}
+          />
+        </>
+      )
+    }
+    render(<ControlledHero />)
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Reauthorize missing-workspace' }))
+    expect(screen.queryByRole('menu')).toBeNull()
+    failure.reject(new Error('reauthorize unavailable after close'))
+
+    expect((await screen.findByRole('alert')).textContent)
+      .toContain('reauthorize unavailable after close')
+  })
+
+  it('surfaces and clears collapsed rail failures without expanding the layout', async () => {
+    const h = harness([])
+    h.authorize.mockRejectedValueOnce(new Error('rail chooser unavailable'))
+    const view = render(
+      <WorkspaceSidebar
+        wide={false}
+        expandSidebar={vi.fn()}
+        useGrants={h.useGrants}
+        useSessions={h.useSessions}
+        actions={h.actions}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add Workspace' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('rail chooser unavailable')
+    expect(view.container.querySelector('[data-workspace-rail-error="true"]')).toBe(alert)
+    fireEvent.click(within(alert).getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 
   it('runs Add once, treats native cancellation as stable, and surfaces real failures', async () => {
@@ -286,6 +390,108 @@ describe('Openloop Workspace surfaces', () => {
     )
     fireEvent.click(within(removeDialog).getByRole('button', { name: 'Remove' }))
     await waitFor(() => { expect(h.remove).toHaveBeenCalledWith('alpha') })
+    expect(screen.getByRole('dialog', { name: 'Remove Workspace' })).toBeTruthy()
+  })
+
+  it('uses one Settings modal state machine and restores focus across close paths', async () => {
+    const h = harness([grant('alpha')])
+    render(
+      <WorkspaceSettings
+        wide
+        useGrants={h.useGrants}
+        useSessions={h.useSessions}
+        actions={h.actions}
+      />,
+    )
+    const settingsTrigger = screen.getByRole<HTMLButtonElement>('button', { name: 'Settings' })
+    fireEvent.click(settingsTrigger)
+
+    const openActions = () => {
+      const trigger = screen.getByRole<HTMLButtonElement>('button', {
+        name: 'Workspace actions for Alpha',
+      })
+      expect(trigger.getAttribute('aria-haspopup')).toBe('menu')
+      expect(trigger.getAttribute('aria-expanded')).toBe('false')
+      fireEvent.click(trigger)
+      expect(trigger.getAttribute('aria-expanded')).toBe('true')
+      return trigger
+    }
+
+    openActions()
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    expect(screen.getAllByRole('dialog')).toHaveLength(1)
+    expect(screen.getByRole('dialog', { name: 'Rename Workspace' })).toBeTruthy()
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => {
+      expect(screen.getByRole('dialog', { name: 'Workspace settings' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: 'Workspace actions for Alpha' }))
+        .toBe(document.activeElement)
+    })
+
+    openActions()
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove' }))
+    const removeDialog = screen.getByRole('dialog', { name: 'Remove Workspace' })
+    fireEvent.click(within(removeDialog).getByRole('button', { name: 'Close' }))
+    await waitFor(() => {
+      expect(screen.getByRole('dialog', { name: 'Workspace settings' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: 'Workspace actions for Alpha' }))
+        .toBe(document.activeElement)
+    })
+
+    openActions()
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove' }))
+    const dialog = screen.getByRole('dialog', { name: 'Remove Workspace' })
+    fireEvent.click(dialog.previousElementSibling as HTMLElement)
+    await waitFor(() => {
+      expect(screen.getByRole('dialog', { name: 'Workspace settings' })).toBeTruthy()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).toBeNull()
+      expect(settingsTrigger).toBe(document.activeElement)
+    })
+  })
+
+  it('routes the section title, loading label, and all authority states through locale copy', () => {
+    const allStates: WorkspaceGrantView['state'][] = [
+      'ready',
+      'needs-authorization',
+      'missing',
+      'permission-denied',
+      'identity-mismatch',
+      'revoking',
+      'reauthorizing',
+    ]
+    const h = harness(allStates.map((state, index) => grant(`workspace-${index}`, state)))
+    h.grants.set({ ...h.grants.getSnapshot(), state: 'loading' })
+    const translations: Record<string, string> = {
+      workspaces: 'Localized workspaces',
+      loading: 'Localized loading',
+      stateReady: 'Localized ready',
+      stateNeedsAuthorization: 'Localized needs authorization',
+      stateMissing: 'Localized missing',
+      statePermissionDenied: 'Localized permission denied',
+      stateIdentityMismatch: 'Localized identity mismatch',
+      stateRevoking: 'Localized revoking',
+      stateReauthorizing: 'Localized reauthorizing',
+    }
+    const t = vi.fn((key: string) => translations[key] ?? key) as never
+    render(
+      <WorkspaceSidebar
+        wide
+        expandSidebar={vi.fn()}
+        useGrants={h.useGrants}
+        useSessions={h.useSessions}
+        actions={h.actions}
+        t={t}
+      />,
+    )
+
+    for (const value of Object.values(translations)) {
+      expect(screen.getByText(value)).toBeTruthy()
+    }
   })
 
   it('disables conflicting row operations while revoking or reauthorizing', () => {

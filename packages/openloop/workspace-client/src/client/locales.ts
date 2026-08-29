@@ -1,4 +1,6 @@
 export const en = {
+  workspaces: 'Workspaces',
+  loading: 'Loading…',
   add: 'Add Workspace',
   settings: 'Settings',
   settingsTitle: 'Workspace settings',
@@ -18,11 +20,20 @@ export const en = {
   empty: 'No Workspaces yet.',
   choose: 'Choose a Workspace',
   block: 'Workspace authorization is required before sending.',
+  stateReady: 'Ready',
+  stateNeedsAuthorization: 'Needs authorization',
+  stateMissing: 'Missing',
+  statePermissionDenied: 'Permission denied',
+  stateIdentityMismatch: 'Identity mismatch',
+  stateRevoking: 'Removing',
+  stateReauthorizing: 'Reauthorizing',
 } as const
 
 export type WorkspaceClientKey = keyof typeof en
 
 export const zh = {
+  workspaces: 'Workspace',
+  loading: '正在加载…',
   add: '添加 Workspace',
   settings: '设置',
   settingsTitle: 'Workspace 设置',
@@ -42,4 +53,11 @@ export const zh = {
   empty: '尚无 Workspace。',
   choose: '选择 Workspace',
   block: 'Workspace 授权不可用，请重新授权后再发送。',
+  stateReady: '可用',
+  stateNeedsAuthorization: '需要授权',
+  stateMissing: '目录不存在',
+  statePermissionDenied: '权限被拒绝',
+  stateIdentityMismatch: '目录身份不匹配',
+  stateRevoking: '正在移除',
+  stateReauthorizing: '正在重新授权',
 } satisfies Record<WorkspaceClientKey, string>

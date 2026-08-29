@@ -9,7 +9,9 @@ import {
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { WorkspaceId } from '@deepseek-ai/dsh-client-runtime/client'
 import type { WorkspaceDataProps } from './shared.tsx'
-import { ActionError, copy, isBusy, useActionState } from './shared.tsx'
+import { ActionError, useActionState } from './actions.tsx'
+import { copy, isBusy } from './shared.tsx'
+import css from './Workspace.module.css'
 
 export interface WorkspaceHeroProps extends WorkspaceDataProps {
   readonly open: boolean
@@ -97,7 +99,15 @@ export function WorkspaceHero({
         portal
         getAnchorRect={getAnchorRect}
       />
-      {open && operation.error !== null && <ActionError>{operation.error}</ActionError>}
+      {operation.error !== null && (
+        <ActionError
+          className={css.heroError}
+          closeLabel={copy(t, 'close')}
+          onClose={() => { operation.clearError() }}
+        >
+          {operation.error}
+        </ActionError>
+      )}
     </>
   )
 }

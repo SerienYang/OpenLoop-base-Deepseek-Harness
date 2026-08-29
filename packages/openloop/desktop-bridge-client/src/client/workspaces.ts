@@ -104,6 +104,8 @@ export class OpenloopWorkspaceService implements IWorkspaces {
   /** Browser-safe DSH-compatible projection for shared renderer infrastructure. */
   readonly list: SnapshotStore<WorkspaceListState> =
     createSnapshotStore<WorkspaceListState>(EMPTY_WORKSPACE_LIST)
+  private refreshGeneration = 0
+  private readonly workspaceConnections = new Map<WorkspaceId, Promise<SessionId>>()
 
   constructor(
     private readonly remoteSource: OpenloopWorkspaceRemoteSource,
@@ -111,6 +113,7 @@ export class OpenloopWorkspaceService implements IWorkspaces {
   ) {}
 
   async refresh(): Promise<void> {
+    const generation = ++this.refreshGeneration
     this.publish({
       ...this.grants.getSnapshot(),
       state: 'loading',
@@ -124,6 +127,7 @@ export class OpenloopWorkspaceService implements IWorkspaces {
           `Openloop Workspace list failed: ${result.error.code}: ${result.error.message}`,
         )
       }
+      if (generation !== this.refreshGeneration) return
       this.publish({
         items: result.value,
         state: 'idle',
@@ -131,11 +135,13 @@ export class OpenloopWorkspaceService implements IWorkspaces {
       })
     } catch (reason) {
       const error = reason instanceof Error ? reason : new Error(String(reason))
-      this.publish({
-        ...this.grants.getSnapshot(),
-        state: 'error',
-        error,
-      })
+      if (generation === this.refreshGeneration) {
+        this.publish({
+          ...this.grants.getSnapshot(),
+          state: 'error',
+          error,
+        })
+      }
       throw error
     }
   }
@@ -182,17 +188,38 @@ export class OpenloopWorkspaceService implements IWorkspaces {
     this.value(await remote.revealWorkspace(workspaceId), 'reveal')
   }
 
-  async connectWorkspace(workspaceId: WorkspaceId, agentPreset?: string): Promise<SessionId> {
+  connectWorkspace(workspaceId: WorkspaceId, agentPreset?: string): Promise<SessionId> {
+    const inFlight = this.workspaceConnections.get(workspaceId)
+    if (inFlight !== undefined) return inFlight
+
     const current = this.grants.getSnapshot().items.find(
       grant => grant.workspaceId === workspaceId,
     )
     if (current === undefined) {
-      throw new Error(`Openloop Workspace connect failed: unknown Workspace ${workspaceId}`)
+      return Promise.reject(new Error(
+        `Openloop Workspace connect failed: unknown Workspace ${workspaceId}`,
+      ))
     }
     if (!isRoutableGrant(current)) {
-      throw new Error(`Openloop Workspace connect failed: Workspace ${workspaceId} is not ready`)
+      return Promise.reject(new Error(
+        `Openloop Workspace connect failed: Workspace ${workspaceId} is not ready`,
+      ))
     }
 
+    const connection = this.createWorkspaceSession(workspaceId, agentPreset)
+      .finally(() => {
+        if (this.workspaceConnections.get(workspaceId) === connection) {
+          this.workspaceConnections.delete(workspaceId)
+        }
+      })
+    this.workspaceConnections.set(workspaceId, connection)
+    return connection
+  }
+
+  private async createWorkspaceSession(
+    workspaceId: WorkspaceId,
+    agentPreset?: string,
+  ): Promise<SessionId> {
     const sessionId = await this.sessions.create({
       workspaceId,
       ...(agentPreset === undefined ? {} : { agentPreset }),

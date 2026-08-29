@@ -1,4 +1,8 @@
-import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+import type {
+  ClientContext,
+  ISessions,
+  SessionId,
+} from '@deepseek-ai/dsh-client-runtime/client'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -39,10 +43,15 @@ export const inject = [
   'locale',
 ]
 
+function clientSessions(ctx: ClientContext): ISessions {
+  return ctx.sessions as unknown as ISessions
+}
+
 function installComposerGuard(ctx: ClientContext, reason: () => string): () => void {
+  const sessions = clientSessions(ctx)
   const owned = new Set<SessionId>()
   const reconcile = (): void => {
-    const sessionSnapshot = ctx.sessions.list.getSnapshot()
+    const sessionSnapshot = sessions.list.getSnapshot()
     const current = sessionSnapshot.current
     const grants = ctx.openloopWorkspaces.grants.getSnapshot().items
     const active = current === undefined
@@ -68,7 +77,7 @@ function installComposerGuard(ctx: ClientContext, reason: () => string): () => v
 
   reconcile()
   const stopGrants = ctx.openloopWorkspaces.grants.subscribe(reconcile)
-  const stopSessions = ctx.sessions.list.subscribe(reconcile)
+  const stopSessions = sessions.list.subscribe(reconcile)
   return () => {
     stopGrants()
     stopSessions()
@@ -83,6 +92,7 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'openloop-workspace: dictionaries')
   const t = ctx.locale.bind(NS)
   const useGrants = bindSnapshotSelector(ctx.openloopWorkspaces.grants)
+  const sessions = clientSessions(ctx)
   const actions: WorkspaceClientActions = {
     authorize: () => ctx.openloopWorkspaces.authorize(),
     reauthorize: workspaceId => ctx.openloopWorkspaces.reauthorize(workspaceId),
@@ -93,9 +103,9 @@ export function apply(ctx: ClientContext): void {
     reveal: workspaceId => ctx.openloopWorkspaces.reveal(workspaceId),
     startSession: async (workspaceId) => {
       const sessionId = await ctx.openloopWorkspaces.connectWorkspace(workspaceId as never)
-      ctx.sessions.open(sessionId)
+      sessions.open(sessionId)
     },
-    openSession: (sessionId) => { ctx.sessions.open(sessionId) },
+    openSession: (sessionId) => { sessions.open(sessionId) },
   }
   const injected = () => ({ useGrants, actions })
 

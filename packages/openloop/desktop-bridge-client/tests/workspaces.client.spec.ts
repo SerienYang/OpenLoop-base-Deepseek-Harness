@@ -57,6 +57,20 @@ function sessions(): OpenloopWorkspaceSessions {
   }
 }
 
+function deferred<T>() {
+  return Promise.withResolvers<T>()
+}
+
+function readyGrant(sessionIds: readonly string[] = []) {
+  return {
+    workspaceId: 'workspace-1',
+    name: 'Project Alpha',
+    displayPath: '~/Project Alpha',
+    state: 'ready' as const,
+    sessionIds: sessionIds as never,
+  }
+}
+
 describe('Openloop browser Workspace facade', () => {
   it('rebinds Remote generations and rejects pending work on close', async () => {
     const binding = new OpenloopWorkspaceRemoteBinding()
@@ -163,6 +177,54 @@ describe('Openloop browser Workspace facade', () => {
     expect(snapshot.error?.message).toBe('Remote mount failed')
   })
 
+  it('keeps the latest refresh when responses settle in reverse order', async () => {
+    const first = deferred<Awaited<ReturnType<OpenloopWorkspaceRemote['listWorkspaceGrants']>>>()
+    const second = deferred<Awaited<ReturnType<OpenloopWorkspaceRemote['listWorkspaceGrants']>>>()
+    const listWorkspaceGrants = vi.fn()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+    const service = new OpenloopWorkspaceService(
+      remote({ listWorkspaceGrants }),
+      sessions(),
+    )
+
+    const staleRefresh = service.refresh()
+    const latestRefresh = service.refresh()
+    second.resolve({ ok: true, value: [readyGrant(['session-latest'])] })
+    await latestRefresh
+    first.resolve({ ok: true, value: [readyGrant(['session-stale'])] })
+    await staleRefresh
+
+    expect(service.grants.getSnapshot()).toEqual({
+      items: [readyGrant(['session-latest'])],
+      state: 'idle',
+      error: null,
+    })
+  })
+
+  it('does not let a stale refresh failure overwrite the latest success', async () => {
+    const first = deferred<Awaited<ReturnType<OpenloopWorkspaceRemote['listWorkspaceGrants']>>>()
+    const second = deferred<Awaited<ReturnType<OpenloopWorkspaceRemote['listWorkspaceGrants']>>>()
+    const service = new OpenloopWorkspaceService(remote({
+      listWorkspaceGrants: vi.fn()
+        .mockReturnValueOnce(first.promise)
+        .mockReturnValueOnce(second.promise),
+    }), sessions())
+
+    const staleRefresh = service.refresh()
+    const latestRefresh = service.refresh()
+    second.resolve({ ok: true, value: [readyGrant(['session-latest'])] })
+    await latestRefresh
+    first.reject(new Error('stale refresh failed'))
+    await expect(staleRefresh).rejects.toThrow('stale refresh failed')
+
+    expect(service.grants.getSnapshot()).toEqual({
+      items: [readyGrant(['session-latest'])],
+      state: 'idle',
+      error: null,
+    })
+  })
+
   it('routes Workspace authority actions without paths and preserves state on cancellation', async () => {
     const first = {
       workspaceId: 'workspace-1',
@@ -253,6 +315,53 @@ describe('Openloop browser Workspace facade', () => {
     expect(createSession).toHaveBeenCalledExactlyOnceWith({ workspaceId: 'workspace-1' })
     expect(listWorkspaceGrants).toHaveBeenCalledTimes(2)
     expect(service.list.getSnapshot().items[0]?.sessionIds).toEqual(['session-1'])
+  })
+
+  it('coalesces concurrent connections to one Workspace until create and refresh finish', async () => {
+    const createResult = deferred<never>()
+    const create = vi.fn(() => createResult.promise)
+    const listWorkspaceGrants = vi.fn()
+      .mockImplementationOnce(() => ok([readyGrant()]))
+      .mockImplementationOnce(() => ok([readyGrant(['session-1'])]))
+    const service = new OpenloopWorkspaceService(remote({ listWorkspaceGrants }), {
+      create,
+      open: vi.fn(),
+      clear: vi.fn(),
+    })
+    await service.refresh()
+
+    const first = service.connectWorkspace('workspace-1' as never)
+    const second = service.connectWorkspace('workspace-1' as never)
+    expect(second).toBe(first)
+    expect(create).toHaveBeenCalledExactlyOnceWith({ workspaceId: 'workspace-1' })
+
+    createResult.resolve('session-1' as never)
+    await expect(Promise.all([first, second])).resolves.toEqual(['session-1', 'session-1'])
+    expect(create).toHaveBeenCalledOnce()
+    expect(listWorkspaceGrants).toHaveBeenCalledTimes(2)
+  })
+
+  it('clears a failed Workspace connection so a later attempt can retry', async () => {
+    const create = vi.fn()
+      .mockRejectedValueOnce(new Error('create failed'))
+      .mockResolvedValueOnce('session-2')
+    const listWorkspaceGrants = vi.fn()
+      .mockImplementationOnce(() => ok([readyGrant()]))
+      .mockImplementationOnce(() => ok([readyGrant(['session-2'])]))
+    const service = new OpenloopWorkspaceService(remote({ listWorkspaceGrants }), {
+      create,
+      open: vi.fn(),
+      clear: vi.fn(),
+    })
+    await service.refresh()
+
+    await expect(service.connectWorkspace('workspace-1' as never))
+      .rejects.toThrow('create failed')
+    await expect(service.connectWorkspace('workspace-1' as never))
+      .resolves.toBe('session-2')
+
+    expect(create).toHaveBeenCalledTimes(2)
+    expect(listWorkspaceGrants).toHaveBeenCalledTimes(2)
   })
 
   it('rejects unknown Workspaces and refresh failures without opening an unowned session', async () => {
