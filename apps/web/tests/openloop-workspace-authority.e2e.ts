@@ -4,7 +4,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
-import type { Browser, Page, Response } from 'playwright'
+import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
@@ -62,8 +62,7 @@ async function closeAll(
   }
 }
 
-function bridgeMethodOf(response: Response): string | undefined {
-  const body = response.request().postData()
+function bridgeMethodOf(body: string | null): string | undefined {
   if (body === null) return undefined
   try {
     const value = JSON.parse(body) as { method?: unknown }
@@ -75,14 +74,42 @@ function bridgeMethodOf(response: Response): string | undefined {
   }
 }
 
+interface BrowserRequestCapture {
+  readonly method: string
+  readonly url: string
+  readonly postData: string | null
+  readonly bridgeMethod: string | undefined
+  headers: Readonly<Record<string, string>>
+}
+
+interface BrowserBridgeResponseCapture {
+  readonly method: string
+  readonly url: string
+  readonly status: number
+  headers: Readonly<Record<string, string>>
+  body: string
+}
+
+async function drainDynamicReads(reads: readonly Promise<void>[]): Promise<void> {
+  let offset = 0
+  while (offset < reads.length) {
+    const end = reads.length
+    await Promise.all(reads.slice(offset, end))
+    offset = end
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+  }
+}
+
 describe('web e2e: assembled Openloop Workspace authority', () => {
   let scaffold: WebScaffold
   let bridge: AuthenticatedUnixBridgeServer
   let browser: Browser
   let page: Page
   let tripwire: ReturnType<typeof watchConsole>
-  const browserBridgeBodies: string[] = []
-  const browserRequests: string[] = []
+  let pendingGrantId = ''
+  const browserRequests: BrowserRequestCapture[] = []
+  const browserBridgeResponses: BrowserBridgeResponseCapture[] = []
+  const requestReads: Promise<void>[] = []
   const responseReads: Promise<void>[] = []
 
   async function openHeroWorkspaceMenu(): Promise<void> {
@@ -122,7 +149,6 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
       secret: BRIDGE_SECRET,
     })
     scaffold = await launchWebScaffold({
-      openloopWorkspaceUi: true,
       agentPresets: {
         roots: [{ path: PRESET_ROOT, trust: 'system' }],
         default: 'standard',
@@ -141,14 +167,35 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     page.setDefaultTimeout(10_000)
     tripwire = watchConsole(page)
     page.on('request', (request) => {
-      const body = request.postData()
-      if (body !== null) browserRequests.push(body)
+      const postData = request.postData()
+      const capture: BrowserRequestCapture = {
+        method: request.method(),
+        url: request.url(),
+        postData,
+        bridgeMethod: bridgeMethodOf(postData),
+        headers: request.headers(),
+      }
+      browserRequests.push(capture)
+      requestReads.push(request.allHeaders().then((headers) => {
+        capture.headers = headers
+      }))
     })
     page.on('response', (response) => {
-      if (bridgeMethodOf(response) === undefined) return
-      const read = response.text()
-        .then((body) => { browserBridgeBodies.push(body) })
-        .catch(() => {})
+      const method = bridgeMethodOf(response.request().postData())
+      if (method === undefined) return
+      const capture: BrowserBridgeResponseCapture = {
+        method,
+        url: response.url(),
+        status: response.status(),
+        headers: response.headers(),
+        body: '',
+      }
+      browserBridgeResponses.push(capture)
+      const read = Promise.all([response.allHeaders(), response.text()])
+        .then(([headers, body]) => {
+          capture.headers = headers
+          capture.body = body
+        })
       responseReads.push(read)
     })
     const bootstrap = Buffer.from(BOOTSTRAP_TOKEN).toString('hex')
@@ -185,6 +232,7 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     const entries = [...scaffold.ctx.loader.entries()]
     const entry = (id: string) => entries.find(candidate => candidate.options.id === id)
     for (const id of [
+      'openloop-settings-scope',
       'openloop-workspace-client',
       'desktop-bridge-client',
       'workspace-authority',
@@ -223,11 +271,12 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     await page.getByRole('textbox', { name: /choose workspace/iu })
       .waitFor({ timeout: 10_000 })
 
-    bridge.enqueueWorkspaceAuthorization({
+    const authorization = bridge.enqueueWorkspaceAuthorization({
       outcome: 'pending',
       canonicalPath,
       displayPath,
     })
+    pendingGrantId = authorization.pendingGrantId
     await openHeroWorkspaceMenu()
     await page.getByRole('menuitem', { name: 'Add Workspace' }).click()
     const composer = page.locator(
@@ -326,12 +375,6 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     const snapshot = await captureStableAria(page, '[class*="frame"]', scaffold.workspaceCwd)
     await compareOrRefreshGolden(UI_EXPECTED, snapshot, MODE)
 
-    await Promise.all(responseReads)
-    const browserBridgeTraffic = browserBridgeBodies.join('\n')
-    expect(browserBridgeTraffic).not.toContain(canonicalPath)
-    expect(browserBridgeTraffic).not.toContain('canonicalPath')
-    expect(browserBridgeTraffic).not.toContain('pendingGrantId')
-
     expect(scaffold.ctx.sessions.get(initialSessionId)).toBeDefined()
 
     bridge.enqueueWorkspaceRevoke('cancelled')
@@ -348,6 +391,9 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     await remove.getByRole('button', { name: 'Cancel' }).click()
 
     bridge.enqueueWorkspaceRevoke('confirmed')
+    const deleteGrantCalls = bridge.calls.filter(call => call.method === 'deleteWorkspaceGrant').length
+    const completeTransactionCalls = bridge.calls
+      .filter(call => call.method === 'completeWorkspaceTransaction').length
     await openWorkspaceActions('Workspace Alpha')
     await page.getByRole('menuitem', { name: 'Remove' }).click()
     await page.getByRole('dialog', { name: 'Remove Workspace' })
@@ -355,9 +401,38 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     await expect.poll(() => scaffold.ctx.workspaceRegistry.get(workspace.id), {
       timeout: 10_000,
     }).toBeUndefined()
+    await bridge.whenCalled('deleteWorkspaceGrant', deleteGrantCalls + 1)
+    await bridge.whenCalled('completeWorkspaceTransaction', completeTransactionCalls + 1)
     expect(bridge.workspaceGrantCount()).toBe(0)
     expect(await readFile(join(canonicalPath, 'keep.txt'), 'utf8')).toBe('retained\n')
     expect(scaffold.ctx.sessions.get(initialSessionId)).toBeDefined()
+
+    await drainDynamicReads(requestReads)
+    await expect.poll(
+      () => browserBridgeResponses.length,
+      { timeout: 10_000 },
+    ).toBe(browserRequests.filter(request => request.bridgeMethod !== undefined).length)
+    await drainDynamicReads(responseReads)
+    const browserRequestTraffic = JSON.stringify(browserRequests)
+    const browserBridgeTraffic = JSON.stringify(browserBridgeResponses)
+    const domSnapshot = await page.content()
+    const forbidden = [
+      ['canonicalPath field', 'canonicalPath'],
+      ['pendingGrantId field', 'pendingGrantId'],
+      ['canonical path', canonicalPath],
+      ['pending grant id', pendingGrantId],
+      ['Bridge secret hex', Buffer.from(BRIDGE_SECRET).toString('hex')],
+      ['Bridge secret base64', Buffer.from(BRIDGE_SECRET).toString('base64')],
+      ['Bridge socket path', bridge.socketPath],
+    ] as const
+    for (const [label, value] of forbidden) {
+      expect(browserRequestTraffic, `browser requests leaked ${label}`).not.toContain(value)
+      expect(browserBridgeTraffic, `openloopDesktop responses leaked ${label}`)
+        .not.toContain(value)
+      expect(snapshot, `ARIA snapshot leaked ${label}`).not.toContain(value)
+      expect(domSnapshot, `DOM snapshot leaked ${label}`).not.toContain(value)
+    }
+
     expect(tripwire.warnings).toEqual([])
     expect(tripwire.pageErrors).toEqual([])
   }, 240_000)

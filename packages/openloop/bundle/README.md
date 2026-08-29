@@ -23,12 +23,15 @@ in the OpenLoop layer; the default DSH Web bundle remains unchanged.
 
 The first-release profile disables the inherited `cordis-client-runner` and
 `ui-cordis` rows, so only the static signed Client roster is loaded. It also
-disables the upstream settings, permission, agent-preset, and workspace Client
-owners whose broad Host calls are outside the first policy. Those surfaces
-remain absent until dedicated Host facades replace them in later tasks. The
-Openloop Desktop Bridge client supplies a profile-selected runtime adapter, so
-the shared client runtime never constructs its legacy Workspace runtime or
-calls any `workspace.*` method.
+disables the upstream settings presentation, permission, agent-preset, and
+workspace Client owners whose broad Host calls are outside the first policy.
+The presentation-free settings domain foundation is remounted under
+`openloop-settings-scope` because locale, theme, and conversation require its
+`settingsScope` service; the legacy `ui-settings` row and every legacy settings
+presentation row remain disabled. Those surfaces remain absent until dedicated
+Host facades replace them in later tasks. The Openloop Desktop Bridge client supplies a
+profile-selected runtime adapter, so the shared client runtime never constructs
+its legacy Workspace runtime or calls any `workspace.*` method.
 
 `ensureOpenloopProfile()` creates the `openloop` profile only when its
 `package.json` is absent. Once that manifest exists, the profile and all sibling

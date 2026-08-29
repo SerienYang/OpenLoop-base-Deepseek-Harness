@@ -305,7 +305,7 @@ describe('OpenLoop profile', () => {
       .toContain('credentialConsumers')
   })
 
-  it('disables Client owners whose calls are intentionally absent from the first policy', () => {
+  it('disables legacy Client rows whose calls are intentionally absent from the first policy', () => {
     const entries = openloopEntries()
     const disabled = [
       ['cordis-client-runner', '@deepseek-ai/dsh-cordis-client-runner'],
@@ -326,6 +326,8 @@ describe('OpenLoop profile', () => {
         name,
         disabled: true,
       })
+    }
+    for (const [, name] of disabled.filter(([id]) => id !== 'ui-settings')) {
       expect(enabledClientPackages()).not.toContain(name)
     }
   })
@@ -333,10 +335,15 @@ describe('OpenLoop profile', () => {
   it('enables the Openloop Workspace client while legacy Workspace and Settings rows stay disabled', () => {
     const entries = openloopEntries()
 
+    expect(entries.find(entry => entry.id === 'openloop-settings-scope')).toEqual({
+      id: 'openloop-settings-scope',
+      name: '@deepseek-ai/dsh-client-ui-settings',
+    })
     expect(entries.find(entry => entry.id === 'openloop-workspace-client')).toEqual({
       id: 'openloop-workspace-client',
       name: '@openloop/workspace-client',
     })
+    expect(enabledClientPackages()).toContain('@deepseek-ai/dsh-client-ui-settings')
     expect(enabledClientPackages()).toContain('@openloop/workspace-client')
     for (const id of [
       'ui-workspace',
@@ -634,6 +641,7 @@ describe('OpenLoop profile', () => {
       dependencies: {
         '@deepseek-ai/dsh-app-boot': 'workspace:^',
         '@deepseek-ai/dsh-base': 'workspace:^',
+        '@deepseek-ai/dsh-client-ui-settings': 'workspace:^',
         '@deepseek-ai/dsh-web-app': 'workspace:^',
         '@openloop/runtime-bootstrap': 'workspace:^',
         '@openloop/sandbox-workspace': 'workspace:^',

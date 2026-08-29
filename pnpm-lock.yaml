@@ -5619,6 +5619,9 @@ importers:
       '@deepseek-ai/dsh-base':
         specifier: workspace:^
         version: link:../../bundle/base
+      '@deepseek-ai/dsh-client-ui-settings':
+        specifier: workspace:^
+        version: link:../../client/ui-settings
       '@deepseek-ai/dsh-web-app':
         specifier: workspace:^
         version: link:../../bundle/web-app

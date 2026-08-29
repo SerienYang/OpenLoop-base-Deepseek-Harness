@@ -123,6 +123,7 @@ describe('web e2e: Openloop credential boundary', () => {
       expect(entry(id)?.disabled, `${id} must stay disabled in the Openloop profile`).toBe(true)
     }
     for (const id of [
+      'openloop-settings-scope',
       'desktop-bridge-host',
       'credentials-keychain',
       'connection',
@@ -148,14 +149,22 @@ describe('web e2e: Openloop credential boundary', () => {
         },
       }])
     expect(await page.locator('input[type="password"]').count()).toBe(0)
-    expect(await page.getByRole('button', { name: '设置', exact: true }).count()).toBe(0)
-    expect(await page.getByRole('dialog', { name: WELCOME_NOTICE_COPY.zh.title }).count()).toBe(0)
-    expect(await page.getByRole('dialog', { name: '添加一个 API Key 开始使用' }).count()).toBe(0)
-
-    const snapshot = await captureStableAria(page, '[class*="wordmark"]', scaffold.workspaceCwd)
+    const snapshot = await captureStableAria(page, '[class*="frame"]', scaffold.workspaceCwd)
     expect(snapshot).not.toContain('password')
     expect(snapshot).not.toContain('API 密钥')
     await compareOrRefreshGolden(UI_EXPECTED, snapshot, MODE)
+
+    const workspaceSettings = page.getByRole('button', { name: '设置', exact: true })
+    expect(await workspaceSettings.count()).toBe(1)
+    await workspaceSettings.click()
+    await page.getByRole('dialog', { name: 'Workspace 设置', exact: true })
+      .waitFor({ timeout: 10_000 })
+    expect(await page.getByRole('dialog', { name: '设置', exact: true }).count()).toBe(0)
+    expect(await page.getByRole('button', { name: '模型', exact: true }).count()).toBe(0)
+    expect(await page.getByRole('button', { name: '插件', exact: true }).count()).toBe(0)
+    expect(await page.getByRole('dialog', { name: WELCOME_NOTICE_COPY.zh.title }).count()).toBe(0)
+    expect(await page.getByRole('dialog', { name: '添加一个 API Key 开始使用' }).count()).toBe(0)
+
     expect(tripwire.warnings).toEqual([])
     expect(tripwire.pageErrors).toEqual([])
   })

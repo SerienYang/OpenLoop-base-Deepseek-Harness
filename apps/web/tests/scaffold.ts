@@ -203,12 +203,6 @@ export interface LaunchOptions {
    */
   openloop?: OpenloopFixtureRuntime
   /**
-   * Mount the presentation-free settingsScope foundation under a fixture ID.
-   * The shipped Openloop patch keeps every legacy Settings row disabled; an
-   * assembled UI test still needs the real scope service used by locale/theme.
-   */
-  openloopWorkspaceUi?: boolean
-  /**
    * Optional product overlay applied after the shipped Web surface and before
    * the scaffold's hermetic test patches, matching the launcher's `--patch`
    * ordering.
@@ -506,14 +500,6 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
     ...options.cordisTools === true
       ? [{ insert: [
         { id: 'tool-cordis', name: '@deepseek-ai/dsh-tool-cordis' },
-      ] }]
-      : [],
-    ...options.openloopWorkspaceUi === true
-      ? [{ insert: [
-        {
-          id: 'openloop-settings-scope',
-          name: '@deepseek-ai/dsh-client-ui-settings',
-        },
       ] }]
       : [],
     ...options.deepSeekSearch === undefined
