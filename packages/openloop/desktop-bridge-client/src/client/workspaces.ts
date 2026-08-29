@@ -113,6 +113,10 @@ export class OpenloopWorkspaceService implements IWorkspaces {
   ) {}
 
   async refresh(): Promise<void> {
+    await this.loadWorkspaceGrants()
+  }
+
+  private async loadWorkspaceGrants(): Promise<readonly WorkspaceGrantView[]> {
     const generation = ++this.refreshGeneration
     this.publish({
       ...this.grants.getSnapshot(),
@@ -127,12 +131,14 @@ export class OpenloopWorkspaceService implements IWorkspaces {
           `Openloop Workspace list failed: ${result.error.code}: ${result.error.message}`,
         )
       }
-      if (generation !== this.refreshGeneration) return
-      this.publish({
-        items: result.value,
-        state: 'idle',
-        error: null,
-      })
+      if (generation === this.refreshGeneration) {
+        this.publish({
+          items: result.value,
+          state: 'idle',
+          error: null,
+        })
+      }
+      return result.value
     } catch (reason) {
       const error = reason instanceof Error ? reason : new Error(String(reason))
       if (generation === this.refreshGeneration) {
@@ -224,8 +230,8 @@ export class OpenloopWorkspaceService implements IWorkspaces {
       workspaceId,
       ...(agentPreset === undefined ? {} : { agentPreset }),
     })
-    await this.refresh()
-    const refreshed = this.grants.getSnapshot().items.find(
+    const grants = await this.loadWorkspaceGrants()
+    const refreshed = grants.find(
       grant => grant.workspaceId === workspaceId,
     )
     if (!isRoutableGrant(refreshed) || !refreshed.sessionIds.includes(sessionId)) {

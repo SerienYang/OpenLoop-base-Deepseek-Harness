@@ -341,6 +341,54 @@ describe('Openloop browser Workspace facade', () => {
     expect(listWorkspaceGrants).toHaveBeenCalledTimes(2)
   })
 
+  it('validates concurrent connections against their own reverse-ordered refresh results', async () => {
+    const workspace2 = {
+      ...readyGrant(),
+      workspaceId: 'workspace-2',
+      name: 'Project Beta',
+      displayPath: '~/Project Beta',
+    }
+    const firstList = deferred<
+      Awaited<ReturnType<OpenloopWorkspaceRemote['listWorkspaceGrants']>>
+    >()
+    const secondList = deferred<
+      Awaited<ReturnType<OpenloopWorkspaceRemote['listWorkspaceGrants']>>
+    >()
+    const listWorkspaceGrants = vi.fn()
+      .mockImplementationOnce(() => ok([readyGrant(), workspace2]))
+      .mockReturnValueOnce(firstList.promise)
+      .mockReturnValueOnce(secondList.promise)
+    const create = vi.fn(async ({ workspaceId }: { workspaceId: string }) => (
+      workspaceId === 'workspace-1' ? 'session-1' : 'session-2'
+    ) as never)
+    const service = new OpenloopWorkspaceService(remote({ listWorkspaceGrants }), {
+      create,
+      open: vi.fn(),
+      clear: vi.fn(),
+    })
+    await service.refresh()
+
+    const firstConnection = service.connectWorkspace('workspace-1' as never)
+    const secondConnection = service.connectWorkspace('workspace-2' as never)
+    await vi.waitFor(() => { expect(listWorkspaceGrants).toHaveBeenCalledTimes(3) })
+
+    secondList.resolve({
+      ok: true,
+      value: [readyGrant(), { ...workspace2, sessionIds: ['session-2'] as never }],
+    })
+    await expect(secondConnection).resolves.toBe('session-2')
+    firstList.resolve({
+      ok: true,
+      value: [readyGrant(['session-1']), workspace2],
+    })
+
+    await expect(firstConnection).resolves.toBe('session-1')
+    expect(service.grants.getSnapshot().items).toEqual([
+      readyGrant(),
+      { ...workspace2, sessionIds: ['session-2'] },
+    ])
+  })
+
   it('clears a failed Workspace connection so a later attempt can retry', async () => {
     const create = vi.fn()
       .mockRejectedValueOnce(new Error('create failed'))
