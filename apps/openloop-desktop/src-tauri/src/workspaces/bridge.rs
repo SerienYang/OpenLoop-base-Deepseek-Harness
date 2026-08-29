@@ -98,6 +98,29 @@ pub fn install_workspace_authority_handlers(
     picker: Arc<dyn WorkspaceDirectoryPicker>,
     confirmation: Arc<dyn RevokeConfirmation>,
 ) -> Result<(), String> {
+    install_workspace_authority_handlers_with_reveal(
+        tables,
+        launch_id,
+        store,
+        journal,
+        registry,
+        picker,
+        confirmation,
+        Arc::new(reveal_workspace_in_finder),
+    )
+}
+
+#[doc(hidden)]
+pub fn install_workspace_authority_handlers_with_reveal(
+    tables: &mut BridgeDispatchTables,
+    launch_id: Uuid,
+    store: GrantStore,
+    journal: WorkspaceJournal,
+    registry: Arc<Mutex<PendingGrantRegistry>>,
+    picker: Arc<dyn WorkspaceDirectoryPicker>,
+    confirmation: Arc<dyn RevokeConfirmation>,
+    reveal_workspace: Arc<dyn Fn(&Path) -> Result<(), BridgeHandlerError> + Send + Sync + 'static>,
+) -> Result<(), String> {
     let operation_gate = registry
         .lock()
         .map_err(|_| "Workspace operation gate is unavailable".to_owned())?
@@ -344,7 +367,7 @@ pub fn install_workspace_authority_handlers(
         }
         reopen_verified_grant(&grant).map_err(|_| BridgeHandlerError::workspace_failure())?;
         cancellation
-            .commit_if_active(|| reveal_workspace_in_finder(&grant.canonical_path))
+            .commit_if_active(|| reveal_workspace(&grant.canonical_path))
             .ok_or_else(BridgeHandlerError::invalid_request)??;
         Ok(Value::Null)
     });

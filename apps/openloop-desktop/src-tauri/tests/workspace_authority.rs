@@ -24,7 +24,10 @@ use openloop_desktop_lib::{
     launcher::capture_process_identity,
     update::channel::ReleaseChannel,
     workspaces::{
-        bridge::{install_workspace_authority_handlers, install_workspace_transaction_handlers},
+        bridge::{
+            install_workspace_authority_handlers, install_workspace_authority_handlers_with_reveal,
+            install_workspace_transaction_handlers,
+        },
         confirmation::{
             confirm_workspace_revoke, AppKitWorkspaceRevokeConfirmation,
             AppKitWorkspaceRevokeConfirmationBackend, CommittedWorkspaceProjection,
@@ -1922,6 +1925,103 @@ fn native_revoke_confirmation_accepts_a_registry_title_without_a_host_grant() {
             workspace_id: "workspace-1".to_owned(),
             title: "Project Alpha".to_owned(),
         }]
+    );
+}
+
+#[test]
+fn reveal_workspace_requires_a_ready_grant_before_invoking_finder() {
+    let root = tempdir().expect("root");
+    let channel = root.path().join("channel");
+    let workspace = root.path().join("Project Alpha");
+    secure_root(&channel);
+    secure_root(&workspace);
+    let store = GrantStore::open(&channel, ReleaseChannel::Test).expect("store");
+    store
+        .commit(grant(&workspace, "workspace-1", 0), 0)
+        .expect("commit grant");
+    store
+        .update_status(
+            "workspace-1",
+            GrantStatus::Ready,
+            GrantStatus::NeedsAuthorization,
+            1,
+        )
+        .expect("make grant non-ready");
+    let journal = WorkspaceJournal::open(&channel, ReleaseChannel::Test).expect("journal");
+    let launch_id = Uuid::new_v4();
+    let revealed = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+    let reveal_calls = revealed.clone();
+    let mut tables = BridgeDispatchTables::unavailable();
+    install_workspace_authority_handlers_with_reveal(
+        &mut tables,
+        launch_id,
+        store.clone(),
+        journal,
+        Arc::new(Mutex::new(PendingGrantRegistry::new(launch_id))),
+        Arc::new(SequencePicker {
+            outcomes: Mutex::new(VecDeque::new()),
+        }),
+        Arc::new(FixedConfirmation(true)),
+        Arc::new(move |path: &Path| {
+            reveal_calls
+                .lock()
+                .expect("reveal calls")
+                .push(path.to_path_buf());
+            Ok(())
+        }),
+    )
+    .expect("authority handlers");
+    let executable = std::env::current_exe().expect("test executable");
+    let secret: Vec<u8> = (0..32).collect();
+    let peer = PeerIdentity {
+        uid: unsafe { libc::geteuid() },
+        pid: process::id(),
+    };
+    let dispatcher = AuthenticatedBridgeDispatcher::new(
+        peer.uid,
+        capture_process_identity(process::id(), &executable).expect("process identity"),
+        executable,
+        launch_id,
+        secret.clone(),
+        tables,
+    )
+    .expect("Workspace dispatcher");
+
+    let non_ready = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        1,
+        "revealWorkspace",
+        serde_json::json!({ "workspaceId": "workspace-1" }),
+    );
+    assert_eq!(non_ready["ok"], false);
+    assert_eq!(non_ready["error"]["code"], "workspace_failure");
+    assert!(revealed.lock().expect("reveal calls").is_empty());
+
+    store
+        .update_status(
+            "workspace-1",
+            GrantStatus::NeedsAuthorization,
+            GrantStatus::Ready,
+            2,
+        )
+        .expect("restore ready grant");
+    let ready = dispatch_workspace(
+        &dispatcher,
+        launch_id,
+        &secret,
+        peer,
+        2,
+        "revealWorkspace",
+        serde_json::json!({ "workspaceId": "workspace-1" }),
+    );
+    assert_eq!(ready["ok"], true);
+    assert_eq!(ready["result"], serde_json::Value::Null);
+    assert_eq!(
+        revealed.lock().expect("reveal calls").as_slice(),
+        [fs::canonicalize(&workspace).expect("canonical workspace")]
     );
 }
 

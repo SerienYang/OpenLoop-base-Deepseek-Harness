@@ -218,11 +218,15 @@ describe('OpenLoop browser API policy manifest', () => {
       'workspace.rename',
       'workspace.delete',
       'workspace.insertBefore',
+      'workspace.insertSessionBefore',
       'workspace.archiveSession',
-      'workspace.unarchiveSession',
     ]) {
       expect([method, policy.allows(method, {})]).toEqual([method, false])
     }
+    expect(policy.allows('openloopDesktop/renameWorkspace', {
+      workspaceId: 'workspace-1',
+      name: 'Renamed',
+    })).toBe(true)
   })
 
   it('lists exactly the browser facade endpoints while denying all Host-only methods', () => {
