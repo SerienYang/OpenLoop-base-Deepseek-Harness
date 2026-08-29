@@ -531,6 +531,211 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'desktopBridge',
+    summary: 'Host-only named facade; this class is never decorated or mounted as a Remote.',
+    description: 'Host-only named facade; this class is never decorated or mounted as a Remote.',
+    methods: [
+      {
+        signature: 'async resolveCredential( ref: string, signal?: AbortSignal, ): Promise<ResolvedSecretBytes | undefined>',
+        description: 'Resolve a credential for one trusted Host request. This method is never exposed through the browser Remote facade, and callers must clear the returned mutable bytes after use.',
+        parameters: [{ name: 'ref', description: 'Registered credential reference.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'Short-lived credential bytes, or `undefined` when absent.',
+      },
+      {
+        signature: 'async acknowledgeMainWebviewHealth( acknowledgement: MainWebviewHealthAcknowledgement, signal?: AbortSignal, ): Promise<void>',
+        description: 'Acknowledge the verified main-webview credential health result to native.',
+        parameters: [{ name: 'acknowledgement', description: 'Host-produced health acknowledgement.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'Resolution after native persistence.',
+      },
+      {
+        signature: 'getCandidateCredentialHealthPlan( signal?: AbortSignal, ): Promise<CandidateCredentialHealthPlan>',
+        description: 'Read the value-free credential checks required before candidate startup.',
+        parameters: [{ name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'The native candidate-health plan without credential values.',
+      },
+      {
+        signature: 'describeCredential(ref: string, signal?: AbortSignal): Promise<CredentialStatus>',
+        description: 'Read value-free native Keychain status for one reference.',
+        parameters: [{ name: 'ref', description: 'Credential reference.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'Native Keychain status.',
+      },
+      {
+        signature: 'openCredentialReplacement( ref: string, signal?: AbortSignal, ): Promise<\'saved\' | \'cancelled\'>',
+        description: 'Request the native credential replacement flow.',
+        parameters: [{ name: 'ref', description: 'Credential reference.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'Native replacement outcome.',
+      },
+      {
+        signature: 'deleteCredentialWithConfirmation( plan: { readonly reference: string readonly consumers: readonly { readonly ownerId: string readonly kind: \'model-route\' | \'plugin\' readonly display: { readonly key: string readonly values: Readonly<Record<string, string>> } }[] }, signal?: AbortSignal, ): Promise<\'deleted\' | \'cancelled\'>',
+        description: 'Forward a Host-derived deletion plan to native confirmation.',
+        parameters: [{ name: 'plan', description: 'Registry-derived reference and consumer labels.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'Native confirmation outcome.',
+      },
+      {
+        signature: 'beginWorkspaceAuthorization(signal?: AbortSignal): Promise<WorkspaceAuthorizationSelection>',
+        description: 'Open the native directory picker and create a launch-local pending grant.',
+        parameters: [{ name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'A cancelled selection or pending grant metadata.',
+      },
+      {
+        signature: 'commitWorkspaceAuthorization( pendingGrantId: string, workspaceId: string, expectedGrantGeneration: number, operationId: string, expectedCanonicalPath?: string, signal?: AbortSignal, ): Promise<CommittedWorkspaceGrant>',
+        description: 'Bind a pending native selection to a Host workspace after generation and canonical-path checks.',
+        parameters: [{ name: 'pendingGrantId', description: 'Launch-local pending grant identifier.' }, { name: 'workspaceId', description: 'Host-owned workspace identifier.' }, { name: 'expectedGrantGeneration', description: 'Native grant generation previously observed.' }, { name: 'operationId', description: 'Idempotency identifier for the authority transaction.' }, { name: 'expectedCanonicalPath', description: 'Canonical path the Host expects to bind.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'The committed workspace grant metadata.',
+      },
+      {
+        signature: 'abortWorkspaceAuthorization(pendingGrantId: string, signal?: AbortSignal): Promise<void>',
+        description: 'Discard a launch-local pending directory grant.',
+        parameters: [{ name: 'pendingGrantId', description: 'Pending grant identifier returned by native.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'Resolution after the pending capability is discarded.',
+      },
+      {
+        signature: 'getWorkspaceGrantGeneration(signal?: AbortSignal): Promise<number>',
+        description: 'Read the native generation used for compare-and-swap grant mutations.',
+        parameters: [{ name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'The current native grant generation.',
+      },
+      {
+        signature: 'inspectWorkspaceGrant( workspaceId: string, signal?: AbortSignal, ): Promise<WorkspaceGrantInspection>',
+        description: 'Inspect value-free grant state and identity validity for one workspace.',
+        parameters: [{ name: 'workspaceId', description: 'Host-owned workspace identifier.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'Grant status without exposing the underlying capability.',
+      },
+      {
+        signature: 'markWorkspaceGrantNeedsAuthorization( workspaceId: string, expectedGrantGeneration: number, operationId?: string, signal?: AbortSignal, ): Promise<number>',
+        description: 'Mark a grant unusable after validating its expected generation.',
+        parameters: [{ name: 'workspaceId', description: 'Host-owned workspace identifier.' }, { name: 'expectedGrantGeneration', description: 'Native generation previously observed.' }, { name: 'operationId', description: 'Optional authority transaction identifier.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'The committed native grant generation.',
+      },
+      {
+        signature: 'restoreWorkspaceGrantReady( workspaceId: string, expectedGrantGeneration: number, operationId: string, signal?: AbortSignal, ): Promise<number>',
+        description: 'Restore a transaction-owned grant to ready after generation validation.',
+        parameters: [{ name: 'workspaceId', description: 'Host-owned workspace identifier.' }, { name: 'expectedGrantGeneration', description: 'Native generation previously observed.' }, { name: 'operationId', description: 'Authority transaction that owns the transition.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'The committed native grant generation.',
+      },
+      {
+        signature: 'confirmWorkspaceRevoke( workspaceId: string, title: string, signal?: AbortSignal, ): Promise<\'confirmed\' | \'cancelled\'>',
+        description: 'Ask native trusted UI to confirm revoking a workspace grant.',
+        parameters: [{ name: 'workspaceId', description: 'Host-owned workspace identifier.' }, { name: 'title', description: 'Display-only workspace title shown for confirmation.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'The user\'s confirmation outcome.',
+      },
+      {
+        signature: 'markWorkspaceGrantRevoking( workspaceId: string, expectedGrantGeneration: number, operationId: string, signal?: AbortSignal, ): Promise<number>',
+        description: 'Reserve a grant for revoke using transaction and generation ownership.',
+        parameters: [{ name: 'workspaceId', description: 'Host-owned workspace identifier.' }, { name: 'expectedGrantGeneration', description: 'Native generation previously observed.' }, { name: 'operationId', description: 'Authority transaction that owns the transition.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'The committed native grant generation.',
+      },
+      {
+        signature: 'markWorkspaceGrantReauthorizing( workspaceId: string, expectedGrantGeneration: number, operationId: string, signal?: AbortSignal, ): Promise<number>',
+        description: 'Reserve a grant for reauthorization using transaction and generation ownership.',
+        parameters: [{ name: 'workspaceId', description: 'Host-owned workspace identifier.' }, { name: 'expectedGrantGeneration', description: 'Native generation previously observed.' }, { name: 'operationId', description: 'Authority transaction that owns the transition.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'The committed native grant generation.',
+      },
+      {
+        signature: 'deleteWorkspaceGrant( workspaceId: string, expectedGrantGeneration: number, operationId?: string, signal?: AbortSignal, ): Promise<number>',
+        description: 'Delete a native grant after generation and optional transaction checks.',
+        parameters: [{ name: 'workspaceId', description: 'Host-owned workspace identifier.' }, { name: 'expectedGrantGeneration', description: 'Native generation previously observed.' }, { name: 'operationId', description: 'Optional authority transaction identifier.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'The committed native grant generation.',
+      },
+      {
+        signature: 'prepareWorkspaceTransaction( input: WorkspaceTransactionInput, signal?: AbortSignal, ): Promise<WorkspaceTransactionVersion>',
+        description: 'Persist the initial authority transaction before cross-store mutation.',
+        parameters: [{ name: 'input', description: 'Transaction intent and expected durable generations.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'The prepared transaction version.',
+      },
+      {
+        signature: 'readWorkspaceTransaction(signal?: AbortSignal): Promise<WorkspaceTransaction | null>',
+        description: 'Read the durable authority recovery journal.',
+        parameters: [{ name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'The pending transaction, or `null` when no recovery is required.',
+      },
+      {
+        signature: 'advanceWorkspaceTransaction( operationId: string, expectedGeneration: number, expectedStage: WorkspaceTransactionStage, nextStage: WorkspaceTransactionStage, workspaceId?: string, signal?: AbortSignal, ): Promise<WorkspaceTransactionVersion>',
+        description: 'Advance the recovery journal through a compare-and-swap stage transition.',
+        parameters: [{ name: 'operationId', description: 'Transaction identifier.' }, { name: 'expectedGeneration', description: 'Journal generation previously observed.' }, { name: 'expectedStage', description: 'Journal stage previously observed.' }, { name: 'nextStage', description: 'Next legal recovery stage.' }, { name: 'workspaceId', description: 'Workspace id learned during the transaction, when applicable.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'The updated transaction version.',
+      },
+      {
+        signature: 'async abortWorkspaceTransaction( operationId: string, expectedGeneration: number, expectedStage: WorkspaceTransactionStage, signal?: AbortSignal, ): Promise<void>',
+        description: 'Remove a recoverable transaction only from its expected version and stage.',
+        parameters: [{ name: 'operationId', description: 'Transaction identifier.' }, { name: 'expectedGeneration', description: 'Journal generation previously observed.' }, { name: 'expectedStage', description: 'Journal stage previously observed.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'Resolution after the journal is removed.',
+      },
+      {
+        signature: 'async completeWorkspaceTransaction( operationId: string, expectedGeneration: number, expectedStage: WorkspaceTransactionStage, signal?: AbortSignal, ): Promise<void>',
+        description: 'Complete and remove a transaction after its final expected stage.',
+        parameters: [{ name: 'operationId', description: 'Transaction identifier.' }, { name: 'expectedGeneration', description: 'Journal generation previously observed.' }, { name: 'expectedStage', description: 'Final journal stage previously observed.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'Resolution after completion is persisted.',
+      },
+      {
+        signature: 'openWorkspaceFile( workspaceId: string, relativePath: string, mode: \'read\' | \'list\', signal?: AbortSignal, ): Promise<WorkspaceFileHandle>',
+        description: 'Open a file or directory beneath an authorized workspace root. Native resolves the relative path without following it outside that root.',
+        parameters: [{ name: 'workspaceId', description: 'Authorized workspace identifier.' }, { name: 'relativePath', description: 'Workspace-relative path.' }, { name: 'mode', description: 'Requested read or directory-list capability.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'An opaque native file handle.',
+      },
+      {
+        signature: 'openWorkspaceRoot( workspaceId: string, signal?: AbortSignal, ): Promise<WorkspaceFileHandle>',
+        description: 'Open the authorized root directory for a workspace.',
+        parameters: [{ name: 'workspaceId', description: 'Authorized workspace identifier.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'An opaque native directory handle.',
+      },
+      {
+        signature: 'statWorkspaceFile( handleId: string, signal?: AbortSignal, ): Promise<WorkspaceFileStat>',
+        description: 'Read metadata through an already authorized native handle.',
+        parameters: [{ name: 'handleId', description: 'Opaque native file handle.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'File metadata without an unrestricted filesystem path.',
+      },
+      {
+        signature: 'listWorkspaceFiles( handleId: string, offset: number, maxEntries: number, signal?: AbortSignal, ): Promise<WorkspaceDirectoryChunk>',
+        description: 'Read one bounded page from an authorized directory handle.',
+        parameters: [{ name: 'handleId', description: 'Opaque native directory handle.' }, { name: 'offset', description: 'Zero-based entry offset.' }, { name: 'maxEntries', description: 'Maximum entries to return.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'Directory entries and continuation metadata.',
+      },
+      {
+        signature: 'readWorkspaceFile( handleId: string, offset: number, maxBytes: number, signal?: AbortSignal, ): Promise<WorkspaceFileReadChunk>',
+        description: 'Read one bounded chunk from an authorized file handle.',
+        parameters: [{ name: 'handleId', description: 'Opaque native file handle.' }, { name: 'offset', description: 'Zero-based byte offset.' }, { name: 'maxBytes', description: 'Maximum bytes to return.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'Encoded bytes and continuation metadata.',
+      },
+      {
+        signature: 'createWorkspaceFile( workspaceId: string, relativePath: string, signal?: AbortSignal, ): Promise<WorkspaceFileHandle>',
+        description: 'Create a file beneath an authorized workspace root.',
+        parameters: [{ name: 'workspaceId', description: 'Authorized workspace identifier.' }, { name: 'relativePath', description: 'Workspace-relative path validated by native.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'An opaque handle for the created file.',
+      },
+      {
+        signature: 'beginWorkspaceAtomicWrite( workspaceId: string, relativePath: string, createIfAbsent: boolean, expectedVersion?: string, signal?: AbortSignal, ): Promise<WorkspaceFileHandle>',
+        description: 'Begin a native atomic replacement beneath an authorized workspace root.',
+        parameters: [{ name: 'workspaceId', description: 'Authorized workspace identifier.' }, { name: 'relativePath', description: 'Workspace-relative destination path.' }, { name: 'createIfAbsent', description: 'Whether a missing destination may be created.' }, { name: 'expectedVersion', description: 'Optional version required to prevent stale writes.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'An opaque write handle for staging chunks.',
+      },
+      {
+        signature: 'writeWorkspaceFileChunk( handleId: string, bytes: string, signal?: AbortSignal, ): Promise<void>',
+        description: 'Append one encoded chunk to an authorized atomic-write handle.',
+        parameters: [{ name: 'handleId', description: 'Opaque native write handle.' }, { name: 'bytes', description: 'Encoded chunk accepted by the bounded bridge protocol.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'Resolution after native staging.',
+      },
+      {
+        signature: 'commitWorkspaceAtomicWrite( handleId: string, signal?: AbortSignal, ): Promise<WorkspaceFileVersion>',
+        description: 'Atomically publish all staged chunks for a write handle.',
+        parameters: [{ name: 'handleId', description: 'Opaque native write handle.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'The committed file version.',
+      },
+      {
+        signature: 'closeWorkspaceFile(handleId: string, signal?: AbortSignal): Promise<void>',
+        description: 'Release an opaque native file, directory, or write handle.',
+        parameters: [{ name: 'handleId', description: 'Opaque native handle.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'Resolution after native cleanup.',
+      },
+      {
+        signature: 'spawnWorkspaceProcess( workspaceId: string, approvedCommand: ApprovedCommand, signal?: AbortSignal, ): Promise<WorkspaceProcessHandle>',
+        description: 'Spawn only a Host-approved command inside an authorized workspace.',
+        parameters: [{ name: 'workspaceId', description: 'Authorized workspace identifier used as confinement root.' }, { name: 'approvedCommand', description: 'Host policy result; arbitrary browser argv is not accepted.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'An opaque process handle.',
+      },
+    ],
+  },
+  {
     key: 'directoryPicker',
     summary: 'Abstract directory-picking service.',
     description: 'Abstract directory-picking service. Subclass, implement `capability()`, and load the subclass as a plugin — it registers as `ctx.directoryPicker` (one implementation per context; loading a second throws, cordis\' standard duplicate-service behavior). The capability object must be stable for the service lifetime: consumers may capture it across calls.',
@@ -566,6 +771,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         throws: ['when E2B rejects creation or the service is disposing.'],
       },
     ],
+  },
+  {
+    key: 'fileBroker',
+    summary: 'Production Cordis owner for Workspace file access.',
+    description: 'Production Cordis owner for Workspace file access.',
+    methods: [],
   },
   {
     key: 'fs',
@@ -2110,6 +2321,55 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'workspaceAuthority',
+    summary: 'Host-owned coordinator for Workspace registry rows and native directory grants.',
+    description: 'Host-owned coordinator for Workspace registry rows and native directory grants. Mutations are serialized and journaled across both durable stores; browser code receives only value-free grant projections.',
+    methods: [
+      {
+        signature: 'async list( signal: AbortSignal = new AbortController().signal, ): Promise<WorkspaceGrantView[]>',
+        description: 'Combine durable Workspace records with value-free native grant status.',
+        parameters: [{ name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'Workspace projections in registry order.',
+      },
+      {
+        signature: 'add(signal?: AbortSignal): Promise<WorkspaceGrantView | \'cancelled\'>',
+        description: 'Ask trusted native UI for a directory and atomically register its grant.',
+        parameters: [{ name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'The committed Workspace projection, or `cancelled`.',
+      },
+      {
+        signature: 'revoke(workspaceId: string, signal?: AbortSignal): Promise<\'revoked\' | \'cancelled\'>',
+        description: 'Revoke a Workspace through trusted confirmation while retaining session logs.',
+        parameters: [{ name: 'workspaceId', description: 'Workspace whose registry row and grant are targeted.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'The confirmation outcome.',
+      },
+      {
+        signature: 'reauthorize( workspaceId: string, signal?: AbortSignal, ): Promise<WorkspaceGrantView | \'cancelled\'>',
+        description: 'Replace an unusable grant through trusted native directory selection.',
+        parameters: [{ name: 'workspaceId', description: 'Existing Workspace to reauthorize.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'The ready Workspace projection, or `cancelled`.',
+      },
+      {
+        signature: 'rename( workspaceId: string, name: string, signal?: AbortSignal, ): Promise<WorkspaceGrantView>',
+        description: 'Rename a ready Workspace under the same serialized authority lease.',
+        parameters: [{ name: 'workspaceId', description: 'Workspace to rename.' }, { name: 'name', description: 'New non-blank display name.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'The updated Workspace projection.',
+      },
+      {
+        signature: 'isReady(workspaceId: string, signal?: AbortSignal): Promise<boolean>',
+        description: 'Check that both registry ownership and the native grant are ready.',
+        parameters: [{ name: 'workspaceId', description: 'Workspace to inspect.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: '`true` only while the Workspace is authorized for Host operations.',
+      },
+      {
+        signature: 'runIfReady<T>( workspaceId: string, operation: () => Promise<T>, signal?: AbortSignal, ): Promise< | { readonly allowed: false } | { readonly allowed: true; readonly value: T } >',
+        description: 'Run a Host operation while holding the authority queue after a ready check.',
+        parameters: [{ name: 'workspaceId', description: 'Workspace whose authorization gates the operation.' }, { name: 'operation', description: 'Deferred Host operation; never called when access is denied.' }, { name: 'signal', description: 'Optional request cancellation signal.' }],
+        returns: 'A denied result or the operation value.',
+      },
+    ],
+  },
+  {
     key: 'workspaceRegistry',
     summary: 'Durable workspace registry.',
     description: 'Durable workspace registry. Startup waits for `sessionPersistence`, builds one canonical-cwd header index, and completes the one-time history bootstrap before the service becomes active. The persistence dependency is mandatory so an unavailable peer can never be mistaken for an empty history and commit the initialized marker.',
@@ -2119,6 +2379,18 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Create or reuse a workspace for an existing directory. The path is canonicalized through `fs.realpath`; a nonexistent path rejects with the original error and a non-directory rejects. Repeated calls for the same canonical path return the existing entity without changing its title. A newly created workspace is prepended to the durable registry order. Different canonical paths may share a display title.',
         parameters: [{ name: 'path', description: 'Existing directory to own, in any path spelling.' }, { name: 'title', description: 'Display title used only when a new record is created.' }],
         returns: 'the existing or newly durable workspace.',
+      },
+      {
+        signature: 'catalogGeneration(): number',
+        description: 'Read the generation used to serialize structural registry mutations.',
+        parameters: [],
+        returns: 'The current durable catalog generation.',
+      },
+      {
+        signature: 'async createExpected( path: string, expectedGeneration: number, title?: string, trustedWorkspaceId?: WorkspaceId, ): Promise<{ readonly workspace: Workspace readonly created: boolean readonly generation: number }>',
+        description: 'Create or reuse a canonical directory only if the catalog generation still matches the caller\'s snapshot.',
+        parameters: [{ name: 'path', description: 'Existing directory to register.' }, { name: 'expectedGeneration', description: 'Catalog generation observed before the operation.' }, { name: 'title', description: 'Display title used only for a newly created record.' }, { name: 'trustedWorkspaceId', description: 'Host-allocated id used only for a new record.' }],
+        returns: 'The workspace, whether it was created, and the committed generation.',
       },
       {
         signature: 'get(id: WorkspaceId): Workspace | undefined',
@@ -2137,6 +2409,18 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Delete one workspace registration while retaining its directory and every session log. The durable order is updated before the table deletion; a failed table write restores the prior order and keeps the entity published. Unknown ids are an idempotent no-op for domain callers.',
         parameters: [{ name: 'id', description: 'Workspace registration to remove.' }],
         returns: '`true` when a record was deleted, `false` when it was unknown.',
+      },
+      {
+        signature: 'deleteExpected( id: WorkspaceId, expectedGeneration: number, ): Promise<{ readonly deleted: boolean; readonly generation: number }>',
+        description: 'Delete a registration only if no structural mutation has raced the caller. The directory and session logs are retained.',
+        parameters: [{ name: 'id', description: 'Workspace registration to remove.' }, { name: 'expectedGeneration', description: 'Catalog generation observed before the operation.' }],
+        returns: 'Whether a record was deleted and the committed generation.',
+      },
+      {
+        signature: 'renameExpected( id: WorkspaceId, title: string, expectedGeneration: number, ): Promise<{ readonly workspace: Workspace; readonly generation: number }>',
+        description: 'Rename a known workspace only if the catalog generation matches.',
+        parameters: [{ name: 'id', description: 'Workspace registration to rename.' }, { name: 'title', description: 'New display title.' }, { name: 'expectedGeneration', description: 'Catalog generation observed before the operation.' }],
+        returns: 'The renamed workspace and current generation.',
       },
       {
         signature: 'insertBefore(id: WorkspaceId, beforeId?: WorkspaceId): Promise<readonly WorkspaceId[]>',
@@ -2671,6 +2955,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export class ApprovalService extends Service {\n    static Config: z<Config>;\n    constructor(ctx: Context, public config: Config);\n    setPolicy(agent: Agent, policy: ApprovalPolicy): void;\n    async request(req: ApprovalRequest): Promise<ApprovalOutcome>;\n    overrideOf(session: Session): ApprovalPolicy | undefined;\n}',
   },
   {
+    name: 'ApprovedCommand',
+    declaration: 'export interface ApprovedCommand {\n    readonly program: string;\n    readonly args: readonly string[];\n}',
+  },
+  {
     name: 'AskUserQuestionAnswer',
     declaration: 'export interface AskUserQuestionAnswer {\n    answers: AskUserQuestionAnswerItem[];\n}',
   },
@@ -2739,8 +3027,20 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type Branded<B extends string> = string & {\n    readonly [BRAND]: B;\n};',
   },
   {
+    name: 'CancelledWorkspaceGrant',
+    declaration: 'export interface CancelledWorkspaceGrant {\n    readonly outcome: \'cancelled\';\n}',
+  },
+  {
     name: 'CancelOptions',
     declaration: 'export interface CancelOptions {\n    keepInbox?: boolean | undefined;\n}',
+  },
+  {
+    name: 'CandidateCredentialHealthPlan',
+    declaration: 'export interface CandidateCredentialHealthPlan {\n    readonly migrationTransactionId: string | null;\n    readonly references: readonly string[];\n}',
+  },
+  {
+    name: 'CandidateCredentialHealthProof',
+    declaration: 'export interface CandidateCredentialHealthProof {\n    readonly migrationTransactionId: string | null;\n    readonly ready: boolean;\n    readonly checkedCount: number;\n}',
   },
   {
     name: 'ClientResponse',
@@ -2809,6 +3109,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'CommandResult',
     declaration: 'export type CommandResult = {\n    readonly kind: \'success\';\n    readonly text?: string;\n    readonly sourceEventSeq?: number;\n} | {\n    readonly kind: \'error\';\n    readonly text: string;\n};',
+  },
+  {
+    name: 'CommittedWorkspaceGrant',
+    declaration: 'export interface CommittedWorkspaceGrant {\n    readonly workspaceId: string;\n    readonly displayPath?: string;\n    readonly state: WorkspaceGrantView[\'state\'];\n}',
   },
   {
     name: 'CompactionAgentContext',
@@ -2925,6 +3229,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'CredentialRef',
     declaration: 'export type CredentialRef = Branded<\'CredentialRef\'>;',
+  },
+  {
+    name: 'CredentialStatus',
+    declaration: 'export interface CredentialStatus {\n    readonly configured: boolean;\n    readonly writable: boolean;\n    readonly source?: \'keychain\' | \'legacy-file\' | \'environment\';\n}',
   },
   {
     name: 'DiffCallView',
@@ -3363,6 +3671,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface LspRange {\n    readonly start: LspPosition;\n    readonly end: LspPosition;\n}',
   },
   {
+    name: 'MainWebviewHealthAcknowledgement',
+    declaration: 'export interface MainWebviewHealthAcknowledgement {\n    readonly launchId: string;\n    readonly coreManifestSha256: string;\n    readonly openloopDataVersion: number;\n    readonly dshDataVersion: number;\n    readonly credentialHealth?: CandidateCredentialHealthProof;\n}',
+  },
+  {
     name: 'ManualCompactAgentContext',
     declaration: 'export interface ManualCompactAgentContext extends CompactionAgentContext {\n    runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;\n}',
   },
@@ -3477,6 +3789,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'OneShotSubagentDescriptorData',
     declaration: 'export interface OneShotSubagentDescriptorData extends SubagentDescriptorBase {\n    readonly mode: \'one-shot\';\n    readonly label?: string;\n}',
+  },
+  {
+    name: 'PendingWorkspaceGrant',
+    declaration: 'export interface PendingWorkspaceGrant {\n    readonly outcome: \'pending\';\n    readonly pendingGrantId: string;\n    readonly path: string;\n}',
   },
   {
     name: 'PermissionSelect',
@@ -3623,6 +3939,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type ResolvedRetryPolicy = ResolvedNormalRetryPolicy | ResolvedAlwaysRetryPolicy;',
   },
   {
+    name: 'ResolvedSecretBytes',
+    declaration: 'export interface ResolvedSecretBytes {\n    readonly bytes: SecretBytes;\n    readonly source: \'keychain\' | \'legacy-file\';\n}',
+  },
+  {
     name: 'ResolvedSubagentStartRequest',
     declaration: 'export interface ResolvedSubagentStartRequest extends SubagentStartRequest {\n    readonly descriptor: SubagentDescriptorData;\n}',
   },
@@ -3725,6 +4045,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SearchResultView',
     declaration: 'export type SearchResultView = SearchMatchesResultView | SearchPathsResultView;',
+  },
+  {
+    name: 'SecretBytes',
+    declaration: 'export type SecretBytes = number[];',
   },
   {
     name: 'ServerResponse',
@@ -4653,6 +4977,58 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'WorkflowStopReason',
     declaration: 'export type WorkflowStopReason = \'completed\' | \'cancelled\' | \'error\';',
+  },
+  {
+    name: 'WorkspaceAuthorizationSelection',
+    declaration: 'export type WorkspaceAuthorizationSelection = PendingWorkspaceGrant | CancelledWorkspaceGrant;',
+  },
+  {
+    name: 'WorkspaceDirectoryChunk',
+    declaration: 'export interface WorkspaceDirectoryChunk {\n    readonly entries: readonly WorkspaceDirectoryEntry[];\n    readonly nextOffset: number;\n    readonly eof: boolean;\n}',
+  },
+  {
+    name: 'WorkspaceDirectoryEntry',
+    declaration: 'export interface WorkspaceDirectoryEntry {\n    readonly name: string;\n    readonly kind: WorkspaceFileHandle[\'kind\'] | \'symlink\' | \'other\';\n    readonly size: number;\n    readonly version: string;\n}',
+  },
+  {
+    name: 'WorkspaceFileHandle',
+    declaration: 'export interface WorkspaceFileHandle {\n    readonly handleId: string;\n    readonly kind: \'regular\' | \'directory\';\n    readonly version?: string;\n}',
+  },
+  {
+    name: 'WorkspaceFileReadChunk',
+    declaration: 'export interface WorkspaceFileReadChunk {\n    readonly bytes: string;\n    readonly nextOffset: number;\n    readonly eof: boolean;\n}',
+  },
+  {
+    name: 'WorkspaceFileStat',
+    declaration: 'export interface WorkspaceFileStat {\n    readonly kind: WorkspaceFileHandle[\'kind\'];\n    readonly size: number;\n    readonly version?: string;\n}',
+  },
+  {
+    name: 'WorkspaceFileVersion',
+    declaration: 'export interface WorkspaceFileVersion {\n    readonly version: string;\n}',
+  },
+  {
+    name: 'WorkspaceGrantInspection',
+    declaration: 'export interface WorkspaceGrantInspection {\n    readonly exists: boolean;\n    readonly generation?: number;\n    readonly operationId?: string;\n    readonly identityValid: boolean;\n    readonly displayPath?: string;\n    readonly status?: WorkspaceGrantView[\'state\'] | \'reauthorizing\';\n    readonly effectiveStatus?: WorkspaceGrantView[\'state\'];\n}',
+  },
+  {
+    name: 'WorkspaceProcessHandle',
+    declaration: 'export interface WorkspaceProcessHandle {\n    readonly handleId: string;\n}',
+  },
+  {
+    name: 'WorkspaceTransactionInput',
+    declaration: 'export interface WorkspaceTransactionInput {\n    readonly operationId?: string;\n    readonly kind: WorkspaceTransactionKind;\n    readonly workspaceId?: string;\n    readonly expectedCatalogGeneration: number;\n    readonly expectedGrantGeneration: number;\n    readonly stage: WorkspaceTransactionStage;\n}',
+  },
+  {
+    name: 'WorkspaceTransactionKind',
+    declaration: 'export type WorkspaceTransactionKind = \'add\' | \'revoke\' | \'reauthorize\';',
+  },
+  {
+    name: 'WorkspaceTransactionStage',
+    declaration: 'export type WorkspaceTransactionStage = \'prepared\' | \'registry-committed\' | \'grant-committed\' | \'revoke-prepared\' | \'registry-deleted\' | \'grant-deleted\' | \'reauthorize-prepared\' | \'authorization-failed\';',
+  },
+  {
+    name: 'WorkspaceTransactionVersion',
+    declaration: 'export interface WorkspaceTransactionVersion {\n    readonly operationId: string;\n    readonly generation: number;\n    readonly stage: WorkspaceTransactionStage;\n}',
   },
 ]
 

@@ -175,10 +175,23 @@ export class WorkspaceRegistry extends Service {
     return result.workspace
   }
 
+  /**
+   * Read the generation used to serialize structural registry mutations.
+   * @returns The current durable catalog generation.
+   */
   catalogGeneration(): number {
     return this.requireState().generation
   }
 
+  /**
+   * Create or reuse a canonical directory only if the catalog generation still
+   * matches the caller's snapshot.
+   * @param path - Existing directory to register.
+   * @param expectedGeneration - Catalog generation observed before the operation.
+   * @param title - Display title used only for a newly created record.
+   * @param trustedWorkspaceId - Host-allocated id used only for a new record.
+   * @returns The workspace, whether it was created, and the committed generation.
+   */
   async createExpected(
     path: string,
     expectedGeneration: number,
@@ -236,6 +249,13 @@ export class WorkspaceRegistry extends Service {
     return this.enqueueOperation(() => this.deleteKnown(id))
   }
 
+  /**
+   * Delete a registration only if no structural mutation has raced the caller.
+   * The directory and session logs are retained.
+   * @param id - Workspace registration to remove.
+   * @param expectedGeneration - Catalog generation observed before the operation.
+   * @returns Whether a record was deleted and the committed generation.
+   */
   deleteExpected(
     id: WorkspaceId,
     expectedGeneration: number,
@@ -247,6 +267,13 @@ export class WorkspaceRegistry extends Service {
     })
   }
 
+  /**
+   * Rename a known workspace only if the catalog generation matches.
+   * @param id - Workspace registration to rename.
+   * @param title - New display title.
+   * @param expectedGeneration - Catalog generation observed before the operation.
+   * @returns The renamed workspace and current generation.
+   */
   renameExpected(
     id: WorkspaceId,
     title: string,

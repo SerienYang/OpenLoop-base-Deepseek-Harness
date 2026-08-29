@@ -112,8 +112,8 @@ export class WorkspaceFileBroker {
 
   list(
     handleId: string,
-    offset = 0,
-    maxEntries = MAX_DIRECTORY_ENTRIES,
+    offset: number = 0,
+    maxEntries: number = MAX_DIRECTORY_ENTRIES,
     signal?: AbortSignal,
   ): Promise<WorkspaceDirectoryChunk> {
     return this.port.listWorkspaceFiles(
@@ -127,7 +127,7 @@ export class WorkspaceFileBroker {
   async read(
     handleId: string,
     offset: number,
-    maxBytes = MAX_FILE_CHUNK_BYTES,
+    maxBytes: number = MAX_FILE_CHUNK_BYTES,
     signal?: AbortSignal,
   ): Promise<WorkspaceReadChunk> {
     const result = await this.port.readWorkspaceFile(

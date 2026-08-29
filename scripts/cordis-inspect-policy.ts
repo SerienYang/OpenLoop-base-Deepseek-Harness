@@ -26,6 +26,7 @@ export const CORDIS_CONTEXT_SCAN_EXEMPTIONS: Readonly<Record<string, string>> = 
   launchEnvironment: 'Launcher-provided environment snapshot.',
   browserApiPolicy: 'Product browser boundary enforced by transport dispatchers, not a model-visible service.',
   connection: 'Client interface service whose implementation has a different declaration name.',
+  credentialConsumers: 'Host-only credential ownership registry; model calls use reviewed service facades.',
   appShell: 'Client browser service.',
   settingsScope: 'Client settings transport service.',
   chatFileMentions: 'Client slot accessor.',
@@ -37,12 +38,17 @@ export const CORDIS_CONTEXT_SCAN_EXEMPTIONS: Readonly<Record<string, string>> = 
   locale: 'Client locale service.',
   modelDirectories: 'Client model directory service.',
   modules: 'Client module service.',
+  openloopCredentialOperations:
+    'Host credential-operation implementation reached only through the reviewed desktopBridge facade.',
+  openloopWorkspaces: 'OpenLoop Client Workspace state service, absent from the Host catalog.',
   remote: 'Client gateway accessor.',
   sessionLogDownload: 'Client session export controller.',
   inputTriggers: 'Client input trigger service.',
   timer: 'Client dynamic-package timer service.',
   slots: 'Client slot registry.',
   theme: 'Client theme service.',
+  workspaceRuntimeAdapter:
+    'Profile-selected Client Workspace factory, absent from the Host catalog.',
   workspaces: 'Client workspace service.',
 }
 
@@ -351,10 +357,53 @@ const RUNTIME_TYPE_EXEMPTIONS = Object.fromEntries([
   'z.core.ToJSONSchemaParams',
 ].map(name => [name, 'Included in the model-visible runtime API type closure.']))
 
+const OPENLOOP_HOST_TYPE_EXEMPTIONS: Readonly<Record<string, string>> = {
+  ApprovedCommand: 'Reviewed process-launch DTO owned by @openloop/desktop-bridge-host.',
+  CandidateCredentialHealthPlan:
+    'Value-free startup health-check plan owned by @openloop/desktop-bridge-host.',
+  CommittedWorkspaceGrant:
+    'Native Workspace grant commit receipt owned by @openloop/desktop-bridge-host.',
+  CredentialStatus:
+    'Value-free native credential status owned by @openloop/desktop-bridge-host.',
+  MainWebviewHealthAcknowledgement:
+    'Host-to-native startup acknowledgement owned by @openloop/desktop-bridge-host.',
+  ResolvedSecretBytes:
+    'Host-only short-lived credential transport owned by @openloop/desktop-bridge-host.',
+  WorkspaceAuthorizationSelection:
+    'Trusted native directory-picker result owned by @openloop/desktop-bridge-host.',
+  WorkspaceDirectoryChunk:
+    'Bounded native directory-page result owned by @openloop/desktop-bridge-host.',
+  WorkspaceFileHandle:
+    'Opaque authorized filesystem handle owned by @openloop/desktop-bridge-host.',
+  WorkspaceFileReadChunk:
+    'Bounded native file-read result owned by @openloop/desktop-bridge-host.',
+  WorkspaceFileStat:
+    'Authorized file metadata result owned by @openloop/desktop-bridge-host.',
+  WorkspaceFileVersion:
+    'Native optimistic-write version owned by @openloop/desktop-bridge-host.',
+  WorkspaceGrantInspection:
+    'Value-free native grant inspection owned by @openloop/desktop-bridge-host.',
+  WorkspaceGrantView:
+    'Browser-safe Workspace projection owned by the OpenLoop bridge and authority contracts.',
+  WorkspaceProcessHandle:
+    'Opaque authorized process handle owned by @openloop/desktop-bridge-host.',
+  WorkspaceTransaction:
+    'Durable Workspace recovery journal owned by @openloop/desktop-bridge-host.',
+  WorkspaceTransactionInput:
+    'Workspace recovery-journal preparation input owned by @openloop/desktop-bridge-host.',
+  WorkspaceTransactionStage:
+    'Workspace recovery state-machine stage owned by @openloop/desktop-bridge-host.',
+  WorkspaceTransactionVersion:
+    'Workspace recovery compare-and-swap version owned by @openloop/desktop-bridge-host.',
+}
+
 export const CORDIS_INSPECT_POLICY: CordisCatalogPolicy = {
   linkedTypePages: {},
   foundationTypeNames: FOUNDATION_TYPE_NAMES,
-  typeLinkExemptions: RUNTIME_TYPE_EXEMPTIONS,
+  typeLinkExemptions: {
+    ...RUNTIME_TYPE_EXEMPTIONS,
+    ...OPENLOOP_HOST_TYPE_EXEMPTIONS,
+  },
   runtimeServiceExclusions: new Set(['cordisInspect', 'dynamicCordisRunner', 'runtimeBootstrap']),
   runtimeServices: [{
     key: 'timer',

@@ -15,6 +15,7 @@ import {
 import type {
   PersistedGrantStatus,
   TransactionVersion,
+  WorkspaceGrantView,
   WorkspaceTransaction,
 } from './types.ts'
 
@@ -231,6 +232,11 @@ function recoveryPort(
   }
 }
 
+/**
+ * Host-owned coordinator for Workspace registry rows and native directory
+ * grants. Mutations are serialized and journaled across both durable stores;
+ * browser code receives only value-free grant projections.
+ */
 export class WorkspaceAuthorityService extends Service {
   static inject = inject
   private readonly authority: WorkspaceAuthority
@@ -255,7 +261,14 @@ export class WorkspaceAuthorityService extends Service {
     }
   }
 
-  async list(signal: AbortSignal = new AbortController().signal) {
+  /**
+   * Combine durable Workspace records with value-free native grant status.
+   * @param signal - Optional request cancellation signal.
+   * @returns Workspace projections in registry order.
+   */
+  async list(
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<WorkspaceGrantView[]> {
     signal.throwIfAborted()
     return await Promise.all(this.registry.list().map(async (workspace) => {
       const grant = await this.bridge.inspectWorkspaceGrant(workspace.id, signal)
@@ -282,31 +295,78 @@ export class WorkspaceAuthorityService extends Service {
     }))
   }
 
-  add(signal?: AbortSignal) {
+  /**
+   * Ask trusted native UI for a directory and atomically register its grant.
+   * @param signal - Optional request cancellation signal.
+   * @returns The committed Workspace projection, or `cancelled`.
+   */
+  add(signal?: AbortSignal): Promise<WorkspaceGrantView | 'cancelled'> {
     return this.authority.add(signal)
   }
 
-  revoke(workspaceId: string, signal?: AbortSignal) {
+  /**
+   * Revoke a Workspace through trusted confirmation while retaining session logs.
+   * @param workspaceId - Workspace whose registry row and grant are targeted.
+   * @param signal - Optional request cancellation signal.
+   * @returns The confirmation outcome.
+   */
+  revoke(workspaceId: string, signal?: AbortSignal): Promise<'revoked' | 'cancelled'> {
     return this.authority.revoke(workspaceId, signal)
   }
 
-  reauthorize(workspaceId: string, signal?: AbortSignal) {
+  /**
+   * Replace an unusable grant through trusted native directory selection.
+   * @param workspaceId - Existing Workspace to reauthorize.
+   * @param signal - Optional request cancellation signal.
+   * @returns The ready Workspace projection, or `cancelled`.
+   */
+  reauthorize(
+    workspaceId: string,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceGrantView | 'cancelled'> {
     return this.authority.reauthorize(workspaceId, signal)
   }
 
-  rename(workspaceId: string, name: string, signal?: AbortSignal) {
+  /**
+   * Rename a ready Workspace under the same serialized authority lease.
+   * @param workspaceId - Workspace to rename.
+   * @param name - New non-blank display name.
+   * @param signal - Optional request cancellation signal.
+   * @returns The updated Workspace projection.
+   */
+  rename(
+    workspaceId: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceGrantView> {
     return this.authority.rename(workspaceId, name, signal)
   }
 
-  isReady(workspaceId: string, signal?: AbortSignal) {
+  /**
+   * Check that both registry ownership and the native grant are ready.
+   * @param workspaceId - Workspace to inspect.
+   * @param signal - Optional request cancellation signal.
+   * @returns `true` only while the Workspace is authorized for Host operations.
+   */
+  isReady(workspaceId: string, signal?: AbortSignal): Promise<boolean> {
     return this.authority.isReady(workspaceId, signal)
   }
 
+  /**
+   * Run a Host operation while holding the authority queue after a ready check.
+   * @param workspaceId - Workspace whose authorization gates the operation.
+   * @param operation - Deferred Host operation; never called when access is denied.
+   * @param signal - Optional request cancellation signal.
+   * @returns A denied result or the operation value.
+   */
   runIfReady<T>(
     workspaceId: string,
     operation: () => Promise<T>,
     signal?: AbortSignal,
-  ) {
+  ): Promise<
+    | { readonly allowed: false }
+    | { readonly allowed: true; readonly value: T }
+  > {
     return this.authority.runIfReady(workspaceId, operation, signal)
   }
 }

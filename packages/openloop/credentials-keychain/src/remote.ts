@@ -25,11 +25,29 @@ export interface KeychainCredentialBridge {
 
 /** Operations exposed indirectly through the browser-safe desktop facade. */
 export interface CredentialBrowserOperations {
+  /**
+   * Describe a registered reference without returning plaintext.
+   * @param reference - Browser-supplied credential reference.
+   * @param signal - Optional request cancellation signal.
+   * @returns Value-free credential status.
+   */
   describeCredential(reference: string, signal?: AbortSignal): Promise<CredentialInfo>
+  /**
+   * Open native replacement UI for a registered, writable reference.
+   * @param reference - Browser-supplied credential reference.
+   * @param signal - Optional request cancellation signal.
+   * @returns Native sheet outcome.
+   */
   openCredentialReplacement(
     reference: string,
     signal?: AbortSignal,
   ): Promise<'saved' | 'cancelled'>
+  /**
+   * Ask native confirmation to delete a registered, writable reference.
+   * @param reference - Browser-supplied credential reference.
+   * @param signal - Optional request cancellation signal.
+   * @returns Native confirmation outcome.
+   */
   deleteCredential(reference: string, signal?: AbortSignal): Promise<'deleted' | 'cancelled'>
 }
 

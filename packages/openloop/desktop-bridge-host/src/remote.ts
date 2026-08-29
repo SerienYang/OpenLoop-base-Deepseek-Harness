@@ -277,6 +277,14 @@ export class OpenloopDesktopHostClient {
     this.#client = client
   }
 
+  /**
+   * Resolve a credential for one trusted Host request. This method is never
+   * exposed through the browser Remote facade, and callers must clear the
+   * returned mutable bytes after use.
+   * @param ref - Registered credential reference.
+   * @param signal - Optional request cancellation signal.
+   * @returns Short-lived credential bytes, or `undefined` when absent.
+   */
   async resolveCredential(
     ref: string,
     signal?: AbortSignal,
@@ -289,6 +297,12 @@ export class OpenloopDesktopHostClient {
     return result ?? undefined
   }
 
+  /**
+   * Acknowledge the verified main-webview credential health result to native.
+   * @param acknowledgement - Host-produced health acknowledgement.
+   * @param signal - Optional request cancellation signal.
+   * @returns Resolution after native persistence.
+   */
   async acknowledgeMainWebviewHealth(
     acknowledgement: MainWebviewHealthAcknowledgement,
     signal?: AbortSignal,
@@ -300,6 +314,11 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Read the value-free credential checks required before candidate startup.
+   * @param signal - Optional request cancellation signal.
+   * @returns The native candidate-health plan without credential values.
+   */
   getCandidateCredentialHealthPlan(
     signal?: AbortSignal,
   ): Promise<CandidateCredentialHealthPlan> {
@@ -356,6 +375,11 @@ export class OpenloopDesktopHostClient {
     return this.#client.call('unsetCredential', plan, signal)
   }
 
+  /**
+   * Open the native directory picker and create a launch-local pending grant.
+   * @param signal - Optional request cancellation signal.
+   * @returns A cancelled selection or pending grant metadata.
+   */
   beginWorkspaceAuthorization(signal?: AbortSignal): Promise<WorkspaceAuthorizationSelection> {
     return this.#client.call<WorkspaceAuthorizationSelection>(
       'beginWorkspaceAuthorization',
@@ -364,6 +388,17 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Bind a pending native selection to a Host workspace after generation and
+   * canonical-path checks.
+   * @param pendingGrantId - Launch-local pending grant identifier.
+   * @param workspaceId - Host-owned workspace identifier.
+   * @param expectedGrantGeneration - Native grant generation previously observed.
+   * @param operationId - Idempotency identifier for the authority transaction.
+   * @param expectedCanonicalPath - Canonical path the Host expects to bind.
+   * @param signal - Optional request cancellation signal.
+   * @returns The committed workspace grant metadata.
+   */
   commitWorkspaceAuthorization(
     pendingGrantId: string,
     workspaceId: string,
@@ -385,14 +420,31 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Discard a launch-local pending directory grant.
+   * @param pendingGrantId - Pending grant identifier returned by native.
+   * @param signal - Optional request cancellation signal.
+   * @returns Resolution after the pending capability is discarded.
+   */
   abortWorkspaceAuthorization(pendingGrantId: string, signal?: AbortSignal): Promise<void> {
     return this.#client.call<void>('abortWorkspaceAuthorization', { pendingGrantId }, signal)
   }
 
+  /**
+   * Read the native generation used for compare-and-swap grant mutations.
+   * @param signal - Optional request cancellation signal.
+   * @returns The current native grant generation.
+   */
   getWorkspaceGrantGeneration(signal?: AbortSignal): Promise<number> {
     return this.#client.call<number>('getWorkspaceGrantGeneration', null, signal)
   }
 
+  /**
+   * Inspect value-free grant state and identity validity for one workspace.
+   * @param workspaceId - Host-owned workspace identifier.
+   * @param signal - Optional request cancellation signal.
+   * @returns Grant status without exposing the underlying capability.
+   */
   inspectWorkspaceGrant(
     workspaceId: string,
     signal?: AbortSignal,
@@ -400,6 +452,14 @@ export class OpenloopDesktopHostClient {
     return this.#client.call('inspectWorkspaceGrant', { workspaceId }, signal)
   }
 
+  /**
+   * Mark a grant unusable after validating its expected generation.
+   * @param workspaceId - Host-owned workspace identifier.
+   * @param expectedGrantGeneration - Native generation previously observed.
+   * @param operationId - Optional authority transaction identifier.
+   * @param signal - Optional request cancellation signal.
+   * @returns The committed native grant generation.
+   */
   markWorkspaceGrantNeedsAuthorization(
     workspaceId: string,
     expectedGrantGeneration: number,
@@ -417,6 +477,14 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Restore a transaction-owned grant to ready after generation validation.
+   * @param workspaceId - Host-owned workspace identifier.
+   * @param expectedGrantGeneration - Native generation previously observed.
+   * @param operationId - Authority transaction that owns the transition.
+   * @param signal - Optional request cancellation signal.
+   * @returns The committed native grant generation.
+   */
   restoreWorkspaceGrantReady(
     workspaceId: string,
     expectedGrantGeneration: number,
@@ -430,6 +498,13 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Ask native trusted UI to confirm revoking a workspace grant.
+   * @param workspaceId - Host-owned workspace identifier.
+   * @param title - Display-only workspace title shown for confirmation.
+   * @param signal - Optional request cancellation signal.
+   * @returns The user's confirmation outcome.
+   */
   confirmWorkspaceRevoke(
     workspaceId: string,
     title: string,
@@ -438,6 +513,14 @@ export class OpenloopDesktopHostClient {
     return this.#client.call('confirmWorkspaceRevoke', { title, workspaceId }, signal)
   }
 
+  /**
+   * Reserve a grant for revoke using transaction and generation ownership.
+   * @param workspaceId - Host-owned workspace identifier.
+   * @param expectedGrantGeneration - Native generation previously observed.
+   * @param operationId - Authority transaction that owns the transition.
+   * @param signal - Optional request cancellation signal.
+   * @returns The committed native grant generation.
+   */
   markWorkspaceGrantRevoking(
     workspaceId: string,
     expectedGrantGeneration: number,
@@ -451,6 +534,14 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Reserve a grant for reauthorization using transaction and generation ownership.
+   * @param workspaceId - Host-owned workspace identifier.
+   * @param expectedGrantGeneration - Native generation previously observed.
+   * @param operationId - Authority transaction that owns the transition.
+   * @param signal - Optional request cancellation signal.
+   * @returns The committed native grant generation.
+   */
   markWorkspaceGrantReauthorizing(
     workspaceId: string,
     expectedGrantGeneration: number,
@@ -464,6 +555,14 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Delete a native grant after generation and optional transaction checks.
+   * @param workspaceId - Host-owned workspace identifier.
+   * @param expectedGrantGeneration - Native generation previously observed.
+   * @param operationId - Optional authority transaction identifier.
+   * @param signal - Optional request cancellation signal.
+   * @returns The committed native grant generation.
+   */
   deleteWorkspaceGrant(
     workspaceId: string,
     expectedGrantGeneration: number,
@@ -481,6 +580,12 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Persist the initial authority transaction before cross-store mutation.
+   * @param input - Transaction intent and expected durable generations.
+   * @param signal - Optional request cancellation signal.
+   * @returns The prepared transaction version.
+   */
   prepareWorkspaceTransaction(
     input: WorkspaceTransactionInput,
     signal?: AbortSignal,
@@ -488,10 +593,25 @@ export class OpenloopDesktopHostClient {
     return this.#client.call('prepareWorkspaceTransaction', input, signal)
   }
 
+  /**
+   * Read the durable authority recovery journal.
+   * @param signal - Optional request cancellation signal.
+   * @returns The pending transaction, or `null` when no recovery is required.
+   */
   readWorkspaceTransaction(signal?: AbortSignal): Promise<WorkspaceTransaction | null> {
     return this.#client.call('readWorkspaceTransaction', null, signal)
   }
 
+  /**
+   * Advance the recovery journal through a compare-and-swap stage transition.
+   * @param operationId - Transaction identifier.
+   * @param expectedGeneration - Journal generation previously observed.
+   * @param expectedStage - Journal stage previously observed.
+   * @param nextStage - Next legal recovery stage.
+   * @param workspaceId - Workspace id learned during the transaction, when applicable.
+   * @param signal - Optional request cancellation signal.
+   * @returns The updated transaction version.
+   */
   advanceWorkspaceTransaction(
     operationId: string,
     expectedGeneration: number,
@@ -513,6 +633,14 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Remove a recoverable transaction only from its expected version and stage.
+   * @param operationId - Transaction identifier.
+   * @param expectedGeneration - Journal generation previously observed.
+   * @param expectedStage - Journal stage previously observed.
+   * @param signal - Optional request cancellation signal.
+   * @returns Resolution after the journal is removed.
+   */
   async abortWorkspaceTransaction(
     operationId: string,
     expectedGeneration: number,
@@ -526,6 +654,14 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Complete and remove a transaction after its final expected stage.
+   * @param operationId - Transaction identifier.
+   * @param expectedGeneration - Journal generation previously observed.
+   * @param expectedStage - Final journal stage previously observed.
+   * @param signal - Optional request cancellation signal.
+   * @returns Resolution after completion is persisted.
+   */
   async completeWorkspaceTransaction(
     operationId: string,
     expectedGeneration: number,
@@ -539,6 +675,15 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Open a file or directory beneath an authorized workspace root.
+   * Native resolves the relative path without following it outside that root.
+   * @param workspaceId - Authorized workspace identifier.
+   * @param relativePath - Workspace-relative path.
+   * @param mode - Requested read or directory-list capability.
+   * @param signal - Optional request cancellation signal.
+   * @returns An opaque native file handle.
+   */
   openWorkspaceFile(
     workspaceId: string,
     relativePath: string,
@@ -552,6 +697,12 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Open the authorized root directory for a workspace.
+   * @param workspaceId - Authorized workspace identifier.
+   * @param signal - Optional request cancellation signal.
+   * @returns An opaque native directory handle.
+   */
   openWorkspaceRoot(
     workspaceId: string,
     signal?: AbortSignal,
@@ -563,6 +714,12 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Read metadata through an already authorized native handle.
+   * @param handleId - Opaque native file handle.
+   * @param signal - Optional request cancellation signal.
+   * @returns File metadata without an unrestricted filesystem path.
+   */
   statWorkspaceFile(
     handleId: string,
     signal?: AbortSignal,
@@ -570,6 +727,14 @@ export class OpenloopDesktopHostClient {
     return this.#client.call<WorkspaceFileStat>('statWorkspaceFile', { handleId }, signal)
   }
 
+  /**
+   * Read one bounded page from an authorized directory handle.
+   * @param handleId - Opaque native directory handle.
+   * @param offset - Zero-based entry offset.
+   * @param maxEntries - Maximum entries to return.
+   * @param signal - Optional request cancellation signal.
+   * @returns Directory entries and continuation metadata.
+   */
   listWorkspaceFiles(
     handleId: string,
     offset: number,
@@ -583,6 +748,14 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Read one bounded chunk from an authorized file handle.
+   * @param handleId - Opaque native file handle.
+   * @param offset - Zero-based byte offset.
+   * @param maxBytes - Maximum bytes to return.
+   * @param signal - Optional request cancellation signal.
+   * @returns Encoded bytes and continuation metadata.
+   */
   readWorkspaceFile(
     handleId: string,
     offset: number,
@@ -596,6 +769,13 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Create a file beneath an authorized workspace root.
+   * @param workspaceId - Authorized workspace identifier.
+   * @param relativePath - Workspace-relative path validated by native.
+   * @param signal - Optional request cancellation signal.
+   * @returns An opaque handle for the created file.
+   */
   createWorkspaceFile(
     workspaceId: string,
     relativePath: string,
@@ -608,6 +788,15 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Begin a native atomic replacement beneath an authorized workspace root.
+   * @param workspaceId - Authorized workspace identifier.
+   * @param relativePath - Workspace-relative destination path.
+   * @param createIfAbsent - Whether a missing destination may be created.
+   * @param expectedVersion - Optional version required to prevent stale writes.
+   * @param signal - Optional request cancellation signal.
+   * @returns An opaque write handle for staging chunks.
+   */
   beginWorkspaceAtomicWrite(
     workspaceId: string,
     relativePath: string,
@@ -627,6 +816,13 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Append one encoded chunk to an authorized atomic-write handle.
+   * @param handleId - Opaque native write handle.
+   * @param bytes - Encoded chunk accepted by the bounded bridge protocol.
+   * @param signal - Optional request cancellation signal.
+   * @returns Resolution after native staging.
+   */
   writeWorkspaceFileChunk(
     handleId: string,
     bytes: string,
@@ -639,6 +835,12 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Atomically publish all staged chunks for a write handle.
+   * @param handleId - Opaque native write handle.
+   * @param signal - Optional request cancellation signal.
+   * @returns The committed file version.
+   */
   commitWorkspaceAtomicWrite(
     handleId: string,
     signal?: AbortSignal,
@@ -650,10 +852,23 @@ export class OpenloopDesktopHostClient {
     )
   }
 
+  /**
+   * Release an opaque native file, directory, or write handle.
+   * @param handleId - Opaque native handle.
+   * @param signal - Optional request cancellation signal.
+   * @returns Resolution after native cleanup.
+   */
   closeWorkspaceFile(handleId: string, signal?: AbortSignal): Promise<void> {
     return this.#client.call<void>('closeWorkspaceFile', { handleId }, signal)
   }
 
+  /**
+   * Spawn only a Host-approved command inside an authorized workspace.
+   * @param workspaceId - Authorized workspace identifier used as confinement root.
+   * @param approvedCommand - Host policy result; arbitrary browser argv is not accepted.
+   * @param signal - Optional request cancellation signal.
+   * @returns An opaque process handle.
+   */
   spawnWorkspaceProcess(
     workspaceId: string,
     approvedCommand: ApprovedCommand,

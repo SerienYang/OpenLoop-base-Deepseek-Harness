@@ -93,10 +93,37 @@ export interface CredentialConsumerRegistration {
 
 /** Optional structural seam consumed by built-in DSH Host plugins. */
 export interface CredentialConsumerRegistryLike {
+  /**
+   * Register the built-in DeepSeek model route as a credential consumer.
+   * @param reference - Credential reference used by the route.
+   * @returns Atomic replacement and lifecycle handle.
+   */
   registerDeepSeekModel(reference: CredentialRef): CredentialConsumerRegistration
+  /**
+   * Register one pi-ai model route without exposing credential values.
+   * @param routeId - Exact model route identifier.
+   * @param reference - Credential reference used by the route.
+   * @returns Lifecycle disposer.
+   */
   registerPiAiModel(routeId: string, reference: CredentialRef): () => void
+  /**
+   * Register a validated pi-ai route set as one replaceable unit.
+   * @param consumers - Complete route-to-reference ownership set.
+   * @returns Atomic replacement and lifecycle handle.
+   */
   registerPiAiModels(consumers: readonly PiAiCredentialConsumer[]): CredentialConsumerBatchRegistration
+  /**
+   * Register the built-in DeepSeek Web Search plugin as a credential consumer.
+   * @param reference - Credential reference used by the plugin.
+   * @returns Atomic replacement and lifecycle handle.
+   */
   registerDeepSeekWebSearch(reference: CredentialRef): CredentialConsumerRegistration
+  /**
+   * Register one named MCP server as a credential consumer.
+   * @param serverName - Configured MCP server namespace.
+   * @param reference - Credential reference used by the server.
+   * @returns Lifecycle disposer.
+   */
   registerMcpServer(serverName: string, reference: CredentialRef): () => void
 }
 

@@ -122,6 +122,13 @@ export interface WorkspaceRuntimeLifecycle {
 
 /** Factory installed by a profile before the shared client runtime activates. */
 export interface WorkspaceRuntimeAdapter {
+  /**
+   * Construct the profile-owned Workspace runtime without exposing Host-only APIs.
+   * @param ctx - Client Cordis context that owns the runtime lifecycle.
+   * @param api - Browser-safe API client.
+   * @param sessions - Client session operations used by the adapter.
+   * @returns The Workspace runtime lifecycle installed by the shared client runtime.
+   */
   create(ctx: Context, api: IApiClient, sessions: SessionsPort): WorkspaceRuntimeLifecycle
 }
 
