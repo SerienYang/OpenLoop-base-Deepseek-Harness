@@ -124,21 +124,15 @@ export class OpenloopWorkspaceService implements IWorkspaces {
       error: null,
     })
     try {
-      const remote = await this.remote()
-      const result = await remote.listWorkspaceGrants()
-      if (!result.ok) {
-        throw new Error(
-          `Openloop Workspace list failed: ${result.error.code}: ${result.error.message}`,
-        )
-      }
+      const grants = await this.listWorkspaceGrants()
       if (generation === this.refreshGeneration) {
         this.publish({
-          items: result.value,
+          items: grants,
           state: 'idle',
           error: null,
         })
       }
-      return result.value
+      return grants
     } catch (reason) {
       const error = reason instanceof Error ? reason : new Error(String(reason))
       if (generation === this.refreshGeneration) {
@@ -150,6 +144,15 @@ export class OpenloopWorkspaceService implements IWorkspaces {
       }
       throw error
     }
+  }
+
+  private async listWorkspaceGrants(): Promise<readonly WorkspaceGrantView[]> {
+    const remote = await this.remote()
+    const result = await remote.listWorkspaceGrants()
+    if (result.ok) return result.value
+    throw new Error(
+      `Openloop Workspace list failed: ${result.error.code}: ${result.error.message}`,
+    )
   }
 
   async authorize(): Promise<WorkspaceGrantView | 'cancelled'> {
@@ -230,7 +233,7 @@ export class OpenloopWorkspaceService implements IWorkspaces {
       workspaceId,
       ...(agentPreset === undefined ? {} : { agentPreset }),
     })
-    const grants = await this.loadWorkspaceGrants()
+    const grants = await this.listWorkspaceGrants()
     const refreshed = grants.find(
       grant => grant.workspaceId === workspaceId,
     )
@@ -239,6 +242,7 @@ export class OpenloopWorkspaceService implements IWorkspaces {
         `Openloop Workspace connect failed: session ${sessionId} has no ready Workspace grant`,
       )
     }
+    this.mergeWorkspaceSessionIds(workspaceId, refreshed.sessionIds)
     return sessionId
   }
 
@@ -339,6 +343,20 @@ export class OpenloopWorkspaceService implements IWorkspaces {
       ? [workspace, ...current.items]
       : current.items.map(item => item.workspaceId === workspace.workspaceId ? workspace : item)
     this.publish({ ...current, items })
+  }
+
+  private mergeWorkspaceSessionIds(
+    workspaceId: WorkspaceId,
+    sessionIds: readonly SessionId[],
+  ): void {
+    const current = this.grants.getSnapshot()
+    if (!current.items.some(item => item.workspaceId === workspaceId)) return
+    this.publish({
+      ...current,
+      items: current.items.map(item => item.workspaceId === workspaceId
+        ? { ...item, sessionIds: [...sessionIds] }
+        : item),
+    })
   }
 
   private publish(snapshot: OpenloopWorkspaceListState): void {

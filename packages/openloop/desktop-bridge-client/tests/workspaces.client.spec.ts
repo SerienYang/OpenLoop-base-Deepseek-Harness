@@ -384,9 +384,62 @@ describe('Openloop browser Workspace facade', () => {
 
     await expect(firstConnection).resolves.toBe('session-1')
     expect(service.grants.getSnapshot().items).toEqual([
-      readyGrant(),
+      readyGrant(['session-1']),
       { ...workspace2, sessionIds: ['session-2'] },
     ])
+  })
+
+  it('merges a connected session without reverting newer Workspace metadata or state', async () => {
+    const connectedList = deferred<
+      Awaited<ReturnType<OpenloopWorkspaceRemote['listWorkspaceGrants']>>
+    >()
+    const changed = {
+      ...readyGrant(),
+      name: 'Current Name',
+      displayPath: '~/Current Path',
+      state: 'permission-denied' as const,
+    }
+    const listWorkspaceGrants = vi.fn()
+      .mockImplementationOnce(() => ok([readyGrant()]))
+      .mockReturnValueOnce(connectedList.promise)
+    const service = new OpenloopWorkspaceService(remote({
+      listWorkspaceGrants,
+      reauthorizeWorkspace: vi.fn(() => ok(changed)),
+    }), sessions())
+    await service.refresh()
+
+    const connection = service.connectWorkspace('workspace-1' as never)
+    await vi.waitFor(() => { expect(listWorkspaceGrants).toHaveBeenCalledTimes(2) })
+    await service.reauthorize('workspace-1')
+    connectedList.resolve({ ok: true, value: [readyGrant(['session-1'])] })
+
+    await expect(connection).resolves.toBe('session-1')
+    expect(service.grants.getSnapshot().items).toEqual([{
+      ...changed,
+      sessionIds: ['session-1'],
+    }])
+  })
+
+  it('does not resurrect a Workspace removed while its connection refresh is pending', async () => {
+    const connectedList = deferred<
+      Awaited<ReturnType<OpenloopWorkspaceRemote['listWorkspaceGrants']>>
+    >()
+    const listWorkspaceGrants = vi.fn()
+      .mockImplementationOnce(() => ok([readyGrant()]))
+      .mockReturnValueOnce(connectedList.promise)
+    const service = new OpenloopWorkspaceService(remote({
+      listWorkspaceGrants,
+      revokeWorkspace: vi.fn(() => ok('revoked' as const)),
+    }), sessions())
+    await service.refresh()
+
+    const connection = service.connectWorkspace('workspace-1' as never)
+    await vi.waitFor(() => { expect(listWorkspaceGrants).toHaveBeenCalledTimes(2) })
+    await service.revoke('workspace-1')
+    connectedList.resolve({ ok: true, value: [readyGrant(['session-1'])] })
+
+    await expect(connection).resolves.toBe('session-1')
+    expect(service.grants.getSnapshot().items).toEqual([])
   })
 
   it('clears a failed Workspace connection so a later attempt can retry', async () => {
