@@ -24,6 +24,14 @@ const BRAND_FIELDS = [
   'attribution',
 ] as const
 
+const OPENLOOP_FAILURE_BRAND: ProductBrand = Object.freeze({
+  productName: 'Openloop',
+  documentSuffix: 'Openloop',
+  heroTitle: 'Openloop',
+  previewLabel: '预览版',
+  attribution: 'Built on DeepSeek Harness',
+})
+
 function openloopBrand(value: unknown): ProductBrand {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('web app: Openloop bootstrap is invalid')
@@ -71,7 +79,7 @@ export async function startWebApp(root: HTMLElement = rootElement): Promise<void
     await preboot
   } catch {
     if (target.__OPENLOOP_BOOTSTRAP__ === undefined) {
-      await new AppWebEntry(root).run()
+      await new AppWebEntry(root, { brand: OPENLOOP_FAILURE_BRAND }).run()
       return
     }
     // A published identity remains authoritative while AppWebEntry renders the failure.

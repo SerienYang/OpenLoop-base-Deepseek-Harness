@@ -81,7 +81,9 @@ export function OpenloopFrame({
           {renderSlot('conversation', {})}
         </main>
         <section className={css.workbench} data-openloop-workbench>
-          {renderSlot('workbench', {})}
+          {renderSlot('workbench', {}, {
+            fallback: <span data-openloop-workbench-empty />,
+          })}
         </section>
       </div>
       <aside className={css.details}>

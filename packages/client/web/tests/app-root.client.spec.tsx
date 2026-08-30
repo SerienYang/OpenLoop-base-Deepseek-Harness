@@ -7,14 +7,20 @@
  * gate semantics. Stores are the kernel-own signals production boot uses
  * (shell self-sufficiency: the loading page depends on no plugin package).
  */
+import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
 import { act, cleanup, render } from '@testing-library/react'
 import { useProductBrand } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ProductBrand } from '@deepseek-ai/dsh-client-ui-primitives'
 
-afterEach(cleanup)
 import { AppRoot } from '@deepseek-ai/dsh-client-web/src/AppRoot.tsx'
+import { DocumentTitle } from '@deepseek-ai/dsh-client-web/src/DocumentTitle.tsx'
 import { createLoaderStatusStore, createSignal } from '@deepseek-ai/dsh-client-web/src/loader-status.ts'
+
+afterEach(() => {
+  cleanup()
+  document.title = ''
+})
 
 const openloopBrand: ProductBrand = {
   productName: 'Openloop',
@@ -25,12 +31,18 @@ const openloopBrand: ProductBrand = {
   attribution: 'Built on DeepSeek Harness',
 }
 
+const openloopFailureBrand: ProductBrand = {
+  productName: 'Openloop',
+  documentSuffix: 'Openloop',
+  attribution: 'Built on DeepSeek Harness',
+}
+
 function SettledBrandProbe() {
   const brand = useProductBrand()
   return <div data-testid="real-ui">{brand.productName}</div>
 }
 
-function mount(brand?: ProductBrand) {
+function mount(brand?: ProductBrand, renderApp: () => ReactNode = () => <SettledBrandProbe />) {
   const settled = createSignal(false)
   const error = createSignal<string | undefined>(undefined)
   const status = createLoaderStatusStore()
@@ -42,7 +54,7 @@ function mount(brand?: ProductBrand) {
       error={error}
       renderApp={() => {
         renders += 1
-        return <SettledBrandProbe />
+        return renderApp()
       }}
       {...brand === undefined ? {} : { brand }}
     />,
@@ -111,5 +123,41 @@ describe('AppRoot', () => {
 
     act(() => { settled.set(true) })
     expect(getByTestId('real-ui').textContent).toBe('Openloop')
+  })
+
+  it('renders a non-default product name when its failure brand has no mark asset', () => {
+    const { error, getByText, queryByText } = mount(openloopFailureBrand)
+
+    expect(getByText('Openloop')).toBeTruthy()
+    expect(getByText('Built on DeepSeek Harness')).toBeTruthy()
+    expect(queryByText('HARNESS')).toBeNull()
+
+    act(() => { error.set('preboot failed') })
+    expect(getByText('Openloop')).toBeTruthy()
+    expect(getByText('Built on DeepSeek Harness')).toBeTruthy()
+    expect(queryByText('HARNESS')).toBeNull()
+  })
+
+  it('projects the Openloop title before settlement and yields to the session title afterward', () => {
+    document.title = 'DeepSeek Harness'
+    const { error, settled } = mount(openloopBrand, () => (
+      <DocumentTitle title="Session one" />
+    ))
+
+    expect(document.title).toBe('Openloop')
+    act(() => { error.set('boot failed') })
+    expect(document.title).toBe('Openloop')
+
+    act(() => { settled.set(true) })
+    expect(document.title).toBe('Session one — Openloop')
+  })
+
+  it('preserves the default DSH document title throughout loading and failure', () => {
+    document.title = 'DeepSeek Harness'
+    const { error } = mount()
+
+    expect(document.title).toBe('DeepSeek Harness')
+    act(() => { error.set('boot failed') })
+    expect(document.title).toBe('DeepSeek Harness')
   })
 })

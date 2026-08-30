@@ -4,6 +4,7 @@ import { SlotRegistry, type SessionListState } from '@deepseek-ai/dsh-client-run
 import type { ThemeTokenOverrides } from '@deepseek-ai/dsh-client-ui-theme/client'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render } from '@testing-library/react'
 import { apply, inject, OpenloopFrame } from '../src/client/index.ts'
@@ -16,6 +17,24 @@ afterEach(async () => {
   await activeContext?.fiber.dispose()
   activeContext = undefined
 })
+
+function stableAnchorRenderer(workbenchOccupant?: ReactNode) {
+  const probe = vi.fn((
+    key: string,
+    _owner: object,
+    options?: { fallback?: ReactNode },
+  ) => (
+    <div data-slot={key} style={{ display: 'contents' }}>
+      {key === 'workbench'
+        ? (workbenchOccupant ?? options?.fallback ?? null)
+        : <div data-slot-occupant={key} />}
+    </div>
+  ))
+  return {
+    probe,
+    renderSlot: probe as unknown as OpenloopFrameProps['renderSlot'],
+  }
+}
 
 describe('Openloop root shell Slot contract', () => {
   it('owns root once, declares the DSH shell seats, and preserves panel actions', async () => {
@@ -84,7 +103,7 @@ describe('Openloop root shell Slot contract', () => {
   })
 
   it('renders one workbench surface without replacing conversation or details', () => {
-    const renderSlot = vi.fn((key: string) => <div data-slot={key} />)
+    const { probe, renderSlot } = stableAnchorRenderer(<div data-testid="workbench-occupant" />)
     const props = {
       actions: {
         closeDetails: vi.fn(),
@@ -102,7 +121,7 @@ describe('Openloop root shell Slot contract', () => {
 
     const view = render(<OpenloopFrame {...props} />)
 
-    expect(renderSlot.mock.calls.map(([key]) => key)).toEqual([
+    expect(probe.mock.calls.map(([key]) => key)).toEqual([
       'sidebar',
       'conversation',
       'workbench',
@@ -116,21 +135,23 @@ describe('Openloop root shell Slot contract', () => {
       .toBe(false)
     expect(view.container.querySelector('[data-slot="conversation"]')).not.toBeNull()
     expect(view.container.querySelector('[data-slot="details"]')).not.toBeNull()
+    expect(view.queryByTestId('workbench-occupant')).not.toBeNull()
+    expect(view.container.querySelector('[data-openloop-workbench-empty]')).toBeNull()
   })
 
-  it('does not reserve workbench width until an occupant renders', () => {
+  it('reserves 42% with a 320px minimum only while a workbench occupant renders', () => {
     const css = readFileSync(
       resolve(import.meta.dirname, '../src/client/OpenloopFrame.module.css'),
       'utf8',
     )
 
     expect(css).toMatch(/\.workspace\s*\{[^}]*display:\s*flex;/su)
-    expect(css).toMatch(/\.workbench:empty\s*\{[^}]*display:\s*none;/su)
+    expect(css).toMatch(/\.workbench\s*\{[^}]*flex:\s*0 1 42%;[^}]*width:\s*42%;[^}]*min-width:\s*320px;/su)
+    expect(css).toMatch(/\.workbench:has\(\[data-openloop-workbench-empty\]\)\s*\{[^}]*display:\s*none;/su)
   })
 
-  it('preserves normal conversation width while the workbench renders no DOM', () => {
-    const renderSlot = vi.fn((key: string) =>
-      key === 'workbench' ? null : <div data-slot={key} />)
+  it('collapses the workbench when the stable Slot anchor renders its empty fallback', () => {
+    const { renderSlot } = stableAnchorRenderer()
     const props = {
       actions: {
         closeDetails: vi.fn(),
@@ -150,9 +171,12 @@ describe('Openloop root shell Slot contract', () => {
     const frame = view.container.firstElementChild as HTMLElement
     const conversation = view.container.querySelector('[data-slot="conversation"]')
     const workbench = view.container.querySelector('[data-openloop-workbench]')
+    const anchor = workbench?.querySelector('[data-slot="workbench"]')
 
     expect(frame.style.gridTemplateColumns).toBe('280px minmax(0, 1fr) 0px')
     expect(conversation?.parentElement?.parentElement).toBe(workbench?.parentElement)
-    expect(workbench?.matches(':empty')).toBe(true)
+    expect(anchor).not.toBeNull()
+    expect(workbench?.matches(':empty')).toBe(false)
+    expect(anchor?.querySelector('[data-openloop-workbench-empty]')).not.toBeNull()
   })
 })

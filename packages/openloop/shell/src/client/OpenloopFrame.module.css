@@ -44,7 +44,7 @@
   border-left: 1px solid var(--dsw-alias-border-l1);
 }
 
-.workbench:empty {
+.workbench:has([data-openloop-workbench-empty]) {
   display: none;
 }
 

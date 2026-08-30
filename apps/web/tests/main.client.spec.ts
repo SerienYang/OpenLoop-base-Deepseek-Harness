@@ -107,7 +107,7 @@ describe('web application entry', () => {
     expect(entry.constructors).toEqual([{ el: root, seams: { brand } }])
   })
 
-  it('mounts the default entry when preboot rejects before publishing identity', async () => {
+  it('uses an immutable Openloop failure brand when preboot rejects before publishing identity', async () => {
     const root = installRoot()
     const target = globalThis as BootstrapGlobal
     target.__DSH_PREBOOT__ = Promise.reject(new Error('bootstrap unavailable'))
@@ -115,6 +115,15 @@ describe('web application entry', () => {
     await import('../src/main.ts')
     await vi.waitFor(() => { expect(entry.run).toHaveBeenCalledOnce() })
 
-    expect(entry.constructors).toEqual([{ el: root, seams: undefined }])
+    const seams = entry.constructors[0]?.seams as { brand?: typeof brand } | undefined
+    expect(entry.constructors[0]?.el).toBe(root)
+    expect(seams?.brand).toMatchObject({
+      productName: 'Openloop',
+      documentSuffix: 'Openloop',
+      attribution: 'Built on DeepSeek Harness',
+    })
+    expect(seams?.brand?.markAsset).toBeUndefined()
+    expect(Object.isFrozen(seams?.brand)).toBe(true)
+    expect(entry.constructors).toHaveLength(1)
   })
 })

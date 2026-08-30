@@ -15,6 +15,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ProductBrand } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { KernelSignal, LoaderStatus } from './loader-status.ts'
+import { DocumentTitle } from './DocumentTitle.tsx'
 import css from './AppRoot.module.css'
 
 /** AppRoot props: settled signal, fiber-state projection feed, boot failure report, deferred real-UI factory. */
@@ -42,23 +43,24 @@ export function AppRoot(props: AppRootProps) {
 
   return (
     <ProductBrandProvider brand={brand}>
+      {!settled && <DocumentTitle />}
       {settled
         ? props.renderApp()
         : (
           <div className={css.boot}>
             <div className={css.card}>
-              {brand.markAsset === undefined
-                ? <div className={css.wordmark}>HARNESS</div>
-                : (
-                  <>
-                    <div className={css.wordmark}>
+              <div className={css.wordmark}>
+                {brand.markAsset === undefined
+                  ? (brand === DEFAULT_PRODUCT_BRAND ? 'HARNESS' : brand.productName)
+                  : (
+                    <>
                       <img src={brand.markAsset} alt="" width={24} />
                       <span>{brand.productName}</span>
-                    </div>
-                    {brand.attribution !== undefined
-                      && <div className={css.hint}>{brand.attribution}</div>}
-                  </>
-                )}
+                    </>
+                  )}
+              </div>
+              {brand.attribution !== undefined
+                && <div className={css.hint}>{brand.attribution}</div>}
               {!loud
                 ? (
                   <>
