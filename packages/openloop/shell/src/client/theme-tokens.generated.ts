@@ -86,4 +86,16 @@ export const OPENLOOP_THEME_TOKENS = {
     light: '#EEF1F3',
     dark: '#3B424A',
   },
+  '--dsw-static-deepseek-200': {
+    light: '#EEF1F3',
+    dark: '#3B424A',
+  },
+  '--dsw-static-deepseek-450': {
+    light: '#111316',
+    dark: '#F7F8FA',
+  },
+  '--dsw-static-deepseek-500': {
+    light: '#666D76',
+    dark: '#AEB4BC',
+  },
 } as const satisfies ThemeTokenOverrides

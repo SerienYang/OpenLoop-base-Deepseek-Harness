@@ -162,6 +162,13 @@ describe('OpenLoop build manifest generator', () => {
       },
     })
     expect(result.manifest.brand.markAsset).toMatch(/^data:image\/svg\+xml;base64,/u)
+    const encodedMark = result.manifest.brand.markAsset.replace(
+      /^data:image\/svg\+xml;base64,/u,
+      '',
+    )
+    expect(Buffer.from(encodedMark, 'base64')).toEqual(
+      readFileSync(new URL('../../assets/brand/openloop-icon.svg', import.meta.url)),
+    )
     expect(result.bytes).toBe(readFileSync(out, 'utf8'))
     expect(result.sha256).toBe(
       createHash('sha256').update(result.bytes).digest('hex'),

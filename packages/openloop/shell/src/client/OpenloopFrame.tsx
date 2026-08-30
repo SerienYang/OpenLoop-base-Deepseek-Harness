@@ -66,10 +66,7 @@ export function OpenloopFrame({
   return (
     <div
       className={css.frame}
-      style={{
-        gridTemplateColumns:
-          `${sidebarWidth}px minmax(0, 1fr) minmax(320px, 42%) ${detailsWidth}px`,
-      }}
+      style={{ gridTemplateColumns: `${sidebarWidth}px minmax(0, 1fr) ${detailsWidth}px` }}
       data-sidebar-collapsed={state.sidebarOpen ? undefined : ''}
       data-details-collapsed={detailsWidth === 0 ? '' : undefined}
     >
@@ -79,12 +76,14 @@ export function OpenloopFrame({
           width: sidebarWidth,
         })}
       </aside>
-      <main className={css.conversation}>
-        {renderSlot('conversation', {})}
-      </main>
-      <section className={css.workbench} data-openloop-workbench>
-        {renderSlot('workbench', {})}
-      </section>
+      <div className={css.workspace} data-openloop-workspace>
+        <main className={css.conversation}>
+          {renderSlot('conversation', {})}
+        </main>
+        <section className={css.workbench} data-openloop-workbench>
+          {renderSlot('workbench', {})}
+        </section>
+      </div>
       <aside className={css.details}>
         {renderSlot('details', {})}
       </aside>

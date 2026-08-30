@@ -2,6 +2,8 @@
 import { Context } from '@deepseek-ai/cordis'
 import { SlotRegistry, type SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ThemeTokenOverrides } from '@deepseek-ai/dsh-client-ui-theme/client'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render } from '@testing-library/react'
 import { apply, inject, OpenloopFrame } from '../src/client/index.ts'
@@ -109,8 +111,48 @@ describe('Openloop root shell Slot contract', () => {
     ])
     expect(view.container.querySelectorAll('[data-openloop-workbench]')).toHaveLength(1)
     expect((view.container.firstElementChild as HTMLElement).style.gridTemplateColumns)
-      .toBe('280px minmax(0, 1fr) minmax(320px, 42%) 0px')
+      .toBe('280px minmax(0, 1fr) 0px')
+    expect(view.container.querySelector('[data-openloop-workbench]')?.matches(':empty'))
+      .toBe(false)
     expect(view.container.querySelector('[data-slot="conversation"]')).not.toBeNull()
     expect(view.container.querySelector('[data-slot="details"]')).not.toBeNull()
+  })
+
+  it('does not reserve workbench width until an occupant renders', () => {
+    const css = readFileSync(
+      resolve(import.meta.dirname, '../src/client/OpenloopFrame.module.css'),
+      'utf8',
+    )
+
+    expect(css).toMatch(/\.workspace\s*\{[^}]*display:\s*flex;/su)
+    expect(css).toMatch(/\.workbench:empty\s*\{[^}]*display:\s*none;/su)
+  })
+
+  it('preserves normal conversation width while the workbench renders no DOM', () => {
+    const renderSlot = vi.fn((key: string) =>
+      key === 'workbench' ? null : <div data-slot={key} />)
+    const props = {
+      actions: {
+        closeDetails: vi.fn(),
+        openDetails: vi.fn(),
+        toggleSidebar: vi.fn(),
+      },
+      renderSlot,
+      useSessions: (select: (state: SessionListState) => unknown) => select({
+        byId: {},
+        current: undefined,
+      } as SessionListState),
+      useStore: (select: (state: { sidebarOpen: boolean; detailsOpen: boolean }) => unknown) =>
+        select({ sidebarOpen: true, detailsOpen: false }),
+    } as unknown as OpenloopFrameProps
+
+    const view = render(<OpenloopFrame {...props} />)
+    const frame = view.container.firstElementChild as HTMLElement
+    const conversation = view.container.querySelector('[data-slot="conversation"]')
+    const workbench = view.container.querySelector('[data-openloop-workbench]')
+
+    expect(frame.style.gridTemplateColumns).toBe('280px minmax(0, 1fr) 0px')
+    expect(conversation?.parentElement?.parentElement).toBe(workbench?.parentElement)
+    expect(workbench?.matches(':empty')).toBe(true)
   })
 })

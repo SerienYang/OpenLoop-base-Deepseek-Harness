@@ -58,6 +58,8 @@ const semverPattern = new RegExp(
 )
 const sha256Pattern = /^[0-9a-f]{64}$/u
 const dshCommitPattern = /^[0-9a-f]{40}$/u
+// This validates transport structure only. Exact mark identity comes from the
+// source SVG bytes inside the canonical, hash-bound, signed core manifest.
 const svgDataUriPattern = /^data:image\/svg\+xml;base64,[A-Za-z0-9+/]+={0,2}$/u
 
 const semver = z.string().pattern(semverPattern).required()

@@ -11,6 +11,7 @@
 }
 
 .sidebar,
+.workspace,
 .conversation,
 .workbench,
 .details {
@@ -23,15 +24,28 @@
   border-right: 1px solid var(--dsw-alias-border-l1);
 }
 
-.conversation {
+.workspace {
   display: flex;
-  flex-direction: column;
+  min-height: 0;
   background: var(--dsw-alias-bg-layer-1);
 }
 
+.conversation {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
 .workbench {
+  flex: 0 1 42%;
+  width: 42%;
+  min-width: 320px;
   background: var(--dsw-alias-bg-layer-1);
   border-left: 1px solid var(--dsw-alias-border-l1);
+}
+
+.workbench:empty {
+  display: none;
 }
 
 .details {

@@ -31,6 +31,9 @@ const TOKEN_ROLES = {
   '--dsw-specific-bubble-highlight': 'state.selected.background',
   '--dsw-specific-sidebar-fill': 'background.subtle',
   '--dsw-specific-sidebar-nav-item-active-accent': 'state.selected.background',
+  '--dsw-static-deepseek-200': 'state.selected.background',
+  '--dsw-static-deepseek-450': 'action.primary.background',
+  '--dsw-static-deepseek-500': 'status.info.foreground',
 }
 
 function isRecord(value) {
