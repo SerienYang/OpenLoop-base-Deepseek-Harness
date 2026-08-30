@@ -178,6 +178,64 @@ describe('Openloop bootstrap Host route', () => {
     expect(Object.isFrozen(bootstrap.coreManifest.brand)).toBe(true)
   })
 
+  test('observes preboot rejection immediately without changing the published promise', async () => {
+    let tap: ((html: string) => string) | undefined
+    const ctx = new Context()
+    ctx.provide('webServer', {
+      register: () => () => {},
+      tapIndex: (value: (html: string) => string) => {
+        tap = value
+        return () => {}
+      },
+    })
+    installDesktopBridge(ctx)
+    installRuntimeBootstrap(ctx, {
+      launchId: 'launch-id',
+      bootstrapToken: Uint8Array.from([0xab, 0xcd]),
+      bridgeSecret: Uint8Array.from([1, 2]),
+      socketPath: '/tmp/openloop.sock',
+    }, {
+      manifest: {
+        appVersion: '0.1.0',
+        channel: 'test',
+        openloopDataVersion: 3,
+        dshDataVersion: 7,
+        brand,
+      },
+      sha256: 'a'.repeat(64),
+    })
+    apply(ctx)
+
+    const html = tap?.('<html><head></head><body></body></html>') ?? ''
+    const script = /<script>([\s\S]+)<\/script>/u.exec(html)?.[1]
+    expect(script).toBeDefined()
+    const rejection = new Error('bootstrap unavailable before main')
+    const sandbox: Record<string, unknown> = {
+      URLSearchParams,
+      location: { hash: '', pathname: '/', search: '' },
+      history: { replaceState: () => {} },
+      document: { documentElement: { dataset: {} } },
+      fetch: () => Promise.reject(rejection),
+    }
+    sandbox.globalThis = sandbox
+    runInNewContext(`
+      globalThis.prebootCatchCount = 0
+      const originalCatch = Promise.prototype.catch
+      Promise.prototype.catch = function (...args) {
+        globalThis.prebootCatchCount += 1
+        return Reflect.apply(originalCatch, this, args)
+      }
+    `, sandbox)
+
+    if (script === undefined) throw new Error('injected bootstrap script is missing')
+    runInNewContext(script, sandbox)
+    const immediateCatchCount = sandbox.prebootCatchCount
+    const preboot = sandbox.__DSH_PREBOOT__ as Promise<void>
+
+    await expect(preboot).rejects.toThrow('bootstrap unavailable before main')
+    expect(immediateCatchCount).toBe(1)
+  })
+
   test('acknowledges the real main WebView only after a cookie-bound completion request', async () => {
     let route: BootstrapHostRoute | undefined
     const acknowledgeMainWebviewHealth = vi.fn(() => Promise.resolve())

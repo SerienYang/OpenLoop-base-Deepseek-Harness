@@ -102,6 +102,19 @@ function openloopBrand(value: unknown): ProductBrand {
   return brand as ProductBrand
 }
 
+async function runOpenloopEntry(
+  root: HTMLElement,
+  loading: ReturnType<typeof mountOpenloopPreboot>,
+  brand: ProductBrand,
+): Promise<void> {
+  loading.handoff(brand)
+  try {
+    await new AppWebEntry(root, { brand }).run()
+  } catch (reason) {
+    mountOpenloopPreboot(root).fail(reason)
+  }
+}
+
 /** Start only after Host preboot so one trusted brand spans every app state. */
 export async function startWebApp(root: HTMLElement = rootElement): Promise<void> {
   const target = globalThis as BootstrapWindow
@@ -116,8 +129,7 @@ export async function startWebApp(root: HTMLElement = rootElement): Promise<void
     await preboot
   } catch {
     if (target.__OPENLOOP_BOOTSTRAP__ === undefined) {
-      loading.handoff(OPENLOOP_FAILURE_BRAND)
-      await new AppWebEntry(root, { brand: OPENLOOP_FAILURE_BRAND }).run()
+      await runOpenloopEntry(root, loading, OPENLOOP_FAILURE_BRAND)
       return
     }
     // A published identity remains authoritative while AppWebEntry renders the failure.
@@ -127,10 +139,9 @@ export async function startWebApp(root: HTMLElement = rootElement): Promise<void
     brand = openloopBrand(target.__OPENLOOP_BOOTSTRAP__)
   } catch (reason) {
     loading.fail(reason)
-    throw reason
+    return
   }
-  loading.handoff(brand)
-  await new AppWebEntry(root, { brand }).run()
+  await runOpenloopEntry(root, loading, brand)
 }
 
 void startWebApp()

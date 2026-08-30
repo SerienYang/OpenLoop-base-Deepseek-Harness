@@ -190,7 +190,7 @@ export interface WebScaffold {
 }
 
 /** Launch identity supplied by the fake native endpoint to the real Openloop plugins. */
-export interface OpenloopFixtureRuntime extends RuntimeLaunchSecrets {
+interface OpenloopFixtureRuntime extends RuntimeLaunchSecrets {
   readonly coreManifest: Readonly<Record<string, unknown>>
   readonly coreManifestSha256: string
 }

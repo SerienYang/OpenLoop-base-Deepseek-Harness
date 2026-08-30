@@ -45,6 +45,12 @@ function installRoot(): HTMLElement {
   return document.getElementById('root') as HTMLElement
 }
 
+function installProbe(): HTMLElement {
+  const probe = document.createElement('div')
+  document.body.append(probe)
+  return probe
+}
+
 afterEach(() => {
   const target = globalThis as BootstrapGlobal
   delete target.__DSH_PREBOOT__
@@ -135,5 +141,58 @@ describe('web application entry', () => {
     expect(seams?.brand?.markAsset).toBeUndefined()
     expect(Object.isFrozen(seams?.brand)).toBe(true)
     expect(entry.constructors).toHaveLength(1)
+  })
+
+  it.each([
+    ['missing', undefined, 'web app: Openloop bootstrap is invalid'],
+    ['mutable', {
+      launchId: 'launch-id',
+      coreManifest: { brand },
+      coreManifestSha256: 'a'.repeat(64),
+    }, 'web app: Openloop bootstrap identity is not frozen'],
+  ])('shows branded failure and resolves for %s bootstrap identity', async (
+    _label,
+    bootstrap,
+    message,
+  ) => {
+    installRoot()
+    const probe = installProbe()
+    const target = globalThis as BootstrapGlobal
+    target.__DSH_PREBOOT__ = Promise.resolve()
+    if (bootstrap === undefined) delete target.__OPENLOOP_BOOTSTRAP__
+    else target.__OPENLOOP_BOOTSTRAP__ = bootstrap
+
+    const { startWebApp } = await import('../src/main.ts')
+
+    await expect(startWebApp(probe)).resolves.toBeUndefined()
+    expect(probe.textContent).toContain('Openloop')
+    expect(probe.textContent).toContain('Built on DeepSeek Harness')
+    expect(probe.textContent).toContain(message)
+    expect(entry.constructors).toEqual([])
+    expect(entry.run).not.toHaveBeenCalled()
+  })
+
+  it('restores branded failure when AppWebEntry rejects immediately after Openloop handoff', async () => {
+    installRoot()
+    const probe = installProbe()
+    const target = globalThis as BootstrapGlobal
+    target.__DSH_PREBOOT__ = Promise.resolve()
+    Object.defineProperty(target, '__OPENLOOP_BOOTSTRAP__', {
+      value: Object.freeze({
+        launchId: 'launch-id',
+        coreManifest: Object.freeze({ brand }),
+        coreManifestSha256: 'a'.repeat(64),
+      }),
+      configurable: true,
+      writable: false,
+    })
+    entry.run.mockRejectedValue(new Error('entry failed after handoff'))
+
+    const { startWebApp } = await import('../src/main.ts')
+
+    await expect(startWebApp(probe)).resolves.toBeUndefined()
+    expect(probe.textContent).toContain('Openloop')
+    expect(probe.textContent).toContain('Built on DeepSeek Harness')
+    expect(probe.textContent).toContain('entry failed after handoff')
   })
 })

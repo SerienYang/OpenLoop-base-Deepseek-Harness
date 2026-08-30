@@ -902,6 +902,9 @@ describe('Openloop desktop foundation configuration', () => {
       '@openloop/file-broker',
       '@openloop/fs-workspace',
       '@openloop/sandbox-workspace',
+      '@openloop/settings-foundation',
+      '@openloop/shell',
+      '@openloop/workspace-client',
       '@openloop/workspace-authority',
     ])
     expect(stringArray(adapters.entry, 'Openloop adapters entry')).toEqual([

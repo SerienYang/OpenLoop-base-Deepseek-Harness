@@ -286,6 +286,7 @@ function bootstrapScript(): string {
     if (!completion.ok) throw new Error('Openloop bootstrap completion failed')
     document.documentElement.dataset.openloopBootstrap = 'ready'
   })()
+  void preboot.catch(() => {})
   globalThis.__DSH_PREBOOT__ = preboot
 })()</script>`
 }

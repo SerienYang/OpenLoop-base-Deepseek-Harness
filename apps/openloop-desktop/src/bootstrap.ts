@@ -11,7 +11,7 @@ export interface BootstrapResponse {
   readonly coreManifestSha256: string
 }
 
-export interface OpenloopBrandManifest {
+interface OpenloopBrandManifest {
   readonly productName: 'Openloop'
   readonly documentSuffix: 'Openloop'
   readonly markAsset: string

@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render } from '@testing-library/react'
 import { apply, inject, OpenloopFrame } from '../src/client/index.ts'
 import type { OpenloopFrameProps } from '../src/client/OpenloopFrame.tsx'
+import css from '../src/client/OpenloopFrame.module.css'
 
 let activeContext: Context | undefined
 
@@ -172,12 +173,16 @@ describe('Openloop root shell Slot contract', () => {
     const conversation = view.container.querySelector('[data-slot="conversation"]')
     const workbench = view.container.querySelector('[data-openloop-workbench]')
     const anchor = workbench?.querySelector('[data-slot="workbench"]')
+    const marker = anchor?.querySelector('[data-openloop-workbench-empty]')
+    const workbenchClass = css.workbench
 
     expect(frame.style.gridTemplateColumns).toBe('280px minmax(0, 1fr) 0px')
     expect(conversation?.parentElement?.parentElement).toBe(workbench?.parentElement)
+    expect(workbenchClass).toBeDefined()
+    expect(workbench?.classList.contains(workbenchClass as string)).toBe(true)
     expect(anchor).not.toBeNull()
     expect(workbench?.matches(':empty')).toBe(false)
-    expect(anchor?.querySelector('[data-openloop-workbench-empty]')).not.toBeNull()
+    expect(marker?.parentElement).toBe(anchor)
   })
 
   it.each([
