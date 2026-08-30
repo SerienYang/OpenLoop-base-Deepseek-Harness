@@ -16,7 +16,7 @@ export interface OpenloopBrandManifest {
   readonly documentSuffix: 'Openloop'
   readonly markAsset: string
   readonly heroTitle: 'Openloop'
-  readonly previewLabel: 'Preview'
+  readonly previewLabel: '预览版'
   readonly attribution: 'Built on DeepSeek Harness'
 }
 
@@ -59,7 +59,7 @@ function parseBrand(value: unknown): OpenloopBrandManifest {
     || typeof brand.markAsset !== 'string'
     || !brand.markAsset.startsWith('data:image/svg+xml;base64,')
     || brand.heroTitle !== 'Openloop'
-    || brand.previewLabel !== 'Preview'
+    || brand.previewLabel !== '预览版'
     || brand.attribution !== 'Built on DeepSeek Harness') {
     throw new Error('Openloop bootstrap brand is invalid')
   }

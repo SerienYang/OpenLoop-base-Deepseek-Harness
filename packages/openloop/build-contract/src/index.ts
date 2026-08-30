@@ -11,7 +11,7 @@ export interface OpenloopBrandManifest {
   readonly documentSuffix: 'Openloop'
   readonly markAsset: string
   readonly heroTitle: 'Openloop'
-  readonly previewLabel: 'Preview'
+  readonly previewLabel: '预览版'
   readonly attribution: 'Built on DeepSeek Harness'
 }
 
@@ -69,7 +69,7 @@ const brandSchema: z<OpenloopBrandManifest> = z.object({
   documentSuffix: z.const('Openloop').required(),
   markAsset: z.string().pattern(svgDataUriPattern).required(),
   heroTitle: z.const('Openloop').required(),
-  previewLabel: z.const('Preview').required(),
+  previewLabel: z.const('预览版').required(),
   attribution: z.const('Built on DeepSeek Harness').required(),
 })
 

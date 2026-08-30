@@ -186,7 +186,7 @@ function openloopBrand() {
     documentSuffix: 'Openloop',
     markAsset: `data:image/svg+xml;base64,${readFileSync(brandMarkPath).toString('base64')}`,
     heroTitle: 'Openloop',
-    previewLabel: 'Preview',
+    previewLabel: '预览版',
     attribution: 'Built on DeepSeek Harness',
   }
 }

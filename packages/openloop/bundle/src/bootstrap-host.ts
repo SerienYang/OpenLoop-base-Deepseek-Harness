@@ -252,7 +252,7 @@ function bootstrapScript(): string {
       || typeof brand.markAsset !== 'string'
       || !brand.markAsset.startsWith('data:image/svg+xml;base64,')
       || brand.heroTitle !== 'Openloop'
-      || brand.previewLabel !== 'Preview'
+      || brand.previewLabel !== '预览版'
       || brand.attribution !== 'Built on DeepSeek Harness') {
       throw new Error('Openloop bootstrap brand identity is invalid')
     }

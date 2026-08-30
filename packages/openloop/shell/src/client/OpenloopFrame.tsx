@@ -32,7 +32,7 @@ export function createOpenloopShellStore() {
 
 export type OpenloopFrameProps =
   & PropsRuntime<'root'>
-  & PropsRenderSlots<'sidebar' | 'conversation' | 'details' | 'shell.overlay'>
+  & PropsRenderSlots<'sidebar' | 'conversation' | 'workbench' | 'details' | 'shell.overlay'>
   & PropsStore<ReturnType<typeof createOpenloopShellStore>>
 
 function currentConversation(state: SessionListState): string | undefined {
@@ -66,7 +66,10 @@ export function OpenloopFrame({
   return (
     <div
       className={css.frame}
-      style={{ gridTemplateColumns: `${sidebarWidth}px minmax(0, 1fr) ${detailsWidth}px` }}
+      style={{
+        gridTemplateColumns:
+          `${sidebarWidth}px minmax(0, 1fr) minmax(320px, 42%) ${detailsWidth}px`,
+      }}
       data-sidebar-collapsed={state.sidebarOpen ? undefined : ''}
       data-details-collapsed={detailsWidth === 0 ? '' : undefined}
     >
@@ -79,6 +82,9 @@ export function OpenloopFrame({
       <main className={css.conversation}>
         {renderSlot('conversation', {})}
       </main>
+      <section className={css.workbench} data-openloop-workbench>
+        {renderSlot('workbench', {})}
+      </section>
       <aside className={css.details}>
         {renderSlot('details', {})}
       </aside>

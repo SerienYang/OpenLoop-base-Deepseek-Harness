@@ -51,7 +51,7 @@ function openloopBrand(value: unknown): ProductBrand {
     || typeof record.markAsset !== 'string'
     || !record.markAsset.startsWith('data:image/svg+xml;base64,')
     || record.heroTitle !== 'Openloop'
-    || record.previewLabel !== 'Preview'
+    || record.previewLabel !== '预览版'
     || record.attribution !== 'Built on DeepSeek Harness') {
     throw new Error('web app: Openloop brand identity is invalid')
   }
@@ -70,7 +70,11 @@ export async function startWebApp(root: HTMLElement = rootElement): Promise<void
   try {
     await preboot
   } catch {
-    // AppWebEntry observes the same rejected promise and owns the failure UI.
+    if (target.__OPENLOOP_BOOTSTRAP__ === undefined) {
+      await new AppWebEntry(root).run()
+      return
+    }
+    // A published identity remains authoritative while AppWebEntry renders the failure.
   }
   const brand = openloopBrand(target.__OPENLOOP_BOOTSTRAP__)
   await new AppWebEntry(root, { brand }).run()

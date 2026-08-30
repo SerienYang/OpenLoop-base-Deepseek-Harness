@@ -23,7 +23,7 @@ const brand = Object.freeze({
   documentSuffix: 'Openloop',
   markAsset: 'data:image/svg+xml;base64,PHN2Zy8+',
   heroTitle: 'Openloop',
-  previewLabel: 'Preview',
+  previewLabel: '预览版',
   attribution: 'Built on DeepSeek Harness',
 })
 
@@ -105,5 +105,16 @@ describe('web application entry', () => {
     await vi.waitFor(() => { expect(entry.run).toHaveBeenCalledOnce() })
 
     expect(entry.constructors).toEqual([{ el: root, seams: { brand } }])
+  })
+
+  it('mounts the default entry when preboot rejects before publishing identity', async () => {
+    const root = installRoot()
+    const target = globalThis as BootstrapGlobal
+    target.__DSH_PREBOOT__ = Promise.reject(new Error('bootstrap unavailable'))
+
+    await import('../src/main.ts')
+    await vi.waitFor(() => { expect(entry.run).toHaveBeenCalledOnce() })
+
+    expect(entry.constructors).toEqual([{ el: root, seams: undefined }])
   })
 })

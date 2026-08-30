@@ -20,7 +20,7 @@ const brand = {
   documentSuffix: 'Openloop',
   markAsset: 'data:image/svg+xml;base64,PHN2Zy8+',
   heroTitle: 'Openloop',
-  previewLabel: 'Preview',
+  previewLabel: '预览版',
   attribution: 'Built on DeepSeek Harness',
 } as const
 

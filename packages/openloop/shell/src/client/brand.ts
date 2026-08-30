@@ -6,7 +6,7 @@ export interface OpenloopBrand extends ProductBrand {
   readonly documentSuffix: 'Openloop'
   readonly markAsset: string
   readonly heroTitle: 'Openloop'
-  readonly previewLabel: 'Preview'
+  readonly previewLabel: '预览版'
   readonly attribution: 'Built on DeepSeek Harness'
 }
 
@@ -31,7 +31,7 @@ export function parseOpenloopBrand(value: unknown): OpenloopBrand {
     || typeof brand.markAsset !== 'string'
     || !brand.markAsset.startsWith('data:image/svg+xml;base64,')
     || brand.heroTitle !== 'Openloop'
-    || brand.previewLabel !== 'Preview'
+    || brand.previewLabel !== '预览版'
     || brand.attribution !== 'Built on DeepSeek Harness') {
     throw new TypeError('Openloop brand identity is invalid')
   }

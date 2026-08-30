@@ -157,7 +157,7 @@ describe('OpenLoop build manifest generator', () => {
         documentSuffix: 'Openloop',
         markAsset: result.manifest.brand.markAsset,
         heroTitle: 'Openloop',
-        previewLabel: 'Preview',
+        previewLabel: '预览版',
         attribution: 'Built on DeepSeek Harness',
       },
     })

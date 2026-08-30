@@ -1710,5 +1710,29 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
     example: 'return {\n  inject: [\'slots\'],\n  apply(ctx) {\n    ctx.slots.inject(\'tool.view.cordis\', () => ctx.slots.register(\n      { name: \'tool.view.cordis\', key: \'<one key the owner dispatches>\' },\n      () => React.createElement(\'div\', null, \'hello\'),\n    ))\n  },\n}',
     source: 'packages/extensions/ui-cordis/src/client/slots.ts:31',
   },
+  {
+    key: 'workbench',
+    kind: 'single',
+    scope: 'root',
+    summary: 'Openloop\'s trusted Workbench surface beside the conversation.',
+    doc: 'Openloop\'s trusted Workbench surface beside the conversation. The\nWorkbench package mounts its single WorkbenchHost occupant here.',
+    registerOptions: [],
+    ownerProps: [
+      '/** Workbench owner share; the Workbench package owns its application state. */\nexport interface WorkbenchOwnerProps {}',
+    ],
+    ownerPropsReferences: [],
+    standardProps: [
+      'useSessions: SnapshotSelectorHook<SessionListState>',
+      'useWorkspaces: SnapshotSelectorHook<import(\'./workspaces/service.ts\').WorkspaceListState>',
+    ],
+    keyDomain: '',
+    hookContext: '',
+    slotInject: '',
+    declaredBy: 'an entry in \'root\' (@openloop/shell), so it exists while that entry is mounted',
+    occupants: [],
+    replaceRisk: 'none',
+    example: 'return {\n  inject: [\'slots\'],\n  apply(ctx) {\n    ctx.slots.inject(\'workbench\', () => ctx.slots.register(\n      { name: \'workbench\' },\n      () => React.createElement(\'div\', null, \'hello\'),\n    ))\n  },\n}',
+    source: 'packages/openloop/shell/src/client/index.ts:21',
+  },
 ]
 /* jscpd:ignore-end */

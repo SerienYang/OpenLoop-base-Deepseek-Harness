@@ -26,9 +26,10 @@ side-effect-free contracts translate public Shell, Workspace, settings, and
 desktop data without owning persistence or workflow state.
 
 `@openloop/shell` is the Openloop profile's single Client `root` owner. It
-declares the existing sidebar, conversation, details, and overlay Slots,
-preserves the shared `ctx.layout` panel actions and theme projection, and
-changes no default DSH profile behavior.
+declares the existing sidebar, conversation, details, and overlay Slots plus
+the root-scoped `workbench` Slot for one trusted WorkbenchHost, preserves the
+shared `ctx.layout` panel actions and theme projection, and changes no default
+DSH profile behavior.
 
 `@openloop/credentials-keychain` is the Openloop profile's Host credential
 provider. It resolves inherited process environment values before channel-

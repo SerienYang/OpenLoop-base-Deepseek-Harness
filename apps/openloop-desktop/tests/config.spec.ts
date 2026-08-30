@@ -613,6 +613,7 @@ describe('Openloop desktop foundation configuration', () => {
   })
 
   test('keeps the Rust and TypeScript build-manifest contracts identical', () => {
+    const buildScript = readText('apps/openloop-desktop/src-tauri/build.rs')
     const library = readText('apps/openloop-desktop/src-tauri/src/lib.rs')
     const rustFields = rustStructFields(library, 'OpenloopBuildManifest')
     const typeScriptFields = interfaceFields(
@@ -668,6 +669,8 @@ describe('Openloop desktop foundation configuration', () => {
       previewLabel: 'string',
       attribution: 'string',
     })
+    expect(buildScript).toContain('brand.preview_label != "预览版"')
+    expect(buildScript).toContain('preview_label: "预览版".into()')
   })
 
   test('embeds validated manifests and keeps updater ownership in the Rust Host', () => {

@@ -221,7 +221,7 @@ fn validate_core(manifest: &CanonicalBuildManifest) -> Result<(), Box<dyn std::e
         || brand.document_suffix != "Openloop"
         || !brand.mark_asset.starts_with("data:image/svg+xml;base64,")
         || brand.hero_title != "Openloop"
-        || brand.preview_label != "Preview"
+        || brand.preview_label != "预览版"
         || brand.attribution != "Built on DeepSeek Harness"
     {
         return Err(invalid_data("Openloop core manifest brand identity is invalid").into());
@@ -495,7 +495,7 @@ mod tests {
                 document_suffix: "Openloop".into(),
                 mark_asset: "data:image/svg+xml;base64,PHN2Zy8+".into(),
                 hero_title: "Openloop".into(),
-                preview_label: "Preview".into(),
+                preview_label: "预览版".into(),
                 attribution: "Built on DeepSeek Harness".into(),
             },
         }

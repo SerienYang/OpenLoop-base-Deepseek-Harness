@@ -4,12 +4,26 @@ import type { BoundActions } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ILayout } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { ThemeSnapshot } from '@deepseek-ai/dsh-client-ui-theme/client'
 import { createOpenloopShellStore, OpenloopFrame } from './OpenloopFrame.tsx'
+import { OPENLOOP_THEME_TOKENS } from './theme-tokens.generated.ts'
 
 export { OpenloopFrame } from './OpenloopFrame.tsx'
 export { parseOpenloopBrand } from './brand.ts'
 export type { OpenloopBrand } from './brand.ts'
 
 type ShellActions = BoundActions<ReturnType<typeof createOpenloopShellStore>>
+
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface SlotMap {
+    /**
+     * Openloop's trusted Workbench surface beside the conversation. The
+     * Workbench package mounts its single WorkbenchHost occupant here.
+     */
+    'workbench': { kind: 'single'; scope: 'root'; owner: WorkbenchOwnerProps }
+  }
+}
+
+/** Workbench owner share; the Workbench package owns its application state. */
+export interface WorkbenchOwnerProps {}
 
 class OpenloopLayoutController implements ILayout {
   private actions: ShellActions | undefined
@@ -72,7 +86,7 @@ class ThemeDocumentPresenter {
 export const name = 'shell'
 export const inject = ['slots', 'theme']
 
-/** Register exactly one Openloop root owner and the established DSH shell seats. */
+/** Register one Openloop root owner, its child surfaces, and product theme tokens. */
 export function apply(ctx: ClientContext): void {
   const layout = new OpenloopLayoutController()
   ctx.effect(() => {
@@ -82,6 +96,7 @@ export function apply(ctx: ClientContext): void {
       children: {
         'sidebar': { kind: 'single', scope: 'root' },
         'conversation': { kind: 'single', scope: 'session-maybe' },
+        'workbench': { kind: 'single', scope: 'root' },
         'details': { kind: 'single', scope: 'session' },
         'shell.overlay': { kind: 'list', scope: 'root' },
       },
@@ -96,6 +111,11 @@ export function apply(ctx: ClientContext): void {
       void disposeService()
     }
   }, 'openloop-shell: layout service + root registration')
+
+  ctx.effect(
+    () => ctx.theme.overrideTokens('@openloop/shell', OPENLOOP_THEME_TOKENS),
+    'openloop-shell: brand theme tokens',
+  )
 
   ctx.effect(() => {
     const presenter = new ThemeDocumentPresenter()

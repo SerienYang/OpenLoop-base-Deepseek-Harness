@@ -1,12 +1,16 @@
 // @vitest-environment jsdom
 import { Context } from '@deepseek-ai/cordis'
-import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
+import { SlotRegistry, type SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ThemeTokenOverrides } from '@deepseek-ai/dsh-client-ui-theme/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { apply, inject } from '../src/client/index.ts'
+import { cleanup, render } from '@testing-library/react'
+import { apply, inject, OpenloopFrame } from '../src/client/index.ts'
+import type { OpenloopFrameProps } from '../src/client/OpenloopFrame.tsx'
 
 let activeContext: Context | undefined
 
 afterEach(async () => {
+  cleanup()
   await activeContext?.fiber.dispose()
   activeContext = undefined
 })
@@ -16,6 +20,7 @@ describe('Openloop root shell Slot contract', () => {
     const ctx = new Context()
     activeContext = ctx
     await ctx.plugin(SlotRegistry).await()
+    const overrideTokens = vi.fn((_source: string, _tokens: ThemeTokenOverrides) => vi.fn())
     ctx.provide('theme', {
       getTheme: () => ({
         active: {
@@ -23,6 +28,7 @@ describe('Openloop root shell Slot contract', () => {
           tokens: { '--dsw-alias-brand-primary': '#f7f8fa' },
         },
       }),
+      overrideTokens,
     } as never)
     await ctx.plugin({ inject: [...inject], apply }).await()
 
@@ -33,8 +39,20 @@ describe('Openloop root shell Slot contract', () => {
     expect(slots.entries('root')).toHaveLength(1)
     expect(slots.spec('sidebar')).toEqual({ kind: 'single', scope: 'root' })
     expect(slots.spec('conversation')).toEqual({ kind: 'single', scope: 'session-maybe' })
+    expect(slots.spec('workbench')).toEqual({ kind: 'single', scope: 'root' })
     expect(slots.spec('details')).toEqual({ kind: 'single', scope: 'session' })
     expect(slots.spec('shell.overlay')).toEqual({ kind: 'list', scope: 'root' })
+    expect(overrideTokens).toHaveBeenCalledOnce()
+    const [source, tokens] = overrideTokens.mock.calls[0] ?? []
+    expect(source).toBe('@openloop/shell')
+    expect(tokens?.['--dsw-alias-bg-base']).toEqual({
+      light: '#F7F8FA',
+      dark: '#0B0D0F',
+    })
+    expect(tokens?.['--dsw-alias-brand-primary']).toEqual({
+      light: '#111316',
+      dark: '#F7F8FA',
+    })
 
     const panelActions = {
       toggleSidebar: vi.fn(),
@@ -61,5 +79,38 @@ describe('Openloop root shell Slot contract', () => {
     expect(panelActions.toggleSidebar).toHaveBeenCalledOnce()
     expect(panelActions.openDetails).toHaveBeenCalledOnce()
     expect(panelActions.closeDetails).toHaveBeenCalledOnce()
+  })
+
+  it('renders one workbench surface without replacing conversation or details', () => {
+    const renderSlot = vi.fn((key: string) => <div data-slot={key} />)
+    const props = {
+      actions: {
+        closeDetails: vi.fn(),
+        openDetails: vi.fn(),
+        toggleSidebar: vi.fn(),
+      },
+      renderSlot,
+      useSessions: (select: (state: SessionListState) => unknown) => select({
+        byId: {},
+        current: undefined,
+      } as SessionListState),
+      useStore: (select: (state: { sidebarOpen: boolean; detailsOpen: boolean }) => unknown) =>
+        select({ sidebarOpen: true, detailsOpen: false }),
+    } as unknown as OpenloopFrameProps
+
+    const view = render(<OpenloopFrame {...props} />)
+
+    expect(renderSlot.mock.calls.map(([key]) => key)).toEqual([
+      'sidebar',
+      'conversation',
+      'workbench',
+      'details',
+      'shell.overlay',
+    ])
+    expect(view.container.querySelectorAll('[data-openloop-workbench]')).toHaveLength(1)
+    expect((view.container.firstElementChild as HTMLElement).style.gridTemplateColumns)
+      .toBe('280px minmax(0, 1fr) minmax(320px, 42%) 0px')
+    expect(view.container.querySelector('[data-slot="conversation"]')).not.toBeNull()
+    expect(view.container.querySelector('[data-slot="details"]')).not.toBeNull()
   })
 })
