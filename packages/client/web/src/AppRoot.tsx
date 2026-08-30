@@ -10,6 +10,10 @@
  */
 import { useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
+import {
+  DEFAULT_PRODUCT_BRAND, ProductBrandProvider,
+} from '@deepseek-ai/dsh-client-ui-primitives'
+import type { ProductBrand } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { KernelSignal, LoaderStatus } from './loader-status.ts'
 import css from './AppRoot.module.css'
 
@@ -23,6 +27,8 @@ export interface AppRootProps {
   error: KernelSignal<string | undefined>
   /** Builds the real UI; called only after settled. */
   renderApp: () => ReactNode
+  /** Immutable product identity supplied by the trusted bootstrap boundary. */
+  brand?: ProductBrand
 }
 
 /** Boot gate: loading page until the boot settles; failures stay here. */
@@ -31,30 +37,45 @@ export function AppRoot(props: AppRootProps) {
   const status = useSyncExternalStore(props.status.subscribe, props.status.getSnapshot)
   const error = useSyncExternalStore(props.error.subscribe, props.error.getSnapshot)
   const failed = Object.entries(status).filter(([, s]) => s === 'failed')
-
-  if (settled) return <>{props.renderApp()}</>
-
+  const brand = props.brand ?? DEFAULT_PRODUCT_BRAND
   const loud = error !== undefined || failed.length > 0
 
   return (
-    <div className={css.boot}>
-      <div className={css.card}>
-        <div className={css.wordmark}>HARNESS</div>
-        {!loud
-          ? (
-            <>
-              <div className={css.spinner} />
-              <div className={css.hint}>Loading plugins…</div>
-            </>
-          )
-          : (
-            <div className={css.failed}>
-              <div className={css.failedTitle}>Failed to load plugins</div>
-              {failed.map(([id]) => <div key={id} className={css.failedItem}>{id}</div>)}
-              {error !== undefined && <div className={css.failedItem}>{error}</div>}
+    <ProductBrandProvider brand={brand}>
+      {settled
+        ? props.renderApp()
+        : (
+          <div className={css.boot}>
+            <div className={css.card}>
+              {brand.markAsset === undefined
+                ? <div className={css.wordmark}>HARNESS</div>
+                : (
+                  <>
+                    <div className={css.wordmark}>
+                      <img src={brand.markAsset} alt="" width={24} />
+                      <span>{brand.productName}</span>
+                    </div>
+                    {brand.attribution !== undefined
+                      && <div className={css.hint}>{brand.attribution}</div>}
+                  </>
+                )}
+              {!loud
+                ? (
+                  <>
+                    <div className={css.spinner} />
+                    <div className={css.hint}>Loading plugins…</div>
+                  </>
+                )
+                : (
+                  <div className={css.failed}>
+                    <div className={css.failedTitle}>Failed to load plugins</div>
+                    {failed.map(([id]) => <div key={id} className={css.failedItem}>{id}</div>)}
+                    {error !== undefined && <div className={css.failedItem}>{error}</div>}
+                  </div>
+                )}
             </div>
-          )}
-      </div>
-    </div>
+          </div>
+        )}
+    </ProductBrandProvider>
   )
 }

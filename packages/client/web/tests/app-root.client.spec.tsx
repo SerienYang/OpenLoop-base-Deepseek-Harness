@@ -9,12 +9,28 @@
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import { act, cleanup, render } from '@testing-library/react'
+import { useProductBrand } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { ProductBrand } from '@deepseek-ai/dsh-client-ui-primitives'
 
 afterEach(cleanup)
 import { AppRoot } from '@deepseek-ai/dsh-client-web/src/AppRoot.tsx'
 import { createLoaderStatusStore, createSignal } from '@deepseek-ai/dsh-client-web/src/loader-status.ts'
 
-function mount() {
+const openloopBrand: ProductBrand = {
+  productName: 'Openloop',
+  documentSuffix: 'Openloop',
+  markAsset: 'openloop-icon',
+  heroTitle: 'Openloop',
+  previewLabel: '预览版',
+  attribution: 'Built on DeepSeek Harness',
+}
+
+function SettledBrandProbe() {
+  const brand = useProductBrand()
+  return <div data-testid="real-ui">{brand.productName}</div>
+}
+
+function mount(brand?: ProductBrand) {
   const settled = createSignal(false)
   const error = createSignal<string | undefined>(undefined)
   const status = createLoaderStatusStore()
@@ -24,7 +40,11 @@ function mount() {
       settled={settled}
       status={status}
       error={error}
-      renderApp={() => { renders += 1; return <div data-testid="real-ui" /> }}
+      renderApp={() => {
+        renders += 1
+        return <SettledBrandProbe />
+      }}
+      {...brand === undefined ? {} : { brand }}
     />,
   )
   return { settled, status, error, counts: () => renders, ...utils }
@@ -33,7 +53,7 @@ function mount() {
 describe('AppRoot', () => {
   it('shows the loading page and never calls renderApp before settled', () => {
     const { queryByTestId, counts, getByText } = mount()
-    expect(getByText('HARNESS')).toBeTruthy()
+    expect(getByText('HARNESS').textContent).toBe('HARNESS')
     expect(queryByTestId('real-ui')).toBeNull()
     expect(counts()).toBe(0)
   })
@@ -53,6 +73,7 @@ describe('AppRoot', () => {
       status.set('@deepseek-ai/dsh-client-ui-layout', 'failed')
       status.set('ok', 'active')
     })
+    expect(getByText('HARNESS').textContent).toBe('HARNESS')
     expect(getByText('Failed to load plugins')).toBeTruthy()
     expect(getByText('@deepseek-ai/dsh-client-ui-layout')).toBeTruthy()
     expect(queryByTestId('real-ui')).toBeNull()
@@ -72,5 +93,23 @@ describe('AppRoot', () => {
     expect(getByTestId('real-ui')).toBeTruthy()
     expect(queryByText('HARNESS')).toBeNull()
     expect(counts()).toBe(1)
+  })
+
+  it('renders the injected identity throughout loading, failure, and the settled app', () => {
+    const { container, error, settled, getByText, queryByText, getByTestId } = mount(openloopBrand)
+    const mark = container.querySelector('img')
+    expect(mark?.getAttribute('src')).toBe('openloop-icon')
+    expect(mark?.getAttribute('width')).toBe('24')
+    expect(getByText('Openloop')).toBeTruthy()
+    expect(getByText('Built on DeepSeek Harness')).toBeTruthy()
+    expect(queryByText('HARNESS')).toBeNull()
+
+    act(() => { error.set('brand fixture failure') })
+    expect(container.querySelector('img')?.getAttribute('src')).toBe('openloop-icon')
+    expect(getByText('Openloop')).toBeTruthy()
+    expect(queryByText('HARNESS')).toBeNull()
+
+    act(() => { settled.set(true) })
+    expect(getByTestId('real-ui').textContent).toBe('Openloop')
   })
 })
