@@ -5,18 +5,59 @@ import type { ThemeTokenOverrides } from '@deepseek-ai/dsh-client-ui-theme/clien
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { ReactNode } from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, cleanup, render } from '@testing-library/react'
 import { apply, inject, OpenloopFrame } from '../src/client/index.ts'
+import { computeOpenloopColumns } from '../src/client/columns.ts'
 import type { OpenloopFrameProps } from '../src/client/OpenloopFrame.tsx'
 import css from '../src/client/OpenloopFrame.module.css'
 
 let activeContext: Context | undefined
+let frameWidth = 1280
+let fireResize: (() => void) | undefined
+
+class ResizeObserverStub {
+  readonly #callback: ResizeObserverCallback
+
+  constructor(callback: ResizeObserverCallback) {
+    this.#callback = callback
+  }
+
+  observe(): void {
+    fireResize = () => { this.#callback([], this) }
+  }
+
+  unobserve(): void {}
+
+  disconnect(): void {
+    fireResize = undefined
+  }
+}
+
+beforeEach(() => {
+  frameWidth = 1280
+  fireResize = undefined
+  window.innerWidth = frameWidth
+  vi.stubGlobal('ResizeObserver', ResizeObserverStub)
+  vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(() => ({
+    width: frameWidth,
+    height: 760,
+    top: 0,
+    right: frameWidth,
+    bottom: 760,
+    left: 0,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
+  }))
+})
 
 afterEach(async () => {
   cleanup()
   await activeContext?.fiber.dispose()
   activeContext = undefined
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 function stableAnchorRenderer(workbenchOccupant?: ReactNode) {
@@ -36,6 +77,33 @@ function stableAnchorRenderer(workbenchOccupant?: ReactNode) {
     renderSlot: probe as unknown as OpenloopFrameProps['renderSlot'],
   }
 }
+
+describe('Openloop column concessions', () => {
+  it('keeps preferred widths when the 640px workspace floor fits', () => {
+    expect(computeOpenloopColumns(1280, true, true)).toEqual({
+      sidebar: 280,
+      workspace: 640,
+      details: 360,
+    })
+  })
+
+  it('derives a rail and closes details at the 760px Tauri minimum', () => {
+    expect(computeOpenloopColumns(760, true, true)).toEqual({
+      sidebar: 56,
+      workspace: 704,
+      details: 0,
+    })
+  })
+
+  it('restores preferred columns after a narrow derived concession', () => {
+    expect(computeOpenloopColumns(760, true, true).details).toBe(0)
+    expect(computeOpenloopColumns(1280, true, true)).toEqual({
+      sidebar: 280,
+      workspace: 640,
+      details: 360,
+    })
+  })
+})
 
 describe('Openloop root shell Slot contract', () => {
   it('owns root once, declares the DSH shell seats, and preserves panel actions', async () => {
@@ -183,6 +251,47 @@ describe('Openloop root shell Slot contract', () => {
     expect(anchor).not.toBeNull()
     expect(workbench?.matches(':empty')).toBe(false)
     expect(marker?.parentElement).toBe(anchor)
+  })
+
+  it('concedes to the rail and closes details at 760px without changing preferences', () => {
+    frameWidth = 760
+    window.innerWidth = frameWidth
+    const { probe, renderSlot } = stableAnchorRenderer(<div data-testid="workbench-occupant" />)
+    const closeDetails = vi.fn()
+    const props = {
+      actions: {
+        closeDetails,
+        openDetails: vi.fn(),
+        toggleSidebar: vi.fn(),
+      },
+      renderSlot,
+      useSessions: (select: (state: SessionListState) => unknown) => select({
+        byId: { current: { blank: false } },
+        current: 'current',
+      } as unknown as SessionListState),
+      useStore: (select: (state: { sidebarOpen: boolean; detailsOpen: boolean }) => unknown) =>
+        select({ sidebarOpen: true, detailsOpen: true }),
+    } as unknown as OpenloopFrameProps
+
+    const view = render(<OpenloopFrame {...props} />)
+    const frame = view.container.firstElementChild as HTMLElement
+    const sidebarCalls = () => probe.mock.calls.filter(([key]) => key === 'sidebar')
+
+    expect(frame.style.gridTemplateColumns).toBe('56px minmax(0, 1fr) 0px')
+    expect(frame.hasAttribute('data-sidebar-collapsed')).toBe(true)
+    expect(frame.hasAttribute('data-details-collapsed')).toBe(true)
+    expect(sidebarCalls().at(-1)?.[1]).toEqual({ collapsed: true, width: 56 })
+    expect(view.queryByTestId('workbench-occupant')).not.toBeNull()
+    expect(closeDetails).not.toHaveBeenCalled()
+
+    frameWidth = 1280
+    act(() => { fireResize?.() })
+
+    expect(frame.style.gridTemplateColumns).toBe('280px minmax(0, 1fr) 360px')
+    expect(frame.hasAttribute('data-sidebar-collapsed')).toBe(false)
+    expect(frame.hasAttribute('data-details-collapsed')).toBe(false)
+    expect(sidebarCalls().at(-1)?.[1]).toEqual({ collapsed: false, width: 280 })
+    expect(closeDetails).not.toHaveBeenCalled()
   })
 
   it.each([

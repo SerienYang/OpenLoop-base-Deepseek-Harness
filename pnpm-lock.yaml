@@ -9679,9 +9679,18 @@ importers:
       '@openloop/sandbox-workspace':
         specifier: workspace:^
         version: link:../../packages/openloop/sandbox-workspace
+      '@openloop/settings-foundation':
+        specifier: workspace:^
+        version: link:../../packages/openloop/settings-foundation
+      '@openloop/shell':
+        specifier: workspace:^
+        version: link:../../packages/openloop/shell
       '@openloop/workspace-authority':
         specifier: workspace:^
         version: link:../../packages/openloop/workspace-authority
+      '@openloop/workspace-client':
+        specifier: workspace:^
+        version: link:../../packages/openloop/workspace-client
 
   vendor/cordis:
     dependencies:

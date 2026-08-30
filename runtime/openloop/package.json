@@ -209,6 +209,9 @@
     "@openloop/runtime": "workspace:^",
     "@openloop/runtime-bootstrap": "workspace:^",
     "@openloop/sandbox-workspace": "workspace:^",
-    "@openloop/workspace-authority": "workspace:^"
+    "@openloop/settings-foundation": "workspace:^",
+    "@openloop/shell": "workspace:^",
+    "@openloop/workspace-authority": "workspace:^",
+    "@openloop/workspace-client": "workspace:^"
   }
 }

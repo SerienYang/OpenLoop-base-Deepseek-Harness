@@ -1,11 +1,10 @@
-import { useLayoutEffect, useRef } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { defineStore, type SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import type { PropsRenderSlots, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
+import { computeOpenloopColumns } from './columns.ts'
 import css from './OpenloopFrame.module.css'
 
-const SIDEBAR_WIDTH = 280
 const SIDEBAR_COLLAPSED_WIDTH = 56
-const DETAILS_WIDTH = 360
 
 interface ShellState {
   sidebarOpen: boolean
@@ -50,6 +49,8 @@ export function OpenloopFrame({
   const state = useStore(value => value)
   const session = useSessions(currentConversation)
   const previousSession = useRef(session)
+  const frameRef = useRef<HTMLDivElement | null>(null)
+  const [viewport, setViewport] = useState(() => window.innerWidth)
 
   useLayoutEffect(() => {
     if (session !== undefined
@@ -60,20 +61,38 @@ export function OpenloopFrame({
     if (session !== undefined) previousSession.current = session
   }, [actions, session])
 
-  const sidebarWidth = state.sidebarOpen ? SIDEBAR_WIDTH : SIDEBAR_COLLAPSED_WIDTH
-  const detailsWidth = session !== undefined && state.detailsOpen ? DETAILS_WIDTH : 0
+  useLayoutEffect(() => {
+    const frame = frameRef.current
+    if (frame === null) return
+    const updateViewport = () => {
+      const width = frame.getBoundingClientRect().width
+      if (width > 0) setViewport(width)
+    }
+    const observer = new ResizeObserver(updateViewport)
+    observer.observe(frame)
+    updateViewport()
+    return () => { observer.disconnect() }
+  }, [])
+
+  const columns = computeOpenloopColumns(
+    viewport,
+    state.sidebarOpen,
+    session !== undefined && state.detailsOpen,
+  )
+  const sidebarCollapsed = columns.sidebar === SIDEBAR_COLLAPSED_WIDTH
 
   return (
     <div
+      ref={frameRef}
       className={css.frame}
-      style={{ gridTemplateColumns: `${sidebarWidth}px minmax(0, 1fr) ${detailsWidth}px` }}
-      data-sidebar-collapsed={state.sidebarOpen ? undefined : ''}
-      data-details-collapsed={detailsWidth === 0 ? '' : undefined}
+      style={{ gridTemplateColumns: `${columns.sidebar}px minmax(0, 1fr) ${columns.details}px` }}
+      data-sidebar-collapsed={sidebarCollapsed ? '' : undefined}
+      data-details-collapsed={columns.details === 0 ? '' : undefined}
     >
       <aside className={css.sidebar}>
         {renderSlot('sidebar', {
-          collapsed: !state.sidebarOpen,
-          width: sidebarWidth,
+          collapsed: sidebarCollapsed,
+          width: columns.sidebar,
         })}
       </aside>
       <div className={css.workspace} data-openloop-workspace>
