@@ -337,6 +337,19 @@ describe('OpenLoop profile', () => {
     }
   })
 
+  it('prewires the Host credential control into future settings rows without enabling them', () => {
+    const entries = openloopEntries()
+    for (const id of ['ui-settings-models', 'ui-settings-plugins']) {
+      const entry = entries.find(candidate => candidate.id === id)
+      expect(entry).toMatchObject({ id, disabled: true })
+      expect(entry?.inject).toContain('credentialControl')
+    }
+    expect(entries.find(entry => entry.id === 'ui-settings')?.disabled).toBe(true)
+    expect(entries.find(entry => entry.id === 'ui-settings-general')?.disabled).toBe(true)
+    expect(entries.find(entry => entry.id === 'shell')?.inject)
+      .toEqual(['remote', 'remote.openloopDesktop'])
+  })
+
   it('enables the Openloop Workspace client while legacy Workspace and Settings rows stay disabled', () => {
     const entries = openloopEntries()
 
@@ -374,6 +387,7 @@ describe('OpenLoop profile', () => {
     expect(entries.filter(entry => entry.name === '@openloop/shell')).toEqual([{
       id: 'shell',
       name: '@openloop/shell',
+      inject: ['remote', 'remote.openloopDesktop'],
     }])
     expect(enabledClientPackages()).not.toContain('@deepseek-ai/dsh-client-ui-layout')
     expect(enabledClientPackages()).toContain('@openloop/shell')

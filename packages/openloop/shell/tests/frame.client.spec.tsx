@@ -161,10 +161,18 @@ describe('Openloop root shell Slot contract', () => {
       }),
       overrideTokens,
     } as never)
+    const openloopDesktop = {
+      describeCredential: vi.fn(),
+      openCredentialReplacement: vi.fn(),
+      unsetCredential: vi.fn(),
+    }
+    ctx.provide('remote', { openloopDesktop } as never)
+    ctx.provide('remote.openloopDesktop', openloopDesktop)
     await ctx.plugin({ inject: [...inject], apply }).await()
 
     const slots = ctx.get('slots') as SlotRegistry
-    expect(inject).toEqual(['slots', 'theme'])
+    expect(inject).toEqual(['slots', 'theme', 'remote', 'remote.openloopDesktop'])
+    expect(ctx.get('credentialControl')).toBeDefined()
     expect(document.body.hasAttribute('data-ds-dark-theme')).toBe(true)
     expect(document.body.style.getPropertyValue('--dsw-alias-brand-primary')).toBe('#f7f8fa')
     expect(slots.entries('root')).toHaveLength(1)

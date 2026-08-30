@@ -15,6 +15,7 @@
 import { useState } from 'react'
 import type { ReactNode } from 'react'
 import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
+import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { Button, IconPlusOutline16, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-web-react'
 import { CustomProviderCard } from './CustomProviderCard.tsx'
@@ -34,6 +35,8 @@ export interface ModelsSectionInjected {
   api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>
   /** Section copy. */
   t: (key: keyof typeof en) => string
+  /** Optional product-owned credential rendering and lifecycle policy. */
+  credentialControl?: CredentialControlAdapter
 }
 
 /**
@@ -56,6 +59,8 @@ interface EditorTarget extends ProviderIdentity {
   settingsPath: readonly string[]
   /** Writable credential identified under this page's conventional reference. */
   credentialRef?: string
+  /** Value-free credential snapshot marker for an open product control. */
+  credentialRefreshToken?: string
   /** The adapter reports this route as one it does not ship (see {@link ProviderEditorProps.declared}). */
   declared?: boolean
 }
@@ -63,7 +68,7 @@ interface EditorTarget extends ProviderIdentity {
 /** Values that vary around the shared provider-editor rendering. */
 interface ProviderEditorRenderProps extends Pick<
   ProviderEditorProps,
-  'namespace' | 'api' | 't' | 'readOnly' | 'onClose'
+  'namespace' | 'api' | 't' | 'readOnly' | 'credentialControl' | 'onClose'
 > {
   target: EditorTarget
 }
@@ -75,6 +80,9 @@ function renderProviderEditor({ target, ...props }: ProviderEditorRenderProps): 
       provider={target.provider}
       displayName={target.displayName}
       settingsPath={target.settingsPath}
+      {...target.credentialRefreshToken === undefined
+        ? {}
+        : { credentialRefreshToken: target.credentialRefreshToken }}
       {...target.declared === true ? { declared: true } : {}}
       {...props}
     />
@@ -96,9 +104,10 @@ export async function removeProviderProfile(
   api: Pick<IApiClient, 'settings' | 'credentials'>,
   controller: ModelsSettingsStore,
   target: { settingsNs: string; settingsPath: readonly string[]; credentialRef?: string },
+  deleteCredentialWithProfile = true,
 ): Promise<string | undefined> {
   try {
-    if (target.credentialRef !== undefined) {
+    if (deleteCredentialWithProfile && target.credentialRef !== undefined) {
       const credential = await api.credentials.unset({ ref: target.credentialRef })
       if (!credential.result.ok) return credential.result.error.message
     }
@@ -143,6 +152,9 @@ function targetOf(row: ProviderRow): EditorTarget {
     displayName: row.entry.displayName,
     settingsNs: row.entry.settingsNs,
     settingsPath: row.entry.settingsPath,
+    ...row.credential === undefined
+      ? {}
+      : { credentialRefreshToken: JSON.stringify(row.credential) },
     ...credentialRef === undefined ? {} : { credentialRef },
     // Absent is not "shipped": an adapter that answers nothing leaves the
     // route-level fields only a declared route owns off the card, exactly as
@@ -169,9 +181,15 @@ export function providerCopy(template: string, target: ProviderIdentity): string
  * @returns the section, or null while the shell has not injected yet.
  */
 export function ModelsSection(props: ModelsSectionProps): ReactNode {
-  const { controller, useSnapshot, api, t } = props
+  const { controller, useSnapshot, api, t, credentialControl } = props
   if (controller === undefined || useSnapshot === undefined || api === undefined || t === undefined) return null
-  return <Loaded injected={{ controller, useSnapshot, api, t }} />
+  return <Loaded injected={{
+    controller,
+    useSnapshot,
+    api,
+    t,
+    ...credentialControl === undefined ? {} : { credentialControl },
+  }} />
 }
 
 function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
@@ -223,7 +241,12 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
     if (deleteTarget === undefined || deleting) return
     setDeleting(true)
     setDeleteFailure(undefined)
-    void removeProviderProfile(api, controller, deleteTarget)
+    void removeProviderProfile(
+      api,
+      controller,
+      deleteTarget,
+      injected.credentialControl?.deleteCredentialWithProfile ?? true,
+    )
       .then((failure) => {
         if (failure !== undefined) {
           setDeleteFailure(failure)
@@ -300,6 +323,9 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
                   api,
                   t,
                   readOnly: !state.writable,
+                  ...injected.credentialControl === undefined
+                    ? {}
+                    : { credentialControl: injected.credentialControl },
                   onClose: (changed) => { closeSetup(changed, target) },
                 })}
               </li>
@@ -384,6 +410,9 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
                   api,
                   t,
                   readOnly: !state.writable,
+                  ...injected.credentialControl === undefined
+                    ? {}
+                    : { credentialControl: injected.credentialControl },
                   onClose: (changed) => { closeEditor(changed, target) },
                 })
                 : null}
@@ -423,6 +452,9 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
                 api={api}
                 t={t}
                 readOnly={!state.writable}
+                {...injected.credentialControl === undefined
+                  ? {}
+                  : { credentialControl: injected.credentialControl }}
                 onClose={(changed) => { closeEditor(changed, addTarget) }}
               />
             </div>
@@ -438,6 +470,9 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
                   api={api}
                   t={t}
                   readOnly={!state.writable}
+                  {...injected.credentialControl === undefined
+                    ? {}
+                    : { credentialControl: injected.credentialControl }}
                   onClose={(changed) => {
                     setDeclaring(false)
                     if (changed) void controller.load()
@@ -495,6 +530,7 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
           ? ''
           : providerCopy(
             deleteTarget.credentialRef === undefined
+              || injected.credentialControl?.deleteCredentialWithProfile === false
               ? t('deleteDescription')
               : t('deleteDescriptionWithCredential'),
             deleteTarget,

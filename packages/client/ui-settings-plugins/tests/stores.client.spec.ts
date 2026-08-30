@@ -5,6 +5,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { stubSettingsScope, type StubSettingsScope } from '@deepseek-ai/dsh-client-test-runtime'
+import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { CardForm, numberField, textField } from '../src/client/card-form.ts'
 import { AgentLoopCardController, type AgentLoopSettings } from '../src/client/agent-loop-card-controller.ts'
 import { BashCardController, type BashSettings } from '../src/client/bash-card-controller.ts'
@@ -32,6 +33,19 @@ function credentialsApi(configured: boolean) {
   }))
   const set = vi.fn(() => Promise.resolve({ rpcId: 'c-2' as never, result: { ok: true as const, value: {} } }))
   return { api: { credentials: { describe, set } } as never, describe, set }
+}
+
+function hostCredentialControl(configured = true): CredentialControlAdapter {
+  return {
+    describe: vi.fn(() => Promise.resolve({
+      configured,
+      writable: true,
+      ...configured ? { source: 'keychain' } : {},
+    })),
+    render: () => null,
+    materializeApiKeyEnv: true,
+    deleteCredentialWithProfile: false,
+  }
 }
 
 describe('CardForm', () => {
@@ -381,6 +395,30 @@ describe('AgentLoopCardController', () => {
 })
 
 describe('WebSearchCardController', () => {
+  it('uses the Host adapter without creating a secret draft or calling legacy credentials', async () => {
+    const host = stubSettingsScope<WebSearchSettings>()
+    const credentials = credentialsApi(false)
+    const describe = vi.fn(() => Promise.resolve({
+      configured: true,
+      source: 'keychain',
+      writable: true,
+    }))
+    const credentialControl = { ...hostCredentialControl(), describe }
+    const controller = new WebSearchCardController(host.scope, credentials.api, credentialControl)
+    host.publish({ status: 'ready', writable: true, value: {}, user: {} })
+
+    await vi.waitFor(() => { expect(describe).toHaveBeenCalledWith('DEEPSEEK_API_KEY') })
+    const state = controller.inject().hooks.webSearchCard.getSnapshot()
+    expect(state).not.toHaveProperty('apiKey')
+    expect(state).toMatchObject({
+      credentialRef: 'DEEPSEEK_API_KEY',
+      apiKeyConfigured: true,
+      apiKeyWritable: true,
+    })
+    expect(credentials.describe).not.toHaveBeenCalled()
+    expect(credentials.set).not.toHaveBeenCalled()
+  })
+
   it('reads the credential state for the reference the tab names', async () => {
     const host = stubSettingsScope<WebSearchSettings>()
     const credentials = credentialsApi(true)

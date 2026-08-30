@@ -12,6 +12,11 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import { SettingsScopeBinder } from './settings-scope.ts'
 
 export type {
+  CredentialControlAdapter,
+  CredentialControlRenderProps,
+  CredentialControlStatus,
+} from './credential-control.ts'
+export type {
   SettingsGeneralItemOwnerProps, SettingsHeaderOwnerProps, SettingsOnboardingOwnerProps,
   SettingsPluginsTabOwnerProps, SettingsSectionOwnerProps, SettingsTriggerOwnerProps,
 } from './contract/slots.ts'

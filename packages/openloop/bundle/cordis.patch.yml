@@ -49,10 +49,12 @@
   disabled: true
 - id: ui-settings-models
   disabled: true
+  inject: [credentialControl]
 - id: ui-settings-plugin-inventory
   disabled: true
 - id: ui-settings-plugins
   disabled: true
+  inject: [credentialControl]
 - id: ui-permission
   disabled: true
 - id: ui-agent-preset
@@ -149,3 +151,4 @@
 - insert:
     - id: shell
       name: '@openloop/shell'
+      inject: [remote, remote.openloopDesktop]

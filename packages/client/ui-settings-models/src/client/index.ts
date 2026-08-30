@@ -68,7 +68,8 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-models: copy dictionaries')
 
   const connection = ctx.get('connection') as ConnectionHandle
-  const controller = new ModelsSettingsStore(connection.api)
+  const credentialControl = ctx.get('credentialControl')
+  const controller = new ModelsSettingsStore(connection.api, credentialControl)
   const useSnapshot = bindSnapshotSelector(controller.store)
   // Registration-time text (the nav label thunk) and the inject faces share
   // one bound translate; copy freshness rides the locale revision.
@@ -78,12 +79,14 @@ export function apply(ctx: ClientContext): void {
     useSnapshot,
     api: connection.api,
     t,
+    ...credentialControl === undefined ? {} : { credentialControl },
   })
   const deepSeekOnboardingInjected = (): DeepSeekOnboardingInjected => ({
     controller,
     hooks: { models: controller.store },
     api: connection.api,
     t,
+    ...credentialControl === undefined ? {} : { credentialControl },
   })
   const welcomeController = new WelcomeNoticeStore(
     connection.api,

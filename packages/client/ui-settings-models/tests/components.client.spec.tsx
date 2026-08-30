@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import Schema from '@deepseek-ai/schemastery'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
 import type { RpcResponse, SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
+import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import {
   ModelsSection, needsSetup, providerCopy, providerTargetLabel, removeProviderProfile,
 } from '../src/client/ModelsSection.tsx'
@@ -183,15 +184,19 @@ function scriptedFace(overrides: {
 
 type WireFace = ConstructorParameters<typeof ModelsSettingsStore>[0]
 
-async function mountFace(scripted: ReturnType<typeof scriptedFace>) {
+async function mountFace(
+  scripted: ReturnType<typeof scriptedFace>,
+  credentialControl?: CredentialControlAdapter,
+) {
   const { face, update, replace, mutate, set, unset } = scripted
-  const controller = new ModelsSettingsStore(face as unknown as WireFace)
+  const controller = new ModelsSettingsStore(face as unknown as WireFace, credentialControl)
   await controller.load()
   const injected: ModelsSectionInjected = {
     controller,
     useSnapshot: bindSnapshotSelector(controller.store),
     api: face as never,
     t,
+    ...credentialControl === undefined ? {} : { credentialControl },
   }
   const view = render(<ModelsSection {...injected} />)
   return { view, face, update, replace, mutate, set, unset, controller }
@@ -199,6 +204,22 @@ async function mountFace(scripted: ReturnType<typeof scriptedFace>) {
 
 async function mountSection(overrides: Parameters<typeof scriptedFace>[0] = {}) {
   return mountFace(scriptedFace(overrides))
+}
+
+function hostCredentialControl(
+  overrides: Partial<CredentialControlAdapter> = {},
+): CredentialControlAdapter {
+  return {
+    describe: vi.fn(() => Promise.resolve({
+      configured: true,
+      source: 'keychain',
+      writable: true,
+    })),
+    render: ({ label }) => <div data-testid="host-credential-control">{label}</div>,
+    materializeApiKeyEnv: true,
+    deleteCredentialWithProfile: false,
+    ...overrides,
+  }
 }
 
 /**
@@ -353,6 +374,25 @@ describe('ModelsSection', () => {
     )
     fireEvent.click(screen.getByText(en.add))
     expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('delegates Openloop credential rendering and status reads without exposing an input', async () => {
+    const describe = vi.fn(() => Promise.resolve({
+      configured: true,
+      source: 'keychain',
+      writable: true,
+    }))
+    const adapter = hostCredentialControl({ describe })
+    const scripted = scriptedFace()
+    await mountFace(scripted, adapter)
+
+    fireEvent.click(screen.getByRole('button', { name: openaiCopy(en.editProvider) }))
+
+    expect(screen.getByTestId('host-credential-control').textContent).toBe(en.keyInput)
+    expect(screen.queryByLabelText(en.keyInput)).toBeNull()
+    expect(document.querySelector('input[type="password"]')).toBeNull()
+    expect(describe).toHaveBeenCalledWith('OPENAI_API_KEY')
+    expect(scripted.face.credentials.describe).not.toHaveBeenCalled()
   })
 
   it('reuses the provider editor as a required credential-only onboarding form', async () => {
@@ -1115,6 +1155,21 @@ describe('ModelsSection', () => {
       ns: 'llm-pi-ai',
       ops: [{ op: 'unset', path: ['providers', 'openai'] }],
     })
+  })
+
+  it('removes only the Openloop provider profile and leaves shared credential deletion to its control', async () => {
+    const adapter = hostCredentialControl()
+    const scripted = scriptedFace()
+    const { mutate, unset } = await mountFace(scripted, adapter)
+
+    fireEvent.click(screen.getByRole('button', { name: openaiCopy(en.removeProvider) }))
+    const dialog = screen.getByRole('dialog', { name: openaiCopy(en.deleteTitle) })
+    expect(dialog.textContent).toContain(openaiCopy(en.deleteDescription))
+    expect(dialog.textContent).not.toContain(openaiCopy(en.deleteDescriptionWithCredential))
+    fireEvent.click(within(dialog).getByRole('button', { name: openaiCopy(en.deleteConfirm) }))
+
+    await waitFor(() => { expect(mutate).toHaveBeenCalledOnce() })
+    expect(unset).not.toHaveBeenCalled()
   })
 
   it('blocks duplicate deletion while the confirmed removal is pending', async () => {

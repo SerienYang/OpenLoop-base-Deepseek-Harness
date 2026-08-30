@@ -3,9 +3,22 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { BoundActions } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ILayout } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { ThemeSnapshot } from '@deepseek-ai/dsh-client-ui-theme/client'
+import type {} from '@deepseek-ai/dsh-api-remotes/client'
+import {
+  createOpenloopCredentialControlAdapter,
+  type OpenloopCredentialRemote,
+} from './CredentialControl.tsx'
 import { createOpenloopShellStore, OpenloopFrame } from './OpenloopFrame.tsx'
 import { OPENLOOP_THEME_TOKENS } from './theme-tokens.generated.ts'
 
+export {
+  createOpenloopCredentialControlAdapter,
+  CredentialControl,
+} from './CredentialControl.tsx'
+export type {
+  CredentialControlProps,
+  OpenloopCredentialRemote,
+} from './CredentialControl.tsx'
 export { OpenloopFrame } from './OpenloopFrame.tsx'
 export { parseOpenloopBrand } from './brand.ts'
 export type { OpenloopBrand } from './brand.ts'
@@ -84,10 +97,21 @@ class ThemeDocumentPresenter {
 }
 
 export const name = 'shell'
-export const inject = ['slots', 'theme']
+export const inject = ['slots', 'theme', 'remote', 'remote.openloopDesktop']
 
 /** Register one Openloop root owner, its child surfaces, and product theme tokens. */
 export function apply(ctx: ClientContext): void {
+  const desktop = (
+    ctx.remote as unknown as { openloopDesktop: OpenloopCredentialRemote }
+  ).openloopDesktop
+  ctx.effect(
+    () => ctx.reflect.provide(
+      'credentialControl',
+      createOpenloopCredentialControlAdapter(desktop),
+    ),
+    'openloop-shell: Host credential control',
+  )
+
   const layout = new OpenloopLayoutController()
   ctx.effect(() => {
     const disposeService = ctx.reflect.provide('layout', layout)

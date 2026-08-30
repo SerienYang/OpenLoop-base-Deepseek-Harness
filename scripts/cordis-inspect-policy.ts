@@ -26,6 +26,7 @@ export const CORDIS_CONTEXT_SCAN_EXEMPTIONS: Readonly<Record<string, string>> = 
   launchEnvironment: 'Launcher-provided environment snapshot.',
   browserApiPolicy: 'Product browser boundary enforced by transport dispatchers, not a model-visible service.',
   connection: 'Client interface service whose implementation has a different declaration name.',
+  credentialControl: 'Client product credential UI service, absent from the Host catalog.',
   credentialConsumers: 'Host-only credential ownership registry; model calls use reviewed service facades.',
   appShell: 'Client browser service.',
   settingsScope: 'Client settings transport service.',

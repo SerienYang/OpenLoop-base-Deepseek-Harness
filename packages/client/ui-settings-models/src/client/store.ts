@@ -7,11 +7,15 @@
  */
 
 import type {
-  ConfigurableProviderView, CredentialView, IApiClient, SettingsNamespaceView,
+  ConfigurableProviderView, IApiClient, SettingsNamespaceView,
 } from '@deepseek-ai/dsh-api-remotes/client'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import { getPath, hasPath, nodeAtPath, rehydrateSchema } from '@deepseek-ai/dsh-client-schema-form'
+import type {
+  CredentialControlAdapter,
+  CredentialControlStatus,
+} from '@deepseek-ai/dsh-client-ui-settings/client'
 
 /**
  * Any route key walks a dict schema to the same profile node, so the lookup
@@ -30,7 +34,7 @@ export interface ProviderRow {
   /** The credential reference the resolved profile names, when one does. */
   apiKeyEnv: string | undefined
   /** Credential state for {@link apiKeyEnv}, once described. */
-  credential: CredentialView | undefined
+  credential: CredentialControlStatus | undefined
 }
 
 /** Page snapshot. */
@@ -108,7 +112,10 @@ export class ModelsSettingsStore {
   /**
    * @param api - the wire face (settings/credentials/llm domains).
    */
-  constructor(private readonly api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>) {}
+  constructor(
+    private readonly api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>,
+    private readonly credentialControl?: CredentialControlAdapter,
+  ) {}
 
   /**
    * Refresh the whole page snapshot: directory and namespaces in parallel,
@@ -158,16 +165,23 @@ export class ModelsSettingsStore {
       }
     })
     const refs = [...new Set(rows.flatMap(row => row.apiKeyEnv === undefined ? [] : [row.apiKeyEnv]))]
-    let credentials: Record<string, CredentialView> = {}
+    let credentials: Record<string, CredentialControlStatus> = {}
     let credentialError: string | null = null
     if (refs.length > 0) {
       try {
-        const response = await this.api.credentials.describe({ refs })
-        // Credential state is an enrichment for the Models page: neither a
-        // business rejection nor a transport failure fails the load. The
-        // onboarding projection below retains the failure distinction.
-        if (response.result.ok) credentials = response.result.value.credentials
-        else credentialError = response.result.error.message
+        const credentialControl = this.credentialControl
+        if (credentialControl === undefined) {
+          const response = await this.api.credentials.describe({ refs })
+          // Credential state is an enrichment for the Models page: neither a
+          // business rejection nor a transport failure fails the load. The
+          // onboarding projection below retains the failure distinction.
+          if (response.result.ok) credentials = response.result.value.credentials
+          else credentialError = response.result.error.message
+        } else {
+          credentials = Object.fromEntries(await Promise.all(
+            refs.map(async ref => [ref, await credentialControl.describe(ref)] as const),
+          ))
+        }
       } catch (error) {
         credentialError = messageOf(error)
       }

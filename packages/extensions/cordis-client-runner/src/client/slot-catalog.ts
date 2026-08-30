@@ -1732,7 +1732,7 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
     occupants: [],
     replaceRisk: 'none',
     example: 'return {\n  inject: [\'slots\'],\n  apply(ctx) {\n    ctx.slots.inject(\'workbench\', () => ctx.slots.register(\n      { name: \'workbench\' },\n      () => React.createElement(\'div\', null, \'hello\'),\n    ))\n  },\n}',
-    source: 'packages/openloop/shell/src/client/index.ts:21',
+    source: 'packages/openloop/shell/src/client/index.ts:34',
   },
 ]
 /* jscpd:ignore-end */

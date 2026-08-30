@@ -34,20 +34,31 @@ export function WebSearchCard(props: WebSearchCardProps) {
       onSave={props.save}
       onDiscard={props.discard}
     >
-      <SecretField
-        id="plugin-config-web-search-key"
-        label={t('webSearchApiKey')}
-        hint={t('webSearchApiKeyHint')}
-        // The credentials domain accepts a key even when the settings document
-        // itself is read-only; they are separate stores with separate refusals.
-        // Its own writability is what disables this control — a key sourced
-        // from the process environment cannot be written from here.
-        disabled={!state.apiKeyWritable}
-        text={state.apiKey.text}
-        configured={state.apiKeyConfigured}
-        stateLabel={state.apiKeyConfigured ? t('webSearchApiKeySet') : t('webSearchApiKeyUnset')}
-        onEdit={(text) => { props.edit('apiKey', text) }}
-      />
+      {props.credentialControl === undefined
+        ? state.apiKey === undefined
+          ? null
+          : (
+            <SecretField
+              id="plugin-config-web-search-key"
+              label={t('webSearchApiKey')}
+              hint={t('webSearchApiKeyHint')}
+              // The credentials domain accepts a key even when the settings document
+              // itself is read-only; they are separate stores with separate refusals.
+              // Its own writability is what disables this control — a key sourced
+              // from the process environment cannot be written from here.
+              disabled={!state.apiKeyWritable}
+              text={state.apiKey.text}
+              configured={state.apiKeyConfigured}
+              stateLabel={state.apiKeyConfigured ? t('webSearchApiKeySet') : t('webSearchApiKeyUnset')}
+              onEdit={(text) => { props.edit('apiKey', text) }}
+            />
+          )
+        : props.credentialControl.render({
+          reference: state.credentialRef,
+          label: t('webSearchApiKey'),
+          disabled: !state.apiKeyWritable,
+          refreshToken: state.credentialVersion,
+        })}
       <ValueField
         id="plugin-config-web-search-endpoint"
         label={t('webSearchBaseUrl')}
