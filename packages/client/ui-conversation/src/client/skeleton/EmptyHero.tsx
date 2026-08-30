@@ -92,7 +92,14 @@ export function HeroGlow({ className }: { className?: string | undefined }) {
         </filter>
       </defs>
       <g filter={`url(#${glowFilterId})`}>
-        <ellipse cx="525.5" cy="234" rx="425.5" ry="134" fill="#6187D8" fillOpacity="0.08" />
+        <ellipse
+          cx="525.5"
+          cy="234"
+          rx="425.5"
+          ry="134"
+          fill="var(--dsw-specific-hero-glow, #6187D8)"
+          fillOpacity="0.08"
+        />
       </g>
     </svg>
   )

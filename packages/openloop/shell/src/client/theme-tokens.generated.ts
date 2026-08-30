@@ -78,6 +78,22 @@ export const OPENLOOP_THEME_TOKENS = {
     light: '#EEF1F3',
     dark: '#3B424A',
   },
+  '--dsw-specific-drop-overlay-back-card': {
+    light: '#EEF1F3',
+    dark: '#3B424A',
+  },
+  '--dsw-specific-drop-overlay-front-card': {
+    light: '#111316',
+    dark: '#F7F8FA',
+  },
+  '--dsw-specific-drop-overlay-side-card': {
+    light: '#666D76',
+    dark: '#AEB4BC',
+  },
+  '--dsw-specific-hero-glow': {
+    light: '#666D76',
+    dark: '#AEB4BC',
+  },
   '--dsw-specific-sidebar-fill': {
     light: '#FBFBFA',
     dark: '#20242A',

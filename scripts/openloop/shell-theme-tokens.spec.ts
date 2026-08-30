@@ -14,8 +14,40 @@ const directDeepSeekConsumers = [
   'packages/client/ui-primitives/src/StateDot.module.css',
   'packages/client/ui-conversation/src/client/chat/ChatView.module.css',
 ]
+const brandAccentBindings = [
+  {
+    file: 'packages/client/ui-conversation/src/client/skeleton/EmptyHero.tsx',
+    token: '--dsw-specific-hero-glow',
+    fallback: '#6187D8',
+    light: '#666D76',
+    dark: '#AEB4BC',
+  },
+  {
+    file: 'packages/client/ui-attachment/src/DropOverlay.tsx',
+    token: '--dsw-specific-drop-overlay-back-card',
+    fallback: '#9CE5ED',
+    light: '#EEF1F3',
+    dark: '#3B424A',
+  },
+  {
+    file: 'packages/client/ui-attachment/src/DropOverlay.tsx',
+    token: '--dsw-specific-drop-overlay-side-card',
+    fallback: '#679EFE',
+    light: '#666D76',
+    dark: '#AEB4BC',
+  },
+  {
+    file: 'packages/client/ui-attachment/src/DropOverlay.tsx',
+    token: '--dsw-specific-drop-overlay-front-card',
+    fallback: '#3964FE',
+    light: '#111316',
+    dark: '#F7F8FA',
+  },
+] as const
 const repositoryRoot = resolve(import.meta.dirname, '../..')
 const staticDeepseekPattern = /var\((--dsw-static-deepseek-[a-z0-9-]+)\)/gu
+const directBrandAccentPattern =
+  /(?:\b(?:fill|stroke)=["']|(?:background(?:-color)?|border-color|color|fill|stroke)\s*:\s*)#(?:6187d8|9ce5ed|679efe|3964fe)\b/giu
 
 interface PackageManifest {
   readonly name?: string
@@ -31,7 +63,7 @@ function packageName(specifier: string): string {
     : specifier.split('/', 1)[0] ?? specifier
 }
 
-function enabledStaticDeepseekTokens(): string[] {
+function enabledClientPackageDirectories(): string[] {
   const require = createRequire(import.meta.url)
   const manifests = new Map<string, { readonly directory: string; readonly value: PackageManifest }>()
   for (const relative of globSync('packages/*/*/package.json', { cwd: repositoryRoot })) {
@@ -72,12 +104,15 @@ function enabledStaticDeepseekTokens(): string[] {
       }
     }
   }
+  return [...reachable]
+    .flatMap(name => manifests.get(name)?.directory ?? [])
+    .sort()
+}
 
+function enabledStaticDeepseekTokens(): string[] {
   const tokens = new Set<string>()
-  for (const name of reachable) {
-    if (name === '@deepseek-ai/dsh-client-ui-theme') continue
-    const directory = manifests.get(name)?.directory
-    if (directory === undefined) continue
+  for (const directory of enabledClientPackageDirectories()) {
+    if (directory.endsWith('/packages/client/ui-theme')) continue
     for (const file of globSync('src/**/*.css', { cwd: directory })) {
       const css = readFileSync(join(directory, file), 'utf8')
       for (const match of css.matchAll(staticDeepseekPattern)) {
@@ -86,6 +121,19 @@ function enabledStaticDeepseekTokens(): string[] {
     }
   }
   return [...tokens].sort()
+}
+
+function directlyDeclaredBrandAccents(): string[] {
+  const matches: string[] = []
+  for (const directory of enabledClientPackageDirectories()) {
+    for (const file of globSync('src/**/*.{css,ts,tsx}', { cwd: directory })) {
+      const source = readFileSync(join(directory, file), 'utf8')
+      for (const match of source.matchAll(directBrandAccentPattern)) {
+        matches.push(`${join(directory, file)}: ${match[0]}`)
+      }
+    }
+  }
+  return matches.sort()
 }
 
 describe('Openloop shell theme tokens', () => {
@@ -153,6 +201,35 @@ describe('Openloop shell theme tokens', () => {
       '#F7F8FA',
       '#AEB4BC',
     ])
+  })
+
+  it('keeps DSH fallbacks while routing branded SVG decoration through theme tokens', () => {
+    for (const binding of brandAccentBindings) {
+      const source = readFileSync(binding.file, 'utf8')
+      expect(source).toContain(`var(${binding.token}, ${binding.fallback})`)
+    }
+  })
+
+  it('maps branded SVG decoration to neutral Openloop semantic roles', () => {
+    const result = spawnSync(process.execPath, [generator, '--json'], {
+      encoding: 'utf8',
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    const tokens = JSON.parse(result.stdout) as Record<
+      string,
+      { readonly light: string; readonly dark: string }
+    >
+    for (const binding of brandAccentBindings) {
+      expect(tokens[binding.token]).toEqual({
+        light: binding.light,
+        dark: binding.dark,
+      })
+    }
+  })
+
+  it('has no direct branded cyan or blue decoration in the enabled Openloop UI', () => {
+    expect(directlyDeclaredBrandAccents()).toEqual([])
   })
 
   it('keeps frame CSS on theme aliases instead of copied semantic hex values', () => {
