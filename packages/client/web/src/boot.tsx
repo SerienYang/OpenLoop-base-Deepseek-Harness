@@ -52,6 +52,7 @@ import './base.css'
 export interface BootSeams {
   readonly loadBundle?: ClientModuleSystemOptions['loadBundle']
   readonly brand?: ProductBrand
+  readonly reactRoot?: Root
 }
 
 interface DshPrebootWindow {
@@ -126,7 +127,7 @@ export class AppWebEntry {
     this.modules.registerStatic(MODULES_ID, ModulesClient)
     ;(globalThis as DshWindow).__DSH_MODULES__ = this.modules
 
-    this.root = createRoot(this.el)
+    this.root = this.seams?.reactRoot ?? createRoot(this.el)
     this.root.render(
       <AppRoot
         settled={this.settled}

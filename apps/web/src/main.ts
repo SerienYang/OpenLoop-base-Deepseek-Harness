@@ -54,15 +54,13 @@ function mountOpenloopPreboot(root: HTMLElement) {
     }))
   })
   return {
+    reactRoot: loadingRoot,
     fail(reason: unknown): void {
       flushSync(() => {
         error.set(reason instanceof Error ? reason.message : String(reason))
       })
     },
     handoff(brand: ProductBrand): void {
-      flushSync(() => {
-        loadingRoot.unmount()
-      })
       document.title = brand.documentSuffix
     },
   }
@@ -109,9 +107,9 @@ async function runOpenloopEntry(
 ): Promise<void> {
   loading.handoff(brand)
   try {
-    await new AppWebEntry(root, { brand }).run()
+    await new AppWebEntry(root, { brand, reactRoot: loading.reactRoot }).run()
   } catch (reason) {
-    mountOpenloopPreboot(root).fail(reason)
+    loading.fail(reason)
   }
 }
 
