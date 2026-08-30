@@ -1,6 +1,5 @@
 const SIDEBAR_WIDTH = 280
 const SIDEBAR_COLLAPSED_WIDTH = 56
-const SIDEBAR_AUTO_COLLAPSE = 1024
 const DETAILS_WIDTH = 360
 const DETAILS_MIN_WIDTH = 300
 const WORKSPACE_MIN_WIDTH = 640
@@ -18,9 +17,7 @@ export function computeOpenloopColumns(
   detailsOpen: boolean,
 ): OpenloopColumns {
   const available = Math.max(0, Math.round(viewport))
-  const sidebar = sidebarOpen && available >= SIDEBAR_AUTO_COLLAPSE
-    ? SIDEBAR_WIDTH
-    : SIDEBAR_COLLAPSED_WIDTH
+  const sidebar = sidebarOpen ? SIDEBAR_WIDTH : SIDEBAR_COLLAPSED_WIDTH
   const preferredDetails = detailsOpen ? DETAILS_WIDTH : 0
 
   if (sidebar + preferredDetails + WORKSPACE_MIN_WIDTH <= available) {

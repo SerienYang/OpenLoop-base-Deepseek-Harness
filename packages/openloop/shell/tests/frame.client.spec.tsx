@@ -4,12 +4,15 @@ import { SlotRegistry, type SessionListState } from '@deepseek-ai/dsh-client-run
 import type { ThemeTokenOverrides } from '@deepseek-ai/dsh-client-ui-theme/client'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import type { ReactNode } from 'react'
+import { type ReactNode, useSyncExternalStore } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render } from '@testing-library/react'
 import { apply, inject, OpenloopFrame } from '../src/client/index.ts'
 import { computeOpenloopColumns } from '../src/client/columns.ts'
-import type { OpenloopFrameProps } from '../src/client/OpenloopFrame.tsx'
+import {
+  createOpenloopShellStore,
+  type OpenloopFrameProps,
+} from '../src/client/OpenloopFrame.tsx'
 import css from '../src/client/OpenloopFrame.module.css'
 
 let activeContext: Context | undefined
@@ -78,6 +81,15 @@ function stableAnchorRenderer(workbenchOccupant?: ReactNode) {
   }
 }
 
+function hookOf<T>(instance: {
+  subscribe: (listener: () => void) => () => void
+  getSnapshot: () => T
+}) {
+  return function useSelector<S>(select: (state: T) => S): S {
+    return select(useSyncExternalStore(instance.subscribe, instance.getSnapshot))
+  }
+}
+
 describe('Openloop column concessions', () => {
   it('keeps preferred widths when the 640px workspace floor fits', () => {
     expect(computeOpenloopColumns(1280, true, true)).toEqual({
@@ -88,15 +100,44 @@ describe('Openloop column concessions', () => {
   })
 
   it('derives a rail and closes details at the 760px Tauri minimum', () => {
-    expect(computeOpenloopColumns(760, true, true)).toEqual({
+    expect(computeOpenloopColumns(760, false, true)).toEqual({
       sidebar: 56,
       workspace: 704,
       details: 0,
     })
   })
 
+  it('honors a narrow manual expansion instead of forcing the rail in the solver', () => {
+    expect(computeOpenloopColumns(760, true, false)).toEqual({
+      sidebar: 280,
+      workspace: 480,
+      details: 0,
+    })
+    expect(computeOpenloopColumns(760, false, false)).toEqual({
+      sidebar: 56,
+      workspace: 704,
+      details: 0,
+    })
+  })
+
+  it.each([
+    [995, false, 0],
+    [996, false, 300],
+    [1023, false, 327],
+    [1024, false, 328],
+    [1219, false, 360],
+    [1220, true, 300],
+    [1280, true, 360],
+  ])('keeps details visible across adjacent width %ipx when constraints allow it', (
+    width,
+    sidebarExpanded,
+    details,
+  ) => {
+    expect(computeOpenloopColumns(width, sidebarExpanded, true).details).toBe(details)
+  })
+
   it('restores preferred columns after a narrow derived concession', () => {
-    expect(computeOpenloopColumns(760, true, true).details).toBe(0)
+    expect(computeOpenloopColumns(760, false, true).details).toBe(0)
     expect(computeOpenloopColumns(1280, true, true)).toEqual({
       sidebar: 280,
       workspace: 640,
@@ -177,6 +218,7 @@ describe('Openloop root shell Slot contract', () => {
       actions: {
         closeDetails: vi.fn(),
         openDetails: vi.fn(),
+        setNarrow: vi.fn(),
         toggleSidebar: vi.fn(),
       },
       renderSlot,
@@ -225,6 +267,7 @@ describe('Openloop root shell Slot contract', () => {
       actions: {
         closeDetails: vi.fn(),
         openDetails: vi.fn(),
+        setNarrow: vi.fn(),
         toggleSidebar: vi.fn(),
       },
       renderSlot,
@@ -262,6 +305,7 @@ describe('Openloop root shell Slot contract', () => {
       actions: {
         closeDetails,
         openDetails: vi.fn(),
+        setNarrow: vi.fn(),
         toggleSidebar: vi.fn(),
       },
       renderSlot,
@@ -294,6 +338,81 @@ describe('Openloop root shell Slot contract', () => {
     expect(closeDetails).not.toHaveBeenCalled()
   })
 
+  it('toggles a temporary narrow expansion and restores the wide sidebar preference', () => {
+    frameWidth = 760
+    window.innerWidth = frameWidth
+    const instance = createOpenloopShellStore().create()
+    const { probe, renderSlot } = stableAnchorRenderer()
+    const props = {
+      actions: instance.actions,
+      renderSlot,
+      useSessions: (select: (state: SessionListState) => unknown) => select({
+        byId: {},
+        current: undefined,
+      } as SessionListState),
+      useStore: hookOf(instance.store),
+    } as unknown as OpenloopFrameProps
+    const view = render(<OpenloopFrame {...props} />)
+    const frame = view.container.firstElementChild as HTMLElement
+    const sidebarOwner = () => probe.mock.calls.filter(([key]) => key === 'sidebar').at(-1)?.[1]
+
+    expect(frame.style.gridTemplateColumns).toBe('56px minmax(0, 1fr) 0px')
+    expect(sidebarOwner()).toEqual({ collapsed: true, width: 56 })
+
+    act(() => { instance.actions.toggleSidebar() })
+    expect(frame.style.gridTemplateColumns).toBe('280px minmax(0, 1fr) 0px')
+    expect(sidebarOwner()).toEqual({ collapsed: false, width: 280 })
+
+    act(() => { instance.actions.toggleSidebar() })
+    expect(frame.style.gridTemplateColumns).toBe('56px minmax(0, 1fr) 0px')
+    expect(sidebarOwner()).toEqual({ collapsed: true, width: 56 })
+
+    act(() => { instance.actions.toggleSidebar() })
+    expect(frame.style.gridTemplateColumns).toBe('280px minmax(0, 1fr) 0px')
+
+    frameWidth = 1280
+    act(() => { fireResize?.() })
+    expect(frame.style.gridTemplateColumns).toBe('280px minmax(0, 1fr) 0px')
+    expect(instance.store.getSnapshot()).toMatchObject({
+      sidebarOpen: true,
+      narrow: false,
+      narrowExpanded: false,
+    })
+  })
+
+  it('keeps open details visible across every adjacent responsive boundary', () => {
+    frameWidth = 995
+    window.innerWidth = frameWidth
+    const instance = createOpenloopShellStore().create()
+    instance.actions.openDetails()
+    const { renderSlot } = stableAnchorRenderer()
+    const props = {
+      actions: instance.actions,
+      renderSlot,
+      useSessions: (select: (state: SessionListState) => unknown) => select({
+        byId: { current: { blank: false } },
+        current: 'current',
+      } as unknown as SessionListState),
+      useStore: hookOf(instance.store),
+    } as unknown as OpenloopFrameProps
+    const view = render(<OpenloopFrame {...props} />)
+    const frame = view.container.firstElementChild as HTMLElement
+
+    for (const [width, expected] of [
+      [995, '56px minmax(0, 1fr) 0px'],
+      [996, '56px minmax(0, 1fr) 300px'],
+      [1023, '56px minmax(0, 1fr) 327px'],
+      [1024, '56px minmax(0, 1fr) 328px'],
+      [1219, '56px minmax(0, 1fr) 360px'],
+      [1220, '280px minmax(0, 1fr) 300px'],
+      [1280, '280px minmax(0, 1fr) 360px'],
+    ] as const) {
+      frameWidth = width
+      act(() => { fireResize?.() })
+      expect(frame.style.gridTemplateColumns).toBe(expected)
+    }
+  })
+
   it.each([
     ['undefined', undefined],
     ['blank', 'blank-session'],
@@ -306,6 +425,7 @@ describe('Openloop root shell Slot contract', () => {
     const actions = {
       closeDetails,
       openDetails: vi.fn(),
+      setNarrow: vi.fn(),
       toggleSidebar: vi.fn(),
     }
     const useStore = (

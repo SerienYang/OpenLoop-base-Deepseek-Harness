@@ -5,14 +5,19 @@ import { computeOpenloopColumns } from './columns.ts'
 import css from './OpenloopFrame.module.css'
 
 const SIDEBAR_COLLAPSED_WIDTH = 56
+const SIDEBAR_AUTO_COLLAPSE = 1024
+const THREE_COLUMN_MIN_WIDTH = 1220
 
 interface ShellState {
   sidebarOpen: boolean
   detailsOpen: boolean
+  narrow: boolean
+  narrowExpanded: boolean
 }
 
 interface ShellActions {
   toggleSidebar: (draft: ShellState) => void
+  setNarrow: (draft: ShellState, narrow: boolean) => void
   openDetails: (draft: ShellState) => void
   closeDetails: (draft: ShellState) => void
 }
@@ -20,9 +25,22 @@ interface ShellActions {
 /** Root-scoped panel state behind the established DSH layout action contract. */
 export function createOpenloopShellStore() {
   return defineStore({
-    init: (): ShellState => ({ sidebarOpen: true, detailsOpen: false }),
+    init: (): ShellState => ({
+      sidebarOpen: true,
+      detailsOpen: false,
+      narrow: false,
+      narrowExpanded: false,
+    }),
     actions: {
-      toggleSidebar: (draft) => { draft.sidebarOpen = !draft.sidebarOpen },
+      toggleSidebar: (draft) => {
+        if (draft.narrow) draft.narrowExpanded = !draft.narrowExpanded
+        else draft.sidebarOpen = !draft.sidebarOpen
+      },
+      setNarrow: (draft, narrow) => {
+        if (draft.narrow === narrow) return
+        draft.narrow = narrow
+        draft.narrowExpanded = false
+      },
       openDetails: (draft) => { draft.detailsOpen = true },
       closeDetails: (draft) => { draft.detailsOpen = false },
     } satisfies ShellActions,
@@ -37,6 +55,12 @@ export type OpenloopFrameProps =
 function currentConversation(state: SessionListState): string | undefined {
   const current = state.current
   return current !== undefined && state.byId[current]?.blank === false ? current : undefined
+}
+
+function isOpenloopNarrow(viewport: number, detailsOpen: boolean): boolean {
+  const available = Math.max(0, Math.round(viewport))
+  return available < SIDEBAR_AUTO_COLLAPSE
+    || (detailsOpen && available < THREE_COLUMN_MIN_WIDTH)
 }
 
 /** Openloop's operational frame; existing DSH session surfaces remain Slot-owned. */
@@ -74,10 +98,14 @@ export function OpenloopFrame({
     return () => { observer.disconnect() }
   }, [])
 
+  const detailsOpen = session !== undefined && state.detailsOpen
+  const narrow = isOpenloopNarrow(viewport, detailsOpen)
+  useLayoutEffect(() => { actions.setNarrow(narrow) }, [actions, narrow])
+  const sidebarOpen = narrow ? state.narrowExpanded : state.sidebarOpen
   const columns = computeOpenloopColumns(
     viewport,
-    state.sidebarOpen,
-    session !== undefined && state.detailsOpen,
+    sidebarOpen,
+    detailsOpen,
   )
   const sidebarCollapsed = columns.sidebar === SIDEBAR_COLLAPSED_WIDTH
 

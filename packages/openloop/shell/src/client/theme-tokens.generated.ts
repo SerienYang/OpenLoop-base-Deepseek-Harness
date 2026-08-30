@@ -38,11 +38,19 @@ export const OPENLOOP_THEME_TOKENS = {
     light: '#111316',
     dark: '#F7F8FA',
   },
+  '--dsw-alias-button-info-foreground': {
+    light: '#FBFBFA',
+    dark: '#111316',
+  },
   '--dsw-alias-button-info-hover': {
     light: '#20242A',
     dark: '#EEF1F3',
   },
   '--dsw-alias-label-primary': {
+    light: '#111316',
+    dark: '#F7F8FA',
+  },
+  '--dsw-alias-label-primary-bluish': {
     light: '#111316',
     dark: '#F7F8FA',
   },
@@ -82,13 +90,25 @@ export const OPENLOOP_THEME_TOKENS = {
     light: '#EEF1F3',
     dark: '#3B424A',
   },
+  '--dsw-specific-drop-overlay-back-card-foreground': {
+    light: '#111316',
+    dark: '#F7F8FA',
+  },
   '--dsw-specific-drop-overlay-front-card': {
     light: '#111316',
     dark: '#F7F8FA',
   },
+  '--dsw-specific-drop-overlay-front-card-foreground': {
+    light: '#FBFBFA',
+    dark: '#111316',
+  },
   '--dsw-specific-drop-overlay-side-card': {
-    light: '#666D76',
-    dark: '#AEB4BC',
+    light: '#0B0D0F',
+    dark: '#FBFBFA',
+  },
+  '--dsw-specific-drop-overlay-side-card-foreground': {
+    light: '#FBFBFA',
+    dark: '#111316',
   },
   '--dsw-specific-hero-glow': {
     light: '#666D76',
