@@ -99,6 +99,18 @@ struct OpenloopBuildManifest {
     plugin_package_spec_version: String,
     openloop_data_version: u64,
     dsh_data_version: u64,
+    brand: OpenloopBrandManifest,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OpenloopBrandManifest {
+    product_name: String,
+    document_suffix: String,
+    mark_asset: String,
+    hero_title: String,
+    preview_label: String,
+    attribution: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]

@@ -47,6 +47,7 @@
     "@openloop/runtime-bootstrap": "workspace:^",
     "@openloop/sandbox-workspace": "workspace:^",
     "@openloop/settings-foundation": "workspace:*",
+    "@openloop/shell": "workspace:*",
     "@openloop/workspace-client": "workspace:*",
     "@openloop/workspace-authority": "workspace:*",
     "js-yaml": "^4.2.0"

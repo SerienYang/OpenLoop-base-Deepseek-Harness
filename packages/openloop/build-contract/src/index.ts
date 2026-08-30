@@ -5,6 +5,16 @@ import z from '@deepseek-ai/schemastery'
 /** Release channel carried by the immutable core build manifest. */
 export type OpenloopBuildChannel = 'test' | 'stable'
 
+/** Product identity signed into every Openloop core manifest. */
+export interface OpenloopBrandManifest {
+  readonly productName: 'Openloop'
+  readonly documentSuffix: 'Openloop'
+  readonly markAsset: string
+  readonly heroTitle: 'Openloop'
+  readonly previewLabel: 'Preview'
+  readonly attribution: 'Built on DeepSeek Harness'
+}
+
 /** Identity and compatibility versions that define one OpenLoop core build. */
 export interface OpenloopBuildManifest {
   readonly appVersion: string
@@ -17,6 +27,7 @@ export interface OpenloopBuildManifest {
   readonly pluginPackageSpecVersion: string
   readonly openloopDataVersion: number
   readonly dshDataVersion: number
+  readonly brand: OpenloopBrandManifest
 }
 
 /** Required build artifacts plus optional release-only products. */
@@ -47,11 +58,20 @@ const semverPattern = new RegExp(
 )
 const sha256Pattern = /^[0-9a-f]{64}$/u
 const dshCommitPattern = /^[0-9a-f]{40}$/u
+const svgDataUriPattern = /^data:image\/svg\+xml;base64,[A-Za-z0-9+/]+={0,2}$/u
 
 const semver = z.string().pattern(semverPattern).required()
 const sha256 = z.string().pattern(sha256Pattern).required()
 const positiveInteger = z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).required()
 const nonnegativeInteger = z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).required()
+const brandSchema: z<OpenloopBrandManifest> = z.object({
+  productName: z.const('Openloop').required(),
+  documentSuffix: z.const('Openloop').required(),
+  markAsset: z.string().pattern(svgDataUriPattern).required(),
+  heroTitle: z.const('Openloop').required(),
+  previewLabel: z.const('Preview').required(),
+  attribution: z.const('Built on DeepSeek Harness').required(),
+})
 
 /** Schemastery schema for the immutable core build manifest. */
 export const OpenloopBuildManifestSchema: z<OpenloopBuildManifest> = z.object({
@@ -65,6 +85,7 @@ export const OpenloopBuildManifestSchema: z<OpenloopBuildManifest> = z.object({
   pluginPackageSpecVersion: semver,
   openloopDataVersion: nonnegativeInteger,
   dshDataVersion: nonnegativeInteger,
+  brand: brandSchema.required(),
 })
 
 const optionalSha256 = z.string().pattern(sha256Pattern).default(
@@ -100,6 +121,15 @@ const buildFields = [
   'pluginPackageSpecVersion',
   'openloopDataVersion',
   'dshDataVersion',
+  'brand',
+] as const
+const brandFields = [
+  'productName',
+  'documentSuffix',
+  'markAsset',
+  'heroTitle',
+  'previewLabel',
+  'attribution',
 ] as const
 const artifactFields = [
   'sidecar',
@@ -138,7 +168,9 @@ function resolveStrict<T>(schema: z<T>, value: unknown): T {
 
 /** Validate unknown input as a closed OpenLoop core build manifest. */
 export function parseOpenloopBuildManifest(value: unknown): OpenloopBuildManifest {
-  assertExactFields(record(value, 'build manifest'), buildFields, 'build manifest')
+  const manifest = record(value, 'build manifest')
+  assertExactFields(manifest, buildFields, 'build manifest')
+  assertExactFields(record(manifest.brand, 'build manifest brand'), brandFields, 'build manifest brand')
   return resolveStrict(OpenloopBuildManifestSchema, value)
 }
 

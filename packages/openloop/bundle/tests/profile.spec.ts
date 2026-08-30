@@ -364,6 +364,21 @@ describe('OpenLoop profile', () => {
     }
   })
 
+  it('replaces the DSH root owner with exactly one Openloop shell in this profile', () => {
+    const entries = openloopEntries()
+    expect(entries.find(entry => entry.id === 'ui-layout')).toMatchObject({
+      id: 'ui-layout',
+      name: '@deepseek-ai/dsh-client-ui-layout',
+      disabled: true,
+    })
+    expect(entries.filter(entry => entry.name === '@openloop/shell')).toEqual([{
+      id: 'shell',
+      name: '@openloop/shell',
+    }])
+    expect(enabledClientPackages()).not.toContain('@deepseek-ai/dsh-client-ui-layout')
+    expect(enabledClientPackages()).toContain('@openloop/shell')
+  })
+
   it('denies every Dynamic Cordis browser endpoint while its Client plugins are disabled', async () => {
     const policy = createBrowserApiPolicy(JSON.parse(
       readFileSync(

@@ -8,6 +8,7 @@ import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import { describe, expect, test, vi } from 'vitest'
 import {
   ensureEmptyRootConfig,
+  isOpenloopBootstrapResponse,
   readCoreManifest,
   readLaunchSecretsForRuntime,
   runOpenloopRuntime,
@@ -25,6 +26,14 @@ const manifest = {
   pluginPackageSpecVersion: '0.1.0',
   openloopDataVersion: 0,
   dshDataVersion: 0,
+  brand: {
+    productName: 'Openloop',
+    documentSuffix: 'Openloop',
+    markAsset: 'data:image/svg+xml;base64,PHN2Zy8+',
+    heroTitle: 'Openloop',
+    previewLabel: 'Preview',
+    attribution: 'Built on DeepSeek Harness',
+  },
 } as const
 
 function temporaryDirectory(label: string): string {
@@ -332,6 +341,22 @@ describe('Openloop runtime launcher', () => {
       manifest,
       sha256: createHash('sha256').update(bytes).digest('hex'),
     })
+  })
+
+  test('accepts candidate bootstrap health only with the signed brand shape', () => {
+    expect(isOpenloopBootstrapResponse({
+      launchId: 'launch-id',
+      coreManifest: manifest,
+      coreManifestSha256: 'a'.repeat(64),
+    }, 'launch-id')).toBe(true)
+    expect(isOpenloopBootstrapResponse({
+      launchId: 'launch-id',
+      coreManifest: {
+        ...manifest,
+        brand: { ...manifest.brand, productName: 'Remote override' },
+      },
+      coreManifestSha256: 'a'.repeat(64),
+    }, 'launch-id')).toBe(false)
   })
 
   test('creates and validates only a regular launcher-owned empty root config', () => {

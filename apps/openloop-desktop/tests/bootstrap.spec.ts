@@ -10,6 +10,14 @@ const response: BootstrapResponse = {
   coreManifest: {
     appVersion: '0.1.0',
     channel: 'test',
+    brand: {
+      productName: 'Openloop',
+      documentSuffix: 'Openloop',
+      markAsset: 'data:image/svg+xml;base64,PHN2Zy8+',
+      heroTitle: 'Openloop',
+      previewLabel: 'Preview',
+      attribution: 'Built on DeepSeek Harness',
+    },
   },
   coreManifestSha256: 'a'.repeat(64),
 }
@@ -55,7 +63,11 @@ describe('Openloop Web bootstrap', () => {
       search: '?ready=1',
     }
 
-    await expect(bootstrapFromLocation({ fetcher, history, location })).resolves.toEqual(response)
+    const result = await bootstrapFromLocation({ fetcher, history, location })
+    expect(result).toEqual(response)
+    expect(Object.isFrozen(result)).toBe(true)
+    expect(Object.isFrozen(result?.coreManifest)).toBe(true)
+    expect(Object.isFrozen(result?.coreManifest.brand)).toBe(true)
     expect(history.replaceState).toHaveBeenCalledWith(null, '', '/?ready=1')
   })
 
@@ -90,5 +102,21 @@ describe('Openloop Web bootstrap', () => {
 
     await expect(bootstrapFromLocation({ fetcher, history, location })).resolves.toEqual(response)
     expect(history.replaceState).not.toHaveBeenCalled()
+  })
+
+  test('rejects a mutable or open-ended brand payload from the Host response', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      ...response,
+      coreManifest: {
+        ...response.coreManifest,
+        brand: { ...response.coreManifest.brand, source: 'query' },
+      },
+    }), { status: 200 }))
+
+    await expect(bootstrapFromLocation({
+      fetcher,
+      history: { replaceState: vi.fn() },
+      location: { hash: '', pathname: '/', search: '' },
+    })).rejects.toThrow(/verified|brand/iu)
   })
 })

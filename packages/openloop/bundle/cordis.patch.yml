@@ -39,6 +39,8 @@
   disabled: true
 - id: ui-cordis
   disabled: true
+- id: ui-layout
+  disabled: true
 - id: ui-workspace
   disabled: true
 - id: ui-settings
@@ -144,3 +146,6 @@
     - id: fs-workspace
       name: '@openloop/fs-workspace'
       inject: [fileBroker, workspaceRegistry, sandboxPolicy]
+- insert:
+    - id: shell
+      name: '@openloop/shell'

@@ -17,6 +17,14 @@ interface PackageManifest {
 }
 
 const sha256 = 'a'.repeat(64)
+const brand = {
+  productName: 'Openloop',
+  documentSuffix: 'Openloop',
+  markAsset: 'data:image/svg+xml;base64,PHN2Zy8+',
+  heroTitle: 'Openloop',
+  previewLabel: 'Preview',
+  attribution: 'Built on DeepSeek Harness',
+} as const
 
 function buildManifest() {
   return {
@@ -30,6 +38,7 @@ function buildManifest() {
     pluginPackageSpecVersion: '0.1.0',
     openloopDataVersion: 0,
     dshDataVersion: 0,
+    brand,
   }
 }
 
@@ -94,6 +103,18 @@ describe('OpenLoop build manifest contract', () => {
     expect(() => parseOpenloopBuildManifest(missing)).toThrow(/appVersion|missing required/u)
     expect(() => parseOpenloopBuildManifest({ ...buildManifest(), secret: 'no' }))
       .toThrow(/unknown field.*secret/iu)
+  })
+
+  it('accepts only the closed Openloop brand identity', () => {
+    expect(parseOpenloopBuildManifest(buildManifest()).brand).toEqual(brand)
+    expect(() => parseOpenloopBuildManifest({
+      ...buildManifest(),
+      brand: { ...brand, productName: 'Attacker' },
+    })).toThrow(/brand|productName/iu)
+    expect(() => parseOpenloopBuildManifest({
+      ...buildManifest(),
+      brand: { ...brand, remote: 'https://attacker.invalid/brand.json' },
+    })).toThrow(/unknown field.*remote/iu)
   })
 
   it('rejects short or non-lowercase DSH commits', () => {

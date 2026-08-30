@@ -235,8 +235,32 @@ function bootstrapScript(): string {
       || !/^[0-9a-f]{64}$/.test(value.coreManifestSha256)) {
       throw new Error('Openloop bootstrap response is invalid')
     }
+    const brand = value.coreManifest.brand
+    const brandFields = [
+      'productName',
+      'documentSuffix',
+      'markAsset',
+      'heroTitle',
+      'previewLabel',
+      'attribution',
+    ]
+    if (brand === null || typeof brand !== 'object' || Array.isArray(brand)
+      || Object.keys(brand).length !== brandFields.length
+      || brandFields.some(field => !Object.prototype.hasOwnProperty.call(brand, field))
+      || brand.productName !== 'Openloop'
+      || brand.documentSuffix !== 'Openloop'
+      || typeof brand.markAsset !== 'string'
+      || !brand.markAsset.startsWith('data:image/svg+xml;base64,')
+      || brand.heroTitle !== 'Openloop'
+      || brand.previewLabel !== 'Preview'
+      || brand.attribution !== 'Built on DeepSeek Harness') {
+      throw new Error('Openloop bootstrap brand identity is invalid')
+    }
+    Object.freeze(brand)
+    Object.freeze(value.coreManifest)
+    Object.freeze(value)
     Object.defineProperty(globalThis, '__OPENLOOP_BOOTSTRAP__', {
-      value: Object.freeze(value),
+      value,
       configurable: false,
       enumerable: false,
       writable: false,

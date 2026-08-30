@@ -19,6 +19,7 @@ import {
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url))
 const baselinePath = fileURLToPath(new URL('./upstream-baseline.json', import.meta.url))
+const brandMarkPath = fileURLToPath(new URL('../../assets/brand/openloop-icon.svg', import.meta.url))
 const integerOptions = new Map([
   ['--runtime-version', 'runtimeVersion'],
   ['--bridge-protocol-version', 'bridgeProtocolVersion'],
@@ -179,6 +180,17 @@ function canonicalJson(value) {
   return `${JSON.stringify(value, null, 2)}\n`
 }
 
+function openloopBrand() {
+  return {
+    productName: 'Openloop',
+    documentSuffix: 'Openloop',
+    markAsset: `data:image/svg+xml;base64,${readFileSync(brandMarkPath).toString('base64')}`,
+    heroTitle: 'Openloop',
+    previewLabel: 'Preview',
+    attribution: 'Built on DeepSeek Harness',
+  }
+}
+
 function sameFileIdentity(left, right) {
   if (!existsSync(left) || !existsSync(right)) return false
   const leftStat = lstatSync(left)
@@ -233,6 +245,7 @@ export function generateBuildManifest(options, dependencies = {}) {
     pluginPackageSpecVersion: options.pluginPackageSpecVersion ?? '0.1.0',
     openloopDataVersion: options.openloopDataVersion ?? 0,
     dshDataVersion: options.dshDataVersion ?? 0,
+    brand: openloopBrand(),
   })
   const bytes = canonicalJson(manifest)
   const sha256 = createHash('sha256').update(bytes).digest('hex')

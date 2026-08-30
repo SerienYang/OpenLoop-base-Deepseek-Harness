@@ -619,6 +619,11 @@ describe('Openloop desktop foundation configuration', () => {
       'apps/openloop-desktop/src/main.ts',
       'OpenloopBuildManifest',
     )
+    const rustBrandFields = rustStructFields(library, 'OpenloopBrandManifest')
+    const typeScriptBrandFields = interfaceFields(
+      'apps/openloop-desktop/src/main.ts',
+      'OpenloopBrandManifest',
+    )
 
     expect(library).toMatch(/#\s*\[\s*serde\s*\(\s*rename_all\s*=\s*"camelCase"\s*,\s*deny_unknown_fields\s*\)\s*\]/u)
     expect(rustFields).toEqual({
@@ -632,6 +637,7 @@ describe('Openloop desktop foundation configuration', () => {
       plugin_package_spec_version: 'String',
       openloop_data_version: 'u64',
       dsh_data_version: 'u64',
+      brand: 'OpenloopBrandManifest',
     })
     expect(typeScriptFields).toEqual({
       appVersion: 'string',
@@ -644,6 +650,23 @@ describe('Openloop desktop foundation configuration', () => {
       pluginPackageSpecVersion: 'string',
       openloopDataVersion: 'number',
       dshDataVersion: 'number',
+      brand: 'OpenloopBrandManifest',
+    })
+    expect(rustBrandFields).toEqual({
+      product_name: 'String',
+      document_suffix: 'String',
+      mark_asset: 'String',
+      hero_title: 'String',
+      preview_label: 'String',
+      attribution: 'String',
+    })
+    expect(typeScriptBrandFields).toEqual({
+      productName: 'string',
+      documentSuffix: 'string',
+      markAsset: 'string',
+      heroTitle: 'string',
+      previewLabel: 'string',
+      attribution: 'string',
     })
   })
 

@@ -15,6 +15,15 @@ import {
   type BootstrapHostRoute,
 } from '../src/bootstrap-host.ts'
 
+const brand = {
+  productName: 'Openloop',
+  documentSuffix: 'Openloop',
+  markAsset: 'data:image/svg+xml;base64,PHN2Zy8+',
+  heroTitle: 'Openloop',
+  previewLabel: 'Preview',
+  attribution: 'Built on DeepSeek Harness',
+} as const
+
 function responseRecorder(): {
   response: BootstrapHostRoute['response']
   state: { status: number | undefined; headers: Record<string, string | string[]> | undefined; body: string }
@@ -92,6 +101,7 @@ describe('Openloop bootstrap Host route', () => {
         channel: 'test',
         openloopDataVersion: 3,
         dshDataVersion: 7,
+        brand,
       },
       sha256: 'a'.repeat(64),
     })
@@ -156,9 +166,16 @@ describe('Openloop bootstrap Host route', () => {
         channel: 'test',
         openloopDataVersion: 3,
         dshDataVersion: 7,
+        brand,
       },
       coreManifestSha256: 'a'.repeat(64),
     })
+    const bootstrap = sandbox.__OPENLOOP_BOOTSTRAP__ as {
+      coreManifest: { brand: unknown }
+    }
+    expect(Object.isFrozen(bootstrap)).toBe(true)
+    expect(Object.isFrozen(bootstrap.coreManifest)).toBe(true)
+    expect(Object.isFrozen(bootstrap.coreManifest.brand)).toBe(true)
   })
 
   test('acknowledges the real main WebView only after a cookie-bound completion request', async () => {

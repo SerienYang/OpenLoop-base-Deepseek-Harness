@@ -183,6 +183,24 @@ export function readCoreManifest(path: string): LoadedCoreManifest {
   }
 }
 
+/** Validate the candidate Host bootstrap identity before marking health ready. */
+export function isOpenloopBootstrapResponse(value: unknown, launchId: string): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const response = value as Record<string, unknown>
+  if (Object.keys(response).length !== 3
+    || response.launchId !== launchId
+    || typeof response.coreManifestSha256 !== 'string'
+    || !/^[0-9a-f]{64}$/u.test(response.coreManifestSha256)) {
+    return false
+  }
+  try {
+    parseOpenloopBuildManifest(response.coreManifest)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /**
  * Resolve one config below a trusted parent without following path links.
  */
@@ -701,10 +719,7 @@ const defaultDependencies: RuntimeDependencies = {
     let bootstrapExchange = false
     if (bootstrap.ok) {
       const value: unknown = await bootstrap.json()
-      bootstrapExchange = typeof value === 'object'
-        && value !== null
-        && !Array.isArray(value)
-        && (value as Record<string, unknown>).launchId === launchId
+      bootstrapExchange = isOpenloopBootstrapResponse(value, launchId)
     }
     return { webAsset, bootstrapExchange }
   },
