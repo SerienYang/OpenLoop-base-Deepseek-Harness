@@ -1,10 +1,19 @@
 /**
- * Web application entry: thin bootstrap over the shell library. Everything —
- * loader holding, module-table seeding, AppRoot gate, plugin assembly — lives
- * in @deepseek-ai/dsh-client-web; this file only finds the mount point.
+ * Web application entry: holds an Openloop-branded AppRoot through Host
+ * preboot, then hands the mount point to the shared shell library. Loader
+ * holding, module-table seeding, the real AppRoot gate, and plugin assembly
+ * remain in @deepseek-ai/dsh-client-web.
  */
-import { AppWebEntry } from '@deepseek-ai/dsh-client-web'
+import {
+  AppRoot,
+  AppWebEntry,
+  createLoaderStatusStore,
+  createSignal,
+} from '@deepseek-ai/dsh-client-web'
 import type { ProductBrand } from '@deepseek-ai/dsh-client-ui-primitives'
+import { createElement } from 'react'
+import { flushSync } from 'react-dom'
+import { createRoot } from 'react-dom/client'
 
 const el = document.getElementById('root')
 if (el === null) throw new Error('web app: missing #root')
@@ -31,6 +40,33 @@ const OPENLOOP_FAILURE_BRAND: ProductBrand = Object.freeze({
   previewLabel: '预览版',
   attribution: 'Built on DeepSeek Harness',
 })
+
+function mountOpenloopPreboot(root: HTMLElement) {
+  const error = createSignal<string | undefined>(undefined)
+  const loadingRoot = createRoot(root)
+  flushSync(() => {
+    loadingRoot.render(createElement(AppRoot, {
+      settled: createSignal(false),
+      status: createLoaderStatusStore(),
+      error,
+      renderApp: () => null,
+      brand: OPENLOOP_FAILURE_BRAND,
+    }))
+  })
+  return {
+    fail(reason: unknown): void {
+      flushSync(() => {
+        error.set(reason instanceof Error ? reason.message : String(reason))
+      })
+    },
+    handoff(brand: ProductBrand): void {
+      flushSync(() => {
+        loadingRoot.unmount()
+      })
+      document.title = brand.documentSuffix
+    },
+  }
+}
 
 function openloopBrand(value: unknown): ProductBrand {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -75,16 +111,25 @@ export async function startWebApp(root: HTMLElement = rootElement): Promise<void
     return
   }
 
+  const loading = mountOpenloopPreboot(root)
   try {
     await preboot
   } catch {
     if (target.__OPENLOOP_BOOTSTRAP__ === undefined) {
+      loading.handoff(OPENLOOP_FAILURE_BRAND)
       await new AppWebEntry(root, { brand: OPENLOOP_FAILURE_BRAND }).run()
       return
     }
     // A published identity remains authoritative while AppWebEntry renders the failure.
   }
-  const brand = openloopBrand(target.__OPENLOOP_BOOTSTRAP__)
+  let brand: ProductBrand
+  try {
+    brand = openloopBrand(target.__OPENLOOP_BOOTSTRAP__)
+  } catch (reason) {
+    loading.fail(reason)
+    throw reason
+  }
+  loading.handoff(brand)
   await new AppWebEntry(root, { brand }).run()
 }
 

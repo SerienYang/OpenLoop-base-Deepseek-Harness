@@ -57,7 +57,7 @@ export function OpenloopFrame({
       && previousSession.current !== session) {
       actions.closeDetails()
     }
-    previousSession.current = session
+    if (session !== undefined) previousSession.current = session
   }, [actions, session])
 
   const sidebarWidth = state.sidebarOpen ? SIDEBAR_WIDTH : SIDEBAR_COLLAPSED_WIDTH

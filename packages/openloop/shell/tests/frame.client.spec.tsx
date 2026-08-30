@@ -179,4 +179,44 @@ describe('Openloop root shell Slot contract', () => {
     expect(workbench?.matches(':empty')).toBe(false)
     expect(anchor?.querySelector('[data-openloop-workbench-empty]')).not.toBeNull()
   })
+
+  it.each([
+    ['undefined', undefined],
+    ['blank', 'blank-session'],
+  ])('retains the last valid session across the %s gap before closing details for the next session', (
+    _label,
+    gapSession,
+  ) => {
+    const closeDetails = vi.fn()
+    const { renderSlot } = stableAnchorRenderer()
+    const actions = {
+      closeDetails,
+      openDetails: vi.fn(),
+      toggleSidebar: vi.fn(),
+    }
+    const useStore = (
+      select: (state: { sidebarOpen: boolean; detailsOpen: boolean }) => unknown,
+    ) => select({ sidebarOpen: true, detailsOpen: true })
+    const frame = (current: string | undefined, blank = false) => (
+      <OpenloopFrame {...{
+        actions,
+        renderSlot,
+        useSessions: (select: (state: SessionListState) => unknown) => select({
+          byId: current === undefined ? {} : { [current]: { blank } },
+          current,
+        } as SessionListState),
+        useStore,
+      } as unknown as OpenloopFrameProps}
+      />
+    )
+
+    const view = render(frame(undefined))
+    view.rerender(frame('session-a'))
+    expect(closeDetails).not.toHaveBeenCalled()
+
+    view.rerender(frame(gapSession, gapSession !== undefined))
+    view.rerender(frame('session-b'))
+
+    expect(closeDetails).toHaveBeenCalledOnce()
+  })
 })

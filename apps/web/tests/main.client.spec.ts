@@ -6,17 +6,21 @@ const entry = vi.hoisted(() => ({
   run: vi.fn(() => Promise.resolve()),
 }))
 
-vi.mock('@deepseek-ai/dsh-client-web', () => ({
-  AppWebEntry: class {
-    constructor(el: HTMLElement, seams?: unknown) {
-      entry.constructors.push({ el, seams })
-    }
+vi.mock('@deepseek-ai/dsh-client-web', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@deepseek-ai/dsh-client-web')>()
+  return {
+    ...actual,
+    AppWebEntry: class {
+      constructor(el: HTMLElement, seams?: unknown) {
+        entry.constructors.push({ el, seams })
+      }
 
-    run(): Promise<void> {
-      return entry.run()
-    }
-  },
-}))
+      run(): Promise<void> {
+        return entry.run()
+      }
+    },
+  }
+})
 
 const brand = Object.freeze({
   productName: 'Openloop',
@@ -48,12 +52,14 @@ afterEach(() => {
   entry.constructors.length = 0
   entry.run.mockClear()
   document.body.innerHTML = ''
+  document.title = ''
   vi.resetModules()
 })
 
 describe('web application entry', () => {
-  it('waits for Host preboot and passes its frozen brand to AppWebEntry', async () => {
+  it('shows the Openloop loading surface while Host preboot is pending, then passes its frozen brand to AppWebEntry', async () => {
     const root = installRoot()
+    document.title = 'DeepSeek Harness'
     let release!: () => void
     const target = globalThis as BootstrapGlobal
     target.__DSH_PREBOOT__ = new Promise<void>((resolve) => { release = resolve })
@@ -69,13 +75,17 @@ describe('web application entry', () => {
     })
 
     const loading = import('../src/main.ts')
-    await Promise.resolve()
+    await loading
+
+    expect(root.textContent).toContain('Openloop')
+    expect(root.textContent).toContain('Built on DeepSeek Harness')
+    expect(root.textContent).toContain('Loading plugins')
+    expect(document.title).toBe('Openloop')
     expect(entry.constructors).toEqual([])
 
     release()
-    await loading
+    await vi.waitFor(() => { expect(entry.run).toHaveBeenCalledOnce() })
     expect(entry.constructors).toEqual([{ el: root, seams: { brand } }])
-    expect(entry.run).toHaveBeenCalledOnce()
   })
 
   it('preserves the default DSH entry when no Openloop preboot exists', async () => {
