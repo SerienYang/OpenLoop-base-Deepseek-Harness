@@ -44,6 +44,17 @@ describe('credential mode', () => {
     })).toThrow(/bearer.*apiKeyEnv/)
   })
 
+  it('rejects bearer mode for a catalog model without generic header support', () => {
+    expect(() => resolveProfiles({
+      'openai-codex': {
+        apiKeyEnv: 'CODEX_TOKEN',
+        credentialMode: 'bearer',
+      },
+    })).toThrow(
+      /provider "openai-codex" model "[^"]+" uses api "openai-codex-responses".*bearer credential mode/,
+    )
+  })
+
   it('defaults an omitted mode to api-key', () => {
     const profile = resolveProfiles({
       'acme-gateway': {

@@ -359,6 +359,16 @@ export function resolveProfiles(
       defaultContextWindow: source.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
       defaultMaxTokens: source.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
     })
+    if (credentialMode === 'bearer') {
+      const protocols = supportedProtocols()
+      const incompatible = catalog.models.find(model => !protocols.includes(model.api))
+      if (incompatible !== undefined) {
+        throw new Error(
+          `llm-pi-ai: provider "${provider}" model "${incompatible.id}" uses api "${incompatible.api}",`
+          + ` which cannot use bearer credential mode; supported protocols are ${protocols.join(', ')}`,
+        )
+      }
+    }
     const {
       apiKeyEnv,
       credentialMode: _credentialMode,

@@ -213,6 +213,7 @@ describe('PiAiAdapter provider routing', () => {
           headers: {
             authorization: 'Bearer configured-wrong',
             'X-Api-Key': 'configured-wrong',
+            'Api-Key': 'configured-wrong',
           },
         },
       },
@@ -228,6 +229,7 @@ describe('PiAiAdapter provider routing', () => {
     expect(server.paths).toEqual(['/api/plan/v1/messages'])
     expect(server.headers[0]?.authorization).toBe('Bearer test-key')
     expect(server.headers[0]?.['x-api-key']).toBeUndefined()
+    expect(server.headers[0]?.['api-key']).toBeUndefined()
   })
 
   it('ignores native ambient Anthropic credentials for a bearer catalog route', async () => {

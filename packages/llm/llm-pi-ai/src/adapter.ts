@@ -183,6 +183,7 @@ function requestHeaders(
   if (bearerToken !== undefined) {
     reserved.add('authorization')
     reserved.add('x-api-key')
+    reserved.add('api-key')
   }
   return {
     ...Object.fromEntries(Object.entries(headers ?? {}).filter(([name]) => !reserved.has(name.toLowerCase()))),
