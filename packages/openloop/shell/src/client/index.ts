@@ -206,7 +206,7 @@ export function apply(ctx: ClientContext): void {
           if (version !== rowsVersion || revision !== rowsRevision) {
             rowsVersion = version
             rowsRevision = revision
-            rows = ctx.slots.entries('settings.section')
+            rows = ctx.slots.entriesOfSlot('settings.section')
               .map(entry => ({
                 /* v8 ignore next -- list entries always have ids. */
                 id: entry.options.id ?? '',

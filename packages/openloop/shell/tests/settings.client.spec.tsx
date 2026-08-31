@@ -41,8 +41,11 @@ import {
   apply,
   inject,
   OpenloopSettings,
+  type OpenloopSettingsInjected,
   parseBootstrapAppView,
+  type ShellKey,
 } from '../src/client/index.ts'
+import { en as shellEn, zh as shellZh } from '../src/client/locales.ts'
 
 describe('Openloop Settings module surface', () => {
   it('exports the settings owner, About view, and bootstrap parser', () => {
@@ -514,7 +517,6 @@ describe('About and Updates typed view', () => {
     })
     expect(parseBootstrapAppView({ coreManifest })).toEqual({
       state: 'error',
-      message: 'Openloop build information is unavailable.',
     })
     expect(parseBootstrapAppView(Object.freeze({
       coreManifest: Object.freeze({
@@ -524,8 +526,36 @@ describe('About and Updates typed view', () => {
       }),
     }))).toEqual({
       state: 'error',
-      message: 'Openloop build information is unavailable.',
     })
+  })
+
+  it.each([
+    ['en', undefined, 'Openloop build information is unavailable.'],
+    ['en', Object.freeze({ coreManifest: Object.freeze({}) }), 'Openloop build information is unavailable.'],
+    ['zh', undefined, 'Openloop 构建信息不可用。'],
+    ['zh', Object.freeze({ coreManifest: Object.freeze({}) }), 'Openloop 构建信息不可用。'],
+  ] as const)('localizes %s bootstrap errors without parser-owned copy', (locale, bootstrap, expected) => {
+    const app = parseBootstrapAppView(bootstrap)
+    expect(app).toEqual({ state: 'error' })
+    const dictionary = locale === 'zh' ? shellZh : shellEn
+    const translate = (key: ShellKey): string => dictionary[key]
+    render(
+      <AboutUpdateSection
+        app={app}
+        update={{
+          phase: 'unavailable',
+          actions: {
+            check: { enabled: false },
+            installAndRestart: { enabled: false },
+          },
+        }}
+        onCheck={vi.fn()}
+        onInstallAndRestart={vi.fn()}
+        t={translate}
+      />,
+    )
+
+    expect(screen.getByRole('alert').textContent).toBe(expected)
   })
 
   it('contains no update transport calls or sensitive update identity fields', () => {
@@ -585,6 +615,74 @@ describe('Openloop Settings slot owner', () => {
     locale.setLocale('zh')
     expect((slots.entries('settings.section')[0]?.options.label as () => string)())
       .toBe('关于与更新')
+    await fiber.dispose()
+  })
+
+  it('projects the rendered settings.section winner and falls back across HMR disposal', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SlotRegistry).await()
+    const locale = new LocaleRuntime(ctx)
+    ctx.provide('locale', locale)
+    ctx.provide('theme', {
+      getTheme: () => ({ active: { colorScheme: 'dark', tokens: {} } }),
+      overrideTokens: () => () => {},
+    } as never)
+    const openloopDesktop = {
+      describeCredential: vi.fn(),
+      openCredentialReplacement: vi.fn(),
+      unsetCredential: vi.fn(),
+    }
+    ctx.provide('remote', { openloopDesktop } as never)
+    ctx.provide('remote.openloopDesktop', openloopDesktop)
+
+    const fiber = ctx.plugin({ inject: [...inject], apply })
+    await fiber.await()
+    const slots = ctx.get('slots') as SlotRegistry
+    slots.register({
+      name: 'sidebar',
+      children: { 'sidebar.settings': { kind: 'single', scope: 'root' } },
+    } as never, () => null)
+    await vi.waitFor(() => {
+      expect(slots.entries('sidebar.settings')).toHaveLength(1)
+    })
+    const shell = slots.entries('sidebar.settings')[0]!
+    const sections = (shell.inject as () => OpenloopSettingsInjected)().hooks.sections
+    const LosingSection = () => null
+    const WinningSection = () => null
+    const disposeLosing = slots.register({
+      name: 'settings.section',
+      id: 'models',
+      priority: 10,
+      label: 'Losing models',
+    } as never, LosingSection)
+    const registerWinner = () => slots.register({
+      name: 'settings.section',
+      id: 'models',
+      priority: -10,
+      label: 'Winning models',
+    } as never, WinningSection)
+    let disposeWinner = registerWinner()
+
+    expect(slots.entriesOfSlot('settings.section')
+      .find(entry => entry.options.id === 'models')?.component).toBe(WinningSection)
+    expect(sections.getSnapshot()
+      .filter(row => row.id === 'models')
+      .map(row => row.label)).toEqual(['Winning models'])
+
+    disposeWinner()
+    expect(slots.entriesOfSlot('settings.section')
+      .find(entry => entry.options.id === 'models')?.component).toBe(LosingSection)
+    expect(sections.getSnapshot()
+      .filter(row => row.id === 'models')
+      .map(row => row.label)).toEqual(['Losing models'])
+
+    disposeWinner = registerWinner()
+    expect(sections.getSnapshot()
+      .filter(row => row.id === 'models')
+      .map(row => row.label)).toEqual(['Winning models'])
+
+    disposeWinner()
+    disposeLosing()
     await fiber.dispose()
   })
 

@@ -12,7 +12,7 @@ export type AppView =
     readonly channel: 'test' | 'stable'
     readonly dshCommit: string
   }
-  | { readonly state: 'error'; readonly message: string }
+  | { readonly state: 'error'; readonly message?: string }
 
 export type UpdatePhase =
   | 'unavailable'
@@ -47,7 +47,7 @@ export interface UpdateView {
   }
 }
 
-const APP_ERROR = 'Openloop build information is unavailable.'
+const APP_ERROR: AppView = Object.freeze({ state: 'error' })
 const SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u
 const DSH_COMMIT = /^[0-9a-f]{40}$/u
 
@@ -57,14 +57,14 @@ export function parseBootstrapAppView(value: unknown): AppView {
     || value === null
     || Array.isArray(value)
     || !Object.isFrozen(value)) {
-    return { state: 'error', message: APP_ERROR }
+    return APP_ERROR
   }
   const manifest = (value as { readonly coreManifest?: unknown }).coreManifest
   if (typeof manifest !== 'object'
     || manifest === null
     || Array.isArray(manifest)
     || !Object.isFrozen(manifest)) {
-    return { state: 'error', message: APP_ERROR }
+    return APP_ERROR
   }
   const record = manifest as Readonly<Record<string, unknown>>
   if (typeof record.appVersion !== 'string'
@@ -72,7 +72,7 @@ export function parseBootstrapAppView(value: unknown): AppView {
     || (record.channel !== 'test' && record.channel !== 'stable')
     || typeof record.dshCommit !== 'string'
     || !DSH_COMMIT.test(record.dshCommit)) {
-    return { state: 'error', message: APP_ERROR }
+    return APP_ERROR
   }
   return {
     state: 'ready',
@@ -92,6 +92,7 @@ export interface AboutUpdateSectionProps extends Partial<PropsLocale<'openloop.s
 const ENGLISH: Partial<Record<ShellKey, string>> = {
   aboutTitle: 'About Openloop',
   aboutLoading: 'Loading build information…',
+  aboutUnavailable: 'Openloop build information is unavailable.',
   aboutVersion: 'Version',
   aboutChannel: 'Channel',
   aboutDshCommit: 'DSH commit',
@@ -151,7 +152,7 @@ export function AboutUpdateSection({
         <h3>{text('aboutTitle')}</h3>
       </div>
       {app.state === 'loading' && <p role="status">{text('aboutLoading')}</p>}
-      {app.state === 'error' && <p role="alert">{app.message}</p>}
+      {app.state === 'error' && <p role="alert">{app.message ?? text('aboutUnavailable')}</p>}
       {app.state === 'ready' && (
         <dl className={css.facts}>
           <div><dt>{text('aboutVersion')}</dt><dd>{app.version}</dd></div>

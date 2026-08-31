@@ -37,6 +37,7 @@ export function WorkspaceSettings({
   const [renameValue, setRenameValue] = useState('')
   const operation = useActionState()
   const actionTriggers = useRef(new Map<string, HTMLButtonElement>())
+  const manageHeading = useRef<HTMLHeadingElement | null>(null)
   const focusWorkspaceId = useRef<string | null>(null)
 
   const setActionTrigger = useCallback((
@@ -51,7 +52,9 @@ export function WorkspaceSettings({
     if (view.kind !== 'manage' || focusWorkspaceId.current === null) return
     const workspaceId = focusWorkspaceId.current
     focusWorkspaceId.current = null
-    actionTriggers.current.get(workspaceId)?.focus()
+    const trigger = actionTriggers.current.get(workspaceId)
+    if (trigger?.isConnected === true) trigger.focus()
+    else manageHeading.current?.focus()
   }, [view])
 
   const returnToManage = (): void => {
@@ -96,7 +99,7 @@ export function WorkspaceSettings({
         ? (
           <>
             <div className={css.settingsToolbar}>
-              <h3>{copy(t, 'settingsTitle')}</h3>
+              <h3 ref={manageHeading} tabIndex={-1}>{copy(t, 'settingsTitle')}</h3>
               <Button
                 variant="outline"
                 size="sm"

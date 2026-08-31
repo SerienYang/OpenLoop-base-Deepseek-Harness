@@ -439,6 +439,34 @@ describe('Openloop Workspace surfaces', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
+  it('focuses the management heading after a revoked Workspace row disappears', async () => {
+    const h = harness([grant('alpha')])
+    h.remove.mockImplementationOnce(async () => {
+      h.grants.set({ ...h.grants.getSnapshot(), items: [] })
+      return 'revoked'
+    })
+    render(
+      <WorkspaceSettings
+        close={vi.fn()}
+        useGrants={h.useGrants}
+        useSessions={h.useSessions}
+        actions={h.actions}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Workspace actions for Alpha' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove' }))
+    fireEvent.click(within(screen.getByRole('region', {
+      name: 'Remove Workspace',
+    })).getByRole('button', { name: 'Remove' }))
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'Workspace actions for Alpha' })).toBeNull()
+      expect(screen.getByRole('heading', { name: 'Workspace settings' }))
+        .toBe(document.activeElement)
+    })
+  })
+
   it('closes the owning Settings shell after starting a Workspace session', async () => {
     const h = harness([grant('alpha')])
     const close = vi.fn()
