@@ -67,6 +67,11 @@ const ACTIVE_INSTALL_STATES = new Set<OpenloopUpdateState>([
   'installing',
   'restarting',
 ])
+const TERMINAL_INSTALL_STATES = new Set<OpenloopUpdateState>([
+  'committed',
+  'failed',
+  'rolled-back',
+])
 
 function actions(state: OpenloopUpdateState): UpdateView['actions'] {
   const installing = ACTIVE_INSTALL_STATES.has(state)
@@ -124,9 +129,10 @@ export class OpenloopUpdateService {
 
   async refresh(): Promise<void> {
     this.requireOpen()
-    await (this.inFlightCheck
+    const status = await (this.inFlightCheck
       ?? this.readStatus('status', remote => remote.getUpdateStatus())
     )
+    if (status?.state === 'checking') await this.checkForUpdate()
   }
 
   async checkForUpdate(): Promise<void> {
@@ -146,7 +152,10 @@ export class OpenloopUpdateService {
       phase: 'checking',
       actions: actions('checking'),
     })
-    const check = this.readStatus('check', remote => remote.checkForUpdate())
+    const check = this.readStatus(
+      'check',
+      remote => remote.checkForUpdate(),
+    ).then(() => {})
     this.inFlightCheck = check
     void check.finally(() => {
       if (this.inFlightCheck === check) this.inFlightCheck = undefined
@@ -186,7 +195,9 @@ export class OpenloopUpdateService {
       }
       return result.value
     } catch (reason) {
-      if (this.isCurrent(generation)) this.publishFailure(reason, previous)
+      if (this.isCurrent(generation)) {
+        await this.publishInstallFailure(reason, previous, generation)
+      }
       throw reason
     }
   }
@@ -200,7 +211,7 @@ export class OpenloopUpdateService {
   private async readStatus(
     operation: string,
     request: (remote: OpenloopUpdateRemote) => Promise<RemoteResult<OpenloopUpdateStatus>>,
-  ): Promise<void> {
+  ): Promise<OpenloopUpdateStatus | undefined> {
     this.requireOpen()
     const generation = ++this.generation
     const previous = this.view.getSnapshot()
@@ -211,6 +222,7 @@ export class OpenloopUpdateService {
       if (!this.isCurrent(generation)) return
       this.updateId = result.value.updateId
       this.view.set(projectStatus(result.value))
+      return result.value
     } catch (reason) {
       if (this.isCurrent(generation)) this.publishFailure(reason, previous)
       throw reason
@@ -227,6 +239,26 @@ export class OpenloopUpdateService {
       message: error.message.replace(/^Openloop update \w+ failed: [^:]+: /u, ''),
       actions: actions('failed'),
     })
+  }
+
+  private async publishInstallFailure(
+    reason: unknown,
+    previous: UpdateView,
+    generation: number,
+  ): Promise<void> {
+    try {
+      const remote = await this.remote()
+      const result = await remote.getUpdateStatus()
+      if (!this.isCurrent(generation)) return
+      if (result.ok && TERMINAL_INSTALL_STATES.has(result.value.state)) {
+        this.updateId = result.value.updateId
+        this.view.set(projectStatus(result.value))
+        return
+      }
+    } catch {
+      // Preserve the original install failure when recovery status cannot be read.
+    }
+    if (this.isCurrent(generation)) this.publishFailure(reason, previous)
   }
 
   private isCurrent(generation: number): boolean {

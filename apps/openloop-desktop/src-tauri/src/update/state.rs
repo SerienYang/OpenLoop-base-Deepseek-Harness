@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     error::Error,
     fmt,
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
     time::Duration,
 };
 
@@ -129,7 +129,7 @@ struct UpdateStateInner<T> {
 pub struct UpdateState<T> {
     channel: ReleaseChannel,
     update_ttl: Duration,
-    inner: Mutex<UpdateStateInner<T>>,
+    inner: Arc<(Mutex<UpdateStateInner<T>>, Condvar)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,12 +225,15 @@ impl<T> UpdateState<T> {
         Self {
             channel,
             update_ttl,
-            inner: Mutex::new(UpdateStateInner {
-                status: UpdateStatus::default(),
-                pending: None,
-                stale_ids: VecDeque::new(),
-                install_reserved: false,
-            }),
+            inner: Arc::new((
+                Mutex::new(UpdateStateInner {
+                    status: UpdateStatus::default(),
+                    pending: None,
+                    stale_ids: VecDeque::new(),
+                    install_reserved: false,
+                }),
+                Condvar::new(),
+            )),
         }
     }
 
@@ -264,46 +267,84 @@ impl<T> UpdateState<T> {
         now: Duration,
         update: Option<AvailableUpdate<T>>,
     ) -> Result<UpdateStatus, UpdateStateError> {
+        let result = (|| {
+            let mut inner = self.lock()?;
+            require_phase(inner.status.state, UpdatePhase::Checking)?;
+            let checked_at = milliseconds(now);
+            match update {
+                Some(update) => {
+                    if update.channel != self.channel {
+                        inner.status =
+                            failed_status(Some(checked_at), UpdateFailure::UnsafeSource.message());
+                        return Err(UpdateStateError::WrongChannel);
+                    }
+                    if update.version.trim().is_empty() {
+                        inner.status =
+                            failed_status(Some(checked_at), UpdateFailure::UnsafeSource.message());
+                        return Err(UpdateStateError::InvalidUpdate);
+                    }
+                    let update_id = Uuid::new_v4().to_string();
+                    inner.status = UpdateStatus {
+                        state: UpdatePhase::Available,
+                        update_id: Some(update_id.clone()),
+                        version: Some(update.version.clone()),
+                        release_notes: update.release_notes,
+                        message: None,
+                        progress: None,
+                        last_checked_at: Some(checked_at),
+                    };
+                    inner.pending = Some(PendingUpdate {
+                        update_id,
+                        version: update.version,
+                        channel: update.channel,
+                        expires_at: now.saturating_add(self.update_ttl),
+                        value: update.value,
+                    });
+                }
+                None => {
+                    inner.status = UpdateStatus {
+                        state: UpdatePhase::UpToDate,
+                        last_checked_at: Some(checked_at),
+                        ..UpdateStatus::default()
+                    };
+                }
+            }
+            Ok(inner.status.clone())
+        })();
+        self.inner.1.notify_all();
+        result
+    }
+
+    pub fn wait_for_check(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<UpdateStatus, UpdateStateError>
+    where
+        T: Send + 'static,
+    {
+        let state = Arc::downgrade(&self.inner);
+        let _subscription = cancellation.subscribe(move || {
+            let Some(state) = state.upgrade() else {
+                return;
+            };
+            let Ok(_guard) = state.0.lock() else {
+                return;
+            };
+            state.1.notify_all();
+        });
         let mut inner = self.lock()?;
-        require_phase(inner.status.state, UpdatePhase::Checking)?;
-        let checked_at = milliseconds(now);
-        match update {
-            Some(update) => {
-                if update.channel != self.channel {
-                    inner.status =
-                        failed_status(Some(checked_at), UpdateFailure::UnsafeSource.message());
-                    return Err(UpdateStateError::WrongChannel);
-                }
-                if update.version.trim().is_empty() {
-                    inner.status =
-                        failed_status(Some(checked_at), UpdateFailure::UnsafeSource.message());
-                    return Err(UpdateStateError::InvalidUpdate);
-                }
-                let update_id = Uuid::new_v4().to_string();
-                inner.status = UpdateStatus {
-                    state: UpdatePhase::Available,
-                    update_id: Some(update_id.clone()),
-                    version: Some(update.version.clone()),
-                    release_notes: update.release_notes,
-                    message: None,
-                    progress: None,
-                    last_checked_at: Some(checked_at),
-                };
-                inner.pending = Some(PendingUpdate {
-                    update_id,
-                    version: update.version,
-                    channel: update.channel,
-                    expires_at: now.saturating_add(self.update_ttl),
-                    value: update.value,
-                });
+        while inner.status.state == UpdatePhase::Checking {
+            if cancellation.is_cancelled() {
+                return Err(UpdateStateError::Cancelled);
             }
-            None => {
-                inner.status = UpdateStatus {
-                    state: UpdatePhase::UpToDate,
-                    last_checked_at: Some(checked_at),
-                    ..UpdateStatus::default()
-                };
-            }
+            inner = self
+                .inner
+                .1
+                .wait(inner)
+                .map_err(|_| UpdateStateError::Unavailable)?;
+        }
+        if cancellation.is_cancelled() {
+            return Err(UpdateStateError::Cancelled);
         }
         Ok(inner.status.clone())
     }
@@ -368,19 +409,38 @@ impl<T> UpdateState<T> {
         Ok(())
     }
 
-    pub fn begin_install(
+    pub fn complete_install_confirmation(
         &self,
         reservation: UpdateInstallReservation<T>,
-    ) -> Result<T, UpdateStateError> {
+        now: Duration,
+        confirmed: bool,
+    ) -> Result<UpdateInstallOutcome<T>, UpdateStateError> {
         let mut inner = self.lock()?;
         if !inner.install_reserved || inner.pending.is_some() {
             return Err(UpdateStateError::InvalidTransition);
         }
         require_phase(inner.status.state, UpdatePhase::Available)?;
+        if now >= reservation.pending.expires_at {
+            retire_update_id(&mut inner, reservation.pending.update_id);
+            inner.install_reserved = false;
+            inner.status = failed_status(
+                inner.status.last_checked_at,
+                "Update offer expired; check again",
+            );
+            return Err(UpdateStateError::ExpiredUpdateId);
+        }
+        if !confirmed {
+            inner.status.update_id = Some(reservation.pending.update_id.clone());
+            inner.status.version = Some(reservation.pending.version.clone());
+            inner.status.progress = None;
+            inner.pending = Some(reservation.pending);
+            inner.install_reserved = false;
+            return Ok(UpdateInstallOutcome::Cancelled);
+        }
         inner.install_reserved = false;
         inner.status.state = UpdatePhase::Downloading;
         inner.status.progress = Some(0);
-        Ok(reservation.pending.value)
+        Ok(UpdateInstallOutcome::Confirmed(reservation.pending.value))
     }
 
     pub fn mark_download_progress(
@@ -427,14 +487,18 @@ impl<T> UpdateState<T> {
     }
 
     pub fn fail(&self, failure: UpdateFailure) -> Result<(), UpdateStateError> {
-        let mut inner = self.lock()?;
-        if !inner.status.state.is_active() {
-            return Err(UpdateStateError::InvalidTransition);
-        }
-        retire_pending(&mut inner);
-        inner.install_reserved = false;
-        inner.status = failed_status(inner.status.last_checked_at, failure.message());
-        Ok(())
+        let result = (|| {
+            let mut inner = self.lock()?;
+            if !inner.status.state.is_active() {
+                return Err(UpdateStateError::InvalidTransition);
+            }
+            retire_pending(&mut inner);
+            inner.install_reserved = false;
+            inner.status = failed_status(inner.status.last_checked_at, failure.message());
+            Ok(())
+        })();
+        self.inner.1.notify_all();
+        result
     }
 
     fn transition(&self, expected: UpdatePhase, next: UpdatePhase) -> Result<(), UpdateStateError> {
@@ -455,7 +519,10 @@ impl<T> UpdateState<T> {
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, UpdateStateInner<T>>, UpdateStateError> {
-        self.inner.lock().map_err(|_| UpdateStateError::Unavailable)
+        self.inner
+            .0
+            .lock()
+            .map_err(|_| UpdateStateError::Unavailable)
     }
 }
 
@@ -534,11 +601,12 @@ pub fn install_update_bridge_handlers<T: Send + 'static>(
             .map_err(|_| BridgeHandlerError::update_failure())?
         {
             CheckStart::AlreadyChecking => {
-                return serde_json::to_value(
-                    check_state
-                        .snapshot(now)
-                        .map_err(|_| BridgeHandlerError::update_failure())?,
-                )
+                return serde_json::to_value(check_state.wait_for_check(&cancellation).map_err(
+                    |error| match error {
+                        UpdateStateError::Cancelled => BridgeHandlerError::invalid_request(),
+                        _ => BridgeHandlerError::update_failure(),
+                    },
+                )?)
                 .map_err(|_| BridgeHandlerError::update_failure());
             }
             CheckStart::Started => {}
@@ -572,7 +640,7 @@ pub fn install_update_bridge_handlers<T: Send + 'static>(
             &install_state,
             &input.update_id,
             channel,
-            install_clock(),
+            install_clock.as_ref(),
             confirmation.as_ref(),
             &cancellation,
         )
@@ -623,11 +691,11 @@ pub fn confirm_and_begin_install<T>(
     state: &UpdateState<T>,
     update_id: &str,
     channel: ReleaseChannel,
-    now: Duration,
+    clock: &dyn Fn() -> Duration,
     confirmation: &dyn UpdateInstallConfirmation,
     cancellation: &CancellationToken,
 ) -> Result<UpdateInstallOutcome<T>, UpdateStateError> {
-    let reservation = state.reserve_install(update_id, channel, now)?;
+    let reservation = state.reserve_install(update_id, channel, clock())?;
     let presentation = UpdateInstallPresentation {
         version: reservation.pending.version.clone(),
         source: signed_source(channel).to_owned(),
@@ -643,13 +711,11 @@ pub fn confirm_and_begin_install<T>(
             return Err(error);
         }
     };
-    if !confirmed || cancellation.is_cancelled() {
-        state.cancel_install(reservation)?;
-        return Ok(UpdateInstallOutcome::Cancelled);
-    }
-    state
-        .begin_install(reservation)
-        .map(UpdateInstallOutcome::Confirmed)
+    state.complete_install_confirmation(
+        reservation,
+        clock(),
+        confirmed && !cancellation.is_cancelled(),
+    )
 }
 
 fn signed_source(channel: ReleaseChannel) -> &'static str {
@@ -708,16 +774,21 @@ fn expire_pending<T>(inner: &mut UpdateStateInner<T>, now: Duration) {
 
 fn retire_pending<T>(inner: &mut UpdateStateInner<T>) {
     if let Some(pending) = inner.pending.take() {
-        inner.stale_ids.push_back(pending.update_id);
-        while inner.stale_ids.len() > MAX_STALE_UPDATE_IDS {
-            inner.stale_ids.pop_front();
-        }
+        retire_update_id(inner, pending.update_id);
+    }
+}
+
+fn retire_update_id<T>(inner: &mut UpdateStateInner<T>, update_id: String) {
+    inner.stale_ids.push_back(update_id);
+    while inner.stale_ids.len() > MAX_STALE_UPDATE_IDS {
+        inner.stale_ids.pop_front();
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateStateError {
     Busy,
+    Cancelled,
     UnknownUpdateId,
     StaleUpdateId,
     ExpiredUpdateId,
@@ -732,6 +803,7 @@ impl fmt::Display for UpdateStateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Busy => "an update operation is already active",
+            Self::Cancelled => "update operation was cancelled",
             Self::UnknownUpdateId => "update id is unknown",
             Self::StaleUpdateId => "update id is stale",
             Self::ExpiredUpdateId => "update id has expired",

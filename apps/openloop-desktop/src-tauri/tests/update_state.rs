@@ -5,7 +5,7 @@ use std::{
     process,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Barrier, Mutex,
+        mpsc, Arc, Barrier, Mutex,
     },
     thread,
     time::Duration,
@@ -164,7 +164,7 @@ fn state_machine_covers_no_update_success_and_rollback_paths() {
         &committed,
         &update_id,
         ReleaseChannel::Test,
-        NOW,
+        &|| NOW,
         &confirmation,
         &CancellationToken::default(),
     )
@@ -201,7 +201,7 @@ fn state_machine_covers_no_update_success_and_rollback_paths() {
             &rolled_back,
             &update_id,
             ReleaseChannel::Test,
-            NOW,
+            &|| NOW,
             &confirmation,
             &CancellationToken::default(),
         )
@@ -253,7 +253,7 @@ fn every_active_state_can_fail_with_a_safe_browser_message() {
                     &state,
                     &update_id,
                     ReleaseChannel::Test,
-                    NOW,
+                    &|| NOW,
                     &RecordingConfirmation::with_decision(true),
                     &CancellationToken::default(),
                 )
@@ -317,7 +317,7 @@ fn rejects_stale_expired_unknown_and_wrong_channel_update_ids() {
             &state,
             &stale_id,
             ReleaseChannel::Test,
-            NOW + Duration::from_secs(2),
+            &|| NOW + Duration::from_secs(2),
             &confirmation,
             &CancellationToken::default(),
         ),
@@ -328,7 +328,7 @@ fn rejects_stale_expired_unknown_and_wrong_channel_update_ids() {
             &state,
             "not-issued-by-host",
             ReleaseChannel::Test,
-            NOW + Duration::from_secs(2),
+            &|| NOW + Duration::from_secs(2),
             &confirmation,
             &CancellationToken::default(),
         ),
@@ -339,7 +339,7 @@ fn rejects_stale_expired_unknown_and_wrong_channel_update_ids() {
             &state,
             &current_id,
             ReleaseChannel::Stable,
-            NOW + Duration::from_secs(2),
+            &|| NOW + Duration::from_secs(2),
             &confirmation,
             &CancellationToken::default(),
         ),
@@ -350,7 +350,7 @@ fn rejects_stale_expired_unknown_and_wrong_channel_update_ids() {
             &state,
             &current_id,
             ReleaseChannel::Test,
-            NOW + UPDATE_TTL + Duration::from_secs(2),
+            &|| NOW + UPDATE_TTL + Duration::from_secs(2),
             &confirmation,
             &CancellationToken::default(),
         ),
@@ -381,7 +381,7 @@ fn native_confirmation_uses_host_stored_version_and_signed_source_and_can_cancel
             &state,
             &update_id,
             ReleaseChannel::Stable,
-            NOW,
+            &|| NOW,
             &confirmation,
             &CancellationToken::default(),
         )
@@ -461,6 +461,75 @@ fn concurrent_checks_share_the_existing_check_without_starting_another() {
             .count(),
         1
     );
+}
+
+#[test]
+fn waiting_check_call_observes_the_existing_check_final_status() {
+    let state = Arc::new(UpdateState::new(ReleaseChannel::Test, UPDATE_TTL));
+    assert_eq!(
+        state.begin_check(NOW).expect("begin independent check"),
+        CheckStart::Started
+    );
+    let waiting_state = state.clone();
+    let waiter = thread::spawn(move || waiting_state.wait_for_check(&CancellationToken::default()));
+
+    let expected = state
+        .finish_check(
+            NOW + Duration::from_secs(1),
+            Some(AvailableUpdate::new(
+                "shared-update",
+                "2.0.0",
+                ReleaseChannel::Test,
+            )),
+        )
+        .expect("finish independent check");
+    let observed = waiter
+        .join()
+        .expect("waiting check thread")
+        .expect("waiting check result");
+
+    assert_eq!(observed, expected);
+}
+
+#[test]
+fn waiting_check_call_observes_the_existing_check_failure() {
+    let state = Arc::new(UpdateState::<()>::new(ReleaseChannel::Test, UPDATE_TTL));
+    assert_eq!(
+        state.begin_check(NOW).expect("begin independent check"),
+        CheckStart::Started
+    );
+    let waiting_state = state.clone();
+    let waiter = thread::spawn(move || waiting_state.wait_for_check(&CancellationToken::default()));
+
+    state
+        .fail(UpdateFailure::Check)
+        .expect("fail independent check");
+    let observed = waiter
+        .join()
+        .expect("waiting check thread")
+        .expect("waiting check result");
+
+    assert_eq!(observed.state, UpdatePhase::Failed);
+    assert_eq!(observed.message.as_deref(), Some("Update check failed"));
+}
+
+#[test]
+fn waiting_check_call_exits_when_cancelled() {
+    let state = Arc::new(UpdateState::<()>::new(ReleaseChannel::Test, UPDATE_TTL));
+    assert_eq!(
+        state.begin_check(NOW).expect("begin independent check"),
+        CheckStart::Started
+    );
+    let cancellation = CancellationToken::default();
+    let waiting_cancellation = cancellation.clone();
+    let waiter = thread::spawn(move || state.wait_for_check(&waiting_cancellation));
+
+    cancellation.cancel();
+
+    assert!(matches!(
+        waiter.join().expect("waiting check thread"),
+        Err(UpdateStateError::Cancelled)
+    ));
 }
 
 #[test]
@@ -653,6 +722,15 @@ impl UpdateChecker<&'static str> for FixedChecker {
     }
 }
 
+struct CountingChecker(AtomicUsize);
+
+impl UpdateChecker<&'static str> for CountingChecker {
+    fn check(&self) -> Result<Option<AvailableUpdate<&'static str>>, UpdateFailure> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(None)
+    }
+}
+
 struct CompletingInstaller;
 
 impl UpdateInstaller<&'static str> for CompletingInstaller {
@@ -671,6 +749,55 @@ impl UpdateInstaller<&'static str> for CompletingInstaller {
             .map_err(|_| UpdateFailure::Install)?;
         observer.installing().map_err(|_| UpdateFailure::Install)?;
         Ok(UpdateInstallResult::Committed)
+    }
+}
+
+struct RollingBackInstaller;
+
+impl UpdateInstaller<&'static str> for RollingBackInstaller {
+    fn install(
+        &self,
+        _update: &'static str,
+        observer: &dyn UpdateInstallObserver,
+    ) -> Result<UpdateInstallResult, UpdateFailure> {
+        observer
+            .download_progress(1, Some(1))
+            .map_err(|_| UpdateFailure::Install)?;
+        observer.verifying().map_err(|_| UpdateFailure::Install)?;
+        observer
+            .ready_to_install()
+            .map_err(|_| UpdateFailure::Install)?;
+        observer.installing().map_err(|_| UpdateFailure::Install)?;
+        Ok(UpdateInstallResult::RolledBack)
+    }
+}
+
+struct CountingInstaller(AtomicUsize);
+
+impl UpdateInstaller<&'static str> for CountingInstaller {
+    fn install(
+        &self,
+        _update: &'static str,
+        _observer: &dyn UpdateInstallObserver,
+    ) -> Result<UpdateInstallResult, UpdateFailure> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(UpdateInstallResult::Committed)
+    }
+}
+
+struct AdvancingConfirmation {
+    clock: Arc<Mutex<Duration>>,
+    confirmed_at: Duration,
+}
+
+impl UpdateInstallConfirmation for AdvancingConfirmation {
+    fn confirm(
+        &self,
+        _presentation: &UpdateInstallPresentation,
+        _cancellation: &CancellationToken,
+    ) -> Result<bool, UpdateStateError> {
+        *self.clock.lock().expect("fake clock") = self.confirmed_at;
+        Ok(true)
     }
 }
 
@@ -850,4 +977,218 @@ fn bridge_dispatch_exposes_safe_status_and_requires_native_confirmation_before_i
             },
         ]
     );
+}
+
+#[test]
+fn bridge_check_waits_for_an_existing_host_check_without_starting_another() {
+    let state = Arc::new(UpdateState::new(ReleaseChannel::Test, UPDATE_TTL));
+    assert_eq!(
+        state.begin_check(NOW).expect("begin independent check"),
+        CheckStart::Started
+    );
+    let checker = Arc::new(CountingChecker(AtomicUsize::new(0)));
+    let mut tables = BridgeDispatchTables::unavailable();
+    install_update_bridge_handlers(
+        &mut tables,
+        state.clone(),
+        ReleaseChannel::Test,
+        checker.clone(),
+        Arc::new(CompletingInstaller),
+        Arc::new(RecordingConfirmation::with_decision(true)),
+        Arc::new(RecordingRestart::default()),
+        Arc::new(|| NOW),
+    )
+    .expect("install update handlers");
+    let launch_id = Uuid::new_v4();
+    let secret: Vec<u8> = (0..32).collect();
+    let executable = std::env::current_exe().expect("test executable");
+    let dispatcher = AuthenticatedBridgeDispatcher::new(
+        unsafe { libc::geteuid() },
+        capture_process_identity(process::id(), &executable).expect("process identity"),
+        executable,
+        launch_id,
+        secret.clone(),
+        tables,
+    )
+    .expect("update dispatcher");
+    let waiting_dispatcher = dispatcher.clone();
+    let waiting_secret = secret.clone();
+    let (result_tx, result_rx) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let response = dispatch(
+            &waiting_dispatcher,
+            launch_id,
+            &waiting_secret,
+            101,
+            "checkForUpdate",
+            Value::Null,
+        );
+        result_tx.send(response).expect("send bridge response");
+    });
+
+    assert!(matches!(
+        result_rx.recv_timeout(Duration::from_secs(2)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    let expected = state
+        .finish_check(
+            NOW + Duration::from_secs(1),
+            Some(AvailableUpdate::new(
+                "shared-update",
+                "8.0.0",
+                ReleaseChannel::Test,
+            )),
+        )
+        .expect("finish independent check");
+    let response = result_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("waiting bridge response");
+    waiter.join().expect("waiting bridge thread");
+
+    assert!(response.ok);
+    assert_eq!(
+        response.result,
+        Some(serde_json::to_value(expected).expect("expected status"))
+    );
+    assert_eq!(checker.0.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn bridge_install_reports_an_error_while_preserving_rolled_back_host_state() {
+    let state = Arc::new(UpdateState::new(ReleaseChannel::Test, UPDATE_TTL));
+    let restart = Arc::new(RecordingRestart::default());
+    let mut tables = BridgeDispatchTables::unavailable();
+    install_update_bridge_handlers(
+        &mut tables,
+        state.clone(),
+        ReleaseChannel::Test,
+        Arc::new(FixedChecker),
+        Arc::new(RollingBackInstaller),
+        Arc::new(RecordingConfirmation::with_decision(true)),
+        restart.clone(),
+        Arc::new(|| NOW),
+    )
+    .expect("install update handlers");
+    let launch_id = Uuid::new_v4();
+    let secret: Vec<u8> = (0..32).collect();
+    let executable = std::env::current_exe().expect("test executable");
+    let dispatcher = AuthenticatedBridgeDispatcher::new(
+        unsafe { libc::geteuid() },
+        capture_process_identity(process::id(), &executable).expect("process identity"),
+        executable,
+        launch_id,
+        secret.clone(),
+        tables,
+    )
+    .expect("update dispatcher");
+    let checked = dispatch(
+        &dispatcher,
+        launch_id,
+        &secret,
+        201,
+        "checkForUpdate",
+        Value::Null,
+    );
+    let update_id = checked.result.expect("available status")["updateId"]
+        .as_str()
+        .expect("opaque update id")
+        .to_owned();
+
+    let installed = dispatch(
+        &dispatcher,
+        launch_id,
+        &secret,
+        202,
+        "installUpdateAndRestart",
+        json!({ "updateId": update_id }),
+    );
+
+    assert!(!installed.ok);
+    assert_eq!(
+        installed.error.expect("rollback bridge error").code,
+        "update_failure"
+    );
+    assert_eq!(
+        state.snapshot(NOW).expect("rolled back status").state,
+        UpdatePhase::RolledBack
+    );
+    assert_eq!(restart.0.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn bridge_rejects_an_update_that_expires_while_confirmation_is_open() {
+    let state = Arc::new(UpdateState::new(ReleaseChannel::Test, UPDATE_TTL));
+    let clock = Arc::new(Mutex::new(NOW));
+    let install_count = Arc::new(CountingInstaller(AtomicUsize::new(0)));
+    let mut tables = BridgeDispatchTables::unavailable();
+    let handler_clock = clock.clone();
+    install_update_bridge_handlers(
+        &mut tables,
+        state.clone(),
+        ReleaseChannel::Test,
+        Arc::new(FixedChecker),
+        install_count.clone(),
+        Arc::new(AdvancingConfirmation {
+            clock: clock.clone(),
+            confirmed_at: NOW + UPDATE_TTL,
+        }),
+        Arc::new(RecordingRestart::default()),
+        Arc::new(move || *handler_clock.lock().expect("handler clock")),
+    )
+    .expect("install update handlers");
+    let launch_id = Uuid::new_v4();
+    let secret: Vec<u8> = (0..32).collect();
+    let executable = std::env::current_exe().expect("test executable");
+    let dispatcher = AuthenticatedBridgeDispatcher::new(
+        unsafe { libc::geteuid() },
+        capture_process_identity(process::id(), &executable).expect("process identity"),
+        executable,
+        launch_id,
+        secret.clone(),
+        tables,
+    )
+    .expect("update dispatcher");
+    let checked = dispatch(
+        &dispatcher,
+        launch_id,
+        &secret,
+        301,
+        "checkForUpdate",
+        Value::Null,
+    );
+    let update_id = checked.result.expect("available status")["updateId"]
+        .as_str()
+        .expect("opaque update id")
+        .to_owned();
+
+    let expired = dispatch(
+        &dispatcher,
+        launch_id,
+        &secret,
+        302,
+        "installUpdateAndRestart",
+        json!({ "updateId": update_id }),
+    );
+
+    assert!(!expired.ok);
+    assert_eq!(install_count.0.load(Ordering::SeqCst), 0);
+    let status = state
+        .snapshot(NOW + UPDATE_TTL)
+        .expect("expired update status");
+    assert_eq!(status.state, UpdatePhase::Failed);
+    assert_eq!(
+        status.message.as_deref(),
+        Some("Update offer expired; check again")
+    );
+
+    let reused = dispatch(
+        &dispatcher,
+        launch_id,
+        &secret,
+        303,
+        "installUpdateAndRestart",
+        json!({ "updateId": update_id }),
+    );
+    assert!(!reused.ok);
+    assert_eq!(install_count.0.load(Ordering::SeqCst), 0);
 }

@@ -130,6 +130,39 @@ describe('Openloop browser update facade', () => {
     })
   })
 
+  it('lets refresh take over an existing Host check through its final status', async () => {
+    const pending = deferred<RemoteResult<OpenloopUpdateStatus>>()
+    const checkForUpdate = vi.fn(() => pending.promise)
+    const service = new OpenloopUpdateService(remote({
+      getUpdateStatus: vi.fn(() => ok(status('checking'))),
+      checkForUpdate,
+    }))
+
+    const refresh = service.refresh()
+    await vi.waitFor(() => {
+      expect(checkForUpdate).toHaveBeenCalledOnce()
+    })
+    expect(service.view.getSnapshot().phase).toBe('checking')
+
+    pending.resolve({
+      ok: true,
+      value: status('available', {
+        updateId: 'host-owned-update-id',
+        version: '2.1.0',
+      }),
+    })
+    await refresh
+
+    expect(service.view.getSnapshot()).toMatchObject({
+      phase: 'available',
+      targetVersion: '2.1.0',
+      actions: {
+        check: { enabled: true },
+        installAndRestart: { enabled: true },
+      },
+    })
+  })
+
   it('keeps the latest status when reads settle in reverse order', async () => {
     const first = deferred<RemoteResult<OpenloopUpdateStatus>>()
     const second = deferred<RemoteResult<OpenloopUpdateStatus>>()
@@ -198,6 +231,51 @@ describe('Openloop browser update facade', () => {
       actions: {
         check: { enabled: true },
         installAndRestart: { enabled: true },
+      },
+    })
+  })
+
+  it('projects a rolled-back Host terminal state while preserving install error propagation', async () => {
+    const getUpdateStatus = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        value: status('available', {
+          updateId: 'rollback-update-id',
+          version: '3.0.0',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        value: status('rolled-back', {
+          version: '3.0.0',
+          message: 'The previous version was restored',
+        }),
+      })
+    const service = new OpenloopUpdateService(remote({
+      getUpdateStatus,
+      installUpdateAndRestart: vi.fn(() => Promise.resolve({
+        ok: false as const,
+        error: {
+          code: 'update_failure',
+          message: 'desktop update operation failed',
+          details: {},
+        },
+      })),
+    }))
+    await service.refresh()
+
+    await expect(service.installUpdateAndRestart()).rejects.toThrow(
+      'Openloop update install failed: update_failure: desktop update operation failed',
+    )
+
+    expect(getUpdateStatus).toHaveBeenCalledTimes(2)
+    expect(service.view.getSnapshot()).toEqual({
+      phase: 'rolled-back',
+      targetVersion: '3.0.0',
+      message: 'The previous version was restored',
+      actions: {
+        check: { enabled: true },
+        installAndRestart: { enabled: false },
       },
     })
   })
