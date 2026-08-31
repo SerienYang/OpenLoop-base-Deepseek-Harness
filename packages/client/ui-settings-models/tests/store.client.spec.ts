@@ -204,7 +204,7 @@ describe('ModelsSettingsStore', () => {
     await store.load()
 
     const state = store.store.getSnapshot()
-    expect(state.credentialError).toBe('host credential transport down')
+    expect(state.credentialError).toBe('credential status is unavailable')
     expect(state.rows.find(row => row.apiKeyEnv === 'DEEPSEEK_API_KEY')?.credential).toEqual({
       configured: false,
       source: 'keychain',
@@ -215,6 +215,67 @@ describe('ModelsSettingsStore', () => {
       source: 'keychain',
       writable: true,
     })
+  })
+
+  it('keeps mixed adapter results independent and redacts one stable failure state', async () => {
+    let load = 0
+    const credentialControl: CredentialControlAdapter = {
+      describe: async (ref) => {
+        if (load === 0) {
+          return { configured: true, source: 'keychain', writable: true }
+        }
+        if (ref === 'OPENAI_API_KEY') {
+          return { configured: false, source: 'environment', writable: false }
+        }
+        throw new Error(`${ref} unavailable`)
+      },
+      render: () => null,
+      materializeApiKeyEnv: true,
+      deleteCredentialWithProfile: false,
+    }
+    const { face } = api({
+      describeSettings: () => Promise.resolve(ok({
+        writable: true,
+        hasDocument: false,
+        namespaces: load === 0
+          ? NAMESPACES
+          : NAMESPACES.map(namespace => namespace.ns === 'llm-pi-ai'
+            ? {
+              ...namespace,
+              value: { providers: {
+                openai: { apiKeyEnv: 'OPENAI_API_KEY' },
+                anthropic: { apiKeyEnv: 'ANTHROPIC_API_KEY' },
+              } },
+              user: { providers: {
+                openai: { apiKeyEnv: 'OPENAI_API_KEY' },
+                anthropic: { apiKeyEnv: 'ANTHROPIC_API_KEY' },
+              } },
+              revision: 1,
+            }
+            : namespace) as typeof NAMESPACES,
+      })),
+    })
+    const store = new ModelsSettingsStore(face, credentialControl)
+    await store.load()
+    load = 1
+
+    await store.load()
+
+    const state = store.store.getSnapshot()
+    expect(state.credentialError).toBe('credential status is unavailable')
+    expect(state.credentialError).not.toContain('DEEPSEEK_API_KEY')
+    expect(state.credentialError).not.toContain('ANTHROPIC_API_KEY')
+    expect(state.rows.find(row => row.apiKeyEnv === 'DEEPSEEK_API_KEY')?.credential).toEqual({
+      configured: true,
+      source: 'keychain',
+      writable: true,
+    })
+    expect(state.rows.find(row => row.apiKeyEnv === 'OPENAI_API_KEY')?.credential).toEqual({
+      configured: false,
+      source: 'environment',
+      writable: false,
+    })
+    expect(state.rows.find(row => row.apiKeyEnv === 'ANTHROPIC_API_KEY')?.credential).toBeUndefined()
   })
 
   it('does not retain credential status for removed or changed references', async () => {

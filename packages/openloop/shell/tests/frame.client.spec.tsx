@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
 import { Context } from '@deepseek-ai/cordis'
+import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { SlotRegistry, type SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
+import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { ThemeTokenOverrides } from '@deepseek-ai/dsh-client-ui-theme/client'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { type ReactNode, useSyncExternalStore } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, render } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import { apply, inject, OpenloopFrame } from '../src/client/index.ts'
 import { computeOpenloopColumns } from '../src/client/columns.ts'
 import {
@@ -161,8 +163,13 @@ describe('Openloop root shell Slot contract', () => {
       }),
       overrideTokens,
     } as never)
+    const locale = new LocaleRuntime(ctx)
+    ctx.provide('locale', locale)
     const openloopDesktop = {
-      describeCredential: vi.fn(),
+      describeCredential: vi.fn(() => Promise.resolve({
+        ok: true as const,
+        value: { configured: true, source: 'keychain', writable: true },
+      })),
       openCredentialReplacement: vi.fn(),
       unsetCredential: vi.fn(),
     }
@@ -171,8 +178,22 @@ describe('Openloop root shell Slot contract', () => {
     await ctx.plugin({ inject: [...inject], apply }).await()
 
     const slots = ctx.get('slots') as SlotRegistry
-    expect(inject).toEqual(['slots', 'theme', 'remote', 'remote.openloopDesktop'])
+    expect(inject).toEqual(['slots', 'theme', 'locale', 'remote', 'remote.openloopDesktop'])
     expect(ctx.get('credentialControl')).toBeDefined()
+    locale.setLocale('en')
+    const credentialControl = ctx.get('credentialControl') as CredentialControlAdapter
+    const credential = render(credentialControl.render({
+      reference: 'DEEPSEEK_API_KEY',
+      label: 'API key',
+    }))
+    expect(await screen.findByText('API key is securely stored')).toBeTruthy()
+    expect(screen.getByText('macOS Keychain · saved value is never shown')).toBeTruthy()
+    locale.setLocale('zh')
+    credential.rerender(credentialControl.render({
+      reference: 'DEEPSEEK_API_KEY',
+      label: 'API 密钥',
+    }))
+    expect(await screen.findByText('API 密钥已安全保存')).toBeTruthy()
     expect(document.body.hasAttribute('data-ds-dark-theme')).toBe(true)
     expect(document.body.style.getPropertyValue('--dsw-alias-brand-primary')).toBe('#f7f8fa')
     expect(slots.entries('root')).toHaveLength(1)

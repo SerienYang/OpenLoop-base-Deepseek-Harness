@@ -395,6 +395,86 @@ describe('ModelsSection', () => {
     expect(scripted.face.credentials.describe).not.toHaveBeenCalled()
   })
 
+  it('materializes an unregistered pi-ai reference before rendering the Host control', async () => {
+    const describe = vi.fn(() => Promise.resolve({
+      configured: false,
+      writable: true,
+    }))
+    const renderCredential = vi.fn(({ label }) =>
+      <div data-testid="host-credential-control">{label}</div>)
+    const adapter = hostCredentialControl({ describe, render: renderCredential })
+    const scripted = scriptedFace()
+    const piAi = wireNamespaces()[2]!
+    const unregistered: SettingsNamespaceView = {
+      ...piAi,
+      value: { providers: { acme: { baseURL: 'https://acme.test/v1' } } },
+      user: { providers: { acme: { baseURL: 'https://acme.test/v1' } } },
+    }
+    const onClose = vi.fn()
+    const { ProviderEditor } = await import('../src/client/ProviderEditor.tsx')
+    const editor = render(<ProviderEditor
+      provider="acme"
+      displayName="Acme"
+      namespace={unregistered}
+      settingsPath={['providers', 'acme']}
+      api={scripted.face as never}
+      t={t}
+      readOnly={false}
+      credentialControl={adapter}
+      onClose={onClose}
+    />)
+
+    expect(screen.getByText(
+      'Apply this profile first. The secure Host control will be available after it reloads.',
+    )).toBeTruthy()
+    expect(renderCredential).not.toHaveBeenCalled()
+    expect(describe).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: en.apply }))
+    await waitFor(() => { expect(scripted.mutate).toHaveBeenCalledOnce() })
+    expect(scripted.mutate.mock.calls[0]?.[0]).toEqual({
+      ns: 'llm-pi-ai',
+      ops: [{
+        op: 'set',
+        path: ['providers', 'acme', 'apiKeyEnv'],
+        value: 'ACME_API_KEY',
+      }],
+      expectedRevision: 0,
+    })
+    expect(onClose).toHaveBeenCalledWith(true)
+
+    editor.unmount()
+    const registered: SettingsNamespaceView = {
+      ...unregistered,
+      value: { providers: { acme: {
+        apiKeyEnv: 'ACME_API_KEY',
+        baseURL: 'https://acme.test/v1',
+      } } },
+      user: { providers: { acme: {
+        apiKeyEnv: 'ACME_API_KEY',
+        baseURL: 'https://acme.test/v1',
+      } } },
+      revision: 1,
+    }
+    render(<ProviderEditor
+      provider="acme"
+      displayName="Acme"
+      namespace={registered}
+      settingsPath={['providers', 'acme']}
+      api={scripted.face as never}
+      t={t}
+      readOnly={false}
+      credentialControl={adapter}
+      onClose={onClose}
+    />)
+
+    expect(renderCredential).toHaveBeenCalledOnce()
+    expect(renderCredential.mock.calls[0]?.[0]).toMatchObject({
+      reference: 'ACME_API_KEY',
+      label: en.keyInput,
+    })
+  })
+
   it('refreshes the Models owner after a Host credential mutation', async () => {
     let controlProps: Parameters<CredentialControlAdapter['render']>[0] | undefined
     const adapter = hostCredentialControl({

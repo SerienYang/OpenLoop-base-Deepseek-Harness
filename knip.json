@@ -794,7 +794,6 @@
         "@openloop/fs-workspace",
         "@openloop/sandbox-workspace",
         "@openloop/settings-foundation",
-        "@openloop/shell",
         "@openloop/workspace-client",
         "@openloop/workspace-authority"
       ]

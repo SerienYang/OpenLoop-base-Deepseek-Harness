@@ -201,6 +201,8 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
     const value = getPath(source, [key])
     return typeof value === 'string' && value.trim().length > 0 ? value : undefined
   }
+  const hasRegisteredKeyRef = layout !== 'pi-ai'
+    || stringAt(fallback, 'apiKeyEnv') !== undefined
   const setField = (key: string, next: string | undefined): void => {
     // A value of nothing but whitespace is cleared, not stored: `stringAt`
     // already reports it as absent, so the field would otherwise render empty
@@ -391,15 +393,17 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
               {shownKeyFailure === undefined ? null : <p className={styles['error']}>{t(shownKeyFailure)}</p>}
             </div>
           )
-          : credentialControl.render({
-            reference: keyRef,
-            label: t('keyInput'),
-            disabled,
-            ...props.credentialRefreshToken === undefined
-              ? {}
-              : { refreshToken: props.credentialRefreshToken },
-            ...onCredentialChanged === undefined ? {} : { onChanged: onCredentialChanged },
-          })}
+          : !hasRegisteredKeyRef
+            ? <p className={styles['advancedHint']}>{t('keyManagedAfterApply')}</p>
+            : credentialControl.render({
+              reference: keyRef,
+              label: t('keyInput'),
+              disabled,
+              ...props.credentialRefreshToken === undefined
+                ? {}
+                : { refreshToken: props.credentialRefreshToken },
+              ...onCredentialChanged === undefined ? {} : { onChanged: onCredentialChanged },
+            })}
         {props.credentialOnly === true ? null : <details className={styles['customized']}>
           <summary className={styles['customizedSummary']}>{t('customized')}</summary>
           <div className={styles['customizedBody']}>

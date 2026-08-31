@@ -4,10 +4,12 @@ import type { BoundActions } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ILayout } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { ThemeSnapshot } from '@deepseek-ai/dsh-client-ui-theme/client'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
+import type {} from '@deepseek-ai/dsh-client-locale/client'
 import {
   createOpenloopCredentialControlAdapter,
   type OpenloopCredentialRemote,
 } from './CredentialControl.tsx'
+import { en, zh, type ShellKey } from './locales.ts'
 import { createOpenloopShellStore, OpenloopFrame } from './OpenloopFrame.tsx'
 import { OPENLOOP_THEME_TOKENS } from './theme-tokens.generated.ts'
 
@@ -19,6 +21,7 @@ export type {
   CredentialControlProps,
   OpenloopCredentialRemote,
 } from './CredentialControl.tsx'
+export type { ShellKey } from './locales.ts'
 export { OpenloopFrame } from './OpenloopFrame.tsx'
 export { parseOpenloopBrand } from './brand.ts'
 export type { OpenloopBrand } from './brand.ts'
@@ -26,6 +29,11 @@ export type { OpenloopBrand } from './brand.ts'
 type ShellActions = BoundActions<ReturnType<typeof createOpenloopShellStore>>
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap {
+    /** Openloop shell credential-control copy. */
+    'openloop.shell': ShellKey
+  }
+
   interface SlotMap {
     /**
      * Openloop's trusted Workbench surface beside the conversation. The
@@ -97,17 +105,22 @@ class ThemeDocumentPresenter {
 }
 
 export const name = 'shell'
-export const inject = ['slots', 'theme', 'remote', 'remote.openloopDesktop']
+export const inject = ['slots', 'theme', 'locale', 'remote', 'remote.openloopDesktop']
+
+/** Dictionary namespace owned by the Openloop shell. */
+const NS = 'openloop.shell'
 
 /** Register one Openloop root owner, its child surfaces, and product theme tokens. */
 export function apply(ctx: ClientContext): void {
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'openloop-shell: copy dictionaries')
+  const t = ctx.locale.bind(NS)
   const desktop = (
     ctx.remote as unknown as { openloopDesktop: OpenloopCredentialRemote }
   ).openloopDesktop
   ctx.effect(
     () => ctx.reflect.provide(
       'credentialControl',
-      createOpenloopCredentialControlAdapter(desktop),
+      createOpenloopCredentialControlAdapter(desktop, t),
     ),
     'openloop-shell: Host credential control',
   )

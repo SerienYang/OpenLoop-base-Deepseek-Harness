@@ -174,6 +174,7 @@ export class ModelsSettingsStore {
     const refs = [...new Set(rows.flatMap(row => row.apiKeyEnv === undefined ? [] : [row.apiKeyEnv]))]
     let credentials: Record<string, CredentialControlStatus> = {}
     let credentialError: string | null = null
+    let failedRefs: string[] = []
     if (refs.length > 0) {
       try {
         const credentialControl = this.credentialControl
@@ -185,16 +186,26 @@ export class ModelsSettingsStore {
           if (response.result.ok) credentials = response.result.value.credentials
           else credentialError = response.result.error.message
         } else {
-          credentials = Object.fromEntries(await Promise.all(
-            refs.map(async ref => [ref, await credentialControl.describe(ref)] as const),
-          ))
+          const results = await Promise.all(refs.map(async (ref) => {
+            try {
+              return { ref, status: await credentialControl.describe(ref) }
+            } catch {
+              return { ref }
+            }
+          }))
+          for (const result of results) {
+            if (result.status === undefined) failedRefs.push(result.ref)
+            else credentials[result.ref] = result.status
+          }
+          if (failedRefs.length > 0) credentialError = 'credential status is unavailable'
         }
       } catch (error) {
         credentialError = messageOf(error)
       }
     }
     if (credentialError !== null) {
-      for (const ref of refs) {
+      if (failedRefs.length === 0) failedRefs = refs
+      for (const ref of failedRefs) {
         const previous = previousCredentials.get(ref)
         if (previous !== undefined) credentials[ref] = previous
       }

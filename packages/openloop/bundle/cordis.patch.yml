@@ -151,4 +151,4 @@
 - insert:
     - id: shell
       name: '@openloop/shell'
-      inject: [remote, remote.openloopDesktop]
+      inject: [locale, remote, remote.openloopDesktop]

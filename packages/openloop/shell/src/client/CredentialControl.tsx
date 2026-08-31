@@ -5,6 +5,7 @@ import type {
   CredentialControlRenderProps,
   CredentialControlStatus,
 } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ShellKey } from './locales.ts'
 import styles from './CredentialControl.module.css'
 
 type RemoteResult<T> =
@@ -22,13 +23,15 @@ export interface OpenloopCredentialRemote {
 export interface CredentialControlProps extends CredentialControlRenderProps {
   /** Browser-safe Remote facade. */
   remote: OpenloopCredentialRemote
+  /** Stable shell-namespace translator. */
+  t: (key: ShellKey) => string
 }
 
-function sourceLabel(source: string | undefined): string {
-  if (source === 'keychain') return 'macOS 钥匙串 · 不显示已保存内容'
-  if (source === 'environment' || source === 'env') return '环境变量'
-  if (source === 'legacy-file' || source === 'file') return '旧版凭据文件'
-  return source === undefined ? '由 Openloop Host 管理' : '受管凭据来源'
+function sourceLabel(source: string | undefined, t: CredentialControlProps['t']): string {
+  if (source === 'keychain') return t('sourceKeychain')
+  if (source === 'environment' || source === 'env') return t('sourceEnvironment')
+  if (source === 'legacy-file' || source === 'file') return t('sourceLegacyFile')
+  return source === undefined ? t('sourceHost') : t('sourceManaged')
 }
 
 function valueOf<T>(result: RemoteResult<T>, failure: string): T {
@@ -41,18 +44,21 @@ function valueOf<T>(result: RemoteResult<T>, failure: string): T {
  * persistence stay in the native Host sheet.
  */
 export function CredentialControl(props: CredentialControlProps): ReactNode {
-  const { reference, remote, onChanged } = props
+  const { reference, remote, onChanged, t } = props
   const [status, setStatus] = useState<CredentialControlStatus | undefined>()
+  const [reading, setReading] = useState(true)
   const [busy, setBusy] = useState<'replace' | 'delete' | undefined>()
   const [failure, setFailure] = useState<string | undefined>()
   const statusRef = useRef<CredentialControlStatus | undefined>()
   const lifetimeEpoch = useRef(0)
   const readGeneration = useRef(0)
   const initialReadPending = useRef(true)
+  const retryPending = useRef(false)
 
   const readStatus = useCallback(async (kind: 'initial' | 'refresh'): Promise<void> => {
     const lifetime = lifetimeEpoch.current
     const generation = ++readGeneration.current
+    setReading(true)
     setFailure(undefined)
     try {
       const next = valueOf(
@@ -65,17 +71,23 @@ export function CredentialControl(props: CredentialControlProps): ReactNode {
     } catch {
       if (lifetimeEpoch.current !== lifetime || readGeneration.current !== generation) return
       setFailure(kind === 'initial'
-        ? '无法读取 API 密钥状态，请重试。'
-        : '无法刷新 API 密钥状态，请重试。')
+        ? t('initialReadFailed')
+        : t('refreshFailed'))
+    } finally {
+      if (lifetimeEpoch.current === lifetime && readGeneration.current === generation) {
+        setReading(false)
+      }
     }
-  }, [reference, remote])
+  }, [reference, remote, t])
 
   useEffect(() => {
     const lifetime = ++lifetimeEpoch.current
     readGeneration.current++
     initialReadPending.current = true
+    retryPending.current = false
     statusRef.current = undefined
     setStatus(undefined)
+    setReading(true)
     setBusy(undefined)
     setFailure(undefined)
     return () => {
@@ -91,7 +103,7 @@ export function CredentialControl(props: CredentialControlProps): ReactNode {
   }, [props.refreshToken, readStatus])
 
   const mutate = async (operation: 'replace' | 'delete'): Promise<void> => {
-    if (busy !== undefined) return
+    if (busy !== undefined || reading) return
     const lifetime = lifetimeEpoch.current
     setBusy(operation)
     setFailure(undefined)
@@ -110,8 +122,8 @@ export function CredentialControl(props: CredentialControlProps): ReactNode {
       } catch {
         if (lifetimeEpoch.current === lifetime) {
           setFailure(operation === 'replace'
-            ? '无法更新 API 密钥，请重试。'
-            : '无法删除 API 密钥，请重试。')
+            ? t('replaceFailed')
+            : t('deleteFailed'))
         }
         return
       }
@@ -133,47 +145,75 @@ export function CredentialControl(props: CredentialControlProps): ReactNode {
     }
   }
 
+  const retry = (): void => {
+    if (retryPending.current) return
+    retryPending.current = true
+    void readStatus('refresh').finally(() => {
+      retryPending.current = false
+    })
+  }
+
   const configured = status?.configured === true
   const writable = status?.writable === true && props.disabled !== true
   return (
-    <div className={styles.control}>
+    <div className={styles.control} aria-busy={reading || busy !== undefined || undefined}>
       <div className={styles.summary}>
         <span className={styles.label}>{props.label}</span>
-        <span className={configured ? styles.configured : styles.missing}>
-          {status === undefined
-            ? '正在读取凭据状态…'
-            : configured ? 'API 密钥已安全保存' : '尚未配置 API 密钥'}
-        </span>
-        {status === undefined ? null : <span className={styles.source}>{sourceLabel(status.source)}</span>}
-      </div>
-      {status === undefined || !writable
-        ? null
-        : (
-          <div className={styles.actions}>
-            <button
-              type="button"
-              className={styles.action}
-              disabled={busy !== undefined}
-              onClick={() => { void mutate('replace') }}
+        {status === undefined && !reading
+          ? null
+          : (
+            <span
+              className={configured ? styles.configured : styles.missing}
+              role="status"
+              aria-live="polite"
             >
-              {busy === 'replace'
-                ? '正在打开…'
-                : configured ? '替换 API 密钥' : '添加 API 密钥'}
-            </button>
-            {!configured
-              ? null
-              : (
-                <button
-                  type="button"
-                  className={styles.deleteAction}
-                  disabled={busy !== undefined}
-                  onClick={() => { void mutate('delete') }}
-                >
-                  {busy === 'delete' ? '正在删除…' : '删除 API 密钥'}
-                </button>
-              )}
-          </div>
-        )}
+              {status === undefined
+                ? t('credentialReading')
+                : configured ? t('credentialConfigured') : t('credentialMissing')}
+            </span>
+          )}
+        {status === undefined
+          ? null
+          : <span className={styles.source}>{sourceLabel(status.source, t)}</span>}
+      </div>
+      {status === undefined
+        ? failure === undefined || reading
+          ? null
+          : (
+            <div className={styles.actions}>
+              <button type="button" className={styles.action} onClick={retry}>
+                {t('retry')}
+              </button>
+            </div>
+          )
+        : !writable
+          ? null
+          : (
+            <div className={styles.actions}>
+              <button
+                type="button"
+                className={styles.action}
+                disabled={busy !== undefined}
+                onClick={() => { void mutate('replace') }}
+              >
+                {busy === 'replace'
+                  ? t('replaceOpening')
+                  : configured ? t('replace') : t('add')}
+              </button>
+              {!configured
+                ? null
+                : (
+                  <button
+                    type="button"
+                    className={styles.deleteAction}
+                    disabled={busy !== undefined}
+                    onClick={() => { void mutate('delete') }}
+                  >
+                    {busy === 'delete' ? t('deleteBusy') : t('delete')}
+                  </button>
+                )}
+            </div>
+          )}
       {failure === undefined ? null : <p className={styles.error} role="alert">{failure}</p>}
     </div>
   )
@@ -182,6 +222,7 @@ export function CredentialControl(props: CredentialControlProps): ReactNode {
 /** Build the Openloop product adapter around its browser-safe Host facade. */
 export function createOpenloopCredentialControlAdapter(
   remote: OpenloopCredentialRemote,
+  t: CredentialControlProps['t'],
 ): CredentialControlAdapter {
   return {
     async describe(reference) {
@@ -190,7 +231,7 @@ export function createOpenloopCredentialControlAdapter(
         'credential status is unavailable',
       )
     },
-    render: props => <CredentialControl {...props} remote={remote} />,
+    render: props => <CredentialControl {...props} remote={remote} t={t} />,
     materializeApiKeyEnv: true,
     deleteCredentialWithProfile: false,
   }

@@ -32,7 +32,13 @@ interface BundleManifest {
   readonly devDependencies?: Readonly<Record<string, string>>
   readonly exports?: Readonly<Record<string, unknown>>
   readonly files?: readonly string[]
-  readonly dsh?: { readonly bundle?: { readonly patch?: string } }
+  readonly dsh?: {
+    readonly bundle?: { readonly patch?: string }
+    readonly client?: {
+      readonly inject?: readonly string[]
+      readonly platform?: string
+    }
+  }
 }
 
 interface ClientPackageManifest {
@@ -347,7 +353,7 @@ describe('OpenLoop profile', () => {
     expect(entries.find(entry => entry.id === 'ui-settings')?.disabled).toBe(true)
     expect(entries.find(entry => entry.id === 'ui-settings-general')?.disabled).toBe(true)
     expect(entries.find(entry => entry.id === 'shell')?.inject)
-      .toEqual(['remote', 'remote.openloopDesktop'])
+      .toEqual(['locale', 'remote', 'remote.openloopDesktop'])
   })
 
   it('enables the Openloop Workspace client while legacy Workspace and Settings rows stay disabled', () => {
@@ -387,8 +393,18 @@ describe('OpenLoop profile', () => {
     expect(entries.filter(entry => entry.name === '@openloop/shell')).toEqual([{
       id: 'shell',
       name: '@openloop/shell',
-      inject: ['remote', 'remote.openloopDesktop'],
+      inject: ['locale', 'remote', 'remote.openloopDesktop'],
     }])
+    const require = createRequire(import.meta.url)
+    const shellManifest = JSON.parse(readFileSync(
+      require.resolve('@openloop/shell/package.json'),
+      'utf8',
+    )) as BundleManifest
+    expect(shellManifest.peerDependencies).toHaveProperty(
+      '@deepseek-ai/dsh-client-locale',
+      'workspace:^',
+    )
+    expect(shellManifest.dsh?.client?.inject).toContain('@deepseek-ai/dsh-client-locale')
     expect(enabledClientPackages()).not.toContain('@deepseek-ai/dsh-client-ui-layout')
     expect(enabledClientPackages()).toContain('@openloop/shell')
   })

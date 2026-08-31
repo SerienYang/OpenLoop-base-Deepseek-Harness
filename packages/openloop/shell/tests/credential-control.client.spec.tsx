@@ -1,13 +1,63 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import type { ComponentProps } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   createOpenloopCredentialControlAdapter,
-  CredentialControl,
+  CredentialControl as CredentialControlComponent,
   type OpenloopCredentialRemote,
 } from '../src/client/CredentialControl.tsx'
 
 afterEach(cleanup)
+
+const zhT = (key: string): string => ({
+  credentialReading: '正在读取凭据状态…',
+  credentialConfigured: 'API 密钥已安全保存',
+  credentialMissing: '尚未配置 API 密钥',
+  sourceKeychain: 'macOS 钥匙串 · 不显示已保存内容',
+  sourceEnvironment: '环境变量',
+  sourceLegacyFile: '旧版凭据文件',
+  sourceHost: '由 Openloop Host 管理',
+  sourceManaged: '受管凭据来源',
+  replaceOpening: '正在打开…',
+  replace: '替换 API 密钥',
+  add: '添加 API 密钥',
+  deleteBusy: '正在删除…',
+  delete: '删除 API 密钥',
+  initialReadFailed: '无法读取 API 密钥状态，请重试。',
+  refreshFailed: '无法刷新 API 密钥状态，请重试。',
+  replaceFailed: '无法更新 API 密钥，请重试。',
+  deleteFailed: '无法删除 API 密钥，请重试。',
+  retry: '重试',
+} as Record<string, string>)[key] ?? key
+
+const enT = (key: string): string => ({
+  credentialReading: 'Reading credential status…',
+  credentialConfigured: 'API key is securely stored',
+  credentialMissing: 'API key is not configured',
+  sourceKeychain: 'macOS Keychain · saved value is never shown',
+  sourceEnvironment: 'Environment variable',
+  sourceLegacyFile: 'Legacy credential file',
+  sourceHost: 'Managed by the Openloop Host',
+  sourceManaged: 'Managed credential source',
+  replaceOpening: 'Opening…',
+  replace: 'Replace API key',
+  add: 'Add API key',
+  deleteBusy: 'Deleting…',
+  delete: 'Delete API key',
+  initialReadFailed: 'Unable to read API key status. Try again.',
+  refreshFailed: 'Unable to refresh API key status. Try again.',
+  replaceFailed: 'Unable to update the API key. Try again.',
+  deleteFailed: 'Unable to delete the API key. Try again.',
+  retry: 'Retry',
+} as Record<string, string>)[key] ?? key
+
+function CredentialControl(
+  props: Omit<ComponentProps<typeof CredentialControlComponent>, 't'>,
+) {
+  const localized = { ...props, t: zhT } as ComponentProps<typeof CredentialControlComponent>
+  return <CredentialControlComponent {...localized} />
+}
 
 function ok<T>(value: T) {
   return Promise.resolve({ ok: true as const, value })
@@ -62,14 +112,77 @@ describe('Openloop CredentialControl', () => {
     fireEvent.click(screen.getByRole('button', { name: '添加 API 密钥' }))
 
     expect(screen.getByRole('button', { name: '正在打开…' })).toHaveProperty('disabled', true)
+    expect(screen.getByText('API 密钥').parentElement?.parentElement?.getAttribute('aria-busy'))
+      .toBe('true')
     expect(describeCredential).toHaveBeenCalledTimes(1)
     expect(screen.getByText('尚未配置 API 密钥')).toBeTruthy()
 
     replacement.resolve({ ok: true, value: 'saved' })
     expect(await screen.findByText('API 密钥已安全保存')).toBeTruthy()
+    expect(screen.getByText('API 密钥').parentElement?.parentElement?.getAttribute('aria-busy'))
+      .toBeNull()
     expect(openCredentialReplacement).toHaveBeenCalledWith('DEEPSEEK_API_KEY')
     expect(describeCredential).toHaveBeenCalledTimes(2)
     expect(onChanged).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers one localized retry after an initial read failure and recovers', async () => {
+    const initial = Promise.withResolvers<never>()
+    const retry = Promise.withResolvers<{
+      ok: true
+      value: { configured: true; source: string; writable: true }
+    }>()
+    const describeCredential = vi.fn()
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(retry.promise)
+    const host = remote({ describeCredential })
+
+    render(<CredentialControl reference="DEEPSEEK_API_KEY" label="API 密钥" remote={host} />)
+
+    const loading = screen.getByRole('status')
+    expect(loading.textContent).toBe('正在读取凭据状态…')
+    expect(loading.getAttribute('aria-live')).toBe('polite')
+    expect(screen.getByText('API 密钥').parentElement?.parentElement?.getAttribute('aria-busy'))
+      .toBe('true')
+
+    await act(async () => { initial.reject(new Error('offline')) })
+
+    expect(screen.getByRole('alert').textContent).toBe('无法读取 API 密钥状态，请重试。')
+    const retryButton = screen.getByRole('button', { name: '重试' })
+    expect(screen.queryByText('正在读取凭据状态…')).toBeNull()
+
+    fireEvent.click(retryButton)
+    fireEvent.click(retryButton)
+    expect(describeCredential).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('status').textContent).toBe('正在读取凭据状态…')
+
+    retry.resolve({
+      ok: true,
+      value: { configured: true, source: 'keychain', writable: true },
+    })
+
+    expect(await screen.findByText('API 密钥已安全保存')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByRole('button', { name: '重试' })).toBeNull()
+  })
+
+  it('renders all credential-control copy in English through its injected translator', async () => {
+    const host = remote()
+
+    render(
+      <CredentialControlComponent
+        reference="DEEPSEEK_API_KEY"
+        label="API key"
+        remote={host}
+        t={enT}
+      />,
+    )
+
+    expect(await screen.findByText('API key is securely stored')).toBeTruthy()
+    expect(screen.getByText('macOS Keychain · saved value is never shown')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Replace API key' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Delete API key' })).toBeTruthy()
+    expect(document.body.textContent).not.toContain('密钥')
   })
 
   it('notifies the owner after a saved replacement even when the follow-up status read rejects', async () => {
@@ -251,7 +364,7 @@ describe('Openloop CredentialControl', () => {
         writable: true,
       })),
     })
-    const adapter = createOpenloopCredentialControlAdapter(host)
+    const adapter = createOpenloopCredentialControlAdapter(host, zhT)
 
     await expect(adapter.describe('DEEPSEEK_API_KEY')).resolves.toEqual({
       configured: false,
