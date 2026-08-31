@@ -1,5 +1,7 @@
 use std::{
     collections::VecDeque,
+    fs,
+    os::unix::fs::{symlink, MetadataExt, PermissionsExt},
     process,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -20,16 +22,21 @@ use openloop_desktop_lib::{
     update::{
         channel::ReleaseChannel,
         coordinator::ensure_update_disk_capacity,
-        schedule::{ScheduledUpdateAction, UpdateCheckSchedule},
+        schedule::{
+            ScheduledUpdateAction, UpdateCheckSchedule, UpdateCheckTimestampStore,
+            AUTOMATIC_CHECK_INTERVAL, STARTUP_STABILITY_DELAY,
+        },
         state::{
             confirm_and_begin_install, install_update_bridge_handlers, AvailableUpdate, CheckStart,
             UpdateChecker, UpdateFailure, UpdateInstallConfirmation, UpdateInstallObserver,
             UpdateInstallOutcome, UpdateInstallPresentation, UpdateInstallResult, UpdateInstaller,
             UpdatePhase, UpdateRestartRequester, UpdateState, UpdateStateError,
+            MAX_RELEASE_NOTES_BYTES,
         },
     },
 };
 use serde_json::{json, Value};
+use tempfile::tempdir;
 use uuid::Uuid;
 
 #[cfg(target_os = "macos")]
@@ -458,38 +465,191 @@ fn concurrent_checks_share_the_existing_check_without_starting_another() {
 
 #[test]
 fn schedule_waits_for_stability_throttles_automatic_checks_and_never_installs() {
-    let mut schedule = UpdateCheckSchedule::new(Duration::ZERO, None);
-    assert_eq!(schedule.automatic_action(Duration::from_secs(29)), None);
+    let mut schedule = UpdateCheckSchedule::new(None);
     assert_eq!(
-        schedule.automatic_action(Duration::from_secs(30)),
-        Some(ScheduledUpdateAction::CheckOnly)
-    );
-    assert_eq!(
-        schedule.automatic_action(Duration::from_secs(60 * 60 * 23)),
+        schedule.automatic_action(Duration::from_secs(29), NOW),
         None
     );
     assert_eq!(
-        schedule.automatic_action(Duration::from_secs(24 * 60 * 60 + 30)),
+        schedule.automatic_action(Duration::from_secs(30), NOW),
+        Some(ScheduledUpdateAction::CheckOnly)
+    );
+    assert_eq!(
+        schedule.automatic_action(
+            Duration::from_secs(60 * 60 * 23),
+            NOW + Duration::from_secs(60 * 60 * 23)
+        ),
+        None
+    );
+    assert_eq!(
+        schedule.automatic_action(
+            Duration::from_secs(24 * 60 * 60 + 30),
+            NOW + Duration::from_secs(24 * 60 * 60)
+        ),
         Some(ScheduledUpdateAction::CheckOnly)
     );
 
-    let mut manual = UpdateCheckSchedule::new(Duration::ZERO, Some(Duration::from_secs(100)));
+    let mut manual = UpdateCheckSchedule::new(Some(Duration::from_secs(100)));
     assert_eq!(
         manual.manual_action(Duration::from_secs(101)),
         ScheduledUpdateAction::CheckOnly
     );
-    assert_eq!(manual.automatic_action(Duration::from_secs(130)), None);
+    assert_eq!(
+        manual.automatic_action(Duration::from_secs(130), Duration::from_secs(130)),
+        None
+    );
+}
+
+#[test]
+fn persisted_check_timestamp_throttles_a_new_process_after_startup_stability() {
+    let root = tempdir().expect("timestamp root");
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
+        .expect("private timestamp root");
+    let first =
+        UpdateCheckTimestampStore::open(root.path(), ReleaseChannel::Test).expect("first store");
+    first.record(NOW).expect("persist first check");
+    drop(first);
+
+    let restarted =
+        UpdateCheckTimestampStore::open(root.path(), ReleaseChannel::Test).expect("reopened store");
+    let mut schedule = UpdateCheckSchedule::new(restarted.load());
+
+    assert_eq!(
+        schedule.automatic_action(
+            STARTUP_STABILITY_DELAY,
+            NOW + AUTOMATIC_CHECK_INTERVAL - Duration::from_secs(1)
+        ),
+        None
+    );
+    assert_eq!(
+        schedule.automatic_action(STARTUP_STABILITY_DELAY, NOW + AUTOMATIC_CHECK_INTERVAL),
+        Some(ScheduledUpdateAction::CheckOnly)
+    );
+}
+
+#[test]
+fn timestamp_store_ignores_corrupt_or_unsafe_records_without_following_symlinks() {
+    let root = tempdir().expect("timestamp root");
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
+        .expect("private timestamp root");
+    let store = UpdateCheckTimestampStore::open(root.path(), ReleaseChannel::Test)
+        .expect("timestamp store");
+    let path = store.path();
+
+    fs::write(&path, b"{not-json").expect("corrupt timestamp");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("corrupt permissions");
+    assert_eq!(store.load(), None);
+
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("wide permissions");
+    assert_eq!(store.load(), None);
+    assert_eq!(
+        store.load_for_owner(unsafe { libc::geteuid() }.wrapping_add(1)),
+        None
+    );
+
+    fs::remove_file(&path).expect("remove unsafe timestamp");
+    fs::create_dir(&path).expect("non-regular timestamp");
+    assert_eq!(store.load(), None);
+    fs::remove_dir(&path).expect("remove non-regular timestamp");
+
+    let outside = root.path().join("outside");
+    fs::write(&outside, b"do-not-touch").expect("outside timestamp");
+    symlink(&outside, &path).expect("timestamp symlink");
+    assert_eq!(store.load(), None);
+    store.record(NOW).expect("replace unsafe entry atomically");
+    assert_eq!(
+        fs::read_to_string(&outside).expect("outside contents"),
+        "do-not-touch"
+    );
+    let metadata = fs::symlink_metadata(&path).expect("safe replacement metadata");
+    assert!(metadata.is_file());
+    assert!(!metadata.file_type().is_symlink());
+    assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+    assert_eq!(metadata.mode() & 0o077, 0);
+}
+
+#[test]
+fn manual_check_bypasses_throttle_and_refreshes_the_persisted_wall_clock() {
+    let root = tempdir().expect("timestamp root");
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
+        .expect("private timestamp root");
+    let store = UpdateCheckTimestampStore::open(root.path(), ReleaseChannel::Stable)
+        .expect("timestamp store");
+    store.record(NOW).expect("persist old check");
+    let manual_at = NOW + Duration::from_secs(60);
+    let mut schedule = UpdateCheckSchedule::new(store.load());
+
+    assert_eq!(
+        schedule.manual_action(manual_at),
+        ScheduledUpdateAction::CheckOnly
+    );
+    store.record(manual_at).expect("persist manual check");
+
+    let restarted = UpdateCheckTimestampStore::open(root.path(), ReleaseChannel::Stable)
+        .expect("reopened stable store");
+    assert_eq!(restarted.load(), Some(manual_at));
+    assert_eq!(
+        schedule.automatic_action(
+            STARTUP_STABILITY_DELAY,
+            manual_at + AUTOMATIC_CHECK_INTERVAL - Duration::from_secs(1)
+        ),
+        None
+    );
+}
+
+#[test]
+fn timestamp_records_are_channel_scoped() {
+    let root = tempdir().expect("timestamp root");
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
+        .expect("private timestamp root");
+    let test =
+        UpdateCheckTimestampStore::open(root.path(), ReleaseChannel::Test).expect("test store");
+    let stable =
+        UpdateCheckTimestampStore::open(root.path(), ReleaseChannel::Stable).expect("stable store");
+
+    test.record(NOW).expect("test timestamp");
+    stable
+        .record(NOW + Duration::from_secs(1))
+        .expect("stable timestamp");
+
+    assert_ne!(test.path(), stable.path());
+    assert_eq!(test.load(), Some(NOW));
+    assert_eq!(stable.load(), Some(NOW + Duration::from_secs(1)));
+}
+
+#[test]
+fn release_notes_are_safely_truncated_and_preserved_with_available_updates() {
+    let state = UpdateState::new(ReleaseChannel::Test, UPDATE_TTL);
+    state.begin_check(NOW).expect("begin check");
+    let notes = format!("{}é-tail", "n".repeat(MAX_RELEASE_NOTES_BYTES - 1));
+    let status = state
+        .finish_check(
+            NOW,
+            Some(
+                AvailableUpdate::new("host-update", "5.6.7", ReleaseChannel::Test)
+                    .with_release_notes(notes),
+            ),
+        )
+        .expect("available update");
+
+    let release_notes = status.release_notes.expect("release notes");
+    assert!(release_notes.len() <= MAX_RELEASE_NOTES_BYTES);
+    assert!(release_notes.starts_with('n'));
+    assert!(!release_notes.contains("tail"));
 }
 
 struct FixedChecker;
 
 impl UpdateChecker<&'static str> for FixedChecker {
     fn check(&self) -> Result<Option<AvailableUpdate<&'static str>>, UpdateFailure> {
-        Ok(Some(AvailableUpdate::new(
-            "raw-update-object-with-signature-and-url",
-            "3.4.5",
-            ReleaseChannel::Test,
-        )))
+        Ok(Some(
+            AvailableUpdate::new(
+                "raw-update-object-with-signature-and-url",
+                "3.4.5",
+                ReleaseChannel::Test,
+            )
+            .with_release_notes("Signed release notes"),
+        ))
     }
 }
 
@@ -633,6 +793,7 @@ fn bridge_dispatch_exposes_safe_status_and_requires_native_confirmation_before_i
         .to_owned();
     assert_eq!(checked["state"], "available");
     assert_eq!(checked["version"], "3.4.5");
+    assert_eq!(checked["releaseNotes"], "Signed release notes");
     let serialized = serde_json::to_string(&checked).expect("checked JSON");
     assert!(!serialized.contains("raw-update-object"));
     assert!(!serialized.contains("github.com"));

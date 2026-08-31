@@ -230,9 +230,9 @@ pub fn validate_download_url(
                 "test update release tag must match openloop-test-[ab]-v<version>".to_owned(),
             ));
         }
-        ReleaseChannel::Stable if tag.starts_with("openloop-test-") => {
+        ReleaseChannel::Stable if tag != format!("openloop-stable-v{version}") => {
             return Err(CoordinatorError::UnsafeDownloadUrl(
-                "stable updates must not use a test release tag".to_owned(),
+                "stable update release tag must match openloop-stable-v<version>".to_owned(),
             ));
         }
         _ => {}

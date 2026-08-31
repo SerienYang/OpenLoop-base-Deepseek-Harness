@@ -23,6 +23,7 @@ export interface OpenloopUpdateStatus {
   readonly state: OpenloopUpdateState
   readonly updateId?: string
   readonly version?: string
+  readonly releaseNotes?: string
   readonly message?: string
   readonly progress?: number
   readonly lastCheckedAt?: number
@@ -38,6 +39,7 @@ export interface UpdateView {
   readonly phase: OpenloopUpdateState
   readonly lastCheckedAt?: string
   readonly targetVersion?: string
+  readonly releaseNotes?: string
   readonly message?: string
   readonly progress?: number
   readonly actions: {
@@ -87,6 +89,9 @@ function projectStatus(status: OpenloopUpdateStatus): UpdateView {
       ? {}
       : { lastCheckedAt: new Date(status.lastCheckedAt).toISOString() }),
     ...(status.version === undefined ? {} : { targetVersion: status.version }),
+    ...(status.releaseNotes === undefined
+      ? {}
+      : { releaseNotes: status.releaseNotes }),
     ...(status.message === undefined ? {} : { message: status.message }),
     ...(status.progress === undefined
       ? {}
@@ -112,16 +117,24 @@ export class OpenloopUpdateService {
     createSnapshotStore<UpdateView>(INITIAL_UPDATE_VIEW)
   private generation = 0
   private updateId: string | undefined
+  private inFlightCheck: Promise<void> | undefined
   private closed: Error | undefined
 
   constructor(private readonly remoteSource: OpenloopUpdateRemoteSource) {}
 
   async refresh(): Promise<void> {
-    await this.readStatus('status', remote => remote.getUpdateStatus())
+    this.requireOpen()
+    await (this.inFlightCheck
+      ?? this.readStatus('status', remote => remote.getUpdateStatus())
+    )
   }
 
   async checkForUpdate(): Promise<void> {
     this.requireOpen()
+    if (this.inFlightCheck !== undefined) {
+      await this.inFlightCheck
+      return
+    }
     const previous = this.view.getSnapshot()
     const {
       message: _message,
@@ -133,7 +146,12 @@ export class OpenloopUpdateService {
       phase: 'checking',
       actions: actions('checking'),
     })
-    await this.readStatus('check', remote => remote.checkForUpdate())
+    const check = this.readStatus('check', remote => remote.checkForUpdate())
+    this.inFlightCheck = check
+    void check.finally(() => {
+      if (this.inFlightCheck === check) this.inFlightCheck = undefined
+    }).catch(() => {})
+    await check
   }
 
   async installUpdateAndRestart(): Promise<'restarting' | 'cancelled'> {

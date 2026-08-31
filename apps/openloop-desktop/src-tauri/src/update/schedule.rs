@@ -4,6 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub use super::schedule_store::UpdateCheckTimestampStore;
 use super::state::{CheckStart, UpdateChecker, UpdateState};
 
 pub const STARTUP_STABILITY_DELAY: Duration = Duration::from_secs(30);
@@ -16,37 +17,35 @@ pub enum ScheduledUpdateAction {
 
 #[derive(Debug, Clone)]
 pub struct UpdateCheckSchedule {
-    started_at: Duration,
     last_check_at: Option<Duration>,
 }
 
 impl UpdateCheckSchedule {
-    pub fn new(started_at: Duration, last_check_at: Option<Duration>) -> Self {
-        Self {
-            started_at,
-            last_check_at,
-        }
+    pub fn new(last_check_at: Option<Duration>) -> Self {
+        Self { last_check_at }
     }
 
-    pub fn automatic_action(&mut self, now: Duration) -> Option<ScheduledUpdateAction> {
-        let stable = now.saturating_sub(self.started_at) >= STARTUP_STABILITY_DELAY;
-        let interval_elapsed = self
-            .last_check_at
-            .is_none_or(|last| now.saturating_sub(last) >= AUTOMATIC_CHECK_INTERVAL);
+    pub fn automatic_action(
+        &mut self,
+        uptime: Duration,
+        wall_clock: Duration,
+    ) -> Option<ScheduledUpdateAction> {
+        let stable = uptime >= STARTUP_STABILITY_DELAY;
+        let interval_elapsed = self.last_check_at.is_none_or(|last| {
+            wall_clock
+                .checked_sub(last)
+                .is_some_and(|elapsed| elapsed >= AUTOMATIC_CHECK_INTERVAL)
+        });
         if !stable || !interval_elapsed {
             return None;
         }
-        self.last_check_at = Some(now);
+        self.last_check_at = Some(wall_clock);
         Some(ScheduledUpdateAction::CheckOnly)
     }
 
     pub fn manual_action(&mut self, now: Duration) -> ScheduledUpdateAction {
         self.last_check_at = Some(now);
         ScheduledUpdateAction::CheckOnly
-    }
-
-    pub fn last_check_at(&self) -> Option<Duration> {
-        self.last_check_at
     }
 }
 
@@ -71,14 +70,14 @@ impl ScheduledUpdateWorker {
                     Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                 }
+                let now = clock();
                 let action = schedule
                     .lock()
                     .ok()
-                    .and_then(|mut schedule| schedule.automatic_action(started.elapsed()));
+                    .and_then(|mut schedule| schedule.automatic_action(started.elapsed(), now));
                 if action != Some(ScheduledUpdateAction::CheckOnly) {
                     continue;
                 }
-                let now = clock();
                 match state.begin_check(now) {
                     Ok(CheckStart::Started) => match checker.check() {
                         Ok(update) => {

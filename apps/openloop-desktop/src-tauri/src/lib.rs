@@ -1,5 +1,5 @@
 #[cfg(target_os = "macos")]
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     ffi::{OsStr, OsString},
     io::{self, Write},
@@ -59,7 +59,7 @@ use crate::update::{
 #[cfg(target_os = "macos")]
 use crate::update::{
     coordinator::{check_update, install_checked_update_with_observer, CoordinatorError},
-    schedule::{ScheduledUpdateWorker, UpdateCheckSchedule},
+    schedule::{ScheduledUpdateWorker, UpdateCheckSchedule, UpdateCheckTimestampStore},
     state::{
         install_update_bridge_handlers, AppKitUpdateInstallConfirmation, AvailableUpdate,
         UpdateChecker, UpdateFailure, UpdateInstallObserver, UpdateInstallResult, UpdateInstaller,
@@ -237,15 +237,17 @@ struct TauriUpdateChecker {
     channel: update::channel::ReleaseChannel,
     policy: DownloadUrlPolicy,
     schedule: Arc<Mutex<UpdateCheckSchedule>>,
-    schedule_started: Instant,
+    timestamp_store: Arc<UpdateCheckTimestampStore>,
 }
 
 #[cfg(target_os = "macos")]
 impl UpdateChecker<Update> for TauriUpdateChecker {
     fn check(&self) -> Result<Option<AvailableUpdate<Update>>, UpdateFailure> {
+        let checked_at = update_time();
         if let Ok(mut schedule) = self.schedule.lock() {
-            schedule.manual_action(self.schedule_started.elapsed());
+            schedule.manual_action(checked_at);
         }
+        let _ = self.timestamp_store.record(checked_at);
         let updater = self.app.updater().map_err(|_| UpdateFailure::Check)?;
         let (_report, update) = tauri::async_runtime::block_on(check_update(
             &updater,
@@ -255,7 +257,9 @@ impl UpdateChecker<Update> for TauriUpdateChecker {
         .map_err(|error| update_failure(&error))?;
         Ok(update.map(|update| {
             let version = update.version.clone();
+            let release_notes = update.body.clone();
             AvailableUpdate::new(update, version, self.channel)
+                .with_optional_release_notes(release_notes)
         }))
     }
 }
@@ -587,14 +591,20 @@ fn start_runtime(
             updater_config.channel(),
             Duration::from_secs(15 * 60),
         ));
-        let update_schedule = Arc::new(Mutex::new(UpdateCheckSchedule::new(Duration::ZERO, None)));
+        let update_timestamp_store = Arc::new(
+            UpdateCheckTimestampStore::open(channel_root, updater_config.channel())
+                .map_err(|error| format!("update schedule store setup failed: {error}"))?,
+        );
+        let update_schedule = Arc::new(Mutex::new(UpdateCheckSchedule::new(
+            update_timestamp_store.load(),
+        )));
         let update_checker: Arc<dyn UpdateChecker<Update>> = Arc::new(TauriUpdateChecker {
             app: app.clone(),
             current_version: manifest.app_version.clone(),
             channel: updater_config.channel(),
             policy: DownloadUrlPolicy::production(updater_config.channel()),
             schedule: update_schedule.clone(),
-            schedule_started: Instant::now(),
+            timestamp_store: update_timestamp_store,
         });
         let installed_app = current_app_bundle()?;
         let update_installer: Arc<dyn UpdateInstaller<Update>> = Arc::new(TauriUpdateInstaller {

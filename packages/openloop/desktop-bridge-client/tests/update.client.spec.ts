@@ -49,6 +49,7 @@ describe('Openloop browser update facade', () => {
       getUpdateStatus: vi.fn(() => ok(status('available', {
         updateId: 'opaque-update-id',
         version: '1.2.3',
+        releaseNotes: 'Security fixes and reliability improvements.',
         lastCheckedAt: Date.UTC(2026, 7, 30, 12, 34, 56),
       }))),
     }))
@@ -63,6 +64,7 @@ describe('Openloop browser update facade', () => {
       phase: 'available',
       lastCheckedAt: '2026-08-30T12:34:56.000Z',
       targetVersion: '1.2.3',
+      releaseNotes: 'Security fixes and reliability improvements.',
       actions: {
         check: { enabled: true },
         installAndRestart: { enabled: true },
@@ -73,6 +75,59 @@ describe('Openloop browser update facade', () => {
     expect(listener).toHaveBeenCalledOnce()
 
     unsubscribe()
+  })
+
+  it('shares one in-flight Remote check and resolves every caller with the final status', async () => {
+    const pending = deferred<RemoteResult<OpenloopUpdateStatus>>()
+    const checkForUpdate = vi.fn(() => pending.promise)
+    const service = new OpenloopUpdateService(remote({ checkForUpdate }))
+
+    const first = service.checkForUpdate()
+    const second = service.checkForUpdate()
+    await Promise.resolve()
+
+    expect(checkForUpdate).toHaveBeenCalledOnce()
+    expect(service.view.getSnapshot().phase).toBe('checking')
+
+    pending.resolve({
+      ok: true,
+      value: status('available', {
+        updateId: 'shared-update-id',
+        version: '2.0.0',
+      }),
+    })
+    await Promise.all([first, second])
+
+    expect(service.view.getSnapshot()).toMatchObject({
+      phase: 'available',
+      targetVersion: '2.0.0',
+    })
+  })
+
+  it('does not let a refresh during a check replace the final check result with checking', async () => {
+    const pending = deferred<RemoteResult<OpenloopUpdateStatus>>()
+    const getUpdateStatus = vi.fn(() => ok(status('checking')))
+    const service = new OpenloopUpdateService(remote({
+      getUpdateStatus,
+      checkForUpdate: vi.fn(() => pending.promise),
+    }))
+
+    const check = service.checkForUpdate()
+    const refresh = service.refresh()
+    expect(getUpdateStatus).not.toHaveBeenCalled()
+
+    pending.resolve({
+      ok: true,
+      value: status('up-to-date', {
+        lastCheckedAt: Date.UTC(2026, 7, 30, 14),
+      }),
+    })
+    await Promise.all([check, refresh])
+
+    expect(service.view.getSnapshot()).toMatchObject({
+      phase: 'up-to-date',
+      lastCheckedAt: '2026-08-30T14:00:00.000Z',
+    })
   })
 
   it('keeps the latest status when reads settle in reverse order', async () => {

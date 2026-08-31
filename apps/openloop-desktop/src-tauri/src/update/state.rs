@@ -17,6 +17,7 @@ use crate::bridge::server::{
 use super::channel::ReleaseChannel;
 
 const MAX_STALE_UPDATE_IDS: usize = 32;
+pub const MAX_RELEASE_NOTES_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -59,6 +60,8 @@ pub struct UpdateStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<u8>,
@@ -72,6 +75,7 @@ impl Default for UpdateStatus {
             state: UpdatePhase::Idle,
             update_id: None,
             version: None,
+            release_notes: None,
             message: None,
             progress: None,
             last_checked_at: None,
@@ -83,6 +87,7 @@ pub struct AvailableUpdate<T> {
     value: T,
     version: String,
     channel: ReleaseChannel,
+    release_notes: Option<String>,
 }
 
 impl<T> AvailableUpdate<T> {
@@ -91,7 +96,18 @@ impl<T> AvailableUpdate<T> {
             value,
             version: version.into(),
             channel,
+            release_notes: None,
         }
+    }
+
+    pub fn with_release_notes(mut self, release_notes: impl Into<String>) -> Self {
+        self.release_notes = Some(truncate_release_notes(release_notes.into()));
+        self
+    }
+
+    pub fn with_optional_release_notes(mut self, release_notes: Option<String>) -> Self {
+        self.release_notes = release_notes.map(truncate_release_notes);
+        self
     }
 }
 
@@ -268,6 +284,7 @@ impl<T> UpdateState<T> {
                     state: UpdatePhase::Available,
                     update_id: Some(update_id.clone()),
                     version: Some(update.version.clone()),
+                    release_notes: update.release_notes,
                     message: None,
                     progress: None,
                     last_checked_at: Some(checked_at),
@@ -644,6 +661,18 @@ fn signed_source(channel: ReleaseChannel) -> &'static str {
 
 fn milliseconds(value: Duration) -> u64 {
     value.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn truncate_release_notes(mut release_notes: String) -> String {
+    if release_notes.len() <= MAX_RELEASE_NOTES_BYTES {
+        return release_notes;
+    }
+    let mut boundary = MAX_RELEASE_NOTES_BYTES;
+    while !release_notes.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    release_notes.truncate(boundary);
+    release_notes
 }
 
 fn require_phase(actual: UpdatePhase, expected: UpdatePhase) -> Result<(), UpdateStateError> {

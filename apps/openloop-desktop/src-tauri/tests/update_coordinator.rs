@@ -451,6 +451,20 @@ fn production_download_policy_accepts_only_immutable_repository_release_assets()
         validate_download_url(accepted[0].1, &test_asset, "1.2.3", ReleaseChannel::Stable).is_err(),
         "stable channel accepted a test release tag"
     );
+    for tag in [
+        "openloop-stable-beta-v1.2.3",
+        "release-v1.2.3",
+        "openloop-stable-v9.9.9",
+    ] {
+        let value = format!(
+            "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/{tag}/Openloop.app.tar.gz"
+        );
+        let url = value.parse().expect("stable rejected URL");
+        assert!(
+            validate_download_url(&value, &url, "1.2.3", ReleaseChannel::Stable).is_err(),
+            "stable channel accepted non-exact release tag {tag}"
+        );
+    }
 }
 
 #[test]

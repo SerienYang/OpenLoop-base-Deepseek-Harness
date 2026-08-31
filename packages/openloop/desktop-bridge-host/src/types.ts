@@ -25,6 +25,7 @@ export interface UpdateStatus {
   readonly state: UpdateState
   readonly updateId?: string
   readonly version?: string
+  readonly releaseNotes?: string
   readonly message?: string
   readonly progress?: number
   readonly lastCheckedAt?: number
