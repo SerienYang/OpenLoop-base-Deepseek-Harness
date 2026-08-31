@@ -74,6 +74,8 @@ export interface WebSearchCardState extends CardShell {
 export interface WebSearchCardFace extends CardActions {
   /** Optional product-owned credential renderer. */
   credentialControl?: CredentialControlAdapter
+  /** Re-read the value-free credential state after a product control mutation. */
+  refreshCredential: () => Promise<void>
   hooks: {
     /** Card snapshot bound by the renderer as useWebSearchCard. */
     webSearchCard: SnapshotStore<WebSearchCardState>
@@ -183,9 +185,9 @@ export class WebSearchCardController {
    * without this the badge keeps reporting a state the Host already replaced.
    * @param ref - the reference the Host reports as changed.
    */
-  refreshCredential(ref: string): void {
+  async refreshCredential(ref = this.credential.ref): Promise<void> {
     if (ref !== this.credential.ref) return
-    void this.readCredential()
+    await this.readCredential()
   }
 
   /**
@@ -196,6 +198,7 @@ export class WebSearchCardController {
     return {
       hooks: { webSearchCard: this.store },
       ...this.form.actions(),
+      refreshCredential: () => this.refreshCredential(),
       ...this.credentialControl === undefined
         ? {}
         : { credentialControl: this.credentialControl },

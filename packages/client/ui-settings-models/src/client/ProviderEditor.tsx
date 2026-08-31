@@ -74,6 +74,8 @@ export interface ProviderEditorProps {
   credentialControl?: CredentialControlAdapter
   /** Value-free row snapshot marker for external credential invalidations. */
   credentialRefreshToken?: string
+  /** Refresh the owning snapshot after the Host confirms a credential mutation. */
+  onCredentialChanged?: () => void | Promise<void>
   /** Render only the credential field and actions, without provider settings. */
   credentialOnly?: boolean
   /** Require a newly entered credential before this editor can submit. */
@@ -321,6 +323,8 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
   }
 
   const keyLocked = keyState?.writable === false
+  const onCredentialChanged = props.onCredentialChanged
+    ?? (props.credentialOnly === true ? () => { props.onClose(true) } : undefined)
 
   /**
    * The catalog beneath the user layer: what the composition entry pinned, or
@@ -394,9 +398,7 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
             ...props.credentialRefreshToken === undefined
               ? {}
               : { refreshToken: props.credentialRefreshToken },
-            ...props.credentialOnly === true
-              ? { onChanged: () => { props.onClose(true) } }
-              : {},
+            ...onCredentialChanged === undefined ? {} : { onChanged: onCredentialChanged },
           })}
         {props.credentialOnly === true ? null : <details className={styles['customized']}>
           <summary className={styles['customizedSummary']}>{t('customized')}</summary>

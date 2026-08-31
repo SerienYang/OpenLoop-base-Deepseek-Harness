@@ -395,6 +395,26 @@ describe('ModelsSection', () => {
     expect(scripted.face.credentials.describe).not.toHaveBeenCalled()
   })
 
+  it('refreshes the Models owner after a Host credential mutation', async () => {
+    let controlProps: Parameters<CredentialControlAdapter['render']>[0] | undefined
+    const adapter = hostCredentialControl({
+      render: (props) => {
+        controlProps = props
+        return <div data-testid="host-credential-control">{props.label}</div>
+      },
+    })
+    const mounted = await mountFace(scriptedFace(), adapter)
+    const load = vi.spyOn(mounted.controller, 'load')
+    load.mockClear()
+
+    fireEvent.click(screen.getByRole('button', { name: openaiCopy(en.editProvider) }))
+    expect(controlProps?.onChanged).toBeTypeOf('function')
+
+    await act(async () => { await controlProps?.onChanged?.() })
+
+    expect(load).toHaveBeenCalledOnce()
+  })
+
   it('reuses the provider editor as a required credential-only onboarding form', async () => {
     let finishSet: ((response: RpcResponse<Record<string, never>>) => void) | undefined
     const set = vi.fn(() => new Promise<RpcResponse<Record<string, never>>>((resolve) => {

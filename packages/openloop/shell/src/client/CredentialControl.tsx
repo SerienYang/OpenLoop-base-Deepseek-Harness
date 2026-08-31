@@ -75,28 +75,41 @@ export function CredentialControl(props: CredentialControlProps): ReactNode {
     setBusy(operation)
     setFailure(undefined)
     try {
-      const result = operation === 'replace'
-        ? await remote.openCredentialReplacement(reference)
-        : await remote.unsetCredential(reference)
-      const outcome = valueOf(
-        result,
-        operation === 'replace'
-          ? 'credential replacement failed'
-          : 'credential deletion failed',
-      )
+      let outcome: 'saved' | 'deleted' | 'cancelled'
+      try {
+        const result = operation === 'replace'
+          ? await remote.openCredentialReplacement(reference)
+          : await remote.unsetCredential(reference)
+        outcome = valueOf(
+          result,
+          operation === 'replace'
+            ? 'credential replacement failed'
+            : 'credential deletion failed',
+        )
+      } catch {
+        if (generation.current === current) {
+          setFailure(operation === 'replace'
+            ? '无法更新 API 密钥，请重试。'
+            : '无法删除 API 密钥，请重试。')
+        }
+        return
+      }
       if (outcome === 'cancelled' || generation.current !== current) return
-      const refreshed = valueOf(
-        await remote.describeCredential(reference),
-        'credential refresh failed',
-      )
-      if (generation.current !== current) return
-      setStatus(refreshed)
-      onChanged?.()
-    } catch {
-      if (generation.current === current) {
-        setFailure(operation === 'replace'
-          ? '无法更新 API 密钥，请重试。'
-          : '无法删除 API 密钥，请重试。')
+      try {
+        await onChanged?.()
+        // An awaited owner refresh may have published a new refresh token or
+        // unmounted this control. Its effect owns that generation's describe.
+        if (generation.current !== current) return
+        const refreshed = valueOf(
+          await remote.describeCredential(reference),
+          'credential refresh failed',
+        )
+        if (generation.current !== current) return
+        setStatus(refreshed)
+      } catch {
+        if (generation.current === current) {
+          setFailure('无法刷新 API 密钥状态，请重试。')
+        }
       }
     } finally {
       if (generation.current === current) setBusy(undefined)

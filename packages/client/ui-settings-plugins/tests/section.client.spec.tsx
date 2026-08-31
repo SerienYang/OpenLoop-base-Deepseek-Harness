@@ -367,14 +367,16 @@ describe('WebSearchCard', () => {
       ...state,
     })
     const actions = cardActions()
+    const refreshCredential = vi.fn(() => Promise.resolve())
     const props = {
       ...actions,
+      refreshCredential,
       t,
       useWebSearchCard: bindSnapshotSelector(store),
       ...credentialControl === undefined ? {} : { credentialControl },
     } as unknown as WebSearchCardProps
     render(<WebSearchCard {...props} />)
-    return actions
+    return { ...actions, refreshCredential }
   }
 
   it('reports whether a key is configured without ever showing one', () => {
@@ -385,22 +387,29 @@ describe('WebSearchCard', () => {
     expect(screen.getByLabelText(en.webSearchApiKey)).toHaveProperty('type', 'password')
   })
 
-  it('renders the Host credential control instead of SecretField in Openloop', () => {
+  it('renders the Host credential control instead of SecretField in Openloop', async () => {
+    let controlProps: Parameters<CredentialControlAdapter['render']>[0] | undefined
     const credentialControl: CredentialControlAdapter = {
       describe: vi.fn(),
-      render: ({ reference, label }) => (
-        <div data-testid="host-credential-control">{`${label}:${reference}`}</div>
-      ),
+      render: (props) => {
+        controlProps = props
+        return <div data-testid="host-credential-control">{`${props.label}:${props.reference}`}</div>
+      },
       materializeApiKeyEnv: true,
       deleteCredentialWithProfile: false,
     }
-    renderWebSearch({ credentialRef: 'SEARCH_KEY' }, credentialControl)
+    const actions = renderWebSearch({ credentialRef: 'SEARCH_KEY' }, credentialControl)
     fireEvent.click(screen.getByText(en.webSearchTitle))
 
     expect(screen.getByTestId('host-credential-control').textContent)
       .toBe(`${en.webSearchApiKey}:SEARCH_KEY`)
     expect(screen.queryByLabelText(en.webSearchApiKey)).toBeNull()
     expect(document.querySelector('input[type="password"]')).toBeNull()
+    expect(controlProps?.onChanged).toBeTypeOf('function')
+
+    await controlProps?.onChanged?.()
+
+    expect(actions.refreshCredential).toHaveBeenCalledOnce()
   })
 
   it('keeps the key control usable while the settings document is read-only', () => {

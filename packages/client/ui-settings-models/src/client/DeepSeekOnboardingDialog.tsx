@@ -121,6 +121,7 @@ export function DeepSeekOnboardingDialog(props: DeepSeekOnboardingDialogProps): 
           cancelLabel="onboardingLater"
           submitLabel="onboardingSave"
           submitBusyLabel="onboardingSaving"
+          onCredentialChanged={() => controller.load()}
           onClose={finishCredential}
         />
       </div>

@@ -188,6 +188,40 @@ describe('DeepSeekOnboardingDialog', () => {
     expect(h.set).not.toHaveBeenCalled()
   })
 
+  it('refreshes the shared join exactly once and completes from provider readiness', async () => {
+    let configured = false
+    let controlProps: Parameters<CredentialControlAdapter['render']>[0] | undefined
+    const credentialControl: CredentialControlAdapter = {
+      describe: vi.fn(() => Promise.resolve({
+        configured,
+        writable: true,
+        ...configured ? { source: 'keychain' } : {},
+      })),
+      render: (props) => {
+        controlProps = props
+        return <div data-testid="host-credential-control">{props.label}</div>
+      },
+      materializeApiKeyEnv: true,
+      deleteCredentialWithProfile: false,
+    }
+    const h = harness({ credentialControl })
+    const load = vi.spyOn(h.controller, 'load')
+    render(<DeepSeekOnboardingDialog {...h.props} />)
+    await screen.findByRole('dialog', { name: en.onboardingTitle })
+    load.mockClear()
+    configured = true
+
+    await act(async () => {
+      const refresh = controlProps?.onChanged?.()
+      expect(refresh).toBeInstanceOf(Promise)
+      await refresh
+    })
+
+    expect(load).toHaveBeenCalledOnce()
+    await waitFor(() => { expect(h.complete).toHaveBeenCalledOnce() })
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
   it('cannot be dismissed implicitly and restores the previous inert state', async () => {
     const h = harness()
     const appRoot = document.getElementById('root')!

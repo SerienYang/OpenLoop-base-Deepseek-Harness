@@ -58,6 +58,7 @@ export function WebSearchCard(props: WebSearchCardProps) {
           label: t('webSearchApiKey'),
           disabled: !state.apiKeyWritable,
           refreshToken: state.credentialVersion,
+          onChanged: props.refreshCredential,
         })}
       <ValueField
         id="plugin-config-web-search-endpoint"

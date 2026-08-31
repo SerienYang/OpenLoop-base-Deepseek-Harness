@@ -68,7 +68,7 @@ interface EditorTarget extends ProviderIdentity {
 /** Values that vary around the shared provider-editor rendering. */
 interface ProviderEditorRenderProps extends Pick<
   ProviderEditorProps,
-  'namespace' | 'api' | 't' | 'readOnly' | 'credentialControl' | 'onClose'
+  'namespace' | 'api' | 't' | 'readOnly' | 'credentialControl' | 'onCredentialChanged' | 'onClose'
 > {
   target: EditorTarget
 }
@@ -203,6 +203,7 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
   const [savedTarget, setSavedTarget] = useState<ProviderIdentity | undefined>(undefined)
   const [declaring, setDeclaring] = useState(false)
   const [dismissedSetup, setDismissedSetup] = useState<ReadonlySet<string>>(() => new Set())
+  const refreshCredential = (): Promise<void> => controller.load()
 
   const announceSaved = (target: ProviderIdentity): void => {
     // Announced only once the refreshed directory is in the snapshot the
@@ -326,6 +327,7 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
                   ...injected.credentialControl === undefined
                     ? {}
                     : { credentialControl: injected.credentialControl },
+                  onCredentialChanged: refreshCredential,
                   onClose: (changed) => { closeSetup(changed, target) },
                 })}
               </li>
@@ -413,6 +415,7 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
                   ...injected.credentialControl === undefined
                     ? {}
                     : { credentialControl: injected.credentialControl },
+                  onCredentialChanged: refreshCredential,
                   onClose: (changed) => { closeEditor(changed, target) },
                 })
                 : null}
@@ -455,6 +458,7 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
                 {...injected.credentialControl === undefined
                   ? {}
                   : { credentialControl: injected.credentialControl }}
+                onCredentialChanged={refreshCredential}
                 onClose={(changed) => { closeEditor(changed, addTarget) }}
               />
             </div>

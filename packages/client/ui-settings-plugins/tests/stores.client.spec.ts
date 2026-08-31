@@ -419,6 +419,31 @@ describe('WebSearchCardController', () => {
     expect(credentials.set).not.toHaveBeenCalled()
   })
 
+  it('exposes one awaited Host credential refresh to the rendered control', async () => {
+    const host = stubSettingsScope<WebSearchSettings>()
+    const credentials = credentialsApi(false)
+    const describe = vi.fn(() => Promise.resolve({
+      configured: false,
+      writable: true,
+    }))
+    const controller = new WebSearchCardController(
+      host.scope,
+      credentials.api,
+      { ...hostCredentialControl(false), describe },
+    )
+    host.publish({ status: 'ready', writable: true, value: {}, user: {} })
+    await vi.waitFor(() => { expect(describe).toHaveBeenCalled() })
+    describe.mockClear()
+    const face = controller.inject() as unknown as {
+      refreshCredential: () => Promise<void>
+    }
+
+    await face.refreshCredential()
+
+    expect(describe).toHaveBeenCalledOnce()
+    expect(credentials.describe).not.toHaveBeenCalled()
+  })
+
   it('reads the credential state for the reference the tab names', async () => {
     const host = stubSettingsScope<WebSearchSettings>()
     const credentials = credentialsApi(true)
@@ -484,7 +509,7 @@ describe('WebSearchCardController', () => {
     credentials.describe.mockClear()
 
     // Another reference is not this card's business.
-    controller.refreshCredential('OTHER_KEY')
+    await controller.refreshCredential('OTHER_KEY')
     expect(credentials.describe).not.toHaveBeenCalled()
 
     // A key written on another surface reaches this card only through this signal.
@@ -492,7 +517,7 @@ describe('WebSearchCardController', () => {
       rpcId: 'c-1' as never,
       result: { ok: true as const, value: { credentials: { DEEPSEEK_API_KEY: { configured: true, writable: true } } } },
     }))
-    controller.refreshCredential('DEEPSEEK_API_KEY')
+    await controller.refreshCredential('DEEPSEEK_API_KEY')
 
     await vi.waitFor(() => {
       expect(controller.inject().hooks.webSearchCard.getSnapshot().apiKeyConfigured).toBe(true)

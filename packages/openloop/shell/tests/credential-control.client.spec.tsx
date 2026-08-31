@@ -72,7 +72,97 @@ describe('Openloop CredentialControl', () => {
     expect(onChanged).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps the previous status and does not refresh on cancellation or failure', async () => {
+  it('notifies the owner after a saved replacement even when the follow-up status read rejects', async () => {
+    const describeCredential = vi.fn()
+      .mockReturnValueOnce(ok({ configured: false, writable: true }))
+      .mockRejectedValueOnce(new Error('DEEPSEEK_API_KEY sk-private refresh failure'))
+    const onChanged = vi.fn()
+    const host = remote({
+      describeCredential,
+      openCredentialReplacement: vi.fn(() => ok('saved' as const)),
+    })
+
+    render(
+      <CredentialControl
+        reference="DEEPSEEK_API_KEY"
+        label="API 密钥"
+        remote={host}
+        onChanged={onChanged}
+      />,
+    )
+    await screen.findByText('尚未配置 API 密钥')
+
+    fireEvent.click(screen.getByRole('button', { name: '添加 API 密钥' }))
+
+    await waitFor(() => { expect(onChanged).toHaveBeenCalledOnce() })
+    expect(await screen.findByText('无法刷新 API 密钥状态，请重试。')).toBeTruthy()
+    expect(screen.getByText('尚未配置 API 密钥')).toBeTruthy()
+    expect(screen.queryByText('无法更新 API 密钥，请重试。')).toBeNull()
+    expect(document.body.textContent).not.toContain('DEEPSEEK_API_KEY')
+    expect(document.body.textContent).not.toContain('sk-private')
+  })
+
+  it('notifies the owner after a confirmed deletion even when the follow-up status read rejects', async () => {
+    const describeCredential = vi.fn()
+      .mockReturnValueOnce(ok({ configured: true, source: 'keychain', writable: true }))
+      .mockRejectedValueOnce(new Error('DEEPSEEK_API_KEY sk-private refresh failure'))
+    const onChanged = vi.fn()
+    const host = remote({
+      describeCredential,
+      unsetCredential: vi.fn(() => ok('deleted' as const)),
+    })
+
+    render(
+      <CredentialControl
+        reference="DEEPSEEK_API_KEY"
+        label="API 密钥"
+        remote={host}
+        onChanged={onChanged}
+      />,
+    )
+    await screen.findByText('API 密钥已安全保存')
+
+    fireEvent.click(screen.getByRole('button', { name: '删除 API 密钥' }))
+
+    await waitFor(() => { expect(onChanged).toHaveBeenCalledOnce() })
+    expect(await screen.findByText('无法刷新 API 密钥状态，请重试。')).toBeTruthy()
+    expect(screen.getByText('API 密钥已安全保存')).toBeTruthy()
+    expect(screen.queryByText('无法删除 API 密钥，请重试。')).toBeNull()
+  })
+
+  it('waits for the owner refresh before starting its follow-up status read', async () => {
+    const ownerRefresh = Promise.withResolvers<undefined>()
+    const describeCredential = vi.fn()
+      .mockReturnValueOnce(ok({ configured: false, writable: true }))
+      .mockReturnValueOnce(ok({ configured: true, source: 'keychain', writable: true }))
+    const onChanged = vi.fn(() => ownerRefresh.promise)
+    const host = remote({
+      describeCredential,
+      openCredentialReplacement: vi.fn(() => ok('saved' as const)),
+    })
+
+    render(
+      <CredentialControl
+        reference="DEEPSEEK_API_KEY"
+        label="API 密钥"
+        remote={host}
+        onChanged={onChanged}
+      />,
+    )
+    await screen.findByText('尚未配置 API 密钥')
+    fireEvent.click(screen.getByRole('button', { name: '添加 API 密钥' }))
+
+    await waitFor(() => { expect(onChanged).toHaveBeenCalledOnce() })
+    expect(describeCredential).toHaveBeenCalledOnce()
+    expect(screen.getByRole('button', { name: '正在打开…' })).toHaveProperty('disabled', true)
+
+    ownerRefresh.resolve(undefined)
+
+    expect(await screen.findByText('API 密钥已安全保存')).toBeTruthy()
+    expect(describeCredential).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps the previous status and does not notify on cancellation or mutation failure', async () => {
     const describeCredential = vi.fn(() => ok({
       configured: true,
       source: 'keychain',
@@ -80,6 +170,7 @@ describe('Openloop CredentialControl', () => {
     }))
     const openCredentialReplacement = vi.fn()
       .mockReturnValueOnce(ok('cancelled' as const))
+      .mockResolvedValueOnce({ ok: false, error: new Error('sk-private refused') })
       .mockRejectedValueOnce(new Error('DEEPSEEK_API_KEY sk-private transport failure'))
     const onChanged = vi.fn()
     const host = remote({ describeCredential, openCredentialReplacement })
@@ -101,7 +192,12 @@ describe('Openloop CredentialControl', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '替换 API 密钥' }))
     expect(await screen.findByText('无法更新 API 密钥，请重试。')).toBeTruthy()
+    expect(onChanged).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: '替换 API 密钥' }))
+    await waitFor(() => { expect(openCredentialReplacement).toHaveBeenCalledTimes(3) })
     expect(describeCredential).toHaveBeenCalledTimes(1)
+    expect(onChanged).not.toHaveBeenCalled()
     expect(document.body.textContent).not.toContain('DEEPSEEK_API_KEY')
     expect(document.body.textContent).not.toContain('sk-private')
   })

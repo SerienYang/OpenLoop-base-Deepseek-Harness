@@ -20,8 +20,8 @@ export interface CredentialControlRenderProps {
   disabled?: boolean
   /** Value-free owner snapshot marker that requests a fresh describe. */
   refreshToken?: string | number
-  /** Called only after the product adapter confirms and refreshes a mutation. */
-  onChanged?: () => void
+  /** Called after the Host confirms a mutation so the owner can refresh its snapshot. */
+  onChanged?: () => void | Promise<void>
 }
 
 /**
