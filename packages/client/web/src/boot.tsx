@@ -48,6 +48,8 @@ import { getStaticModules } from './seed.ts'
 import { STATE_LABELS, createLoaderStatusStore, createSignal } from './loader-status.ts'
 import './base.css'
 
+export { AppRoot, createLoaderStatusStore, createSignal }
+
 /** Trusted bootstrap inputs; jsdom tests also replace the module transport. */
 export interface BootSeams {
   readonly loadBundle?: ClientModuleSystemOptions['loadBundle']

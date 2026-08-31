@@ -38,6 +38,14 @@ const CORE_MANIFEST = {
   channel: 'test',
   dshTag: 'dsh-v0.1.0-rc.7',
   dshCommit: '99f6f02fecdb7dff40c3fbc9470f5907c29f74ca',
+  brand: {
+    productName: 'Openloop',
+    documentSuffix: 'Openloop',
+    markAsset: 'data:image/svg+xml;base64,PHN2Zy8+',
+    heroTitle: 'Openloop',
+    previewLabel: '预览版',
+    attribution: 'Built on DeepSeek Harness',
+  },
   runtimeVersion: 1,
   bridgeProtocolVersion: 1,
   uiSdkVersion: '0.1.0',
@@ -157,11 +165,15 @@ describe('web e2e: Openloop credential boundary', () => {
     const workspaceSettings = page.getByRole('button', { name: '设置', exact: true })
     expect(await workspaceSettings.count()).toBe(1)
     await workspaceSettings.click()
-    await page.getByRole('dialog', { name: 'Workspace 设置', exact: true })
-      .waitFor({ timeout: 10_000 })
-    expect(await page.getByRole('dialog', { name: '设置', exact: true }).count()).toBe(0)
-    expect(await page.getByRole('button', { name: '模型', exact: true }).count()).toBe(0)
-    expect(await page.getByRole('button', { name: '插件', exact: true }).count()).toBe(0)
+    const settings = page.getByRole('dialog', { name: '设置', exact: true })
+    await settings.waitFor({ timeout: 10_000 })
+    expect(await settings.getByRole('tab').allTextContents()).toEqual([
+      '通用',
+      '模型与凭据',
+      '工作区',
+      '插件',
+      '关于与更新',
+    ])
     expect(await page.getByRole('dialog', { name: WELCOME_NOTICE_COPY.zh.title }).count()).toBe(0)
     expect(await page.getByRole('dialog', { name: '添加一个 API Key 开始使用' }).count()).toBe(0)
 

@@ -46,13 +46,13 @@
 - id: ui-settings
   disabled: true
 - id: ui-settings-general
-  disabled: false
+  disabled: true
 - id: ui-settings-models
-  disabled: false
+  disabled: true
 - id: ui-settings-plugin-inventory
   disabled: true
 - id: ui-settings-plugins
-  disabled: false
+  disabled: true
 - id: ui-permission
   disabled: true
 - id: ui-agent-preset

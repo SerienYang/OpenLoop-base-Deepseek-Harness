@@ -1,24 +1,27 @@
-- button "新建会话"
-- button "收起侧边栏":
-  - img
-- button "新建会话":
-  - img
-  - text: 新会话
-- region "Workspace":
-  - text: Workspace
-  - button "添加 Workspace":
+- complementary:
+  - button "新建会话": Openloop
+  - button "收起侧边栏":
     - img
-  - paragraph: 尚无 Workspace。
-- button "设置":
-  - img
-  - text: 设置
-- text: 探索未至之境 预览版
-- button "选择工作区":
-  - img
-  - text: 选择工作区
-  - img
-- textbox "选择工作区":
-  - /placeholder: 选择一个工作区开始
-- button "命令" [disabled]:
-  - img
-- button "发送消息" [disabled]
+  - button "新建会话":
+    - img
+    - text: 新会话
+  - region "Workspace":
+    - text: Workspace
+    - button "添加 Workspace":
+      - img
+    - paragraph: 尚无 Workspace。
+  - button "设置":
+    - img
+    - text: 设置
+- main:
+  - text: Openloop 预览版
+  - button "选择工作区":
+    - img
+    - text: 选择工作区
+    - img
+  - textbox "选择工作区":
+    - /placeholder: 选择一个工作区开始
+  - button "命令" [disabled]:
+    - img
+  - button "发送消息" [disabled]
+- complementary

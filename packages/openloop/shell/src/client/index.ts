@@ -20,6 +20,7 @@ import { en, zh, type ShellKey } from './locales.ts'
 import { createOpenloopShellStore, OpenloopFrame } from './OpenloopFrame.tsx'
 import {
   OpenloopSettings,
+  OpenloopUnavailableSettingsSection,
   type OpenloopSettingsInjected,
   type OpenloopSettingsOnboardingStep,
   type OpenloopSettingsSection,
@@ -42,12 +43,17 @@ export type {
 } from './CredentialControl.tsx'
 export type { ShellKey } from './locales.ts'
 export { OpenloopFrame } from './OpenloopFrame.tsx'
-export { OPENLOOP_SETTINGS_SECTION_IDS, OpenloopSettings } from './OpenloopSettings.tsx'
+export {
+  OPENLOOP_SETTINGS_SECTION_IDS,
+  OpenloopSettings,
+  OpenloopUnavailableSettingsSection,
+} from './OpenloopSettings.tsx'
 export type {
   OpenloopSettingsInjected,
   OpenloopSettingsOnboardingStep,
   OpenloopSettingsProps,
   OpenloopSettingsSection,
+  OpenloopUnavailableSettingsSectionProps,
 } from './OpenloopSettings.tsx'
 export { parseOpenloopBrand } from './brand.ts'
 export type { OpenloopBrand } from './brand.ts'
@@ -230,7 +236,7 @@ export function apply(ctx: ClientContext): void {
           const version = ctx.slots.getVersion('settings.onboarding')
           if (version !== onboardingVersion) {
             onboardingVersion = version
-            onboardingSteps = ctx.slots.entries('settings.onboarding')
+            onboardingSteps = ctx.slots.entriesOfSlot('settings.onboarding')
               .map(entry => ({
                 /* v8 ignore next -- list entries always have ids. */
                 id: entry.options.id ?? '',
@@ -254,6 +260,28 @@ export function apply(ctx: ClientContext): void {
     },
     inject: settingsInjected,
   }, OpenloopSettings))
+
+  const unavailableSections = [
+    { id: 'general', order: 0, label: 'generalNav' },
+    { id: 'models', order: 10, label: 'modelsNav' },
+    { id: 'plugins', order: 30, label: 'pluginsNav' },
+  ] as const
+  ctx.slots.inject('settings.section', function* () {
+    for (const section of unavailableSections) {
+      yield ctx.slots.register({
+        name: 'settings.section',
+        id: section.id,
+        order: section.order,
+        priority: 1_000,
+        label: () => t(section.label),
+        locale: NS,
+        inject: () => ({
+          title: t(section.label),
+          message: t('settingsSectionUnavailable'),
+        }),
+      }, OpenloopUnavailableSettingsSection)
+    }
+  })
 
   const bootstrap = globalThis as typeof globalThis & OpenloopBootstrapGlobal
   const app = parseBootstrapAppView(bootstrap.__OPENLOOP_BOOTSTRAP__)

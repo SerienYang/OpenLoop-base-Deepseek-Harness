@@ -11,6 +11,7 @@ export type AppView =
     readonly version: string
     readonly channel: 'test' | 'stable'
     readonly dshCommit: string
+    readonly attribution: 'Built on DeepSeek Harness'
   }
   | { readonly state: 'error'; readonly message?: string }
 
@@ -67,11 +68,18 @@ export function parseBootstrapAppView(value: unknown): AppView {
     return APP_ERROR
   }
   const record = manifest as Readonly<Record<string, unknown>>
+  const brand = record.brand
   if (typeof record.appVersion !== 'string'
     || !SEMVER.test(record.appVersion)
     || (record.channel !== 'test' && record.channel !== 'stable')
     || typeof record.dshCommit !== 'string'
-    || !DSH_COMMIT.test(record.dshCommit)) {
+    || !DSH_COMMIT.test(record.dshCommit)
+    || typeof brand !== 'object'
+    || brand === null
+    || Array.isArray(brand)
+    || !Object.isFrozen(brand)
+    || (brand as Readonly<Record<string, unknown>>).attribution
+      !== 'Built on DeepSeek Harness') {
     return APP_ERROR
   }
   return {
@@ -79,6 +87,7 @@ export function parseBootstrapAppView(value: unknown): AppView {
     version: record.appVersion,
     channel: record.channel,
     dshCommit: record.dshCommit,
+    attribution: 'Built on DeepSeek Harness',
   }
 }
 
@@ -154,11 +163,14 @@ export function AboutUpdateSection({
       {app.state === 'loading' && <p role="status">{text('aboutLoading')}</p>}
       {app.state === 'error' && <p role="alert">{app.message ?? text('aboutUnavailable')}</p>}
       {app.state === 'ready' && (
-        <dl className={css.facts}>
-          <div><dt>{text('aboutVersion')}</dt><dd>{app.version}</dd></div>
-          <div><dt>{text('aboutChannel')}</dt><dd>{app.channel}</dd></div>
-          <div><dt>{text('aboutDshCommit')}</dt><dd><code>{app.dshCommit}</code></dd></div>
-        </dl>
+        <>
+          <p className={css.attribution}>{app.attribution}</p>
+          <dl className={css.facts}>
+            <div><dt>{text('aboutVersion')}</dt><dd>{app.version}</dd></div>
+            <div><dt>{text('aboutChannel')}</dt><dd>{app.channel}</dd></div>
+            <div><dt>{text('aboutDshCommit')}</dt><dd><code>{app.dshCommit}</code></dd></div>
+          </dl>
+        </>
       )}
 
       <div className={css.update}>

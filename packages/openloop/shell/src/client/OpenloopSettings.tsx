@@ -1,10 +1,4 @@
-import {
-  type KeyboardEvent as ReactKeyboardEvent,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from 'react'
+import { type KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useRef, useState } from 'react'
 import {
   IconCloseOutline16,
   IconSettingsOutline16,
@@ -32,16 +26,6 @@ export const OPENLOOP_SETTINGS_SECTION_IDS = [
 
 type OpenloopSettingsSectionId = typeof OPENLOOP_SETTINGS_SECTION_IDS[number]
 
-const FOCUSABLE_SELECTOR = [
-  'a[href]',
-  'area[href]',
-  'button:not([disabled])',
-  'input:not([disabled]):not([type="hidden"])',
-  'select:not([disabled])',
-  'textarea:not([disabled])',
-  '[tabindex]:not([tabindex="-1"])',
-].join(',')
-
 export interface OpenloopSettingsSection {
   readonly id: string
   readonly order: number
@@ -51,6 +35,11 @@ export interface OpenloopSettingsSection {
 export interface OpenloopSettingsOnboardingStep {
   readonly id: string
   readonly order: number
+}
+
+export interface OpenloopUnavailableSettingsSectionProps {
+  readonly title: string
+  readonly message: string
 }
 
 export interface OpenloopSettingsInjected {
@@ -65,6 +54,19 @@ export type OpenloopSettingsProps =
   & PropsRenderSlots<'settings.action' | 'settings.section' | 'settings.onboarding'>
   & InjectFace<OpenloopSettingsInjected>
   & PropsLocale<'openloop.shell'>
+
+/** Honest placeholder used until a reviewed Host settings facade replaces it. */
+export function OpenloopUnavailableSettingsSection({
+  title,
+  message,
+}: OpenloopUnavailableSettingsSectionProps) {
+  return (
+    <section className={css.unavailableSection}>
+      <h2>{title}</h2>
+      <p role="status">{message}</p>
+    </section>
+  )
+}
 
 function fixedSections(
   rows: readonly OpenloopSettingsSection[],
@@ -87,13 +89,6 @@ function nextTabIndex(
   if (key === 'ArrowDown' || key === 'ArrowRight') return (current + 1) % length
   if (key === 'ArrowUp' || key === 'ArrowLeft') return (current - 1 + length) % length
   return undefined
-}
-
-function focusableElements(panel: HTMLElement): readonly HTMLElement[] {
-  return [...panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)]
-    .filter(element =>
-      element.tabIndex >= 0
-      && element.closest('[hidden],[aria-hidden="true"]') === null)
 }
 
 function SettingsPanel({
@@ -127,11 +122,11 @@ function SettingsPanel({
       mask.dataset.testid = 'openloop-settings-mask'
       mask.tabIndex = -1
     }
-    if (dialog !== undefined) {
+    if (dialog instanceof HTMLElement) {
       dialog.style.gap = '0'
       dialog.style.padding = '0'
     }
-    if (modalRoot !== undefined) modalRoot.style.padding = '0'
+    if (modalRoot instanceof HTMLElement) modalRoot.style.padding = '0'
     return () => {
       if (appRoot !== null) appRoot.inert = previousInert ?? false
     }
@@ -152,22 +147,6 @@ function SettingsPanel({
     tabs.current.get(row.id)?.focus()
   }
 
-  const trapFocus = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
-    const dialog = titleBar.current?.parentElement
-    if (event.key !== 'Tab' || dialog === undefined) return
-    const focusable = focusableElements(dialog)
-    const first = focusable[0]
-    const last = focusable.at(-1)
-    if (first === undefined || last === undefined) return
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault()
-      last.focus()
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault()
-      first.focus()
-    }
-  }
-
   return (
     <Modal
       open
@@ -177,7 +156,7 @@ function SettingsPanel({
       className={css.panel as string}
       headless
     >
-      <div ref={titleBar} className={css.titleBar} onKeyDown={trapFocus}>
+      <div ref={titleBar} className={css.titleBar}>
         <h2 id="openloop-settings-title">{t('settings')}</h2>
         <div className={css.actions}>{renderSlot('settings.action', {})}</div>
         <button
@@ -190,7 +169,7 @@ function SettingsPanel({
           <IconCloseOutline16 size={16} />
         </button>
       </div>
-      <div className={css.body} onKeyDown={trapFocus}>
+      <div className={css.body}>
         <nav className={css.nav} aria-label={t('settings')}>
           <div
             className={css.navScroll}

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Button, ConnectionBanner, Input, Menu, Modal, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
 import { POINTER_GRACE_MS } from '../src/pointer-grace.ts'
@@ -405,6 +406,120 @@ describe('Modal', () => {
     const mask = document.querySelector('[aria-hidden="true"]') as HTMLElement
     fireEvent.click(mask)
     expect(onClose).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps Escape and keyboard focus inside the topmost nested dialog', () => {
+    function NestedModals() {
+      const [outerOpen, setOuterOpen] = useState(true)
+      const [innerOpen, setInnerOpen] = useState(false)
+      return (
+        <>
+          <button type="button">Background</button>
+          <Modal open={outerOpen} onClose={() => { setOuterOpen(false) }} title="Outer">
+            <button type="button">Outer action</button>
+            <button type="button" onClick={() => { setInnerOpen(true) }}>Open inner</button>
+            <Modal open={innerOpen} onClose={() => { setInnerOpen(false) }} title="Inner">
+              <button type="button">Inner first</button>
+              <button type="button">Inner last</button>
+            </Modal>
+          </Modal>
+        </>
+      )
+    }
+
+    render(<NestedModals />)
+    const trigger = screen.getByRole('button', { name: 'Open inner' })
+    trigger.focus()
+    fireEvent.click(trigger)
+    const inner = screen.getByRole('dialog', { name: 'Inner' })
+    const first = within(inner).getByRole('button', { name: 'Close' })
+    const last = within(inner).getByRole('button', { name: 'Inner last' })
+    last.focus()
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(first).toBe(document.activeElement)
+    first.focus()
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })
+    expect(last).toBe(document.activeElement)
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: 'Inner' })).toBeNull()
+    expect(screen.getByRole('dialog', { name: 'Outer' })).toBeTruthy()
+    expect(trigger).toBe(document.activeElement)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('does not steal focus when a background sibling dialog unmounts', () => {
+    const bottomClose = vi.fn()
+    const topClose = vi.fn()
+    const view = render(
+      <>
+        <button type="button">Background trigger</button>
+        <Modal open={false} onClose={bottomClose} title="Bottom">
+          <button type="button">Bottom action</button>
+        </Modal>
+        <Modal open={false} onClose={topClose} title="Top">
+          <button type="button">Top action</button>
+        </Modal>
+      </>,
+    )
+    screen.getByRole('button', { name: 'Background trigger' }).focus()
+    view.rerender(
+      <>
+        <button type="button">Background trigger</button>
+        <Modal open onClose={bottomClose} title="Bottom">
+          <button type="button">Bottom action</button>
+        </Modal>
+        <Modal open onClose={topClose} title="Top">
+          <button type="button">Top action</button>
+        </Modal>
+      </>,
+    )
+    const topAction = screen.getByRole('button', { name: 'Top action' })
+    topAction.focus()
+
+    view.rerender(
+      <>
+        <button type="button">Background trigger</button>
+        <Modal open={false} onClose={bottomClose} title="Bottom">
+          <button type="button">Bottom action</button>
+        </Modal>
+        <Modal open onClose={topClose} title="Top">
+          <button type="button">Top action</button>
+        </Modal>
+      </>,
+    )
+
+    expect(topAction).toBe(document.activeElement)
+  })
+
+  it('restores the external trigger when a nested modal stack unmounts together', () => {
+    const externalTrigger = document.createElement('button')
+    externalTrigger.textContent = 'External trigger'
+    document.body.append(externalTrigger)
+    externalTrigger.focus()
+
+    function NestedStack() {
+      const [innerOpen, setInnerOpen] = useState(false)
+      return (
+        <Modal open onClose={() => {}} title="Outer stack">
+          <button type="button" onClick={() => { setInnerOpen(true) }}>Open stack child</button>
+          <Modal open={innerOpen} onClose={() => { setInnerOpen(false) }} title="Inner stack">
+            <button type="button">Inner action</button>
+          </Modal>
+        </Modal>
+      )
+    }
+
+    const view = render(<NestedStack />)
+    const childTrigger = screen.getByRole('button', { name: 'Open stack child' })
+    childTrigger.focus()
+    fireEvent.click(childTrigger)
+    screen.getByRole('button', { name: 'Inner action' }).focus()
+    view.unmount()
+
+    expect(externalTrigger).toBe(document.activeElement)
+    externalTrigger.remove()
   })
 })
 

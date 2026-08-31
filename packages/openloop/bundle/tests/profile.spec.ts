@@ -340,14 +340,15 @@ describe('OpenLoop profile', () => {
     }
   })
 
-  it('leaves browser settings activation dependencies to each plugin export', () => {
+  it('keeps unsafe legacy settings contributors disabled until a reviewed facade exists', () => {
     const entries = openloopEntries()
-    expect(entries.find(entry => entry.id === 'ui-settings-general')).toMatchObject({
-      disabled: false,
-    })
-    for (const id of ['ui-settings-models', 'ui-settings-plugins']) {
+    for (const id of [
+      'ui-settings-general',
+      'ui-settings-models',
+      'ui-settings-plugins',
+    ]) {
       expect(entries.find(entry => entry.id === id)).toMatchObject({
-        disabled: false,
+        disabled: true,
       })
     }
     expect(entries.find(entry => entry.id === 'ui-settings-general')?.inject).toBeUndefined()
@@ -360,7 +361,7 @@ describe('OpenLoop profile', () => {
       .toEqual(['locale', 'remote', 'remote.openloopDesktop'])
   })
 
-  it('enables exactly the five settings contributors while restricted rows stay disabled', () => {
+  it('uses Shell placeholders plus the Host Workspace contributor for the five-section IA', () => {
     const entries = openloopEntries()
 
     expect(entries.find(entry => entry.id === 'openloop-settings-scope')).toBeUndefined()
@@ -375,13 +376,13 @@ describe('OpenLoop profile', () => {
     expect(enabledClientPackages()).not.toContain('@deepseek-ai/dsh-client-ui-settings')
     expect(enabledClientPackages()).toContain('@openloop/settings-foundation')
     expect(enabledClientPackages()).toContain('@openloop/workspace-client')
-    expect(enabledClientPackages()).toContain('@deepseek-ai/dsh-client-ui-settings-general')
-    expect(enabledClientPackages()).toContain('@deepseek-ai/dsh-client-ui-settings-models')
-    expect(enabledClientPackages()).toContain('@deepseek-ai/dsh-client-ui-settings-plugins')
     for (const id of [
       'ui-workspace',
       'ui-settings',
+      'ui-settings-general',
+      'ui-settings-models',
       'ui-settings-plugin-inventory',
+      'ui-settings-plugins',
       'ui-permission',
       'ui-agent-preset',
     ]) {

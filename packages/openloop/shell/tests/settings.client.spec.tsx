@@ -6,6 +6,7 @@ import {
   SlotRegistry,
   type SessionListState,
 } from '@deepseek-ai/dsh-client-runtime/client'
+import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   apply as applyGeneral,
   inject as injectGeneral,
@@ -423,6 +424,7 @@ describe('About and Updates typed view', () => {
     version: '1.2.3',
     channel: 'test' as const,
     dshCommit: 'a'.repeat(40),
+    attribution: 'Built on DeepSeek Harness' as const,
   }
 
   it('renders identity and an unavailable update without enabling actions', () => {
@@ -445,6 +447,7 @@ describe('About and Updates typed view', () => {
     expect(screen.getByText('1.2.3')).toBeTruthy()
     expect(screen.getByText('test')).toBeTruthy()
     expect(screen.getByText('a'.repeat(40))).toBeTruthy()
+    expect(screen.getByText('Built on DeepSeek Harness')).toBeTruthy()
     expect(screen.getByText('2026-08-30T10:00:00.000Z')).toBeTruthy()
     expect(screen.getByText('Update service unavailable')).toBeTruthy()
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Check for updates' }).disabled)
@@ -506,6 +509,9 @@ describe('About and Updates typed view', () => {
       appVersion: '1.2.3',
       channel: 'stable',
       dshCommit: 'b'.repeat(40),
+      brand: Object.freeze({
+        attribution: 'Built on DeepSeek Harness',
+      }),
     })
     const bootstrap = Object.freeze({ coreManifest })
 
@@ -514,6 +520,7 @@ describe('About and Updates typed view', () => {
       version: '1.2.3',
       channel: 'stable',
       dshCommit: 'b'.repeat(40),
+      attribution: 'Built on DeepSeek Harness',
     })
     expect(parseBootstrapAppView({ coreManifest })).toEqual({
       state: 'error',
@@ -538,7 +545,8 @@ describe('About and Updates typed view', () => {
     const app = parseBootstrapAppView(bootstrap)
     expect(app).toEqual({ state: 'error' })
     const dictionary = locale === 'zh' ? shellZh : shellEn
-    const translate = (key: ShellKey): string => dictionary[key]
+    const translate: TranslateNS<'openloop.shell'> = key =>
+      dictionary[key as ShellKey] ?? key
     render(
       <AboutUpdateSection
         app={app}
@@ -606,14 +614,24 @@ describe('Openloop Settings slot owner', () => {
     expect(slots.spec('settings.trigger')).toBeUndefined()
     expect(slots.spec('settings.header')).toBeUndefined()
     expect(slots.spec('settings.close')).toBeUndefined()
-    expect(slots.entries('settings.section')[0]?.options).toMatchObject({
+    expect(slots.entriesOfSlot('settings.section')
+      .map(entry => entry.options.id)
+      .sort()).toEqual([
+      'about-update',
+      'general',
+      'models',
+      'plugins',
+    ])
+    const about = slots.entriesOfSlot('settings.section')
+      .find(entry => entry.options.id === 'about-update')
+    expect(about?.options).toMatchObject({
       id: 'about-update',
       order: 40,
     })
-    expect(slots.entries('settings.section')[0]?.options.label).toBeTypeOf('function')
+    expect(about?.options.label).toBeTypeOf('function')
 
     locale.setLocale('zh')
-    expect((slots.entries('settings.section')[0]?.options.label as () => string)())
+    expect((about?.options.label as () => string)())
       .toBe('关于与更新')
     await fiber.dispose()
   })
@@ -646,7 +664,9 @@ describe('Openloop Settings slot owner', () => {
       expect(slots.entries('sidebar.settings')).toHaveLength(1)
     })
     const shell = slots.entries('sidebar.settings')[0]!
-    const sections = (shell.inject as () => OpenloopSettingsInjected)().hooks.sections
+    const sections = (
+      shell.inject as unknown as () => OpenloopSettingsInjected
+    )().hooks.sections
     const LosingSection = () => null
     const WinningSection = () => null
     const disposeLosing = slots.register({
@@ -680,6 +700,62 @@ describe('Openloop Settings slot owner', () => {
     expect(sections.getSnapshot()
       .filter(row => row.id === 'models')
       .map(row => row.label)).toEqual(['Winning models'])
+
+    disposeWinner()
+    disposeLosing()
+    await fiber.dispose()
+  })
+
+  it('projects the settings.onboarding winner and falls back across HMR disposal', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SlotRegistry).await()
+    const locale = new LocaleRuntime(ctx)
+    ctx.provide('locale', locale)
+    ctx.provide('theme', {
+      getTheme: () => ({ active: { colorScheme: 'dark', tokens: {} } }),
+      overrideTokens: () => () => {},
+    } as never)
+    const openloopDesktop = {
+      describeCredential: vi.fn(),
+      openCredentialReplacement: vi.fn(),
+      unsetCredential: vi.fn(),
+    }
+    ctx.provide('remote', { openloopDesktop } as never)
+    ctx.provide('remote.openloopDesktop', openloopDesktop)
+
+    const fiber = ctx.plugin({ inject: [...inject], apply })
+    await fiber.await()
+    const slots = ctx.get('slots') as SlotRegistry
+    slots.register({
+      name: 'sidebar',
+      children: { 'sidebar.settings': { kind: 'single', scope: 'root' } },
+    } as never, () => null)
+    await vi.waitFor(() => {
+      expect(slots.entries('sidebar.settings')).toHaveLength(1)
+    })
+    const shell = slots.entries('sidebar.settings')[0]!
+    const onboarding = (
+      shell.inject as unknown as () => OpenloopSettingsInjected
+    )().hooks.onboardingSteps
+    const disposeLosing = slots.register({
+      name: 'settings.onboarding',
+      id: 'welcome',
+      order: -100,
+      priority: 10,
+    } as never, () => null)
+    const registerWinner = () => slots.register({
+      name: 'settings.onboarding',
+      id: 'welcome',
+      order: 20,
+      priority: -10,
+    } as never, () => null)
+    let disposeWinner = registerWinner()
+
+    expect(onboarding.getSnapshot()).toEqual([{ id: 'welcome', order: 20 }])
+    disposeWinner()
+    expect(onboarding.getSnapshot()).toEqual([{ id: 'welcome', order: -100 }])
+    disposeWinner = registerWinner()
+    expect(onboarding.getSnapshot()).toEqual([{ id: 'welcome', order: 20 }])
 
     disposeWinner()
     disposeLosing()
@@ -782,13 +858,13 @@ describe('Openloop Settings slot owner', () => {
 
     await vi.waitFor(() => {
       expect(slots.entries('sidebar.settings')).toHaveLength(1)
-      expect(slots.entries('settings.section')).toHaveLength(5)
+      expect(slots.entriesOfSlot('settings.section')).toHaveLength(5)
     })
     const owner = ctx.get('settingsShellOwner') as SettingsShellOwner
     expect(owner.id).toBe('@openloop/shell')
     expect(owner.credentialControl).toBeDefined()
     expect(slots.entries('sidebar.settings')[0]?.component).toBe(OpenloopSettings)
-    expect(slots.entries('settings.section').map(entry => entry.options.id)).toEqual([
+    expect(slots.entriesOfSlot('settings.section').map(entry => entry.options.id)).toEqual([
       'general',
       'models',
       'plugins',
@@ -796,7 +872,7 @@ describe('Openloop Settings slot owner', () => {
       'about-update',
     ])
 
-    const models = slots.entries('settings.section')
+    const models = slots.entriesOfSlot('settings.section')
       .find(entry => entry.options.id === 'models')!
     const modelsFace = (models.inject as () => {
       credentialControl?: CredentialControlAdapter
@@ -817,14 +893,14 @@ describe('Openloop Settings slot owner', () => {
     } as never, () => null)
     await vi.waitFor(() => {
       expect(slots.entries('sidebar.settings')).toHaveLength(1)
-      expect(slots.entries('settings.section')).toHaveLength(5)
+      expect(slots.entriesOfSlot('settings.section')).toHaveLength(5)
     })
 
     disposeReplacementSidebar()
     await shellFiber.dispose()
     await vi.waitFor(() => {
       expect(ctx.get('settingsShellOwner')).toBeUndefined()
-      expect(slots.entries('settings.section')).toEqual([])
+      expect(slots.entriesOfSlot('settings.section')).toEqual([])
     })
 
     const replacementShellFiber = ctx.plugin({ inject: [...inject], apply })
@@ -835,7 +911,7 @@ describe('Openloop Settings slot owner', () => {
     } as never, () => null)
     await vi.waitFor(() => {
       expect(slots.entries('sidebar.settings')).toHaveLength(1)
-      expect(slots.entries('settings.section')).toHaveLength(5)
+      expect(slots.entriesOfSlot('settings.section')).toHaveLength(5)
     })
     expect((ctx.get('settingsShellOwner') as SettingsShellOwner).id).toBe('@openloop/shell')
 

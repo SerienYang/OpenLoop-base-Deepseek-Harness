@@ -39,6 +39,11 @@ export function WorkspaceSettings({
   const actionTriggers = useRef(new Map<string, HTMLButtonElement>())
   const manageHeading = useRef<HTMLHeadingElement | null>(null)
   const focusWorkspaceId = useRef<string | null>(null)
+  const mounted = useRef(true)
+
+  useEffect(() => () => {
+    mounted.current = false
+  }, [])
 
   const setActionTrigger = useCallback((
     workspaceId: string,
@@ -76,7 +81,7 @@ export function WorkspaceSettings({
     ...actions,
     startSession: async (workspaceId: string): Promise<void> => {
       await actions.startSession(workspaceId)
-      close()
+      if (mounted.current) close()
     },
     openSession: (sessionId: Parameters<typeof actions.openSession>[0]): void => {
       actions.openSession(sessionId)

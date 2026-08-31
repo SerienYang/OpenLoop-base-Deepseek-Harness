@@ -44,6 +44,14 @@ const CORE_MANIFEST = {
   channel: 'test',
   dshTag: 'dsh-v0.1.0-rc.7',
   dshCommit: '99f6f02fecdb7dff40c3fbc9470f5907c29f74ca',
+  brand: {
+    productName: 'Openloop',
+    documentSuffix: 'Openloop',
+    markAsset: 'data:image/svg+xml;base64,PHN2Zy8+',
+    heroTitle: 'Openloop',
+    previewLabel: '预览版',
+    attribution: 'Built on DeepSeek Harness',
+  },
   runtimeVersion: 1,
   bridgeProtocolVersion: 1,
   uiSdkVersion: '0.1.0',
@@ -233,12 +241,15 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
 
   async function openWorkspaceSettings(): Promise<void> {
     await page.getByRole('button', { name: 'Settings', exact: true }).click()
-    await page.getByRole('dialog', { name: 'Workspace settings' })
+    const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
+    await settings.waitFor({ timeout: 10_000 })
+    await settings.getByRole('tab', { name: 'Workspace', exact: true }).click()
+    await settings.getByRole('region', { name: 'Workspace settings' })
       .waitFor({ timeout: 10_000 })
   }
 
   async function openWorkspaceActions(name: string): Promise<void> {
-    const settings = page.getByRole('dialog', { name: 'Workspace settings' })
+    const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
     await settings.getByRole('button', { name: `Workspace actions for ${name}` }).click()
   }
 
@@ -483,10 +494,10 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     await openWorkspaceSettings()
     await openWorkspaceActions('authority-project')
     await page.getByRole('menuitem', { name: 'Rename' }).click()
-    const rename = page.getByRole('dialog', { name: 'Rename Workspace' })
+    const rename = page.getByRole('region', { name: 'Rename Workspace' })
     await rename.getByRole('textbox', { name: 'Rename' }).fill('Workspace Alpha')
     await rename.getByRole('button', { name: 'Rename' }).click()
-    await page.getByRole('dialog', { name: 'Workspace settings' })
+    await page.getByRole('region', { name: 'Workspace settings' })
       .getByText('Workspace Alpha', { exact: true })
       .waitFor({ timeout: 10_000 })
     expect(scaffold.ctx.workspaceRegistry.get(workspace.id)?.title).toBe('Workspace Alpha')
@@ -499,8 +510,8 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
       method: 'revealWorkspace',
       payload: { workspaceId: workspace.id },
     })
-    await page.getByRole('dialog', { name: 'Workspace settings' })
-      .getByRole('button', { name: 'Close' }).click()
+    await page.getByRole('dialog', { name: 'Settings', exact: true })
+      .getByRole('button', { name: 'Close Settings' }).click()
 
     bridge.setWorkspaceGrantState(workspace.id, 'missing')
     const missingRefreshes = browserApiRequests.filter(
@@ -596,7 +607,7 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     await openWorkspaceSettings()
     await openWorkspaceActions('Workspace Alpha')
     await page.getByRole('menuitem', { name: 'Remove' }).click()
-    const remove = page.getByRole('dialog', { name: 'Remove Workspace' })
+    const remove = page.getByRole('region', { name: 'Remove Workspace' })
     expect(await remove.textContent()).toContain(
       'Only the authorization and list item are removed. Files and session history are kept.',
     )
@@ -611,7 +622,7 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
       .filter(call => call.method === 'completeWorkspaceTransaction').length
     await openWorkspaceActions('Workspace Alpha')
     await page.getByRole('menuitem', { name: 'Remove' }).click()
-    await page.getByRole('dialog', { name: 'Remove Workspace' })
+    await page.getByRole('region', { name: 'Remove Workspace' })
       .getByRole('button', { name: 'Remove' }).click()
     await expect.poll(() => scaffold.ctx.workspaceRegistry.get(workspace.id), {
       timeout: 10_000,

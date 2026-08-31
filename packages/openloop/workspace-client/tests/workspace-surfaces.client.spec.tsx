@@ -80,7 +80,9 @@ function harness(
   const authorize = vi.fn(async () => 'cancelled' as const)
   const reauthorize = vi.fn(async () => 'cancelled' as const)
   const rename = vi.fn(async () => {})
-  const remove = vi.fn(async () => 'cancelled' as const)
+  const remove = vi.fn<WorkspaceClientActions['remove']>(
+    async () => 'cancelled',
+  )
   const reveal = vi.fn(async () => {})
   const startSession = vi.fn(async () => {})
   const openSession = vi.fn()
@@ -484,6 +486,43 @@ describe('Openloop Workspace surfaces', () => {
       expect(h.startSession).toHaveBeenCalledWith('alpha')
       expect(close).toHaveBeenCalledOnce()
     })
+  })
+
+  it('does not let a session started by an unmounted Settings instance close a later one', async () => {
+    const h = harness([grant('alpha')])
+    const pending = deferred<undefined>()
+    h.startSession.mockReturnValueOnce(pending.promise)
+    const firstClose = vi.fn()
+    const first = render(
+      <WorkspaceSettings
+        close={firstClose}
+        useGrants={h.useGrants}
+        useSessions={h.useSessions}
+        actions={h.actions}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Switch to Alpha' }))
+    expect(h.startSession).toHaveBeenCalledWith('alpha')
+    first.unmount()
+
+    const laterClose = vi.fn()
+    render(
+      <WorkspaceSettings
+        close={laterClose}
+        useGrants={h.useGrants}
+        useSessions={h.useSessions}
+        actions={h.actions}
+      />,
+    )
+    await act(async () => {
+      pending.resolve(undefined)
+      await pending.promise
+    })
+
+    expect(firstClose).not.toHaveBeenCalled()
+    expect(laterClose).not.toHaveBeenCalled()
+    expect(screen.getByRole('region', { name: 'Workspace settings' })).toBeTruthy()
   })
 
   it('shows existing Workspace sessions and closes Settings after opening one', () => {

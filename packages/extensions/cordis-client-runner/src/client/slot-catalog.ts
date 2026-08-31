@@ -1392,6 +1392,7 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
       'client-ui-settings-general GeneralSection id \'general\'',
       'client-ui-settings-models ModelsSection id \'models\'',
       'client-ui-settings-plugins PluginsSettingsSection id \'plugins\'',
+      '@openloop/shell OpenloopUnavailableSettingsSection',
       '@openloop/shell AboutUpdateSection id \'about-update\'',
       '@openloop/workspace-client WorkspaceSettings id \'workspace\'',
     ],
@@ -1734,7 +1735,7 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
     occupants: [],
     replaceRisk: 'none',
     example: 'return {\n  inject: [\'slots\'],\n  apply(ctx) {\n    ctx.slots.inject(\'workbench\', () => ctx.slots.register(\n      { name: \'workbench\' },\n      () => React.createElement(\'div\', null, \'hello\'),\n    ))\n  },\n}',
-    source: 'packages/openloop/shell/src/client/index.ts:68',
+    source: 'packages/openloop/shell/src/client/index.ts:74',
   },
 ]
 /* jscpd:ignore-end */
