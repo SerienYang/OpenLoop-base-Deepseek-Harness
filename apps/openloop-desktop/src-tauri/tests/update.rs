@@ -80,6 +80,37 @@ fn channel_contracts_are_explicit_isolated_and_use_the_actual_repository() {
 }
 
 #[test]
+fn updater_builder_config_uses_the_endpoint_and_key_for_each_channel() {
+    let test = UpdateChannelConfig::new(ReleaseChannel::Test, Some(VALID_TAURI_PUBLIC_KEY))
+        .expect("valid test updater configuration");
+    let stable = UpdateChannelConfig::new(ReleaseChannel::Stable, Some(REPOSITORY_TEST_PUBLIC_KEY))
+        .expect("valid stable updater configuration");
+
+    let test_builder = test.updater_builder_config();
+    assert_eq!(
+        test_builder.endpoints(),
+        &[test.endpoint().clone()],
+        "test updater must request only latest-test-k1.json"
+    );
+    assert_eq!(test_builder.public_key(), VALID_TAURI_PUBLIC_KEY);
+
+    let stable_builder = stable.updater_builder_config();
+    assert_eq!(
+        stable_builder.endpoints(),
+        &[stable.endpoint().clone()],
+        "stable updater must request only latest-stable-k1.json"
+    );
+    assert_eq!(
+        stable_builder.public_key(),
+        REPOSITORY_TEST_PUBLIC_KEY,
+        "stable updater must use the stable config key, not the test key"
+    );
+
+    assert_ne!(test_builder.endpoints(), stable_builder.endpoints());
+    assert_ne!(test_builder.public_key(), stable_builder.public_key());
+}
+
+#[test]
 fn channel_configuration_fails_closed_without_a_valid_tauri_public_key() {
     for key in [
         None,

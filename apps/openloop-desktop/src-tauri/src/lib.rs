@@ -234,10 +234,21 @@ struct RuntimeProcessState {
 struct TauriUpdateChecker {
     app: AppHandle,
     current_version: String,
-    channel: update::channel::ReleaseChannel,
+    updater_config: update::channel::UpdateChannelConfig,
     policy: DownloadUrlPolicy,
     schedule: Arc<Mutex<UpdateCheckSchedule>>,
     timestamp_store: Arc<UpdateCheckTimestampStore>,
+}
+
+fn build_channel_updater(
+    app: &AppHandle,
+    config: &update::channel::UpdateChannelConfig,
+) -> tauri_plugin_updater::Result<tauri_plugin_updater::Updater> {
+    let (endpoints, public_key) = config.updater_builder_config().into_parts();
+    app.updater_builder()
+        .endpoints(endpoints)?
+        .pubkey(public_key)
+        .build()
 }
 
 #[cfg(target_os = "macos")]
@@ -248,7 +259,8 @@ impl UpdateChecker<Update> for TauriUpdateChecker {
             schedule.manual_action(checked_at);
         }
         let _ = self.timestamp_store.record(checked_at);
-        let updater = self.app.updater().map_err(|_| UpdateFailure::Check)?;
+        let updater = build_channel_updater(&self.app, &self.updater_config)
+            .map_err(|_| UpdateFailure::Check)?;
         let (_report, update) = tauri::async_runtime::block_on(check_update(
             &updater,
             &self.current_version,
@@ -258,7 +270,7 @@ impl UpdateChecker<Update> for TauriUpdateChecker {
         Ok(update.map(|update| {
             let version = update.version.clone();
             let release_notes = update.body.clone();
-            AvailableUpdate::new(update, version, self.channel)
+            AvailableUpdate::new(update, version, self.updater_config.channel())
                 .with_optional_release_notes(release_notes)
         }))
     }
@@ -601,7 +613,7 @@ fn start_runtime(
         let update_checker: Arc<dyn UpdateChecker<Update>> = Arc::new(TauriUpdateChecker {
             app: app.clone(),
             current_version: manifest.app_version.clone(),
-            channel: updater_config.channel(),
+            updater_config: updater_config.clone(),
             policy: DownloadUrlPolicy::production(updater_config.channel()),
             schedule: update_schedule.clone(),
             timestamp_store: update_timestamp_store,
@@ -927,8 +939,7 @@ async fn run_update_spike(
     #[cfg(not(target_os = "macos"))]
     recover_interrupted_update(update_root)
         .map_err(|error| format!("recover interrupted update failed: {error}"))?;
-    let update = app
-        .updater()
+    let update = build_channel_updater(app, &updater_config)
         .map_err(|error| format!("create signed updater failed: {error}"))?
         .check()
         .await

@@ -530,6 +530,14 @@ describe('Openloop desktop build orchestrator', () => {
       pluginPackageSpecVersion: '0.1.0',
       openloopDataVersion: 0,
       dshDataVersion: 0,
+      brand: {
+        productName: 'Openloop',
+        documentSuffix: 'Openloop',
+        markAsset: 'data:image/svg+xml;base64,PHN2Zy8+',
+        heroTitle: 'Openloop',
+        previewLabel: '预览版',
+        attribution: 'Built on DeepSeek Harness',
+      },
     }, null, 2)}\n`)
     writeFileSync(sidecar, 'sidecar')
     writeFileSync(runtimeSbom, '{"version":1}\n')

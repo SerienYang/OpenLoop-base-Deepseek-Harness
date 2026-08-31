@@ -47,6 +47,12 @@ pub struct UpdateChannelConfig {
     public_key: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdaterBuilderConfig {
+    endpoints: Vec<Url>,
+    public_key: String,
+}
+
 impl UpdateChannelConfig {
     pub fn new(
         channel: ReleaseChannel,
@@ -133,6 +139,27 @@ impl UpdateChannelConfig {
 
     pub fn public_key(&self) -> &str {
         &self.public_key
+    }
+
+    pub fn updater_builder_config(&self) -> UpdaterBuilderConfig {
+        UpdaterBuilderConfig {
+            endpoints: vec![self.endpoint.clone()],
+            public_key: self.public_key.clone(),
+        }
+    }
+}
+
+impl UpdaterBuilderConfig {
+    pub fn endpoints(&self) -> &[Url] {
+        &self.endpoints
+    }
+
+    pub fn public_key(&self) -> &str {
+        &self.public_key
+    }
+
+    pub fn into_parts(self) -> (Vec<Url>, String) {
+        (self.endpoints, self.public_key)
     }
 }
 

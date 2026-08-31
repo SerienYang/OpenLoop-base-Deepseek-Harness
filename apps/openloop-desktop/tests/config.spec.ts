@@ -731,7 +731,19 @@ describe('Openloop desktop foundation configuration', () => {
     expect(library).toContain('tauri_plugin_updater::Builder::new()')
     expect(library).toContain('.target("darwin-aarch64")')
     expect(library).toContain('UpdaterExt')
-    expect(library).toMatch(/\.updater\s*\(\s*\)[^]*\.check\s*\(\s*\)\s*\.await/u)
+    expect(library).toContain('fn build_channel_updater(')
+    expect(library).not.toMatch(
+      /#\[cfg\(target_os = "macos"\)\]\s*fn build_channel_updater/u,
+    )
+    expect(library).toContain('app.updater_builder()')
+    expect(library).toContain('.endpoints(endpoints)?')
+    expect(library).toContain('.pubkey(public_key)')
+    expect(library).toContain('updater_config: updater_config.clone()')
+    expect(library).toContain('build_channel_updater(&self.app, &self.updater_config)')
+    expect(library).toMatch(
+      /build_channel_updater\s*\(\s*app\s*,\s*&updater_config\s*\)[^]*\.check\s*\(\s*\)\s*\.await/u,
+    )
+    expect(library).not.toMatch(/\.updater\s*\(\s*\)/u)
     expect(library).toMatch(/\.download\s*\(/u)
     expect(library).not.toMatch(/\.install\s*\(|download_and_install/u)
     expect(library).toContain('RecoveryTransaction')
@@ -903,7 +915,6 @@ describe('Openloop desktop foundation configuration', () => {
       '@openloop/fs-workspace',
       '@openloop/sandbox-workspace',
       '@openloop/settings-foundation',
-      '@openloop/shell',
       '@openloop/workspace-client',
       '@openloop/workspace-authority',
     ])
