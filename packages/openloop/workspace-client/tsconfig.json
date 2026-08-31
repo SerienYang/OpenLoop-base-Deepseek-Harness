@@ -27,6 +27,9 @@
       "path": "../../client/ui-sidebar"
     },
     {
+      "path": "../../client/ui-settings"
+    },
+    {
       "path": "../../client/ui-slots"
     },
     {

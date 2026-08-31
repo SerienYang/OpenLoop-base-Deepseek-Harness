@@ -3,6 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { createSnapshotStore, SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
 import type { SessionId, SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
+import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
 import type { WorkspaceGrantView } from '@openloop/desktop-bridge-host/types'
 import { describe, expect, it, vi } from 'vitest'
 import { WorkspaceHero, WorkspaceSettings, WorkspaceSidebar } from '../src/client/index.ts'
@@ -40,7 +41,7 @@ async function bench() {
     name: 'root',
     children: {
       'sidebar.workspaces': { kind: 'single', scope: 'root' },
-      'sidebar.settings': { kind: 'single', scope: 'root' },
+      'settings.section': { kind: 'list', scope: 'root' },
       'conversation.hero.workspace': { kind: 'single', scope: 'root' },
     },
   } as never, () => null)
@@ -90,12 +91,18 @@ describe('Openloop Workspace client plugin', () => {
     await fiber.await()
 
     expect(b.slots.entries('sidebar.workspaces')[0]?.component).toBe(WorkspaceSidebar)
-    expect(b.slots.entries('sidebar.settings')[0]?.component).toBe(WorkspaceSettings)
+    expect(b.slots.entries('sidebar.settings')).toHaveLength(0)
+    const settings = b.slots.entries('settings.section')[0]
+    expect(settings?.component).toBe(WorkspaceSettings)
+    expect(settings?.options).toMatchObject({ id: 'workspace', order: 20 })
+    expect(resolveSlotLabel(settings?.options.label)).toBe('Workspace')
+    ;(b.ctx.get('locale') as LocaleRuntime).setLocale('zh')
+    expect(resolveSlotLabel(settings?.options.label)).toBe('工作区')
     expect(b.slots.entries('conversation.hero.workspace')[0]?.component).toBe(WorkspaceHero)
 
     await fiber.dispose()
     expect(b.slots.entries('sidebar.workspaces')).toHaveLength(0)
-    expect(b.slots.entries('sidebar.settings')).toHaveLength(0)
+    expect(b.slots.entries('settings.section')).toHaveLength(0)
     expect(b.slots.entries('conversation.hero.workspace')).toHaveLength(0)
   })
 

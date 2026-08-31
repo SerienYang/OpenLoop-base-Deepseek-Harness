@@ -11,6 +11,12 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import { SettingsScopeBinder } from './settings-scope.ts'
 
+/** Optional marker identifying a product-owned Settings shell override. */
+export interface SettingsShellOwner {
+  /** Stable package or product identifier for diagnostics. */
+  readonly id: string
+}
+
 export type {
   CredentialControlAdapter,
   CredentialControlRenderProps,

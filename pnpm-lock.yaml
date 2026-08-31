@@ -5848,6 +5848,10 @@ importers:
         version: link:../../runtime-diagnostics/invariants
 
   packages/openloop/shell:
+    dependencies:
+      '@deepseek-ai/dsh-client-ui-sidebar':
+        specifier: workspace:^
+        version: link:../../client/ui-sidebar
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: workspace:^
@@ -5921,6 +5925,9 @@ importers:
       '@deepseek-ai/dsh-client-ui-primitives':
         specifier: workspace:^
         version: link:../../client/ui-primitives
+      '@deepseek-ai/dsh-client-ui-settings':
+        specifier: workspace:^
+        version: link:../../client/ui-settings
       '@deepseek-ai/dsh-client-ui-sidebar':
         specifier: workspace:^
         version: link:../../client/ui-sidebar

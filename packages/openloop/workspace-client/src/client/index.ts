@@ -7,6 +7,7 @@ import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@openloop/desktop-bridge-client/client'
 import { WorkspaceHero } from './WorkspaceHero.tsx'
 import { WorkspaceSettings } from './WorkspaceSettings.tsx'
@@ -118,8 +119,11 @@ export function apply(ctx: ClientContext): void {
     inject: injected,
     locale: NS,
   }, WorkspaceSidebar))
-  ctx.slots.inject('sidebar.settings', () => ctx.slots.register({
-    name: 'sidebar.settings',
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'workspace',
+    order: 20,
+    label: () => t('settingsNav'),
     inject: injected,
     locale: NS,
   }, WorkspaceSettings))

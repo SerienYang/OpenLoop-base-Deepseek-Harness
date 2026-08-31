@@ -323,10 +323,7 @@ describe('OpenLoop profile', () => {
       ['ui-cordis', '@deepseek-ai/dsh-client-ui-cordis'],
       ['ui-workspace', '@deepseek-ai/dsh-client-ui-workspace'],
       ['ui-settings', '@deepseek-ai/dsh-client-ui-settings'],
-      ['ui-settings-general', '@deepseek-ai/dsh-client-ui-settings-general'],
-      ['ui-settings-models', '@deepseek-ai/dsh-client-ui-settings-models'],
       ['ui-settings-plugin-inventory', '@deepseek-ai/dsh-client-ui-settings-plugin-inventory'],
-      ['ui-settings-plugins', '@deepseek-ai/dsh-client-ui-settings-plugins'],
       ['ui-permission', '@deepseek-ai/dsh-client-ui-permission-presets'],
       ['ui-agent-preset', '@deepseek-ai/dsh-client-ui-agent-preset'],
     ] as const
@@ -343,20 +340,26 @@ describe('OpenLoop profile', () => {
     }
   })
 
-  it('prewires the Host credential control into future settings rows without enabling them', () => {
+  it('enables shared settings contributors behind the Openloop owner and credential control', () => {
     const entries = openloopEntries()
+    expect(entries.find(entry => entry.id === 'ui-settings-general')).toMatchObject({
+      disabled: false,
+      inject: ['settingsShellOwner'],
+    })
     for (const id of ['ui-settings-models', 'ui-settings-plugins']) {
-      const entry = entries.find(candidate => candidate.id === id)
-      expect(entry).toMatchObject({ id, disabled: true })
-      expect(entry?.inject).toContain('credentialControl')
+      expect(entries.find(entry => entry.id === id)).toMatchObject({
+        disabled: false,
+        inject: ['settingsShellOwner', 'credentialControl'],
+      })
     }
     expect(entries.find(entry => entry.id === 'ui-settings')?.disabled).toBe(true)
-    expect(entries.find(entry => entry.id === 'ui-settings-general')?.disabled).toBe(true)
+    expect(entries.find(entry => entry.id === 'openloop-workspace-client')?.inject)
+      .toEqual(['settingsShellOwner'])
     expect(entries.find(entry => entry.id === 'shell')?.inject)
       .toEqual(['locale', 'remote', 'remote.openloopDesktop'])
   })
 
-  it('enables the Openloop Workspace client while legacy Workspace and Settings rows stay disabled', () => {
+  it('enables exactly the five settings contributors while restricted rows stay disabled', () => {
     const entries = openloopEntries()
 
     expect(entries.find(entry => entry.id === 'openloop-settings-scope')).toBeUndefined()
@@ -367,17 +370,20 @@ describe('OpenLoop profile', () => {
     expect(entries.find(entry => entry.id === 'openloop-workspace-client')).toEqual({
       id: 'openloop-workspace-client',
       name: '@openloop/workspace-client',
+      inject: ['settingsShellOwner'],
     })
     expect(enabledClientPackages()).not.toContain('@deepseek-ai/dsh-client-ui-settings')
     expect(enabledClientPackages()).toContain('@openloop/settings-foundation')
     expect(enabledClientPackages()).toContain('@openloop/workspace-client')
+    expect(enabledClientPackages()).toContain('@deepseek-ai/dsh-client-ui-settings-general')
+    expect(enabledClientPackages()).toContain('@deepseek-ai/dsh-client-ui-settings-models')
+    expect(enabledClientPackages()).toContain('@deepseek-ai/dsh-client-ui-settings-plugins')
     for (const id of [
       'ui-workspace',
       'ui-settings',
-      'ui-settings-general',
-      'ui-settings-models',
       'ui-settings-plugin-inventory',
-      'ui-settings-plugins',
+      'ui-permission',
+      'ui-agent-preset',
     ]) {
       expect(entries.find(entry => entry.id === id)?.disabled).toBe(true)
     }

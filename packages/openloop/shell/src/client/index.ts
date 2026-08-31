@@ -1,28 +1,54 @@
 /** Openloop browser root shell. */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
 import type { BoundActions } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ILayout } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { ThemeSnapshot } from '@deepseek-ai/dsh-client-ui-theme/client'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import {
+  AboutUpdateSection,
+  parseBootstrapAppView,
+  type UpdateView,
+} from './AboutUpdateSection.tsx'
 import {
   createOpenloopCredentialControlAdapter,
   type OpenloopCredentialRemote,
 } from './CredentialControl.tsx'
 import { en, zh, type ShellKey } from './locales.ts'
 import { createOpenloopShellStore, OpenloopFrame } from './OpenloopFrame.tsx'
+import {
+  OpenloopSettings,
+  type OpenloopSettingsInjected,
+  type OpenloopSettingsOnboardingStep,
+  type OpenloopSettingsSection,
+} from './OpenloopSettings.tsx'
 import { OPENLOOP_THEME_TOKENS } from './theme-tokens.generated.ts'
 
 export {
   createOpenloopCredentialControlAdapter,
   CredentialControl,
 } from './CredentialControl.tsx'
+export {
+  AboutUpdateSection,
+  parseBootstrapAppView,
+} from './AboutUpdateSection.tsx'
+export type { AppView, UpdateView } from './AboutUpdateSection.tsx'
+export type { AboutUpdateSectionProps, UpdateActionView, UpdatePhase } from './AboutUpdateSection.tsx'
 export type {
   CredentialControlProps,
   OpenloopCredentialRemote,
 } from './CredentialControl.tsx'
 export type { ShellKey } from './locales.ts'
 export { OpenloopFrame } from './OpenloopFrame.tsx'
+export { OPENLOOP_SETTINGS_SECTION_IDS, OpenloopSettings } from './OpenloopSettings.tsx'
+export type {
+  OpenloopSettingsInjected,
+  OpenloopSettingsOnboardingStep,
+  OpenloopSettingsProps,
+  OpenloopSettingsSection,
+} from './OpenloopSettings.tsx'
 export { parseOpenloopBrand } from './brand.ts'
 export type { OpenloopBrand } from './brand.ts'
 
@@ -109,11 +135,27 @@ export const inject = ['slots', 'theme', 'locale', 'remote', 'remote.openloopDes
 
 /** Dictionary namespace owned by the Openloop shell. */
 const NS = 'openloop.shell'
+const SETTINGS_OWNER = Object.freeze({ id: '@openloop/shell' })
+const UNAVAILABLE_UPDATE: UpdateView = Object.freeze({
+  phase: 'unavailable',
+  actions: Object.freeze({
+    check: Object.freeze({ enabled: false }),
+    installAndRestart: Object.freeze({ enabled: false }),
+  }),
+})
+
+interface OpenloopBootstrapGlobal {
+  readonly __OPENLOOP_BOOTSTRAP__?: unknown
+}
 
 /** Register one Openloop root owner, its child surfaces, and product theme tokens. */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'openloop-shell: copy dictionaries')
   const t = ctx.locale.bind(NS)
+  ctx.effect(
+    () => ctx.reflect.provide('settingsShellOwner', SETTINGS_OWNER),
+    'openloop-shell: settings owner marker',
+  )
   const desktop = (
     ctx.remote as unknown as { openloopDesktop: OpenloopCredentialRemote }
   ).openloopDesktop
@@ -153,6 +195,85 @@ export function apply(ctx: ClientContext): void {
     () => ctx.theme.overrideTokens('@openloop/shell', OPENLOOP_THEME_TOKENS),
     'openloop-shell: brand theme tokens',
   )
+
+  let rowsVersion = -1
+  let rowsRevision = -1
+  let rows: readonly OpenloopSettingsSection[] = []
+  let onboardingVersion = -1
+  let onboardingSteps: readonly OpenloopSettingsOnboardingStep[] = []
+  const settingsInjected = (): OpenloopSettingsInjected => ({
+    hooks: {
+      sections: {
+        getSnapshot: () => {
+          const version = ctx.slots.getVersion('settings.section')
+          const revision = ctx.locale.getSnapshot().revision
+          if (version !== rowsVersion || revision !== rowsRevision) {
+            rowsVersion = version
+            rowsRevision = revision
+            rows = ctx.slots.entries('settings.section')
+              .map(entry => ({
+                /* v8 ignore next -- list entries always have ids. */
+                id: entry.options.id ?? '',
+                order: entry.options.order ?? 0,
+                label: resolveSlotLabel(entry.options.label) ?? '',
+              }))
+          }
+          return rows
+        },
+        subscribe: (listener) => {
+          const offSections = ctx.slots.subscribe('settings.section', listener)
+          const offLocale = ctx.locale.subscribe(listener)
+          return () => {
+            offSections()
+            offLocale()
+          }
+        },
+      },
+      onboardingSteps: {
+        getSnapshot: () => {
+          const version = ctx.slots.getVersion('settings.onboarding')
+          if (version !== onboardingVersion) {
+            onboardingVersion = version
+            onboardingSteps = ctx.slots.entries('settings.onboarding')
+              .map(entry => ({
+                /* v8 ignore next -- list entries always have ids. */
+                id: entry.options.id ?? '',
+                order: entry.options.order ?? 0,
+              }))
+              .sort((left, right) => left.order - right.order)
+          }
+          return onboardingSteps
+        },
+        subscribe: listener => ctx.slots.subscribe('settings.onboarding', listener),
+      },
+    },
+  })
+  ctx.slots.inject('sidebar.settings', () => ctx.slots.register({
+    name: 'sidebar.settings',
+    locale: NS,
+    children: {
+      'settings.action': { kind: 'list', scope: 'root' },
+      'settings.section': { kind: 'list', scope: 'root' },
+      'settings.onboarding': { kind: 'list', scope: 'root' },
+    },
+    inject: settingsInjected,
+  }, OpenloopSettings))
+
+  const bootstrap = globalThis as typeof globalThis & OpenloopBootstrapGlobal
+  const app = parseBootstrapAppView(bootstrap.__OPENLOOP_BOOTSTRAP__)
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'about-update',
+    order: 40,
+    label: () => t('aboutNav'),
+    locale: NS,
+    inject: () => ({
+      app,
+      update: UNAVAILABLE_UPDATE,
+      onCheck: () => {},
+      onInstallAndRestart: () => {},
+    }),
+  }, AboutUpdateSection))
 
   ctx.effect(() => {
     const presenter = new ThemeDocumentPresenter()

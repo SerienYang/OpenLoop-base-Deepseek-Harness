@@ -359,52 +359,49 @@ describe('Openloop Workspace surfaces', () => {
     const h = harness([grant('alpha', 'ready', [sid('session-current')])])
     render(
       <WorkspaceSettings
-        wide
+        close={vi.fn()}
         useGrants={h.useGrants}
         useSessions={h.useSessions}
         actions={h.actions}
       />,
     )
-    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
-    const dialog = screen.getByRole('dialog', { name: 'Workspace settings' })
-    expect(within(dialog).getByText('~/Projects/alpha')).toBeTruthy()
+    const section = screen.getByRole('region', { name: 'Workspace settings' })
+    expect(within(section).getByText('~/Projects/alpha')).toBeTruthy()
 
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Workspace actions for Alpha' }))
+    fireEvent.click(within(section).getByRole('button', { name: 'Workspace actions for Alpha' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
-    const renameDialog = screen.getByRole('dialog', { name: 'Rename Workspace' })
-    fireEvent.change(within(renameDialog).getByRole('textbox'), { target: { value: 'Alpha Two' } })
-    fireEvent.click(within(renameDialog).getByRole('button', { name: 'Rename' }))
+    const renameView = screen.getByRole('region', { name: 'Rename Workspace' })
+    fireEvent.change(within(renameView).getByRole('textbox'), { target: { value: 'Alpha Two' } })
+    fireEvent.click(within(renameView).getByRole('button', { name: 'Rename' }))
     await waitFor(() => {
       expect(h.rename).toHaveBeenCalledWith('alpha', 'Alpha Two')
     })
 
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Workspace actions for Alpha' }))
+    fireEvent.click(within(section).getByRole('button', { name: 'Workspace actions for Alpha' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Reveal in Finder' }))
     await waitFor(() => { expect(h.reveal).toHaveBeenCalledWith('alpha') })
 
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Workspace actions for Alpha' }))
+    fireEvent.click(within(section).getByRole('button', { name: 'Workspace actions for Alpha' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Remove' }))
-    const removeDialog = screen.getByRole('dialog', { name: 'Remove Workspace' })
-    expect(removeDialog.textContent).toContain(
+    const removeView = screen.getByRole('region', { name: 'Remove Workspace' })
+    expect(removeView.textContent).toContain(
       'Only the authorization and list item are removed. Files and session history are kept.',
     )
-    fireEvent.click(within(removeDialog).getByRole('button', { name: 'Remove' }))
+    fireEvent.click(within(removeView).getByRole('button', { name: 'Remove' }))
     await waitFor(() => { expect(h.remove).toHaveBeenCalledWith('alpha') })
-    expect(screen.getByRole('dialog', { name: 'Remove Workspace' })).toBeTruthy()
+    expect(screen.getByRole('region', { name: 'Remove Workspace' })).toBeTruthy()
   })
 
-  it('uses one Settings modal state machine and restores focus across close paths', async () => {
+  it('uses inline subviews without nested dialogs and restores focus on return', async () => {
     const h = harness([grant('alpha')])
     render(
       <WorkspaceSettings
-        wide
+        close={vi.fn()}
         useGrants={h.useGrants}
         useSessions={h.useSessions}
         actions={h.actions}
       />,
     )
-    const settingsTrigger = screen.getByRole<HTMLButtonElement>('button', { name: 'Settings' })
-    fireEvent.click(settingsTrigger)
 
     const openActions = () => {
       const trigger = screen.getByRole<HTMLButtonElement>('button', {
@@ -419,38 +416,45 @@ describe('Openloop Workspace surfaces', () => {
 
     openActions()
     fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
-    expect(screen.getAllByRole('dialog')).toHaveLength(1)
-    expect(screen.getByRole('dialog', { name: 'Rename Workspace' })).toBeTruthy()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.getByRole('region', { name: 'Rename Workspace' })).toBeTruthy()
 
-    fireEvent.keyDown(document, { key: 'Escape' })
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' })
     await waitFor(() => {
-      expect(screen.getByRole('dialog', { name: 'Workspace settings' })).toBeTruthy()
+      expect(screen.getByRole('region', { name: 'Workspace settings' })).toBeTruthy()
       expect(screen.getByRole('button', { name: 'Workspace actions for Alpha' }))
         .toBe(document.activeElement)
     })
 
     openActions()
     fireEvent.click(screen.getByRole('menuitem', { name: 'Remove' }))
-    const removeDialog = screen.getByRole('dialog', { name: 'Remove Workspace' })
-    fireEvent.click(within(removeDialog).getByRole('button', { name: 'Close' }))
+    const removeView = screen.getByRole('region', { name: 'Remove Workspace' })
+    fireEvent.click(within(removeView).getByRole('button', { name: 'Cancel' }))
     await waitFor(() => {
-      expect(screen.getByRole('dialog', { name: 'Workspace settings' })).toBeTruthy()
+      expect(screen.getByRole('region', { name: 'Workspace settings' })).toBeTruthy()
       expect(screen.getByRole('button', { name: 'Workspace actions for Alpha' }))
         .toBe(document.activeElement)
     })
 
-    openActions()
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove' }))
-    const dialog = screen.getByRole('dialog', { name: 'Remove Workspace' })
-    fireEvent.click(dialog.previousElementSibling as HTMLElement)
-    await waitFor(() => {
-      expect(screen.getByRole('dialog', { name: 'Workspace settings' })).toBeTruthy()
-    })
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+  it('closes the owning Settings shell after starting a Workspace session', async () => {
+    const h = harness([grant('alpha')])
+    const close = vi.fn()
+    render(
+      <WorkspaceSettings
+        close={close}
+        useGrants={h.useGrants}
+        useSessions={h.useSessions}
+        actions={h.actions}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Switch to Alpha' }))
     await waitFor(() => {
-      expect(screen.queryByRole('dialog')).toBeNull()
-      expect(settingsTrigger).toBe(document.activeElement)
+      expect(h.startSession).toHaveBeenCalledWith('alpha')
+      expect(close).toHaveBeenCalledOnce()
     })
   })
 
@@ -501,13 +505,12 @@ describe('Openloop Workspace surfaces', () => {
     ], undefined)
     render(
       <WorkspaceSettings
-        wide
+        close={vi.fn()}
         useGrants={h.useGrants}
         useSessions={h.useSessions}
         actions={h.actions}
       />,
     )
-    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
     expect(screen.getByRole<HTMLButtonElement>('button', {
       name: 'Workspace actions for revoking-workspace',
     }).disabled).toBe(true)
@@ -526,28 +529,27 @@ describe('Openloop Workspace surfaces', () => {
     h.authorize.mockReturnValueOnce(pending.promise)
     render(
       <WorkspaceSettings
-        wide
+        close={vi.fn()}
         useGrants={h.useGrants}
         useSessions={h.useSessions}
         actions={h.actions}
       />,
     )
-    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
-    const dialog = screen.getByRole('dialog', { name: 'Workspace settings' })
-    const add = within(dialog).getByRole<HTMLButtonElement>('button', { name: 'Add Workspace' })
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Workspace actions for Alpha' }))
+    const section = screen.getByRole('region', { name: 'Workspace settings' })
+    const add = within(section).getByRole<HTMLButtonElement>('button', { name: 'Add Workspace' })
+    fireEvent.click(within(section).getByRole('button', { name: 'Workspace actions for Alpha' }))
     fireEvent.click(add)
 
-    expect(within(dialog).getByRole<HTMLButtonElement>('button', { name: 'Switch to Alpha' }).disabled)
+    expect(within(section).getByRole<HTMLButtonElement>('button', { name: 'Switch to Alpha' }).disabled)
       .toBe(true)
     expect(screen.getByRole<HTMLButtonElement>('menuitem', { name: 'Rename' }).disabled).toBe(true)
     expect(screen.getByRole<HTMLButtonElement>('menuitem', { name: 'Reveal in Finder' }).disabled)
       .toBe(true)
     expect(screen.getByRole<HTMLButtonElement>('menuitem', { name: 'Remove' }).disabled).toBe(true)
-    expect(within(dialog).getByRole<HTMLButtonElement>('button', {
+    expect(within(section).getByRole<HTMLButtonElement>('button', {
       name: 'Workspace actions for Alpha',
     }).disabled).toBe(true)
-    expect(within(dialog).getByRole<HTMLButtonElement>('button', {
+    expect(within(section).getByRole<HTMLButtonElement>('button', {
       name: 'Workspace actions for missing-workspace',
     }).disabled).toBe(true)
     expect(add.disabled).toBe(true)
@@ -559,23 +561,22 @@ describe('Openloop Workspace surfaces', () => {
     h.authorize.mockReturnValueOnce(pending.promise)
     render(
       <WorkspaceSettings
-        wide
+        close={vi.fn()}
         useGrants={h.useGrants}
         useSessions={h.useSessions}
         actions={h.actions}
       />,
     )
-    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
-    const dialog = screen.getByRole('dialog', { name: 'Workspace settings' })
-    fireEvent.click(within(dialog).getByRole('button', {
+    const section = screen.getByRole('region', { name: 'Workspace settings' })
+    fireEvent.click(within(section).getByRole('button', {
       name: 'Workspace actions for missing-workspace',
     }))
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Add Workspace' }))
+    fireEvent.click(within(section).getByRole('button', { name: 'Add Workspace' }))
 
     expect(screen.getByRole<HTMLButtonElement>('menuitem', {
       name: 'Reauthorize missing-workspace',
     }).disabled).toBe(true)
-    expect(within(dialog).getByRole<HTMLButtonElement>('button', {
+    expect(within(section).getByRole<HTMLButtonElement>('button', {
       name: 'Reauthorize missing-workspace',
     }).disabled).toBe(true)
   })

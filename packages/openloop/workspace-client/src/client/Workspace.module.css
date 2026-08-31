@@ -202,6 +202,30 @@
   margin-bottom: 12px;
 }
 
+.settingsSection {
+  min-width: 0;
+}
+
+.settingsToolbar h3,
+.settingsSubviewHeader h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.settingsSubviewHeader {
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+
+.settingsSubviewFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
 .hero {
   display: flex;
   width: min(420px, calc(100vw - 32px));
@@ -276,6 +300,8 @@
   max-width: min(420px, calc(100vw - 32px));
   background: var(--dsw-alias-bg-layer-2);
   box-shadow: var(--dsw-shadow-lv2);
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
 }
 
 .railError {
