@@ -244,10 +244,11 @@ fn build_channel_updater(
     app: &AppHandle,
     config: &update::channel::UpdateChannelConfig,
 ) -> tauri_plugin_updater::Result<tauri_plugin_updater::Updater> {
-    let (endpoints, public_key) = config.updater_builder_config().into_parts();
+    let (endpoints, public_key, timeout) = config.updater_builder_config().into_parts();
     app.updater_builder()
         .endpoints(endpoints)?
         .pubkey(public_key)
+        .timeout(timeout)
         .build()
 }
 
@@ -939,11 +940,14 @@ async fn run_update_spike(
     #[cfg(not(target_os = "macos"))]
     recover_interrupted_update(update_root)
         .map_err(|error| format!("recover interrupted update failed: {error}"))?;
-    let update = build_channel_updater(app, &updater_config)
+    let mut update = build_channel_updater(app, &updater_config)
         .map_err(|error| format!("create signed updater failed: {error}"))?
         .check()
         .await
         .map_err(|error| format!("signed update check failed: {error}"))?;
+    if let Some(update) = update.as_mut() {
+        update.timeout = Some(update::channel::UPDATE_NETWORK_TIMEOUT);
+    }
     let download_policy = DownloadUrlPolicy::production(updater_config.channel());
     if let Some(update) = update.as_ref() {
         download_policy

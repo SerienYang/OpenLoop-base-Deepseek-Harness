@@ -3,7 +3,7 @@ use std::{
     error::Error,
     fmt,
     sync::{Arc, Condvar, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -130,6 +130,7 @@ struct UpdateStateInner<T> {
 pub struct UpdateState<T> {
     channel: ReleaseChannel,
     update_ttl: Duration,
+    capability_clock: Arc<dyn Fn() -> Duration + Send + Sync>,
     inner: Mutex<UpdateStateInner<T>>,
 }
 
@@ -286,9 +287,20 @@ pub trait UpdateRestartRequester: Send + Sync {
 
 impl<T> UpdateState<T> {
     pub fn new(channel: ReleaseChannel, update_ttl: Duration) -> Self {
+        let started = Instant::now();
+        Self::with_capability_clock(channel, update_ttl, Arc::new(move || started.elapsed()))
+    }
+
+    #[doc(hidden)]
+    pub fn with_capability_clock(
+        channel: ReleaseChannel,
+        update_ttl: Duration,
+        capability_clock: Arc<dyn Fn() -> Duration + Send + Sync>,
+    ) -> Self {
         Self {
             channel,
             update_ttl,
+            capability_clock,
             inner: Mutex::new(UpdateStateInner {
                 status: UpdateStatus::default(),
                 pending: None,
@@ -333,9 +345,10 @@ impl<T> UpdateState<T> {
 
     pub fn finish_check(
         &self,
-        now: Duration,
+        wall_clock: Duration,
         update: Option<AvailableUpdate<T>>,
     ) -> Result<UpdateStatus, UpdateStateError> {
+        let capability_now = (self.capability_clock)();
         let (completion, completed_status, result) = {
             let mut inner = self.lock()?;
             require_phase(inner.status.state, UpdatePhase::Checking)?;
@@ -343,7 +356,7 @@ impl<T> UpdateState<T> {
                 .check_completion
                 .take()
                 .ok_or(UpdateStateError::Unavailable)?;
-            let checked_at = milliseconds(now);
+            let checked_at = milliseconds(wall_clock);
             let result = match update {
                 Some(update) => {
                     if update.channel != self.channel {
@@ -369,7 +382,7 @@ impl<T> UpdateState<T> {
                             update_id,
                             version: update.version,
                             channel: update.channel,
-                            expires_at: now.saturating_add(self.update_ttl),
+                            expires_at: capability_now.saturating_add(self.update_ttl),
                             value: update.value,
                         });
                         Ok(())
@@ -398,9 +411,10 @@ impl<T> UpdateState<T> {
         completion.wait(cancellation)
     }
 
-    pub fn snapshot(&self, now: Duration) -> Result<UpdateStatus, UpdateStateError> {
+    pub fn snapshot(&self, _now: Duration) -> Result<UpdateStatus, UpdateStateError> {
+        let capability_now = (self.capability_clock)();
         let mut inner = self.lock()?;
-        expire_pending(&mut inner, now);
+        expire_pending(&mut inner, capability_now);
         Ok(inner.status.clone())
     }
 
@@ -408,8 +422,9 @@ impl<T> UpdateState<T> {
         &self,
         update_id: &str,
         channel: ReleaseChannel,
-        now: Duration,
+        _now: Duration,
     ) -> Result<UpdateInstallReservation<T>, UpdateStateError> {
+        let capability_now = (self.capability_clock)();
         let mut inner = self.lock()?;
         if inner.install_reserved {
             return Err(UpdateStateError::Busy);
@@ -423,7 +438,7 @@ impl<T> UpdateState<T> {
         if pending.update_id != update_id {
             return Err(UpdateStateError::UnknownUpdateId);
         }
-        if now >= pending.expires_at {
+        if capability_now >= pending.expires_at {
             retire_pending(&mut inner);
             inner.status = failed_status(
                 inner.status.last_checked_at,
@@ -461,15 +476,16 @@ impl<T> UpdateState<T> {
     pub fn complete_install_confirmation(
         &self,
         reservation: UpdateInstallReservation<T>,
-        now: Duration,
+        _now: Duration,
         confirmed: bool,
     ) -> Result<UpdateInstallOutcome<T>, UpdateStateError> {
+        let capability_now = (self.capability_clock)();
         let mut inner = self.lock()?;
         if !inner.install_reserved || inner.pending.is_some() {
             return Err(UpdateStateError::InvalidTransition);
         }
         require_phase(inner.status.state, UpdatePhase::Available)?;
-        if now >= reservation.pending.expires_at {
+        if capability_now >= reservation.pending.expires_at {
             retire_update_id(&mut inner, reservation.pending.update_id);
             inner.install_reserved = false;
             inner.status = failed_status(

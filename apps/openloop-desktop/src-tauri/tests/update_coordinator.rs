@@ -11,7 +11,7 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use openloop_desktop_lib::update::{
-    channel::ReleaseChannel,
+    channel::{ReleaseChannel, UPDATE_NETWORK_TIMEOUT},
     coordinator::{
         check_update, install_checked_update, install_checked_update_with_observer,
         validate_download_url, DownloadStatus, DownloadUrlPolicy, InstallPublication,
@@ -383,7 +383,11 @@ fn coordinator_check_reports_no_update_and_detected_update() {
 
     assert_eq!(report.current, "0.1.0");
     assert_eq!(report.available.as_deref(), Some("0.2.0"));
-    assert!(update.is_some());
+    assert_eq!(
+        update.expect("available update").timeout,
+        Some(UPDATE_NETWORK_TIMEOUT),
+        "the archive download must retain the fixed total timeout"
+    );
 }
 
 #[test]

@@ -23,8 +23,8 @@ use openloop_desktop_lib::{
         channel::ReleaseChannel,
         coordinator::ensure_update_disk_capacity,
         schedule::{
-            ScheduledUpdateAction, UpdateCheckSchedule, UpdateCheckTimestampStore,
-            AUTOMATIC_CHECK_INTERVAL, STARTUP_STABILITY_DELAY,
+            ScheduledUpdateAction, ScheduledUpdateWorker, UpdateCheckSchedule,
+            UpdateCheckTimestampStore, AUTOMATIC_CHECK_INTERVAL, STARTUP_STABILITY_DELAY,
         },
         state::{
             confirm_and_begin_install, install_update_bridge_handlers, AvailableUpdate, CheckStart,
@@ -294,7 +294,13 @@ fn every_active_state_can_fail_with_a_safe_browser_message() {
 
 #[test]
 fn rejects_stale_expired_unknown_and_wrong_channel_update_ids() {
-    let state = UpdateState::new(ReleaseChannel::Test, UPDATE_TTL);
+    let monotonic = Arc::new(Mutex::new(Duration::ZERO));
+    let state_clock = monotonic.clone();
+    let state = UpdateState::with_capability_clock(
+        ReleaseChannel::Test,
+        UPDATE_TTL,
+        Arc::new(move || *state_clock.lock().expect("monotonic clock")),
+    );
     let stale_id = available(&state, NOW);
     state
         .begin_check(NOW + Duration::from_secs(1))
@@ -346,6 +352,7 @@ fn rejects_stale_expired_unknown_and_wrong_channel_update_ids() {
         ),
         Err(UpdateStateError::WrongChannel)
     ));
+    *monotonic.lock().expect("advance monotonic clock") = UPDATE_TTL + Duration::from_secs(2);
     assert!(matches!(
         confirm_and_begin_install(
             &state,
@@ -357,6 +364,44 @@ fn rejects_stale_expired_unknown_and_wrong_channel_update_ids() {
         ),
         Err(UpdateStateError::ExpiredUpdateId)
     ));
+}
+
+#[test]
+fn update_id_ttl_uses_monotonic_time_when_the_wall_clock_moves_backward() {
+    let monotonic = Arc::new(Mutex::new(Duration::ZERO));
+    let state_clock = monotonic.clone();
+    let state = UpdateState::with_capability_clock(
+        ReleaseChannel::Test,
+        UPDATE_TTL,
+        Arc::new(move || *state_clock.lock().expect("monotonic clock")),
+    );
+    let wall_clock = Arc::new(Mutex::new(NOW));
+    let update_id = available(&state, *wall_clock.lock().expect("wall clock at issuance"));
+    *wall_clock.lock().expect("wall clock rollback") = NOW - Duration::from_secs(60 * 60);
+    *monotonic.lock().expect("monotonic before confirmation") = UPDATE_TTL - Duration::from_secs(1);
+
+    let result = confirm_and_begin_install(
+        &state,
+        &update_id,
+        ReleaseChannel::Test,
+        &|| *wall_clock.lock().expect("rolled-back wall clock"),
+        &AdvancingConfirmation {
+            clock: monotonic.clone(),
+            confirmed_at: UPDATE_TTL,
+        },
+        &CancellationToken::default(),
+    );
+
+    assert!(matches!(result, Err(UpdateStateError::ExpiredUpdateId)));
+    let status = state
+        .snapshot(*wall_clock.lock().expect("wall clock after expiry"))
+        .expect("expired update status");
+    assert_eq!(status.state, UpdatePhase::Failed);
+    assert_eq!(
+        status.last_checked_at,
+        Some(NOW.as_millis() as u64),
+        "the public lastCheckedAt remains the wall-clock epoch"
+    );
 }
 
 #[test]
@@ -708,6 +753,69 @@ fn persisted_check_timestamp_throttles_a_new_process_after_startup_stability() {
 }
 
 #[test]
+fn future_persisted_timestamp_is_due_after_startup_stability() {
+    let future = NOW + AUTOMATIC_CHECK_INTERVAL + Duration::from_secs(60);
+    let mut schedule = UpdateCheckSchedule::new(Some(future));
+
+    assert_eq!(
+        schedule.automatic_action(STARTUP_STABILITY_DELAY - Duration::from_secs(1), NOW),
+        None
+    );
+    assert_eq!(
+        schedule.automatic_action(STARTUP_STABILITY_DELAY, NOW),
+        Some(ScheduledUpdateAction::CheckOnly)
+    );
+    assert_eq!(
+        schedule.automatic_action(
+            STARTUP_STABILITY_DELAY + Duration::from_secs(1),
+            NOW + Duration::from_secs(1),
+        ),
+        None,
+        "the one recovery check must refresh the in-memory timestamp"
+    );
+}
+
+#[test]
+fn scheduled_worker_drop_does_not_wait_for_a_hung_checker() {
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+    let checker = Arc::new(HangingChecker {
+        started: started_tx,
+        release: Mutex::new(release_rx),
+        finished: finished_tx,
+    });
+    let worker = ScheduledUpdateWorker::start_for_test(
+        Arc::new(Mutex::new(UpdateCheckSchedule::new(None))),
+        Arc::new(UpdateState::new(ReleaseChannel::Test, UPDATE_TTL)),
+        checker,
+        Arc::new(|| NOW),
+        Duration::from_millis(1),
+        STARTUP_STABILITY_DELAY,
+    )
+    .expect("start scheduled worker");
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("checker started");
+
+    let (dropped_tx, dropped_rx) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        drop(worker);
+        dropped_tx.send(()).expect("report worker drop");
+    });
+    let dropped = dropped_rx.recv_timeout(Duration::from_millis(250));
+
+    release_tx.send(()).expect("release checker");
+    finished_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("checker finished");
+    assert!(
+        dropped.is_ok(),
+        "worker Drop waited for a checker that was blocked on network I/O"
+    );
+}
+
+#[test]
 fn timestamp_store_ignores_corrupt_or_unsafe_records_without_following_symlinks() {
     let root = tempdir().expect("timestamp root");
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
@@ -838,6 +946,25 @@ struct CountingChecker(AtomicUsize);
 impl UpdateChecker<&'static str> for CountingChecker {
     fn check(&self) -> Result<Option<AvailableUpdate<&'static str>>, UpdateFailure> {
         self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(None)
+    }
+}
+
+struct HangingChecker {
+    started: mpsc::SyncSender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+    finished: mpsc::SyncSender<()>,
+}
+
+impl UpdateChecker<&'static str> for HangingChecker {
+    fn check(&self) -> Result<Option<AvailableUpdate<&'static str>>, UpdateFailure> {
+        self.started.send(()).expect("report checker start");
+        self.release
+            .lock()
+            .expect("checker release lock")
+            .recv()
+            .expect("checker release");
+        self.finished.send(()).expect("report checker finish");
         Ok(None)
     }
 }
@@ -1228,11 +1355,15 @@ fn bridge_install_reports_an_error_while_preserving_rolled_back_host_state() {
 
 #[test]
 fn bridge_rejects_an_update_that_expires_while_confirmation_is_open() {
-    let state = Arc::new(UpdateState::new(ReleaseChannel::Test, UPDATE_TTL));
-    let clock = Arc::new(Mutex::new(NOW));
+    let monotonic = Arc::new(Mutex::new(Duration::ZERO));
+    let state_clock = monotonic.clone();
+    let state = Arc::new(UpdateState::with_capability_clock(
+        ReleaseChannel::Test,
+        UPDATE_TTL,
+        Arc::new(move || *state_clock.lock().expect("monotonic clock")),
+    ));
     let install_count = Arc::new(CountingInstaller(AtomicUsize::new(0)));
     let mut tables = BridgeDispatchTables::unavailable();
-    let handler_clock = clock.clone();
     install_update_bridge_handlers(
         &mut tables,
         state.clone(),
@@ -1240,11 +1371,11 @@ fn bridge_rejects_an_update_that_expires_while_confirmation_is_open() {
         Arc::new(FixedChecker),
         install_count.clone(),
         Arc::new(AdvancingConfirmation {
-            clock: clock.clone(),
-            confirmed_at: NOW + UPDATE_TTL,
+            clock: monotonic,
+            confirmed_at: UPDATE_TTL,
         }),
         Arc::new(RecordingRestart::default()),
-        Arc::new(move || *handler_clock.lock().expect("handler clock")),
+        Arc::new(|| NOW),
     )
     .expect("install update handlers");
     let launch_id = Uuid::new_v4();

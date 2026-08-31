@@ -120,7 +120,8 @@ const INITIAL_UPDATE_VIEW: UpdateView = Object.freeze({
 export class OpenloopUpdateService {
   readonly view: SnapshotStore<UpdateView> =
     createSnapshotStore<UpdateView>(INITIAL_UPDATE_VIEW)
-  private generation = 0
+  private statusGeneration = 0
+  private installGeneration = 0
   private updateId: string | undefined
   private inFlightCheck: Promise<void> | undefined
   private closed: Error | undefined
@@ -169,7 +170,7 @@ export class OpenloopUpdateService {
     if (updateId === undefined) {
       throw new Error('Openloop update install failed: no current update is available')
     }
-    const generation = ++this.generation
+    const generation = ++this.installGeneration
     const previous = this.view.getSnapshot()
     this.view.set({
       ...previous,
@@ -182,7 +183,8 @@ export class OpenloopUpdateService {
       const remote = await this.remote()
       const result = await remote.installUpdateAndRestart(updateId)
       if (!result.ok) throw remoteError('install', result.error)
-      if (!this.isCurrent(generation)) return result.value
+      if (!this.isCurrentInstall(generation)) return result.value
+      this.statusGeneration += 1
       if (result.value === 'cancelled') {
         this.view.set(previous)
       } else {
@@ -195,7 +197,7 @@ export class OpenloopUpdateService {
       }
       return result.value
     } catch (reason) {
-      if (this.isCurrent(generation)) {
+      if (this.isCurrentInstall(generation)) {
         await this.publishInstallFailure(reason, previous, generation)
       }
       throw reason
@@ -205,7 +207,8 @@ export class OpenloopUpdateService {
   close(): void {
     if (this.closed !== undefined) return
     this.closed = new Error('Openloop update service was disposed')
-    this.generation += 1
+    this.statusGeneration += 1
+    this.installGeneration += 1
   }
 
   private async readStatus(
@@ -213,18 +216,18 @@ export class OpenloopUpdateService {
     request: (remote: OpenloopUpdateRemote) => Promise<RemoteResult<OpenloopUpdateStatus>>,
   ): Promise<OpenloopUpdateStatus | undefined> {
     this.requireOpen()
-    const generation = ++this.generation
+    const generation = ++this.statusGeneration
     const previous = this.view.getSnapshot()
     try {
       const remote = await this.remote()
       const result = await request(remote)
       if (!result.ok) throw remoteError(operation, result.error)
-      if (!this.isCurrent(generation)) return
+      if (!this.isCurrentStatus(generation)) return
       this.updateId = result.value.updateId
       this.view.set(projectStatus(result.value))
       return result.value
     } catch (reason) {
-      if (this.isCurrent(generation)) this.publishFailure(reason, previous)
+      if (this.isCurrentStatus(generation)) this.publishFailure(reason, previous)
       throw reason
     }
   }
@@ -249,8 +252,9 @@ export class OpenloopUpdateService {
     try {
       const remote = await this.remote()
       const result = await remote.getUpdateStatus()
-      if (!this.isCurrent(generation)) return
+      if (!this.isCurrentInstall(generation)) return
       if (result.ok && TERMINAL_INSTALL_STATES.has(result.value.state)) {
+        this.statusGeneration += 1
         this.updateId = result.value.updateId
         this.view.set(projectStatus(result.value))
         return
@@ -258,11 +262,18 @@ export class OpenloopUpdateService {
     } catch {
       // Preserve the original install failure when recovery status cannot be read.
     }
-    if (this.isCurrent(generation)) this.publishFailure(reason, previous)
+    if (this.isCurrentInstall(generation)) {
+      this.statusGeneration += 1
+      this.publishFailure(reason, previous)
+    }
   }
 
-  private isCurrent(generation: number): boolean {
-    return this.closed === undefined && generation === this.generation
+  private isCurrentStatus(generation: number): boolean {
+    return this.closed === undefined && generation === this.statusGeneration
+  }
+
+  private isCurrentInstall(generation: number): boolean {
+    return this.closed === undefined && generation === this.installGeneration
   }
 
   private remote(): Promise<OpenloopUpdateRemote> {

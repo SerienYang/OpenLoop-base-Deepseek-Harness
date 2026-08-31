@@ -12,7 +12,7 @@ use std::{
 };
 
 use openloop_desktop_lib::update::{
-    channel::{ReleaseChannel, UpdateChannelConfig},
+    channel::{ReleaseChannel, UpdateChannelConfig, UPDATE_NETWORK_TIMEOUT},
     recovery::{
         recover_interrupted_update, recover_interrupted_update_with_bound_companion,
         recover_interrupted_update_with_companion, update_journal_path, CandidateHealth,
@@ -93,6 +93,7 @@ fn updater_builder_config_uses_the_endpoint_and_key_for_each_channel() {
         "test updater must request only latest-test-k1.json"
     );
     assert_eq!(test_builder.public_key(), VALID_TAURI_PUBLIC_KEY);
+    assert_eq!(test_builder.timeout(), UPDATE_NETWORK_TIMEOUT);
 
     let stable_builder = stable.updater_builder_config();
     assert_eq!(
@@ -105,6 +106,7 @@ fn updater_builder_config_uses_the_endpoint_and_key_for_each_channel() {
         REPOSITORY_TEST_PUBLIC_KEY,
         "stable updater must use the stable config key, not the test key"
     );
+    assert_eq!(stable_builder.timeout(), UPDATE_NETWORK_TIMEOUT);
 
     assert_ne!(test_builder.endpoints(), stable_builder.endpoints());
     assert_ne!(test_builder.public_key(), stable_builder.public_key());

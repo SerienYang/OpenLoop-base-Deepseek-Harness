@@ -280,6 +280,115 @@ describe('Openloop browser update facade', () => {
     })
   })
 
+  it('lets install failure recovery own the terminal status despite a concurrent refresh', async () => {
+    const refreshStatus = deferred<RemoteResult<OpenloopUpdateStatus>>()
+    const getUpdateStatus = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        value: status('available', {
+          updateId: 'racing-update-id',
+          version: '3.1.0',
+        }),
+      })
+      .mockReturnValueOnce(refreshStatus.promise)
+      .mockResolvedValueOnce({
+        ok: true,
+        value: status('rolled-back', {
+          version: '3.1.0',
+          message: 'The previous version was restored',
+        }),
+      })
+    const installResult = deferred<RemoteResult<'restarting' | 'cancelled'>>()
+    const service = new OpenloopUpdateService(remote({
+      getUpdateStatus,
+      installUpdateAndRestart: vi.fn(() => installResult.promise),
+    }))
+    await service.refresh()
+
+    const install = service.installUpdateAndRestart()
+    const refresh = service.refresh()
+    await vi.waitFor(() => {
+      expect(getUpdateStatus).toHaveBeenCalledTimes(2)
+    })
+    installResult.resolve({
+      ok: false,
+      error: {
+        code: 'update_failure',
+        message: 'desktop update operation failed',
+        details: {},
+      },
+    })
+
+    await expect(install).rejects.toThrow(
+      'Openloop update install failed: update_failure: desktop update operation failed',
+    )
+    expect(getUpdateStatus).toHaveBeenCalledTimes(3)
+    expect(service.view.getSnapshot().phase).toBe('rolled-back')
+
+    refreshStatus.resolve({
+      ok: true,
+      value: status('installing', {
+        updateId: 'racing-update-id',
+        version: '3.1.0',
+      }),
+    })
+    await refresh
+
+    expect(service.view.getSnapshot()).toEqual({
+      phase: 'rolled-back',
+      targetVersion: '3.1.0',
+      message: 'The previous version was restored',
+      actions: {
+        check: { enabled: true },
+        installAndRestart: { enabled: false },
+      },
+    })
+  })
+
+  it('does not publish install recovery status after lifecycle disposal', async () => {
+    const recoveryStatus = deferred<RemoteResult<OpenloopUpdateStatus>>()
+    const getUpdateStatus = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        value: status('available', {
+          updateId: 'closing-update-id',
+          version: '3.2.0',
+        }),
+      })
+      .mockReturnValueOnce(recoveryStatus.promise)
+    const service = new OpenloopUpdateService(remote({
+      getUpdateStatus,
+      installUpdateAndRestart: vi.fn(() => Promise.resolve({
+        ok: false as const,
+        error: {
+          code: 'update_failure',
+          message: 'desktop update operation failed',
+          details: {},
+        },
+      })),
+    }))
+    await service.refresh()
+
+    const install = service.installUpdateAndRestart()
+    await vi.waitFor(() => {
+      expect(getUpdateStatus).toHaveBeenCalledTimes(2)
+    })
+    const snapshot = service.view.getSnapshot()
+    service.close()
+    recoveryStatus.resolve({
+      ok: true,
+      value: status('rolled-back', {
+        version: '3.2.0',
+        message: 'The previous version was restored',
+      }),
+    })
+
+    await expect(install).rejects.toThrow(
+      'Openloop update install failed: update_failure: desktop update operation failed',
+    )
+    expect(service.view.getSnapshot()).toBe(snapshot)
+  })
+
   it('runs manual checks regardless of prior terminal status and surfaces safe failures', async () => {
     const checkForUpdate = vi.fn()
       .mockResolvedValueOnce({

@@ -738,6 +738,10 @@ describe('Openloop desktop foundation configuration', () => {
     expect(library).toContain('app.updater_builder()')
     expect(library).toContain('.endpoints(endpoints)?')
     expect(library).toContain('.pubkey(public_key)')
+    expect(library).toContain('.timeout(timeout)')
+    expect(library).toContain(
+      'update.timeout = Some(update::channel::UPDATE_NETWORK_TIMEOUT)',
+    )
     expect(library).toContain('updater_config: updater_config.clone()')
     expect(library).toContain('build_channel_updater(&self.app, &self.updater_config)')
     expect(library).toMatch(

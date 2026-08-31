@@ -3,6 +3,7 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     str::FromStr,
+    time::Duration,
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -19,6 +20,7 @@ const TEST_KEY_ENVIRONMENT: &str = "OPENLOOP_UPDATER_PUBLIC_KEY";
 const STABLE_KEY_ENVIRONMENT: &str = "OPENLOOP_STABLE_UPDATER_PUBLIC_KEY";
 const TEST_ENDPOINT: &str = "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-rolling/latest-test-k1.json";
 const STABLE_ENDPOINT: &str = "https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-stable-rolling/latest-stable-k1.json";
+pub const UPDATE_NETWORK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReleaseChannel {
@@ -51,6 +53,7 @@ pub struct UpdateChannelConfig {
 pub struct UpdaterBuilderConfig {
     endpoints: Vec<Url>,
     public_key: String,
+    timeout: Duration,
 }
 
 impl UpdateChannelConfig {
@@ -145,6 +148,7 @@ impl UpdateChannelConfig {
         UpdaterBuilderConfig {
             endpoints: vec![self.endpoint.clone()],
             public_key: self.public_key.clone(),
+            timeout: UPDATE_NETWORK_TIMEOUT,
         }
     }
 }
@@ -158,8 +162,12 @@ impl UpdaterBuilderConfig {
         &self.public_key
     }
 
-    pub fn into_parts(self) -> (Vec<Url>, String) {
-        (self.endpoints, self.public_key)
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    pub fn into_parts(self) -> (Vec<Url>, String, Duration) {
+        (self.endpoints, self.public_key, self.timeout)
     }
 }
 

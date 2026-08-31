@@ -14,7 +14,7 @@ use tauri_plugin_updater::{Update, Updater};
 
 use super::{
     archive::{stage_verified_archive, ArchiveStageError},
-    channel::ReleaseChannel,
+    channel::{ReleaseChannel, UPDATE_NETWORK_TIMEOUT},
     health::HEALTH_PROBE_ARGUMENT,
     recovery::{
         CandidateHealth, HealthStatus, PublicationOutcome, RecoveryError, RecoveryTransaction,
@@ -261,9 +261,12 @@ pub async fn check_update(
     current: &str,
     policy: &DownloadUrlPolicy,
 ) -> Result<(CheckReport, Option<Update>), CoordinatorError> {
-    let update = updater.check().await.map_err(CoordinatorError::Check)?;
+    let mut update = updater.check().await.map_err(CoordinatorError::Check)?;
     if let Some(update) = update.as_ref() {
         policy.validate_update(update)?;
+    }
+    if let Some(update) = update.as_mut() {
+        update.timeout = Some(UPDATE_NETWORK_TIMEOUT);
     }
     let report = CheckReport {
         current: current.to_owned(),
