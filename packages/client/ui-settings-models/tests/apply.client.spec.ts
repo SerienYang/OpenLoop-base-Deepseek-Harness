@@ -26,7 +26,12 @@ async function bench(isLoopback = true, credentialControl?: CredentialControlAda
   // The apply path only captures the wire face; no call leaves this fake
   // until a section actually loads.
   ctx.provide('connection', { api: {}, isLoopback } as never)
-  if (credentialControl !== undefined) ctx.provide('credentialControl', credentialControl)
+  ctx.provide('settingsShellOwner', {
+    id: credentialControl === undefined
+      ? '@deepseek-ai/dsh-client-ui-settings-general'
+      : '@openloop/shell',
+    ...credentialControl === undefined ? {} : { credentialControl },
+  } as never)
   return { ctx, slots: ctx.get('slots') as SlotRegistry, locale }
 }
 
@@ -45,7 +50,7 @@ function declare(slots: SlotRegistry): () => void {
 
 describe('ui-settings-models apply', () => {
   it('declares the services it uses', () => {
-    expect(inject).toEqual(['slots', 'locale', 'connection', 'remote'])
+    expect(inject).toEqual(['slots', 'locale', 'connection', 'remote', 'settingsShellOwner'])
   })
 
   it('registers the models nav entry for declarations before or after apply', async () => {

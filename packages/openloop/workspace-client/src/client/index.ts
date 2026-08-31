@@ -42,6 +42,7 @@ export const inject = [
   'openloopWorkspaces',
   'conversation',
   'locale',
+  'settingsShellOwner',
 ]
 
 function clientSessions(ctx: ClientContext): ISessions {

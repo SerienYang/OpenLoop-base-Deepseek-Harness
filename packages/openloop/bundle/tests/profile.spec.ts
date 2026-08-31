@@ -340,21 +340,22 @@ describe('OpenLoop profile', () => {
     }
   })
 
-  it('enables shared settings contributors behind the Openloop owner and credential control', () => {
+  it('leaves browser settings activation dependencies to each plugin export', () => {
     const entries = openloopEntries()
     expect(entries.find(entry => entry.id === 'ui-settings-general')).toMatchObject({
       disabled: false,
-      inject: ['settingsShellOwner'],
     })
     for (const id of ['ui-settings-models', 'ui-settings-plugins']) {
       expect(entries.find(entry => entry.id === id)).toMatchObject({
         disabled: false,
-        inject: ['settingsShellOwner', 'credentialControl'],
       })
     }
+    expect(entries.find(entry => entry.id === 'ui-settings-general')?.inject).toBeUndefined()
+    expect(entries.find(entry => entry.id === 'ui-settings-models')?.inject).toBeUndefined()
+    expect(entries.find(entry => entry.id === 'ui-settings-plugins')?.inject).toBeUndefined()
     expect(entries.find(entry => entry.id === 'ui-settings')?.disabled).toBe(true)
     expect(entries.find(entry => entry.id === 'openloop-workspace-client')?.inject)
-      .toEqual(['settingsShellOwner'])
+      .toBeUndefined()
     expect(entries.find(entry => entry.id === 'shell')?.inject)
       .toEqual(['locale', 'remote', 'remote.openloopDesktop'])
   })
@@ -370,7 +371,6 @@ describe('OpenLoop profile', () => {
     expect(entries.find(entry => entry.id === 'openloop-workspace-client')).toEqual({
       id: 'openloop-workspace-client',
       name: '@openloop/workspace-client',
-      inject: ['settingsShellOwner'],
     })
     expect(enabledClientPackages()).not.toContain('@deepseek-ai/dsh-client-ui-settings')
     expect(enabledClientPackages()).toContain('@openloop/settings-foundation')

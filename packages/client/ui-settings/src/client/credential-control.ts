@@ -49,9 +49,3 @@ export interface CredentialControlAdapter {
   /** Whether deleting a provider profile should also invoke legacy credential deletion. */
   readonly deleteCredentialWithProfile: boolean
 }
-
-declare module '@deepseek-ai/cordis' {
-  interface Context {
-    credentialControl: CredentialControlAdapter
-  }
-}

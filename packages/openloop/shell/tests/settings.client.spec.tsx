@@ -1,7 +1,31 @@
 // @vitest-environment jsdom
 import { Context } from '@deepseek-ai/cordis'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
-import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
+import {
+  createSnapshotStore,
+  SlotRegistry,
+  type SessionListState,
+} from '@deepseek-ai/dsh-client-runtime/client'
+import {
+  apply as applyGeneral,
+  inject as injectGeneral,
+} from '@deepseek-ai/dsh-client-ui-settings-general/client'
+import {
+  apply as applyModels,
+  inject as injectModels,
+} from '@deepseek-ai/dsh-client-ui-settings-models/client'
+import {
+  apply as applyPlugins,
+  inject as injectPlugins,
+} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
+import type {
+  CredentialControlAdapter,
+  SettingsShellOwner,
+} from '@deepseek-ai/dsh-client-ui-settings/client'
+import {
+  apply as applyWorkspace,
+  inject as injectWorkspace,
+} from '@openloop/workspace-client/client'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -411,7 +435,9 @@ describe('Openloop Settings slot owner', () => {
       expect(slots.entries('sidebar.settings')).toHaveLength(1)
     })
 
-    expect(ctx.get('settingsShellOwner')).toEqual({ id: '@openloop/shell' })
+    const owner = ctx.get('settingsShellOwner') as SettingsShellOwner
+    expect(owner.id).toBe('@openloop/shell')
+    expect(owner.credentialControl).toBeDefined()
     expect(slots.entries('sidebar.settings')[0]?.component).toBe(OpenloopSettings)
     expect(slots.spec('settings.action')).toEqual({ kind: 'list', scope: 'root' })
     expect(slots.spec('settings.section')).toEqual({ kind: 'list', scope: 'root' })
@@ -429,5 +455,163 @@ describe('Openloop Settings slot owner', () => {
     expect((slots.entries('settings.section')[0]?.options.label as () => string)())
       .toBe('关于与更新')
     await fiber.dispose()
+  })
+
+  it('activates early browser contributors only after the atomic Openloop owner arrives', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SlotRegistry).await()
+    const slots = ctx.get('slots') as SlotRegistry
+    const locale = new LocaleRuntime(ctx)
+    ctx.provide('locale', locale)
+    ctx.provide('theme', {
+      getTheme: () => ({ active: { colorScheme: 'dark', tokens: {} } }),
+      overrideTokens: () => () => {},
+    } as never)
+    const openloopDesktop = {
+      describeCredential: vi.fn(() => Promise.resolve({
+        ok: true as const,
+        value: { configured: true, source: 'keychain', writable: true },
+      })),
+      openCredentialReplacement: vi.fn(),
+      unsetCredential: vi.fn(),
+    }
+    ctx.provide('remote', {
+      openloopDesktop,
+      $on: () => () => {},
+    } as never)
+    ctx.provide('remote.openloopDesktop', openloopDesktop)
+    ctx.provide('connection', {
+      isLoopback: true,
+      api: {
+        settings: {
+          describe: vi.fn(() => Promise.resolve({
+            rpcId: 'settings' as never,
+            result: { ok: false as const, error: {} },
+          })),
+        },
+        credentials: {
+          describe: vi.fn(() => Promise.resolve({
+            rpcId: 'credentials' as never,
+            result: { ok: false as const, error: {} },
+          })),
+        },
+      },
+    } as never)
+    const unavailableScope = {
+      getSnapshot: () => ({
+        status: 'unavailable' as const,
+        value: undefined,
+        base: undefined,
+        user: undefined,
+        revision: undefined,
+        writable: false,
+        mode: 'memory' as const,
+      }),
+      subscribe: () => () => {},
+      set: () => Promise.resolve(),
+      unset: () => Promise.resolve(),
+    }
+    ctx.provide('settingsScope', { bind: () => unavailableScope } as never)
+    const sessions = createSnapshotStore<SessionListState>({
+      ids: [],
+      byId: {},
+      current: undefined,
+      phase: 'ready',
+      subagentsByParent: {},
+      jobsBySession: {},
+      currentAddress: undefined,
+    })
+    ctx.provide('sessions', { list: sessions, open: vi.fn() } as never)
+    ctx.provide('openloopWorkspaces', {
+      grants: createSnapshotStore({ items: [], state: 'idle', error: null }),
+      authorize: vi.fn(),
+      reauthorize: vi.fn(),
+      renameWorkspace: vi.fn(),
+      revoke: vi.fn(),
+      reveal: vi.fn(),
+      connectWorkspace: vi.fn(),
+    } as never)
+    ctx.provide('conversation', { blocks: { setOwned: vi.fn() } } as never)
+
+    const contributorFibers = [
+      ctx.plugin({ inject: [...injectGeneral], apply: applyGeneral }),
+      ctx.plugin({ inject: [...injectModels], apply: applyModels }),
+      ctx.plugin({ inject: [...injectPlugins], apply: applyPlugins }),
+      ctx.plugin({ inject: [...injectWorkspace], apply: applyWorkspace }),
+    ]
+    await Promise.resolve()
+    expect(ctx.get('settingsShellOwner')).toBeUndefined()
+    expect(slots.entries('settings.section')).toEqual([])
+
+    const shellFiber = ctx.plugin({ inject: [...inject], apply })
+    await shellFiber.await()
+    await Promise.all(contributorFibers.map(fiber => fiber.await()))
+    const disposeSidebar = slots.register({
+      name: 'sidebar',
+      children: { 'sidebar.settings': { kind: 'single', scope: 'root' } },
+    } as never, () => null)
+
+    await vi.waitFor(() => {
+      expect(slots.entries('sidebar.settings')).toHaveLength(1)
+      expect(slots.entries('settings.section')).toHaveLength(5)
+    })
+    const owner = ctx.get('settingsShellOwner') as SettingsShellOwner
+    expect(owner.id).toBe('@openloop/shell')
+    expect(owner.credentialControl).toBeDefined()
+    expect(slots.entries('sidebar.settings')[0]?.component).toBe(OpenloopSettings)
+    expect(slots.entries('settings.section').map(entry => entry.options.id)).toEqual([
+      'general',
+      'models',
+      'plugins',
+      'workspace',
+      'about-update',
+    ])
+
+    const models = slots.entries('settings.section')
+      .find(entry => entry.options.id === 'models')!
+    const modelsFace = (models.inject as () => {
+      credentialControl?: CredentialControlAdapter
+    })()
+    expect(modelsFace.credentialControl).toBe(owner.credentialControl)
+    const webSearch = slots.entries('settings.plugin.item')
+      .find(entry => entry.options.key === 'web-search-deepseek')!
+    const webSearchFace = (webSearch.inject as () => {
+      credentialControl?: CredentialControlAdapter
+    })()
+    expect(webSearchFace.credentialControl).toBe(owner.credentialControl)
+
+    disposeSidebar()
+    expect(slots.entries('sidebar.settings')).toEqual([])
+    const disposeReplacementSidebar = slots.register({
+      name: 'sidebar',
+      children: { 'sidebar.settings': { kind: 'single', scope: 'root' } },
+    } as never, () => null)
+    await vi.waitFor(() => {
+      expect(slots.entries('sidebar.settings')).toHaveLength(1)
+      expect(slots.entries('settings.section')).toHaveLength(5)
+    })
+
+    disposeReplacementSidebar()
+    await shellFiber.dispose()
+    await vi.waitFor(() => {
+      expect(ctx.get('settingsShellOwner')).toBeUndefined()
+      expect(slots.entries('settings.section')).toEqual([])
+    })
+
+    const replacementShellFiber = ctx.plugin({ inject: [...inject], apply })
+    await replacementShellFiber.await()
+    const disposeFinalSidebar = slots.register({
+      name: 'sidebar',
+      children: { 'sidebar.settings': { kind: 'single', scope: 'root' } },
+    } as never, () => null)
+    await vi.waitFor(() => {
+      expect(slots.entries('sidebar.settings')).toHaveLength(1)
+      expect(slots.entries('settings.section')).toHaveLength(5)
+    })
+    expect((ctx.get('settingsShellOwner') as SettingsShellOwner).id).toBe('@openloop/shell')
+
+    disposeFinalSidebar()
+    await replacementShellFiber.dispose()
+    for (const fiber of contributorFibers) await fiber.dispose()
   })
 })

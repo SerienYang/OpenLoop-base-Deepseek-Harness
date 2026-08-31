@@ -47,15 +47,12 @@
   disabled: true
 - id: ui-settings-general
   disabled: false
-  inject: [settingsShellOwner]
 - id: ui-settings-models
   disabled: false
-  inject: [settingsShellOwner, credentialControl]
 - id: ui-settings-plugin-inventory
   disabled: true
 - id: ui-settings-plugins
   disabled: false
-  inject: [settingsShellOwner, credentialControl]
 - id: ui-permission
   disabled: true
 - id: ui-agent-preset
@@ -128,7 +125,6 @@
       name: '@openloop/desktop-bridge-client'
     - id: openloop-workspace-client
       name: '@openloop/workspace-client'
-      inject: [settingsShellOwner]
     - id: credentials-keychain
       name: '@openloop/credentials-keychain'
       inject: [desktopBridge]

@@ -53,10 +53,11 @@ export function refreshIfLoaded(controller: ModelsSettingsStore): void {
 
 /**
  * Required services (cordis fiber inject). The target slot is declared by
- * ui-settings' apply, whose activation order relative to this one is NOT
- * constrained; registration depends on each slot through `slots.inject()`.
+ * settingsShellOwner fixes the profile and optional credential adapter before
+ * this plugin constructs its stores. Slot registration still follows each
+ * declaration through `slots.inject()`.
  */
-export const inject = ['slots', 'locale', 'connection', 'remote']
+export const inject = ['slots', 'locale', 'connection', 'remote', 'settingsShellOwner']
 
 /**
  * Register the Models section once the `settings.section` declaration is on
@@ -68,7 +69,7 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-models: copy dictionaries')
 
   const connection = ctx.get('connection') as ConnectionHandle
-  const credentialControl = ctx.get('credentialControl')
+  const credentialControl = ctx.settingsShellOwner.credentialControl
   const controller = new ModelsSettingsStore(connection.api, credentialControl)
   const useSnapshot = bindSnapshotSelector(controller.store)
   // Registration-time text (the nav label thunk) and the inject faces share

@@ -53,7 +53,12 @@ async function bench(served?: string[], credentialControl?: CredentialControlAda
       credentials: { describe: describeCredentials },
     },
   } as never)
-  if (credentialControl !== undefined) ctx.provide('credentialControl', credentialControl)
+  ctx.provide('settingsShellOwner', {
+    id: credentialControl === undefined
+      ? '@deepseek-ai/dsh-client-ui-settings-general'
+      : '@openloop/shell',
+    ...credentialControl === undefined ? {} : { credentialControl },
+  } as never)
   await ctx.plugin(SettingsScopeBinder).await()
   return { ctx, slots: ctx.get('slots') as SlotRegistry, describeCredentials, describeSettings }
 }
@@ -67,7 +72,14 @@ function declareRoot(slots: SlotRegistry): () => void {
 
 describe('ui-settings-plugins apply', () => {
   it('declares the services it uses', () => {
-    expect(inject).toEqual(['slots', 'locale', 'connection', 'remote', 'settingsScope'])
+    expect(inject).toEqual([
+      'slots',
+      'locale',
+      'connection',
+      'remote',
+      'settingsScope',
+      'settingsShellOwner',
+    ])
   })
 
   it('registers one Plugins section and declares the tab and card slots', async () => {

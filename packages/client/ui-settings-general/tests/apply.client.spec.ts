@@ -5,6 +5,7 @@ import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
 import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { usePinnedBrowserLanguages } from '@deepseek-ai/dsh-client-test-runtime'
+import type { SettingsShellOwner } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { apply, inject } from '@deepseek-ai/dsh-client-ui-settings-general/client'
 import { CloseLabel, HeaderContent, TriggerContent } from '../src/client/chrome.tsx'
 import { GeneralSection } from '../src/client/GeneralSection.tsx'
@@ -24,7 +25,12 @@ const SEATS = [
   ['settings.section', GeneralSection],
 ] as const
 
-async function bench(isLoopback = true) {
+async function bench(
+  isLoopback = true,
+  settingsShellOwner: SettingsShellOwner = {
+    id: '@deepseek-ai/dsh-client-ui-settings-general',
+  },
+) {
   const ctx = new Context()
   await ctx.plugin(SlotRegistry).await()
   const locale = new LocaleRuntime(ctx)
@@ -48,6 +54,7 @@ async function bench(isLoopback = true) {
     api: { settings: { describe: settingsDescribe, openDocument: settingsOpenDocument } },
     isLoopback,
   } as never)
+  ctx.provide('settingsShellOwner', settingsShellOwner)
   return { ctx, slots: ctx.get('slots') as SlotRegistry, locale, settingsDescribe, settingsOpenDocument }
 }
 
@@ -75,7 +82,7 @@ function generalEntry(slots: SlotRegistry) {
 
 describe('ui-settings-general apply', () => {
   it('declares the services it uses', () => {
-    expect(inject).toEqual(['slots', 'locale', 'connection'])
+    expect(inject).toEqual(['slots', 'locale', 'connection', 'settingsShellOwner'])
   })
 
   it('fills all five seats for declarations before or after apply', async () => {
@@ -150,8 +157,7 @@ describe('ui-settings-general apply', () => {
   })
 
   it('defers shell ownership to an optional product marker while retaining General and safe actions', async () => {
-    const b = await bench()
-    b.ctx.reflect.provide('settingsShellOwner', { id: '@openloop/shell' })
+    const b = await bench(true, { id: '@openloop/shell' })
     declare(b.slots)
     await b.ctx.plugin({ inject: [...inject], apply }).await()
 

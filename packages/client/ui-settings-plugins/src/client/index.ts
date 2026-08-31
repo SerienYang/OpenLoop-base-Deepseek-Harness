@@ -48,8 +48,15 @@ export type { WebSearchCardFace, WebSearchCardState } from './web-search-card-co
 /** Dictionary namespace owned by this plugin. */
 const NS = 'settings.plugins'
 
-/** Required services (cordis fiber inject). */
-export const inject = ['slots', 'locale', 'connection', 'remote', 'settingsScope']
+/** Required services (cordis fiber inject), including the settled Settings profile. */
+export const inject = [
+  'slots',
+  'locale',
+  'connection',
+  'remote',
+  'settingsScope',
+  'settingsShellOwner',
+]
 
 /**
  * Mount the plugin configuration section and the cards this package ships.
@@ -57,7 +64,7 @@ export const inject = ['slots', 'locale', 'connection', 'remote', 'settingsScope
  */
 export function apply(ctx: ClientContext): void {
   const { api } = ctx.get('connection') as ConnectionHandle
-  const credentialControl = ctx.get('credentialControl')
+  const credentialControl = ctx.settingsShellOwner.credentialControl
   const t = ctx.locale.bind(NS)
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-plugins: section dictionaries')
 

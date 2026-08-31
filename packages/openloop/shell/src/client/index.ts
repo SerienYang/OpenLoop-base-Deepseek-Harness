@@ -6,7 +6,7 @@ import type { ILayout } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { ThemeSnapshot } from '@deepseek-ai/dsh-client-ui-theme/client'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { SettingsShellOwner } from '@deepseek-ai/dsh-client-ui-settings/client'
 import {
   AboutUpdateSection,
   parseBootstrapAppView,
@@ -135,7 +135,6 @@ export const inject = ['slots', 'theme', 'locale', 'remote', 'remote.openloopDes
 
 /** Dictionary namespace owned by the Openloop shell. */
 const NS = 'openloop.shell'
-const SETTINGS_OWNER = Object.freeze({ id: '@openloop/shell' })
 const UNAVAILABLE_UPDATE: UpdateView = Object.freeze({
   phase: 'unavailable',
   actions: Object.freeze({
@@ -152,19 +151,16 @@ interface OpenloopBootstrapGlobal {
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'openloop-shell: copy dictionaries')
   const t = ctx.locale.bind(NS)
-  ctx.effect(
-    () => ctx.reflect.provide('settingsShellOwner', SETTINGS_OWNER),
-    'openloop-shell: settings owner marker',
-  )
   const desktop = (
     ctx.remote as unknown as { openloopDesktop: OpenloopCredentialRemote }
   ).openloopDesktop
+  const settingsShellOwner: SettingsShellOwner = Object.freeze({
+    id: '@openloop/shell',
+    credentialControl: createOpenloopCredentialControlAdapter(desktop, t),
+  })
   ctx.effect(
-    () => ctx.reflect.provide(
-      'credentialControl',
-      createOpenloopCredentialControlAdapter(desktop, t),
-    ),
-    'openloop-shell: Host credential control',
+    () => ctx.reflect.provide('settingsShellOwner', settingsShellOwner),
+    'openloop-shell: settings owner + Host credential control',
   )
 
   const layout = new OpenloopLayoutController()

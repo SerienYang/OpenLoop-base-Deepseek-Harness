@@ -51,10 +51,11 @@ const NS = 'settings'
 
 /**
  * Required services (cordis fiber inject). The target slots are declared by
- * ui-settings' apply, whose activation order relative to this one is NOT
- * constrained; registrations depend on their slots through `slots.inject()`.
+ * settingsShellOwner is supplied by ui-settings in the default profile or by
+ * the product shell. Slot registrations still follow declaration lifetimes
+ * through `slots.inject()`.
  */
-export const inject = ['slots', 'locale', 'connection']
+export const inject = ['slots', 'locale', 'connection', 'settingsShellOwner']
 
 /**
  * Register the `settings` dictionaries, the chrome content, and the General
@@ -63,7 +64,8 @@ export const inject = ['slots', 'locale', 'connection']
  */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-general: dictionaries')
-  const shellOverridden = ctx.get('settingsShellOwner') !== undefined
+  const shellOverridden = ctx.settingsShellOwner.id
+    !== '@deepseek-ai/dsh-client-ui-settings-general'
 
   // Copy freshness is framework-owned: components read the standard `t`
   // seat, and the nav label is a thunk the owner resolves per render — no

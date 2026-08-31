@@ -458,6 +458,26 @@ describe('Openloop Workspace surfaces', () => {
     })
   })
 
+  it('shows existing Workspace sessions and closes Settings after opening one', () => {
+    const h = harness([
+      grant('alpha', 'ready', [sid('session-current'), sid('session-history')]),
+    ])
+    const close = vi.fn()
+    render(
+      <WorkspaceSettings
+        close={close}
+        useGrants={h.useGrants}
+        useSessions={h.useSessions}
+        actions={h.actions}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Historical discussion' }))
+
+    expect(h.openSession).toHaveBeenCalledWith(sid('session-history'))
+    expect(close).toHaveBeenCalledOnce()
+  })
+
   it('routes the section title, loading label, and all authority states through locale copy', () => {
     const allStates: WorkspaceGrantView['state'][] = [
       'ready',

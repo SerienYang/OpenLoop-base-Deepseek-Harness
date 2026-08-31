@@ -74,6 +74,7 @@ async function bench() {
   ctx.provide('openloopWorkspaces', { grants, ...actions } as never)
   ctx.provide('conversation', { blocks: { setOwned } } as never)
   ctx.provide('locale', new LocaleRuntime(ctx))
+  ctx.provide('settingsShellOwner', { id: '@openloop/shell' })
   return { ctx, slots, grants, sessions, setOwned, actions }
 }
 
@@ -85,6 +86,7 @@ describe('Openloop Workspace client plugin', () => {
       'openloopWorkspaces',
       'conversation',
       'locale',
+      'settingsShellOwner',
     ])
     const b = await bench()
     const fiber = b.ctx.plugin({ inject: [...inject], apply })

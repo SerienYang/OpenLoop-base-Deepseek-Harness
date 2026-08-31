@@ -116,6 +116,7 @@ export function WorkspaceSettings({
               onRename={(workspace) => { openDialog('rename', workspace) }}
               onRemove={(workspace) => { openDialog('remove', workspace) }}
               setActionTrigger={setActionTrigger}
+              showSessions
             />
           </>
         )

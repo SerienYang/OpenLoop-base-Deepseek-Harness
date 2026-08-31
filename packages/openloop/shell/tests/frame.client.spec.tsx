@@ -179,9 +179,12 @@ describe('Openloop root shell Slot contract', () => {
 
     const slots = ctx.get('slots') as SlotRegistry
     expect(inject).toEqual(['slots', 'theme', 'locale', 'remote', 'remote.openloopDesktop'])
-    expect(ctx.get('credentialControl')).toBeDefined()
+    const settingsShellOwner = ctx.get('settingsShellOwner') as {
+      credentialControl?: CredentialControlAdapter
+    }
+    expect(settingsShellOwner.credentialControl).toBeDefined()
     locale.setLocale('en')
-    const credentialControl = ctx.get('credentialControl') as CredentialControlAdapter
+    const credentialControl = settingsShellOwner.credentialControl!
     const credential = render(credentialControl.render({
       reference: 'DEEPSEEK_API_KEY',
       label: 'API key',
