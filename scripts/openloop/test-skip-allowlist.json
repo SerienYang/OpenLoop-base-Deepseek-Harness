@@ -24,6 +24,14 @@
       "owner": "dsh-web-search",
       "reason": "The live DeepSeek search endpoint can succeed without structured source blocks, so this probe is not a reliable merge signal.",
       "expires": "2026-12-31"
+    },
+    {
+      "file": "apps/openloop-desktop/src-tauri/tests/update_cleanup.rs",
+      "line": 1342,
+      "fingerprint": "0f8f6e88860a453a90e4c12f86e9928d7a9ca539e9e573b917ced40baff09716",
+      "owner": "openloop-desktop",
+      "reason": "This child test lowers RLIMIT_NOFILE and is invoked explicitly by its always-enabled parent test to isolate the process-wide limit.",
+      "expires": "2027-03-01"
     }
   ]
 }
