@@ -8,6 +8,7 @@ import {
 import {
   IconCloseOutline16,
   IconSettingsOutline16,
+  Modal,
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
@@ -30,6 +31,16 @@ export const OPENLOOP_SETTINGS_SECTION_IDS = [
 ] as const
 
 type OpenloopSettingsSectionId = typeof OPENLOOP_SETTINGS_SECTION_IDS[number]
+
+const FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'area[href]',
+  'button:not([disabled])',
+  'input:not([disabled]):not([type="hidden"])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',')
 
 export interface OpenloopSettingsSection {
   readonly id: string
@@ -78,6 +89,13 @@ function nextTabIndex(
   return undefined
 }
 
+function focusableElements(panel: HTMLElement): readonly HTMLElement[] {
+  return [...panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)]
+    .filter(element =>
+      element.tabIndex >= 0
+      && element.closest('[hidden],[aria-hidden="true"]') === null)
+}
+
 function SettingsPanel({
   rows,
   activeId,
@@ -94,15 +112,35 @@ function SettingsPanel({
   readonly t: OpenloopSettingsProps['t']
 }) {
   const tabs = useRef(new Map<string, HTMLButtonElement>())
+  const titleBar = useRef<HTMLDivElement | null>(null)
+  const close = useRef<HTMLButtonElement | null>(null)
   const active = rows.find(row => row.id === activeId) ?? rows[0]
 
   useEffect(() => {
-    const dismiss = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') onClose()
+    const appRoot = document.getElementById('root')
+    const previousInert = appRoot?.inert
+    if (appRoot !== null) appRoot.inert = true
+    const dialog = titleBar.current?.parentElement
+    const modalRoot = dialog?.parentElement
+    const mask = dialog?.previousElementSibling
+    if (mask instanceof HTMLElement) {
+      mask.dataset.testid = 'openloop-settings-mask'
+      mask.tabIndex = -1
     }
-    document.addEventListener('keydown', dismiss)
-    return () => { document.removeEventListener('keydown', dismiss) }
-  }, [onClose])
+    if (dialog !== undefined) {
+      dialog.style.gap = '0'
+      dialog.style.padding = '0'
+    }
+    if (modalRoot !== undefined) modalRoot.style.padding = '0'
+    return () => {
+      if (appRoot !== null) appRoot.inert = previousInert ?? false
+    }
+  }, [])
+
+  useEffect(() => {
+    const activeTab = active === undefined ? undefined : tabs.current.get(active.id)
+    ;(activeTab ?? close.current)?.focus()
+  }, [active?.id])
 
   const move = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number): void => {
     const next = nextTabIndex(event.key, index, rows.length)
@@ -114,78 +152,93 @@ function SettingsPanel({
     tabs.current.get(row.id)?.focus()
   }
 
+  const trapFocus = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    const dialog = titleBar.current?.parentElement
+    if (event.key !== 'Tab' || dialog === undefined) return
+    const focusable = focusableElements(dialog)
+    const first = focusable[0]
+    const last = focusable.at(-1)
+    if (first === undefined || last === undefined) return
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault()
+      first.focus()
+    }
+  }
+
   return (
-    <div className={css.overlay}>
-      <button
-        type="button"
-        className={css.mask}
-        data-testid="openloop-settings-mask"
-        aria-label={t('settingsDismiss')}
-        onClick={onClose}
-      />
-      <div className={css.panel} role="dialog" aria-modal="true" aria-labelledby="openloop-settings-title">
-        <div className={css.titleBar}>
-          <h2 id="openloop-settings-title">{t('settings')}</h2>
-          <div className={css.actions}>{renderSlot('settings.action', {})}</div>
-          <button
-            type="button"
-            className={css.close}
-            aria-label={t('settingsClose')}
-            onClick={onClose}
-          >
-            <IconCloseOutline16 size={16} />
-          </button>
-        </div>
-        <div className={css.body}>
-          <nav className={css.nav} aria-label={t('settings')}>
-            <div
-              className={css.navScroll}
-              data-testid="openloop-settings-nav-scroll"
-              role="tablist"
-              aria-label={t('settings')}
-              aria-orientation="vertical"
-            >
-              {rows.map((row, index) => {
-                const selected = row.id === active?.id
-                return (
-                  <button
-                    key={row.id}
-                    ref={(element) => {
-                      if (element === null) tabs.current.delete(row.id)
-                      else tabs.current.set(row.id, element)
-                    }}
-                    id={`openloop-settings-tab-${row.id}`}
-                    type="button"
-                    role="tab"
-                    className={css.tab}
-                    aria-selected={selected}
-                    aria-controls={`openloop-settings-panel-${row.id}`}
-                    tabIndex={selected ? 0 : -1}
-                    onClick={() => { onSelect(row.id as OpenloopSettingsSectionId) }}
-                    onKeyDown={(event) => { move(event, index) }}
-                  >
-                    {row.label}
-                  </button>
-                )
-              })}
-            </div>
-          </nav>
+    <Modal
+      open
+      title={t('settings')}
+      closeLabel={t('settingsDismiss')}
+      onClose={onClose}
+      className={css.panel as string}
+      headless
+    >
+      <div ref={titleBar} className={css.titleBar} onKeyDown={trapFocus}>
+        <h2 id="openloop-settings-title">{t('settings')}</h2>
+        <div className={css.actions}>{renderSlot('settings.action', {})}</div>
+        <button
+          ref={close}
+          type="button"
+          className={css.close}
+          aria-label={t('settingsClose')}
+          onClick={onClose}
+        >
+          <IconCloseOutline16 size={16} />
+        </button>
+      </div>
+      <div className={css.body} onKeyDown={trapFocus}>
+        <nav className={css.nav} aria-label={t('settings')}>
           <div
-            id={active === undefined ? undefined : `openloop-settings-panel-${active.id}`}
-            className={css.content}
-            data-testid="openloop-settings-content-scroll"
-            role="tabpanel"
-            aria-labelledby={active === undefined
-              ? undefined
-              : `openloop-settings-tab-${active.id}`}
-            tabIndex={0}
+            className={css.navScroll}
+            data-testid="openloop-settings-nav-scroll"
+            role="tablist"
+            aria-label={t('settings')}
+            aria-orientation="vertical"
           >
-            {active !== undefined
-              && renderSlot('settings.section', { close: onClose }, { only: active.id })}
+            {rows.map((row, index) => {
+              const selected = row.id === active?.id
+              return (
+                <button
+                  key={row.id}
+                  ref={(element) => {
+                    if (element === null) tabs.current.delete(row.id)
+                    else tabs.current.set(row.id, element)
+                  }}
+                  id={`openloop-settings-tab-${row.id}`}
+                  type="button"
+                  role="tab"
+                  className={css.tab}
+                  aria-selected={selected}
+                  aria-controls={`openloop-settings-panel-${row.id}`}
+                  tabIndex={selected ? 0 : -1}
+                  onClick={() => { onSelect(row.id as OpenloopSettingsSectionId) }}
+                  onKeyDown={(event) => { move(event, index) }}
+                >
+                  {row.label}
+                </button>
+              )
+            })}
           </div>
+        </nav>
+        <div
+          id={active === undefined ? undefined : `openloop-settings-panel-${active.id}`}
+          className={css.content}
+          data-testid="openloop-settings-content-scroll"
+          role="tabpanel"
+          aria-labelledby={active === undefined
+            ? undefined
+            : `openloop-settings-tab-${active.id}`}
+          tabIndex={0}
+        >
+          {active !== undefined
+            && renderSlot('settings.section', { close: onClose }, { only: active.id })}
         </div>
       </div>
-    </div>
+    </Modal>
   )
 }
 

@@ -25,6 +25,7 @@ import type {
 import {
   apply as applyWorkspace,
   inject as injectWorkspace,
+  WorkspaceSettings,
 } from '@openloop/workspace-client/client'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
@@ -32,6 +33,7 @@ import { resolve } from 'node:path'
 import {
   type ComponentProps,
   type ReactNode,
+  useState,
 } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -106,12 +108,16 @@ function mountSettings({
   rows,
   steps = [],
   onboardingActive = false,
+  section,
+  container,
 }: {
   locale?: keyof typeof LABELS
   wide?: boolean
   rows?: readonly Row[]
   steps?: readonly Step[]
   onboardingActive?: boolean
+  section?: (owner: Record<string, unknown>, only: string | undefined) => ReactNode
+  container?: HTMLElement
 } = {}) {
   const sectionRows = rows ?? [
     { id: 'plugins', order: 30, label: LABELS[locale].plugins },
@@ -135,6 +141,7 @@ function mountSettings({
       ? { key, owner }
       : { key, owner, only: options.only })
     if (key === 'settings.section') {
+      if (section !== undefined) return section(owner, options?.only)
       return <div data-testid={`section-${options?.only ?? 'all'}`}>{options?.only}</div>
     }
     if (key === 'settings.action') return <button type="button">Header action</button>
@@ -158,14 +165,29 @@ function mountSettings({
     renderSlot,
     t,
   } as unknown as SettingsProps
+  const view = container === undefined
+    ? render(<OpenloopSettings {...props} />)
+    : render(<OpenloopSettings {...props} />, { container })
   return {
-    ...render(<OpenloopSettings {...props} />),
+    ...view,
     calls,
   }
 }
 
 function openSettings(locale: keyof typeof SHELL_COPY = 'en') {
   fireEvent.click(screen.getByRole('button', { name: SHELL_COPY[locale].settings }))
+}
+
+function DynamicSection() {
+  const [transientDisabled, setTransientDisabled] = useState(false)
+  return (
+    <>
+      <button type="button" onClick={() => { setTransientDisabled(true) }}>
+        Current last
+      </button>
+      <button type="button" disabled={transientDisabled}>Transient last</button>
+    </>
+  )
 }
 
 describe('Openloop Settings navigation', () => {
@@ -211,6 +233,37 @@ describe('Openloop Settings navigation', () => {
     expect(tabs[4]).toBe(document.activeElement)
   })
 
+  it('moves focus to the active tab when the dialog opens', () => {
+    mountSettings()
+    openSettings()
+
+    expect(screen.getByRole('tab', { name: 'General' })).toBe(document.activeElement)
+  })
+
+  it('cycles Tab in both directions using the currently focusable dialog elements', () => {
+    mountSettings({ section: () => <DynamicSection /> })
+    openSettings()
+
+    const first = screen.getByRole<HTMLButtonElement>('button', { name: 'Header action' })
+    const transientLast = screen.getByRole<HTMLButtonElement>('button', {
+      name: 'Transient last',
+    })
+    transientLast.focus()
+    fireEvent.keyDown(transientLast, { key: 'Tab' })
+    expect(first).toBe(document.activeElement)
+
+    first.focus()
+    fireEvent.keyDown(first, { key: 'Tab', shiftKey: true })
+    expect(transientLast).toBe(document.activeElement)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Current last' }))
+    expect(transientLast.disabled).toBe(true)
+    const currentLast = screen.getByRole<HTMLButtonElement>('button', { name: 'Current last' })
+    currentLast.focus()
+    fireEvent.keyDown(currentLast, { key: 'Tab' })
+    expect(first).toBe(document.activeElement)
+  })
+
   it('has one dialog and closes by icon, mask, and Escape with focus returned to the trigger', () => {
     mountSettings()
     const trigger = screen.getByRole<HTMLButtonElement>('button', { name: 'Settings' })
@@ -218,6 +271,9 @@ describe('Openloop Settings navigation', () => {
     openSettings()
     expect(screen.getByRole('dialog', { name: 'Settings' })).toBeTruthy()
     expect(screen.getAllByRole('dialog')).toHaveLength(1)
+    const mask = screen.getByTestId('openloop-settings-mask')
+    expect(mask.getAttribute('aria-hidden')).toBe('true')
+    expect(mask).toHaveProperty('tabIndex', -1)
     fireEvent.click(screen.getByRole('button', { name: 'Close Settings' }))
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(trigger).toBe(document.activeElement)
@@ -231,6 +287,81 @@ describe('Openloop Settings navigation', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(trigger).toBe(document.activeElement)
+  })
+
+  it('portals outside #root and restores its prior inert value on close and unmount', () => {
+    const appRoot = document.createElement('div')
+    appRoot.id = 'root'
+    document.body.append(appRoot)
+    const view = mountSettings({ container: appRoot })
+
+    openSettings()
+    const dialog = screen.getByRole('dialog', { name: 'Settings' })
+    expect(appRoot.contains(dialog)).toBe(false)
+    expect(appRoot.inert).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close Settings' }))
+    expect(appRoot.inert).toBe(false)
+
+    appRoot.inert = true
+    openSettings()
+    view.unmount()
+    expect(appRoot.inert).toBe(true)
+    appRoot.remove()
+  })
+
+  it('lets the Workspace inline subview consume Escape without closing Settings', () => {
+    const workspaceGrant = {
+      workspaceId: 'alpha',
+      name: 'Alpha',
+      displayPath: '~/Projects/alpha',
+      state: 'ready',
+      sessionIds: [],
+    }
+    const workspaceSessions: SessionListState = {
+      ids: [],
+      byId: {},
+      current: undefined,
+      phase: 'ready',
+      subagentsByParent: {},
+      jobsBySession: {},
+      currentAddress: undefined,
+    }
+    mountSettings({
+      section: (owner, only) => only === 'workspace'
+        ? (
+          <WorkspaceSettings
+            close={owner.close as () => void}
+            useGrants={((select: (state: unknown) => unknown) => select({
+              items: [workspaceGrant],
+              state: 'idle',
+              error: null,
+            })) as never}
+            useSessions={((select: (state: SessionListState) => unknown) =>
+              select(workspaceSessions)) as never}
+            actions={{
+              authorize: vi.fn(),
+              reauthorize: vi.fn(),
+              rename: vi.fn(),
+              remove: vi.fn(),
+              reveal: vi.fn(),
+              startSession: vi.fn(),
+              openSession: vi.fn(),
+            }}
+          />
+        )
+        : <div data-testid={`section-${only ?? 'all'}`}>{only}</div>,
+    })
+    openSettings()
+    fireEvent.click(screen.getByRole('tab', { name: 'Workspace' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Workspace actions for Alpha' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+
+    const rename = screen.getByRole('textbox', { name: 'Rename' })
+    fireEvent.keyDown(rename, { key: 'Escape' })
+
+    expect(screen.getByRole('dialog', { name: 'Settings' })).toBeTruthy()
+    expect(screen.getByRole('region', { name: 'Workspace settings' })).toBeTruthy()
   })
 
   it('uses icon-only rail affordance with an accessible tooltip label', () => {
