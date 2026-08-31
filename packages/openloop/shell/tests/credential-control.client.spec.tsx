@@ -299,17 +299,23 @@ describe('Openloop CredentialControl', () => {
       initial: { configured: false, writable: true },
       button: '添加 API 密钥',
       outcome: 'saved' as const,
+      confirmed: { configured: true, source: 'keychain', writable: true },
+      confirmedText: 'API 密钥已安全保存',
     },
     {
       operation: 'deletion',
       initial: { configured: true, source: 'keychain', writable: true },
       button: '删除 API 密钥',
       outcome: 'deleted' as const,
+      confirmed: { configured: false, writable: true },
+      confirmedText: '尚未配置 API 密钥',
     },
-  ])('notifies once after confirmed $operation while a refresh-token read is in flight', async ({
+  ])('invalidates an in-flight refresh and follows up after confirmed $operation', async ({
     initial,
     button,
     outcome,
+    confirmed,
+    confirmedText,
   }) => {
     const mutation = Promise.withResolvers<{
       ok: true
@@ -319,9 +325,14 @@ describe('Openloop CredentialControl', () => {
       ok: true
       value: { configured: boolean; source?: string; writable: boolean }
     }>()
+    const confirmedRead = Promise.withResolvers<{
+      ok: true
+      value: { configured: boolean; source?: string; writable: boolean }
+    }>()
     const describeCredential = vi.fn()
       .mockReturnValueOnce(ok(initial))
       .mockReturnValueOnce(ownerRead.promise)
+      .mockReturnValueOnce(confirmedRead.promise)
     const onChanged = vi.fn()
     const host = remote({
       describeCredential,
@@ -354,10 +365,14 @@ describe('Openloop CredentialControl', () => {
     await act(async () => { mutation.resolve({ ok: true, value: outcome }) })
 
     await waitFor(() => { expect(onChanged).toHaveBeenCalledOnce() })
+    await waitFor(() => { expect(describeCredential).toHaveBeenCalledTimes(3) })
+    await act(async () => { confirmedRead.resolve({ ok: true, value: confirmed }) })
+    expect(await screen.findByText(confirmedText)).toBeTruthy()
     await act(async () => {
       ownerRead.resolve({ ok: true, value: initial })
       await ownerRead.promise
     })
+    expect(screen.getByText(confirmedText)).toBeTruthy()
   })
 
   it('keeps the last status and reports a refresh failure when a refresh-token read rejects', async () => {
@@ -445,7 +460,7 @@ describe('Openloop CredentialControl', () => {
   })
 
   it.each(['reference change', 'unmount'])(
-    'does not notify after a confirmed mutation outlives a %s',
+    'notifies after a confirmed mutation outlives a %s',
     async (endLifetime) => {
       const mutation = Promise.withResolvers<{
         ok: true
@@ -482,7 +497,7 @@ describe('Openloop CredentialControl', () => {
       }
       await act(async () => { mutation.resolve({ ok: true, value: 'saved' }) })
 
-      expect(onChanged).not.toHaveBeenCalled()
+      expect(onChanged).toHaveBeenCalledOnce()
       expect(describeCredential).toHaveBeenCalledTimes(endLifetime === 'unmount' ? 1 : 2)
       if (endLifetime === 'reference change') {
         expect(screen.getByText('尚未配置 API 密钥')).toBeTruthy()
@@ -531,4 +546,37 @@ describe('Openloop CredentialControl', () => {
     expect(onChanged).toHaveBeenCalledOnce()
     expect(describeCredential).toHaveBeenCalledTimes(2)
   })
+
+  it.each(['throw', 'reject'])(
+    'converges locally without a mutation error when onChanged %s',
+    async (failureMode) => {
+      const describeCredential = vi.fn()
+        .mockReturnValueOnce(ok({ configured: false, writable: true }))
+        .mockReturnValueOnce(ok({ configured: true, source: 'keychain', writable: true }))
+      const onChanged = failureMode === 'throw'
+        ? vi.fn(() => { throw new Error('owner refresh failed') })
+        : vi.fn(() => Promise.reject(new Error('owner refresh failed')))
+      const host = remote({
+        describeCredential,
+        openCredentialReplacement: vi.fn(() => ok('saved' as const)),
+      })
+
+      render(
+        <CredentialControl
+          reference="DEEPSEEK_API_KEY"
+          label="API 密钥"
+          remote={host}
+          onChanged={onChanged}
+        />,
+      )
+      await screen.findByText('尚未配置 API 密钥')
+
+      fireEvent.click(screen.getByRole('button', { name: '添加 API 密钥' }))
+
+      expect(await screen.findByText('API 密钥已安全保存')).toBeTruthy()
+      expect(onChanged).toHaveBeenCalledOnce()
+      expect(describeCredential).toHaveBeenCalledTimes(2)
+      expect(screen.queryByText('无法更新 API 密钥，请重试。')).toBeNull()
+    },
+  )
 })

@@ -125,6 +125,13 @@ export class ModelsSettingsStore {
    */
   async load(): Promise<void> {
     const generation = ++this.generation
+    const previousCredentials = new Map(
+      this.store.getSnapshot().rows.flatMap(row =>
+        row.apiKeyEnv === undefined || row.credential === undefined
+          ? []
+          : [[row.apiKeyEnv, row.credential] as const],
+      ),
+    )
     this.store.update((s) => { s.status = 'loading'; s.error = null })
     let providers: ConfigurableProviderView[]
     let writable: boolean
@@ -184,6 +191,12 @@ export class ModelsSettingsStore {
         }
       } catch (error) {
         credentialError = messageOf(error)
+      }
+    }
+    if (credentialError !== null) {
+      for (const ref of refs) {
+        const previous = previousCredentials.get(ref)
+        if (previous !== undefined) credentials[ref] = previous
       }
     }
     if (generation !== this.generation) return

@@ -93,7 +93,6 @@ export function CredentialControl(props: CredentialControlProps): ReactNode {
   const mutate = async (operation: 'replace' | 'delete'): Promise<void> => {
     if (busy !== undefined) return
     const lifetime = lifetimeEpoch.current
-    const readAtStart = readGeneration.current
     setBusy(operation)
     setFailure(undefined)
     try {
@@ -116,16 +115,19 @@ export function CredentialControl(props: CredentialControlProps): ReactNode {
         }
         return
       }
-      if (outcome === 'cancelled' || lifetimeEpoch.current !== lifetime) return
+      if (outcome === 'cancelled') return
+      const confirmationGeneration = lifetimeEpoch.current === lifetime
+        ? ++readGeneration.current
+        : undefined
       try {
         await onChanged?.()
       } catch {
         // The confirmed Host outcome still needs local convergence below.
       }
-      if (lifetimeEpoch.current !== lifetime) return
+      if (confirmationGeneration === undefined || lifetimeEpoch.current !== lifetime) return
       // A newer owner read already covers the confirmed mutation. Otherwise
       // this control owns one follow-up read so standalone usage converges.
-      if (readGeneration.current === readAtStart) await readStatus('refresh')
+      if (readGeneration.current === confirmationGeneration) await readStatus('refresh')
     } finally {
       if (lifetimeEpoch.current === lifetime) setBusy(undefined)
     }

@@ -1,6 +1,7 @@
 /** Page-store join: directory × namespaces × credentials, with last-good rows on failure. */
 import { describe, expect, it } from 'vitest'
 import type { RpcResponse } from '@deepseek-ai/dsh-api-remotes/client'
+import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { messageOf, ModelsSettingsStore } from '../src/client/store.ts'
 
 let nextRpc = 0
@@ -128,6 +129,142 @@ describe('ModelsSettingsStore', () => {
     const store = new ModelsSettingsStore(face)
     await expect(store.load()).resolves.toBeUndefined()
     expect(store.store.getSnapshot().credentialError).toBe('credential transport refusal')
+  })
+
+  it('preserves successful credential statuses after a later business failure', async () => {
+    let load = 0
+    const { face } = api({
+      describeCredentials: (refs) => {
+        load += 1
+        if (load === 1) {
+          return Promise.resolve(ok({
+            credentials: Object.fromEntries(
+              refs.map(ref => [ref, { configured: true, source: 'keychain', writable: true }]),
+            ),
+          }))
+        }
+        return Promise.resolve(fail<{ credentials: Record<string, unknown> }>('credential unavailable'))
+      },
+    })
+    const store = new ModelsSettingsStore(face)
+    await store.load()
+
+    await store.load()
+
+    const state = store.store.getSnapshot()
+    expect(state.credentialError).toBe('credential unavailable')
+    expect(state.rows.filter(row => row.apiKeyEnv !== undefined).every(row =>
+      row.credential?.configured === true && row.credential.source === 'keychain',
+    )).toBe(true)
+  })
+
+  it('preserves successful credential statuses after a later transport rejection', async () => {
+    let load = 0
+    const { face } = api({
+      describeCredentials: (refs) => {
+        load += 1
+        if (load === 1) {
+          return Promise.resolve(ok({
+            credentials: Object.fromEntries(
+              refs.map(ref => [ref, { configured: true, source: 'keychain', writable: true }]),
+            ),
+          }))
+        }
+        return Promise.reject(new Error('credential transport down'))
+      },
+    })
+    const store = new ModelsSettingsStore(face)
+    await store.load()
+
+    await store.load()
+
+    const state = store.store.getSnapshot()
+    expect(state.credentialError).toBe('credential transport down')
+    expect(state.rows.filter(row => row.apiKeyEnv !== undefined).every(row =>
+      row.credential?.configured === true && row.credential.source === 'keychain',
+    )).toBe(true)
+  })
+
+  it('preserves successful injected-adapter statuses after a later rejection', async () => {
+    let rejecting = false
+    const credentialControl: CredentialControlAdapter = {
+      describe: async (ref) => {
+        if (rejecting) throw new Error('host credential transport down')
+        return { configured: ref === 'OPENAI_API_KEY', source: 'keychain', writable: true }
+      },
+      render: () => null,
+      materializeApiKeyEnv: true,
+      deleteCredentialWithProfile: false,
+    }
+    const { face } = api()
+    const store = new ModelsSettingsStore(face, credentialControl)
+    await store.load()
+    rejecting = true
+
+    await store.load()
+
+    const state = store.store.getSnapshot()
+    expect(state.credentialError).toBe('host credential transport down')
+    expect(state.rows.find(row => row.apiKeyEnv === 'DEEPSEEK_API_KEY')?.credential).toEqual({
+      configured: false,
+      source: 'keychain',
+      writable: true,
+    })
+    expect(state.rows.find(row => row.apiKeyEnv === 'OPENAI_API_KEY')?.credential).toEqual({
+      configured: true,
+      source: 'keychain',
+      writable: true,
+    })
+  })
+
+  it('does not retain credential status for removed or changed references', async () => {
+    let rotated = false
+    let credentialLoad = 0
+    const { face, seenRefs } = api({
+      describeSettings: () => Promise.resolve(ok({
+        writable: true,
+        hasDocument: false,
+        namespaces: rotated
+          ? [{
+            ns: 'llm-deepseek',
+            schema: {},
+            value: { apiKeyEnv: 'ROTATED_API_KEY' },
+            base: {},
+            applies: 'live' as const,
+            secrets: [],
+            revision: 1,
+          }]
+          : NAMESPACES,
+      }) as never),
+      describeCredentials: (refs) => {
+        credentialLoad += 1
+        if (credentialLoad === 1) {
+          return Promise.resolve(ok({
+            credentials: Object.fromEntries(
+              refs.map(ref => [ref, { configured: true, source: 'keychain', writable: true }]),
+            ),
+          }))
+        }
+        return Promise.reject(new Error('credential transport down'))
+      },
+    })
+    const store = new ModelsSettingsStore(face)
+    await store.load()
+    rotated = true
+
+    await store.load()
+
+    expect(seenRefs).toEqual([
+      ['DEEPSEEK_API_KEY', 'OPENAI_API_KEY'],
+      ['ROTATED_API_KEY'],
+    ])
+    const state = store.store.getSnapshot()
+    expect(state.rows.find(row => row.entry.provider === 'deepseek-official')).toMatchObject({
+      apiKeyEnv: 'ROTATED_API_KEY',
+      credential: undefined,
+    })
+    expect(state.rows.find(row => row.entry.provider === 'openai')?.apiKeyEnv).toBeUndefined()
+    expect(state.rows.find(row => row.entry.provider === 'openai')?.credential).toBeUndefined()
   })
 
   it('surfaces a directory failure and keeps the last good rows', async () => {
