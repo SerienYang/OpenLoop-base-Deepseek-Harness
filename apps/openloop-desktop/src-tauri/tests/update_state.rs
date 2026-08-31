@@ -47,12 +47,13 @@ use openloop_desktop_lib::update::state::{
 
 const NOW: Duration = Duration::from_secs(1_000_000);
 const UPDATE_TTL: Duration = Duration::from_secs(15 * 60);
+const WAITER_STRESS_ROUNDS: usize = 100;
 
 fn available(state: &UpdateState<&'static str>, now: Duration) -> String {
-    assert_eq!(
+    assert!(matches!(
         state.begin_check(now).expect("begin check"),
-        CheckStart::Started
-    );
+        CheckStart::Started(_)
+    ));
     state
         .finish_check(
             now,
@@ -145,10 +146,10 @@ fn appkit_confirmation_delegates_host_derived_presentation_to_native_backend() {
 #[test]
 fn state_machine_covers_no_update_success_and_rollback_paths() {
     let no_update = UpdateState::<&'static str>::new(ReleaseChannel::Test, UPDATE_TTL);
-    assert_eq!(
+    assert!(matches!(
         no_update.begin_check(NOW).expect("begin no-update check"),
-        CheckStart::Started
-    );
+        CheckStart::Started(_)
+    ));
     assert_eq!(
         no_update
             .finish_check(NOW, None)
@@ -450,28 +451,46 @@ fn concurrent_checks_share_the_existing_check_without_starting_another() {
     assert_eq!(
         outcomes
             .iter()
-            .filter(|outcome| **outcome == CheckStart::Started)
+            .filter(|outcome| matches!(outcome, CheckStart::Started(_)))
             .count(),
         1
     );
     assert_eq!(
         outcomes
             .iter()
-            .filter(|outcome| **outcome == CheckStart::AlreadyChecking)
+            .filter(|outcome| matches!(outcome, CheckStart::AlreadyChecking(_)))
             .count(),
         1
     );
+    let started = outcomes.iter().find_map(|outcome| match outcome {
+        CheckStart::Started(completion) => Some(completion),
+        CheckStart::AlreadyChecking(_) => None,
+    });
+    let waiting = outcomes.iter().find_map(|outcome| match outcome {
+        CheckStart::AlreadyChecking(completion) => Some(completion),
+        CheckStart::Started(_) => None,
+    });
+    assert!(Arc::ptr_eq(
+        started.expect("started completion"),
+        waiting.expect("waiting completion")
+    ));
 }
 
 #[test]
 fn waiting_check_call_observes_the_existing_check_final_status() {
     let state = Arc::new(UpdateState::new(ReleaseChannel::Test, UPDATE_TTL));
-    assert_eq!(
+    assert!(matches!(
         state.begin_check(NOW).expect("begin independent check"),
-        CheckStart::Started
-    );
+        CheckStart::Started(_)
+    ));
+    let completion = match state.begin_check(NOW).expect("join independent check") {
+        CheckStart::AlreadyChecking(completion) => completion,
+        CheckStart::Started(_) => panic!("second caller started another check"),
+    };
     let waiting_state = state.clone();
-    let waiter = thread::spawn(move || waiting_state.wait_for_check(&CancellationToken::default()));
+    let waiter = thread::spawn(move || {
+        waiting_state.wait_for_check(&completion, &CancellationToken::default())
+    });
 
     let expected = state
         .finish_check(
@@ -494,12 +513,18 @@ fn waiting_check_call_observes_the_existing_check_final_status() {
 #[test]
 fn waiting_check_call_observes_the_existing_check_failure() {
     let state = Arc::new(UpdateState::<()>::new(ReleaseChannel::Test, UPDATE_TTL));
-    assert_eq!(
+    assert!(matches!(
         state.begin_check(NOW).expect("begin independent check"),
-        CheckStart::Started
-    );
+        CheckStart::Started(_)
+    ));
+    let completion = match state.begin_check(NOW).expect("join independent check") {
+        CheckStart::AlreadyChecking(completion) => completion,
+        CheckStart::Started(_) => panic!("second caller started another check"),
+    };
     let waiting_state = state.clone();
-    let waiter = thread::spawn(move || waiting_state.wait_for_check(&CancellationToken::default()));
+    let waiter = thread::spawn(move || {
+        waiting_state.wait_for_check(&completion, &CancellationToken::default())
+    });
 
     state
         .fail(UpdateFailure::Check)
@@ -514,22 +539,108 @@ fn waiting_check_call_observes_the_existing_check_failure() {
 }
 
 #[test]
+fn delayed_waiter_observes_its_original_completed_check_after_a_new_check_finishes() {
+    for _ in 0..WAITER_STRESS_ROUNDS {
+        let state = UpdateState::new(ReleaseChannel::Test, UPDATE_TTL);
+        assert!(matches!(
+            state.begin_check(NOW).expect("begin check A"),
+            CheckStart::Started(_)
+        ));
+        let completion_a = match state.begin_check(NOW).expect("join check A") {
+            CheckStart::AlreadyChecking(completion) => completion,
+            CheckStart::Started(_) => panic!("check B did not join check A"),
+        };
+        let expected = state
+            .finish_check(
+                NOW + Duration::from_secs(1),
+                Some(AvailableUpdate::new(
+                    "update-a",
+                    "2.0.0",
+                    ReleaseChannel::Test,
+                )),
+            )
+            .expect("finish check A");
+
+        assert!(matches!(
+            state
+                .begin_check(NOW + Duration::from_secs(2))
+                .expect("begin check C"),
+            CheckStart::Started(_)
+        ));
+        state
+            .finish_check(
+                NOW + Duration::from_secs(3),
+                Some(AvailableUpdate::new(
+                    "update-c",
+                    "3.0.0",
+                    ReleaseChannel::Test,
+                )),
+            )
+            .expect("finish check C");
+
+        let observed = state
+            .wait_for_check(&completion_a, &CancellationToken::default())
+            .expect("wait for check A");
+        assert_eq!(observed, expected);
+    }
+}
+
+#[test]
+fn delayed_waiter_observes_its_original_failed_check_after_a_new_check_finishes() {
+    for _ in 0..WAITER_STRESS_ROUNDS {
+        let state = UpdateState::<()>::new(ReleaseChannel::Test, UPDATE_TTL);
+        assert!(matches!(
+            state.begin_check(NOW).expect("begin check A"),
+            CheckStart::Started(_)
+        ));
+        let completion_a = match state.begin_check(NOW).expect("join check A") {
+            CheckStart::AlreadyChecking(completion) => completion,
+            CheckStart::Started(_) => panic!("check B did not join check A"),
+        };
+        state.fail(UpdateFailure::Check).expect("fail check A");
+        let expected = state.snapshot(NOW).expect("failed check A status");
+
+        assert!(matches!(
+            state
+                .begin_check(NOW + Duration::from_secs(1))
+                .expect("begin check C"),
+            CheckStart::Started(_)
+        ));
+        state
+            .finish_check(NOW + Duration::from_secs(2), None)
+            .expect("finish check C");
+
+        let observed = state
+            .wait_for_check(&completion_a, &CancellationToken::default())
+            .expect("wait for check A");
+        assert_eq!(observed, expected);
+    }
+}
+
+#[test]
 fn waiting_check_call_exits_when_cancelled() {
-    let state = Arc::new(UpdateState::<()>::new(ReleaseChannel::Test, UPDATE_TTL));
-    assert_eq!(
-        state.begin_check(NOW).expect("begin independent check"),
-        CheckStart::Started
-    );
-    let cancellation = CancellationToken::default();
-    let waiting_cancellation = cancellation.clone();
-    let waiter = thread::spawn(move || state.wait_for_check(&waiting_cancellation));
+    for _ in 0..WAITER_STRESS_ROUNDS {
+        let state = Arc::new(UpdateState::<()>::new(ReleaseChannel::Test, UPDATE_TTL));
+        assert!(matches!(
+            state.begin_check(NOW).expect("begin independent check"),
+            CheckStart::Started(_)
+        ));
+        let completion = match state.begin_check(NOW).expect("join independent check") {
+            CheckStart::AlreadyChecking(completion) => completion,
+            CheckStart::Started(_) => panic!("second caller started another check"),
+        };
+        let cancellation = CancellationToken::default();
+        let waiting_cancellation = cancellation.clone();
+        let waiter =
+            thread::spawn(move || state.wait_for_check(&completion, &waiting_cancellation));
 
-    cancellation.cancel();
+        cancellation.cancel();
 
-    assert!(matches!(
-        waiter.join().expect("waiting check thread"),
-        Err(UpdateStateError::Cancelled)
-    ));
+        assert!(matches!(
+            waiter.join().expect("waiting check thread"),
+            Err(UpdateStateError::Cancelled)
+        ));
+    }
 }
 
 #[test]
@@ -982,10 +1093,10 @@ fn bridge_dispatch_exposes_safe_status_and_requires_native_confirmation_before_i
 #[test]
 fn bridge_check_waits_for_an_existing_host_check_without_starting_another() {
     let state = Arc::new(UpdateState::new(ReleaseChannel::Test, UPDATE_TTL));
-    assert_eq!(
+    assert!(matches!(
         state.begin_check(NOW).expect("begin independent check"),
-        CheckStart::Started
-    );
+        CheckStart::Started(_)
+    ));
     let checker = Arc::new(CountingChecker(AtomicUsize::new(0)));
     let mut tables = BridgeDispatchTables::unavailable();
     install_update_bridge_handlers(

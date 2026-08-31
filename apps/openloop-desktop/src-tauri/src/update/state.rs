@@ -124,18 +124,82 @@ struct UpdateStateInner<T> {
     pending: Option<PendingUpdate<T>>,
     stale_ids: VecDeque<String>,
     install_reserved: bool,
+    check_completion: Option<Arc<CheckCompletion>>,
 }
 
 pub struct UpdateState<T> {
     channel: ReleaseChannel,
     update_ttl: Duration,
-    inner: Arc<(Mutex<UpdateStateInner<T>>, Condvar)>,
+    inner: Mutex<UpdateStateInner<T>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
+pub struct CheckCompletion {
+    status: Mutex<Option<UpdateStatus>>,
+    completed: Condvar,
+}
+
+impl CheckCompletion {
+    fn new() -> Self {
+        Self {
+            status: Mutex::new(None),
+            completed: Condvar::new(),
+        }
+    }
+
+    fn complete(&self, status: UpdateStatus) -> Result<(), UpdateStateError> {
+        let mut completed_status = self
+            .status
+            .lock()
+            .map_err(|_| UpdateStateError::Unavailable)?;
+        if completed_status.is_some() {
+            return Err(UpdateStateError::InvalidTransition);
+        }
+        *completed_status = Some(status);
+        self.completed.notify_all();
+        Ok(())
+    }
+
+    fn wait(
+        self: &Arc<Self>,
+        cancellation: &CancellationToken,
+    ) -> Result<UpdateStatus, UpdateStateError> {
+        let completion = Arc::downgrade(self);
+        let _subscription = cancellation.subscribe(move || {
+            let Some(completion) = completion.upgrade() else {
+                return;
+            };
+            let Ok(_guard) = completion.status.lock() else {
+                return;
+            };
+            completion.completed.notify_all();
+        });
+        let mut completed_status = self
+            .status
+            .lock()
+            .map_err(|_| UpdateStateError::Unavailable)?;
+        while completed_status.is_none() {
+            if cancellation.is_cancelled() {
+                return Err(UpdateStateError::Cancelled);
+            }
+            completed_status = self
+                .completed
+                .wait(completed_status)
+                .map_err(|_| UpdateStateError::Unavailable)?;
+        }
+        if cancellation.is_cancelled() {
+            return Err(UpdateStateError::Cancelled);
+        }
+        completed_status
+            .clone()
+            .ok_or(UpdateStateError::Unavailable)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum CheckStart {
-    Started,
-    AlreadyChecking,
+    Started(Arc<CheckCompletion>),
+    AlreadyChecking(Arc<CheckCompletion>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,22 +289,25 @@ impl<T> UpdateState<T> {
         Self {
             channel,
             update_ttl,
-            inner: Arc::new((
-                Mutex::new(UpdateStateInner {
-                    status: UpdateStatus::default(),
-                    pending: None,
-                    stale_ids: VecDeque::new(),
-                    install_reserved: false,
-                }),
-                Condvar::new(),
-            )),
+            inner: Mutex::new(UpdateStateInner {
+                status: UpdateStatus::default(),
+                pending: None,
+                stale_ids: VecDeque::new(),
+                install_reserved: false,
+                check_completion: None,
+            }),
         }
     }
 
     pub fn begin_check(&self, _now: Duration) -> Result<CheckStart, UpdateStateError> {
         let mut inner = self.lock()?;
         if inner.status.state == UpdatePhase::Checking {
-            return Ok(CheckStart::AlreadyChecking);
+            return inner
+                .check_completion
+                .as_ref()
+                .cloned()
+                .map(CheckStart::AlreadyChecking)
+                .ok_or(UpdateStateError::Unavailable);
         }
         if matches!(
             inner.status.state,
@@ -259,7 +326,9 @@ impl<T> UpdateState<T> {
             last_checked_at: inner.status.last_checked_at,
             ..UpdateStatus::default()
         };
-        Ok(CheckStart::Started)
+        let completion = Arc::new(CheckCompletion::new());
+        inner.check_completion = Some(completion.clone());
+        Ok(CheckStart::Started(completion))
     }
 
     pub fn finish_check(
@@ -267,39 +336,44 @@ impl<T> UpdateState<T> {
         now: Duration,
         update: Option<AvailableUpdate<T>>,
     ) -> Result<UpdateStatus, UpdateStateError> {
-        let result = (|| {
+        let (completion, completed_status, result) = {
             let mut inner = self.lock()?;
             require_phase(inner.status.state, UpdatePhase::Checking)?;
+            let completion = inner
+                .check_completion
+                .take()
+                .ok_or(UpdateStateError::Unavailable)?;
             let checked_at = milliseconds(now);
-            match update {
+            let result = match update {
                 Some(update) => {
                     if update.channel != self.channel {
                         inner.status =
                             failed_status(Some(checked_at), UpdateFailure::UnsafeSource.message());
-                        return Err(UpdateStateError::WrongChannel);
-                    }
-                    if update.version.trim().is_empty() {
+                        Err(UpdateStateError::WrongChannel)
+                    } else if update.version.trim().is_empty() {
                         inner.status =
                             failed_status(Some(checked_at), UpdateFailure::UnsafeSource.message());
-                        return Err(UpdateStateError::InvalidUpdate);
+                        Err(UpdateStateError::InvalidUpdate)
+                    } else {
+                        let update_id = Uuid::new_v4().to_string();
+                        inner.status = UpdateStatus {
+                            state: UpdatePhase::Available,
+                            update_id: Some(update_id.clone()),
+                            version: Some(update.version.clone()),
+                            release_notes: update.release_notes,
+                            message: None,
+                            progress: None,
+                            last_checked_at: Some(checked_at),
+                        };
+                        inner.pending = Some(PendingUpdate {
+                            update_id,
+                            version: update.version,
+                            channel: update.channel,
+                            expires_at: now.saturating_add(self.update_ttl),
+                            value: update.value,
+                        });
+                        Ok(())
                     }
-                    let update_id = Uuid::new_v4().to_string();
-                    inner.status = UpdateStatus {
-                        state: UpdatePhase::Available,
-                        update_id: Some(update_id.clone()),
-                        version: Some(update.version.clone()),
-                        release_notes: update.release_notes,
-                        message: None,
-                        progress: None,
-                        last_checked_at: Some(checked_at),
-                    };
-                    inner.pending = Some(PendingUpdate {
-                        update_id,
-                        version: update.version,
-                        channel: update.channel,
-                        expires_at: now.saturating_add(self.update_ttl),
-                        value: update.value,
-                    });
                 }
                 None => {
                     inner.status = UpdateStatus {
@@ -307,46 +381,21 @@ impl<T> UpdateState<T> {
                         last_checked_at: Some(checked_at),
                         ..UpdateStatus::default()
                     };
+                    Ok(())
                 }
-            }
-            Ok(inner.status.clone())
-        })();
-        self.inner.1.notify_all();
-        result
+            };
+            (completion, inner.status.clone(), result)
+        };
+        completion.complete(completed_status.clone())?;
+        result.map(|()| completed_status)
     }
 
     pub fn wait_for_check(
         &self,
+        completion: &Arc<CheckCompletion>,
         cancellation: &CancellationToken,
-    ) -> Result<UpdateStatus, UpdateStateError>
-    where
-        T: Send + 'static,
-    {
-        let state = Arc::downgrade(&self.inner);
-        let _subscription = cancellation.subscribe(move || {
-            let Some(state) = state.upgrade() else {
-                return;
-            };
-            let Ok(_guard) = state.0.lock() else {
-                return;
-            };
-            state.1.notify_all();
-        });
-        let mut inner = self.lock()?;
-        while inner.status.state == UpdatePhase::Checking {
-            if cancellation.is_cancelled() {
-                return Err(UpdateStateError::Cancelled);
-            }
-            inner = self
-                .inner
-                .1
-                .wait(inner)
-                .map_err(|_| UpdateStateError::Unavailable)?;
-        }
-        if cancellation.is_cancelled() {
-            return Err(UpdateStateError::Cancelled);
-        }
-        Ok(inner.status.clone())
+    ) -> Result<UpdateStatus, UpdateStateError> {
+        completion.wait(cancellation)
     }
 
     pub fn snapshot(&self, now: Duration) -> Result<UpdateStatus, UpdateStateError> {
@@ -487,18 +536,31 @@ impl<T> UpdateState<T> {
     }
 
     pub fn fail(&self, failure: UpdateFailure) -> Result<(), UpdateStateError> {
-        let result = (|| {
+        let completion = {
             let mut inner = self.lock()?;
             if !inner.status.state.is_active() {
                 return Err(UpdateStateError::InvalidTransition);
             }
+            let was_checking = inner.status.state == UpdatePhase::Checking;
             retire_pending(&mut inner);
             inner.install_reserved = false;
             inner.status = failed_status(inner.status.last_checked_at, failure.message());
-            Ok(())
-        })();
-        self.inner.1.notify_all();
-        result
+            if was_checking {
+                Some((
+                    inner
+                        .check_completion
+                        .take()
+                        .ok_or(UpdateStateError::Unavailable)?,
+                    inner.status.clone(),
+                ))
+            } else {
+                None
+            }
+        };
+        if let Some((completion, status)) = completion {
+            completion.complete(status)?;
+        }
+        Ok(())
     }
 
     fn transition(&self, expected: UpdatePhase, next: UpdatePhase) -> Result<(), UpdateStateError> {
@@ -519,10 +581,7 @@ impl<T> UpdateState<T> {
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, UpdateStateInner<T>>, UpdateStateError> {
-        self.inner
-            .0
-            .lock()
-            .map_err(|_| UpdateStateError::Unavailable)
+        self.inner.lock().map_err(|_| UpdateStateError::Unavailable)
     }
 }
 
@@ -600,16 +659,18 @@ pub fn install_update_bridge_handlers<T: Send + 'static>(
             .begin_check(now)
             .map_err(|_| BridgeHandlerError::update_failure())?
         {
-            CheckStart::AlreadyChecking => {
-                return serde_json::to_value(check_state.wait_for_check(&cancellation).map_err(
-                    |error| match error {
-                        UpdateStateError::Cancelled => BridgeHandlerError::invalid_request(),
-                        _ => BridgeHandlerError::update_failure(),
-                    },
-                )?)
+            CheckStart::AlreadyChecking(completion) => {
+                return serde_json::to_value(
+                    check_state
+                        .wait_for_check(&completion, &cancellation)
+                        .map_err(|error| match error {
+                            UpdateStateError::Cancelled => BridgeHandlerError::invalid_request(),
+                            _ => BridgeHandlerError::update_failure(),
+                        })?,
+                )
                 .map_err(|_| BridgeHandlerError::update_failure());
             }
-            CheckStart::Started => {}
+            CheckStart::Started(_) => {}
         }
         let checked = checker.check();
         let result = match checked {

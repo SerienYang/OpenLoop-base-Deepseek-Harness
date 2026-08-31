@@ -79,7 +79,7 @@ impl ScheduledUpdateWorker {
                     continue;
                 }
                 match state.begin_check(now) {
-                    Ok(CheckStart::Started) => match checker.check() {
+                    Ok(CheckStart::Started(_)) => match checker.check() {
                         Ok(update) => {
                             let _ = state.finish_check(clock(), update);
                         }
@@ -87,7 +87,7 @@ impl ScheduledUpdateWorker {
                             let _ = state.fail(failure);
                         }
                     },
-                    Ok(CheckStart::AlreadyChecking) | Err(_) => {}
+                    Ok(CheckStart::AlreadyChecking(_)) | Err(_) => {}
                 }
             })
             .map_err(|error| format!("start update schedule failed: {error}"))?;
