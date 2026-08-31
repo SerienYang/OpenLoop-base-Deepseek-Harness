@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import type { RpcResponse } from '@deepseek-ai/dsh-api-remotes/client'
 import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
-import { messageOf, ModelsSettingsStore } from '../src/client/store.ts'
+import { messageOf, ModelsSettingsStore, onboardingReadiness } from '../src/client/store.ts'
 
 let nextRpc = 0
 function ok<T>(value: T): RpcResponse<T> {
@@ -276,6 +276,49 @@ describe('ModelsSettingsStore', () => {
       writable: false,
     })
     expect(state.rows.find(row => row.apiKeyEnv === 'ANTHROPIC_API_KEY')?.credential).toBeUndefined()
+  })
+
+  it('keeps onboarding available when only another credential reference fails', async () => {
+    let rejectDeepSeek = false
+    const credentialControl: CredentialControlAdapter = {
+      describe: async (ref) => {
+        if (ref === 'DEEPSEEK_API_KEY' && !rejectDeepSeek) {
+          return { configured: false, writable: true }
+        }
+        throw new Error(`${ref} unavailable`)
+      },
+      render: () => null,
+      materializeApiKeyEnv: true,
+      deleteCredentialWithProfile: false,
+    }
+    const { face } = api({
+      providers: () => Promise.resolve(ok({
+        providers: DIRECTORY.filter(entry => entry.provider !== 'ghost'),
+      })),
+    })
+    const store = new ModelsSettingsStore(face, credentialControl)
+
+    await store.load()
+
+    const state = store.store.getSnapshot()
+    expect(state.credentialError).toBe('credential status is unavailable')
+    expect(state.rows.find(row => row.apiKeyEnv === 'DEEPSEEK_API_KEY')?.credential).toEqual({
+      configured: false,
+      writable: true,
+    })
+    expect(state.rows.find(row => row.apiKeyEnv === 'OPENAI_API_KEY')?.credential).toBeUndefined()
+    expect(onboardingReadiness(state)).toEqual({ kind: 'credential-missing' })
+
+    rejectDeepSeek = true
+    await store.load()
+
+    const lastGoodState = store.store.getSnapshot()
+    expect(lastGoodState.credentialError).toBe('credential status is unavailable')
+    expect(lastGoodState.rows.find(row => row.apiKeyEnv === 'DEEPSEEK_API_KEY')?.credential).toEqual({
+      configured: false,
+      writable: true,
+    })
+    expect(onboardingReadiness(lastGoodState)).toEqual({ kind: 'credential-missing' })
   })
 
   it('does not retain credential status for removed or changed references', async () => {

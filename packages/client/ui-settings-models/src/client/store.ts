@@ -293,7 +293,7 @@ export function onboardingReadiness(state: ModelsSettingsState): OnboardingReadi
   }
   // Past the usable gate an active route names a reference it has no stored
   // credential for, so the remaining questions are all about that credential.
-  if (state.credentialError !== null || row.credential === undefined) {
+  if (row.credential === undefined) {
     return {
       kind: 'unavailable',
       reason: 'credentials-unavailable',

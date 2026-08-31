@@ -112,11 +112,6 @@ describe('onboardingReadiness', () => {
     }))).toEqual({ kind: 'unavailable', reason: 'provider-inactive' })
     expect(onboardingReadiness(state({
       credentialError: 'credentials service is absent',
-    }))).toEqual({
-      kind: 'unavailable',
-      reason: 'credentials-unavailable',
-    })
-    expect(onboardingReadiness(state({
       rows: [row({ credential: undefined })],
     }))).toEqual({ kind: 'unavailable', reason: 'credentials-unavailable' })
     expect(onboardingReadiness(state({
