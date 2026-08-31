@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { PiAiCredentialMode } from '@deepseek-ai/dsh-llm-pi-ai'
 import { assertServiceable, Config, resolveProfiles } from '../src/config.ts'
 
 /** Validate one hand-declared route, with the caller's fields layered onto it. */
@@ -20,10 +21,11 @@ const configWith = (model: Record<string, unknown>): (() => unknown) =>
 
 describe('credential mode', () => {
   it('resolves bearer mode as bearer', () => {
+    const credentialMode: PiAiCredentialMode = 'bearer'
     const profile = resolveProfiles({
       'acme-gateway': {
         apiKeyEnv: 'ACME_API_KEY',
-        credentialMode: 'bearer',
+        credentialMode,
         api: 'openai-completions',
         baseURL: 'https://acme.test',
         models: [{ id: 'm' }],
