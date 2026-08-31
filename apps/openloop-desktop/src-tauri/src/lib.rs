@@ -963,6 +963,23 @@ fn start_health_probe(
     Ok(())
 }
 
+async fn run_update_check_after_recovery<T, Check, CheckFuture>(
+    action: HostAction,
+    channel_root: &Path,
+    channel: update::channel::ReleaseChannel,
+    check: Check,
+) -> Result<T, String>
+where
+    Check: FnOnce() -> CheckFuture,
+    CheckFuture: std::future::Future<Output = Result<T, String>>,
+{
+    if action == HostAction::Install {
+        ensure_no_pending_cleanup(channel_root, channel)
+            .map_err(|error| format!("pending update cleanup check failed: {error}"))?;
+    }
+    check().await
+}
+
 async fn run_update_spike(
     app: &AppHandle,
     action: HostAction,
@@ -994,11 +1011,15 @@ async fn run_update_spike(
     #[cfg(not(target_os = "macos"))]
     crate::update::recovery::recover_interrupted_update(update_root)
         .map_err(|error| format!("recover interrupted update failed: {error}"))?;
-    let mut update = build_channel_updater(app, &updater_config)
-        .map_err(|error| format!("create signed updater failed: {error}"))?
-        .check()
-        .await
-        .map_err(|error| format!("signed update check failed: {error}"))?;
+    let mut update =
+        run_update_check_after_recovery(action, channel_root, updater_config.channel(), || async {
+            build_channel_updater(app, &updater_config)
+                .map_err(|error| format!("create signed updater failed: {error}"))?
+                .check()
+                .await
+                .map_err(|error| format!("signed update check failed: {error}"))
+        })
+        .await?;
     if let Some(update) = update.as_mut() {
         update.timeout = Some(update::channel::UPDATE_NETWORK_TIMEOUT);
     }
@@ -1231,6 +1252,8 @@ mod tests {
         ffi::OsString,
         fs,
         os::unix::{ffi::OsStringExt, net::UnixListener},
+        panic::{catch_unwind, AssertUnwindSafe},
+        sync::atomic::{AtomicUsize, Ordering},
     };
 
     struct HealthyPublication;
@@ -1238,6 +1261,25 @@ mod tests {
     impl crate::update::recovery::CandidateHealth for HealthyPublication {
         fn await_health(&mut self, _: &Path, _: Duration) -> crate::update::recovery::HealthStatus {
             crate::update::recovery::HealthStatus::Healthy
+        }
+    }
+
+    struct CrashAtCommitIntent;
+
+    impl crate::update::recovery::RecoveryTestHook for CrashAtCommitIntent {
+        fn before(
+            &mut self,
+            boundary: crate::update::recovery::RecoveryBoundary,
+            _: &Path,
+            _: &Path,
+        ) {
+            if boundary
+                == crate::update::recovery::RecoveryBoundary::AfterJournalParentFsync(
+                    crate::update::recovery::RecoveryState::CommitIntent,
+                )
+            {
+                panic!("injected recovery journal crash");
+            }
         }
     }
 
@@ -1260,7 +1302,7 @@ mod tests {
     }
 
     #[test]
-    fn update_spike_install_cleanup_gate_precedes_recovery_and_network_check() {
+    fn update_spike_install_cleanup_gates_surround_recovery_and_precede_network_check() {
         let source = include_str!("lib.rs");
         let spike = source
             .split_once("async fn run_update_spike(")
@@ -1278,11 +1320,106 @@ mod tests {
         let recovery = spike
             .find("recover_interrupted_publication(")
             .expect("publication recovery");
+        let post_recovery_gate = spike
+            .find("run_update_check_after_recovery(")
+            .expect("post-recovery cleanup gate");
         let network_check = spike.find(".check()").expect("network update check");
 
         assert!(install_branch < cleanup_gate);
         assert!(cleanup_gate < recovery);
-        assert!(cleanup_gate < network_check);
+        assert!(recovery < post_recovery_gate);
+        assert!(post_recovery_gate < network_check);
+    }
+
+    #[test]
+    fn install_rejects_cleanup_created_by_recovery_before_network_check() {
+        let fixture = tempfile::tempdir().expect("update spike fixture");
+        let channel_root = fixture.path().join("channel");
+        let update_root = fixture.path().join("Applications");
+        let installed = update_root.join("Openloop.app");
+        let candidate = update_root.join(".openloop-candidate.app");
+        fs::create_dir(&channel_root).expect("channel root");
+        fs::create_dir(&update_root).expect("update root");
+        fs::create_dir(&installed).expect("installed app");
+        fs::write(installed.join("marker"), b"old").expect("installed marker");
+        fs::create_dir(&candidate).expect("candidate app");
+        fs::write(candidate.join("marker"), b"new").expect("candidate marker");
+        let transaction = RecoveryTransaction::open(&update_root, &installed, &candidate)
+            .expect("recovery transaction");
+        let mut cleanup =
+            CleanupCompanion::new(&channel_root, update::channel::ReleaseChannel::Test)
+                .expect("cleanup companion");
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            let _ = transaction.publish_with_companion_and_hook(
+                &mut HealthyPublication,
+                &mut cleanup,
+                &mut CrashAtCommitIntent,
+            );
+        }))
+        .is_err());
+        ensure_no_pending_cleanup(&channel_root, update::channel::ReleaseChannel::Test)
+            .expect("pre-recovery cleanup gate");
+
+        let checker_calls = AtomicUsize::new(0);
+        let result = tauri::async_runtime::block_on(async {
+            let mut cleanup =
+                CleanupCompanion::new(&channel_root, update::channel::ReleaseChannel::Test)
+                    .expect("recovery cleanup companion");
+            crate::update::recovery::recover_interrupted_update_with_companion(
+                &update_root,
+                &mut cleanup,
+            )
+            .expect("recover committed publication");
+            run_update_check_after_recovery(
+                HostAction::Install,
+                &channel_root,
+                update::channel::ReleaseChannel::Test,
+                || async {
+                    checker_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+        });
+
+        assert!(result
+            .expect_err("post-recovery cleanup gate must reject install")
+            .contains("pending update cleanup check failed"));
+        assert_eq!(checker_calls.load(Ordering::SeqCst), 0);
+        assert!(update::cleanup::cleanup_journal_path(
+            &channel_root,
+            update::channel::ReleaseChannel::Test
+        )
+        .exists());
+    }
+
+    #[test]
+    fn check_ignores_pending_cleanup_after_recovery() {
+        let fixture = tempfile::tempdir().expect("update check fixture");
+        let channel_root = fixture.path().join("channel");
+        fs::create_dir(&channel_root).expect("channel root");
+        fs::write(
+            update::cleanup::cleanup_journal_path(
+                &channel_root,
+                update::channel::ReleaseChannel::Test,
+            ),
+            b"{",
+        )
+        .expect("unsafe pending cleanup journal");
+        let checker_calls = AtomicUsize::new(0);
+
+        tauri::async_runtime::block_on(run_update_check_after_recovery(
+            HostAction::Check,
+            &channel_root,
+            update::channel::ReleaseChannel::Test,
+            || async {
+                checker_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        ))
+        .expect("Check action must not inspect pending cleanup");
+
+        assert_eq!(checker_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
