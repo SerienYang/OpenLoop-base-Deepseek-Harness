@@ -2,9 +2,26 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import desktopRemote from '@openloop/desktop-bridge-host/remote'
+import {
+  OpenloopUpdateRemoteBinding,
+  OpenloopUpdateService,
+} from './update.ts'
+import type { OpenloopUpdateRemote } from './update.ts'
 import { OpenloopWorkspaceRuntimeAdapter } from './workspaces.ts'
 import type { OpenloopWorkspaceRemote } from './workspaces.ts'
 
+export {
+  OpenloopUpdateRemoteBinding,
+  OpenloopUpdateService,
+} from './update.ts'
+export type {
+  OpenloopUpdateRemote,
+  OpenloopUpdateRemoteSource,
+  OpenloopUpdateState,
+  OpenloopUpdateStatus,
+  UpdateActionView,
+  UpdateView,
+} from './update.ts'
 export {
   OpenloopWorkspaceRuntimeAdapter,
   OpenloopWorkspaceService,
@@ -69,14 +86,26 @@ export class OpenloopWorkspaceRemoteBinding {
 
 export function apply(ctx: Context): () => Promise<void> {
   const binding = new OpenloopWorkspaceRemoteBinding()
+  const updateBinding = new OpenloopUpdateRemoteBinding()
+  const updates = new OpenloopUpdateService(() => updateBinding.wait())
   const adapter = new OpenloopWorkspaceRuntimeAdapter(() => binding.wait())
   const removeAdapter = ctx.reflect.provide('workspaceRuntimeAdapter', adapter)
+  const removeUpdates = ctx.reflect.provide('openloopUpdates', updates)
   const remoteFiber = ctx.inject(['remote'], async (remoteCtx) => {
     try {
       const disposeRemote = await remoteCtx.remote.$mount(desktopRemote)
       const namespaceFiber = remoteCtx.inject(
         ['remote', 'remote.openloopDesktop'],
-        namespaceCtx => binding.publish(namespaceCtx.remote.openloopDesktop),
+        (namespaceCtx) => {
+          const remote = namespaceCtx.remote.openloopDesktop as unknown as
+            OpenloopWorkspaceRemote & OpenloopUpdateRemote
+          const disposeWorkspace = binding.publish(remote)
+          const disposeUpdate = updateBinding.publish(remote)
+          return () => {
+            disposeUpdate()
+            disposeWorkspace()
+          }
+        },
       )
       return async () => {
         await namespaceFiber.dispose()
@@ -84,11 +113,15 @@ export function apply(ctx: Context): () => Promise<void> {
       }
     } catch (error) {
       binding.fail(error)
+      updateBinding.fail(error)
       throw error
     }
   })
   return async () => {
     await removeAdapter()
+    await removeUpdates()
+    updates.close()
+    updateBinding.close()
     binding.close()
     await remoteFiber.dispose()
   }

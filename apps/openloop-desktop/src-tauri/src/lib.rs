@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{
     ffi::{OsStr, OsString},
     io::{self, Write},
@@ -7,6 +9,8 @@ use std::{
 };
 
 use tauri::{AppHandle, Manager, RunEvent, Url};
+#[cfg(target_os = "macos")]
+use tauri_plugin_updater::Update;
 use tauri_plugin_updater::UpdaterExt;
 
 #[cfg(not(target_os = "macos"))]
@@ -50,6 +54,16 @@ use crate::update::{
     recovery::{
         pending_update_migration_transaction_id, recover_interrupted_update,
         recover_interrupted_update_with_bound_companion, PublicationOutcome, RecoveryTransaction,
+    },
+};
+#[cfg(target_os = "macos")]
+use crate::update::{
+    coordinator::{check_update, install_checked_update_with_observer, CoordinatorError},
+    schedule::{ScheduledUpdateWorker, UpdateCheckSchedule},
+    state::{
+        install_update_bridge_handlers, AppKitUpdateInstallConfirmation, AvailableUpdate,
+        UpdateChecker, UpdateFailure, UpdateInstallObserver, UpdateInstallResult, UpdateInstaller,
+        UpdateRestartRequester, UpdateState,
     },
 };
 #[cfg(target_os = "macos")]
@@ -210,8 +224,117 @@ struct RuntimeProcessState {
     _update_lease: UpdateLease,
     _bridge: BridgeServer,
     #[cfg(target_os = "macos")]
+    _update_schedule: ScheduledUpdateWorker,
+    #[cfg(target_os = "macos")]
     _health: Arc<Mutex<RuntimeHealthState>>,
     child: Mutex<SupervisedChild>,
+}
+
+#[cfg(target_os = "macos")]
+struct TauriUpdateChecker {
+    app: AppHandle,
+    current_version: String,
+    channel: update::channel::ReleaseChannel,
+    policy: DownloadUrlPolicy,
+    schedule: Arc<Mutex<UpdateCheckSchedule>>,
+    schedule_started: Instant,
+}
+
+#[cfg(target_os = "macos")]
+impl UpdateChecker<Update> for TauriUpdateChecker {
+    fn check(&self) -> Result<Option<AvailableUpdate<Update>>, UpdateFailure> {
+        if let Ok(mut schedule) = self.schedule.lock() {
+            schedule.manual_action(self.schedule_started.elapsed());
+        }
+        let updater = self.app.updater().map_err(|_| UpdateFailure::Check)?;
+        let (_report, update) = tauri::async_runtime::block_on(check_update(
+            &updater,
+            &self.current_version,
+            &self.policy,
+        ))
+        .map_err(|error| update_failure(&error))?;
+        Ok(update.map(|update| {
+            let version = update.version.clone();
+            AvailableUpdate::new(update, version, self.channel)
+        }))
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct TauriUpdateInstaller {
+    installed_app: PathBuf,
+    channel_root: PathBuf,
+    dsh_home: PathBuf,
+    policy: DownloadUrlPolicy,
+}
+
+#[cfg(target_os = "macos")]
+impl UpdateInstaller<Update> for TauriUpdateInstaller {
+    fn install(
+        &self,
+        update: Update,
+        observer: &dyn UpdateInstallObserver,
+    ) -> Result<UpdateInstallResult, UpdateFailure> {
+        let credential_plan = credential_health_plan(&self.channel_root, &self.dsh_home, None)
+            .map_err(|_| UpdateFailure::Install)?;
+        let mut health = CandidateProcessHealth::new(&update.version, &self.dsh_home)
+            .with_migration_expectation(
+                credential_plan.migration_transaction_id,
+                credential_plan.references.len(),
+            );
+        let report = tauri::async_runtime::block_on(install_checked_update_with_observer(
+            update,
+            &self.installed_app,
+            &mut health,
+            &self.policy,
+            observer,
+        ))
+        .map_err(|error| update_failure(&error))?;
+        match report.publication {
+            InstallPublication::Committed => Ok(UpdateInstallResult::Committed),
+            InstallPublication::RolledBack(_) => Ok(UpdateInstallResult::RolledBack),
+            InstallPublication::NoUpdate => Err(UpdateFailure::Install),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct TauriUpdateRestart(AppHandle);
+
+#[cfg(target_os = "macos")]
+impl UpdateRestartRequester for TauriUpdateRestart {
+    fn request_restart(&self) {
+        self.0.request_restart();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn update_failure(error: &CoordinatorError) -> UpdateFailure {
+    match error {
+        CoordinatorError::Check(_) => UpdateFailure::Check,
+        CoordinatorError::UnsafeDownloadUrl(_) => UpdateFailure::UnsafeSource,
+        CoordinatorError::Download(
+            tauri_plugin_updater::Error::Minisign(_)
+            | tauri_plugin_updater::Error::Base64(_)
+            | tauri_plugin_updater::Error::SignatureUtf8(_),
+        ) => UpdateFailure::SignatureVerification,
+        CoordinatorError::Download(_) => UpdateFailure::DownloadInterrupted,
+        CoordinatorError::InsufficientDiskSpace { .. } => UpdateFailure::InsufficientDiskSpace,
+        CoordinatorError::Recovery(_) => UpdateFailure::Recovery,
+        CoordinatorError::InvalidArguments
+        | CoordinatorError::Stage(_)
+        | CoordinatorError::MissingInstallationRoot
+        | CoordinatorError::DiskInspection(_)
+        | CoordinatorError::State(_)
+        | CoordinatorError::Serialize(_) => UpdateFailure::Install,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn update_time() -> Duration {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
 }
 
 #[cfg(target_os = "macos")]
@@ -401,7 +524,7 @@ fn start_runtime(
     #[cfg(target_os = "macos")]
     let migration_status = CredentialMigrationStatusHandle::from_outcome(&migration_outcome);
     #[cfg(target_os = "macos")]
-    let dispatch_tables = {
+    let (dispatch_tables, update_state, update_checker, update_schedule) = {
         let sheet_gate = std::sync::Arc::new(CredentialSheetGate::default());
         let writable = migration_outcome != MigrationOutcome::ReadOnlyLegacy;
         let legacy = if migration_outcome == MigrationOutcome::ReadOnlyLegacy {
@@ -460,6 +583,36 @@ fn start_runtime(
         )?;
         install_file_broker_handlers(&mut tables, file_broker)?;
         install_workspace_transaction_handlers(&mut tables, workspace_journal)?;
+        let update_state = Arc::new(UpdateState::new(
+            updater_config.channel(),
+            Duration::from_secs(15 * 60),
+        ));
+        let update_schedule = Arc::new(Mutex::new(UpdateCheckSchedule::new(Duration::ZERO, None)));
+        let update_checker: Arc<dyn UpdateChecker<Update>> = Arc::new(TauriUpdateChecker {
+            app: app.clone(),
+            current_version: manifest.app_version.clone(),
+            channel: updater_config.channel(),
+            policy: DownloadUrlPolicy::production(updater_config.channel()),
+            schedule: update_schedule.clone(),
+            schedule_started: Instant::now(),
+        });
+        let installed_app = current_app_bundle()?;
+        let update_installer: Arc<dyn UpdateInstaller<Update>> = Arc::new(TauriUpdateInstaller {
+            installed_app,
+            channel_root: channel_root.to_owned(),
+            dsh_home: dsh_home.clone(),
+            policy: DownloadUrlPolicy::production(updater_config.channel()),
+        });
+        install_update_bridge_handlers(
+            &mut tables,
+            update_state.clone(),
+            updater_config.channel(),
+            update_checker.clone(),
+            update_installer,
+            Arc::new(AppKitUpdateInstallConfirmation::new(app.clone())),
+            Arc::new(TauriUpdateRestart(app.clone())),
+            Arc::new(update_time),
+        )?;
         let health_plan = match migration_outcome.transaction_id() {
             Some(transaction_id) => {
                 let plan = credential_health_plan(channel_root, &dsh_home, Some(transaction_id))
@@ -516,7 +669,7 @@ fn start_runtime(
         tables
             .set_host_handler("acknowledgeMainWebviewHealth", handler)
             .map_err(|error| format!("main WebView health bridge setup failed: {error}"))?;
-        tables
+        (tables, update_state, update_checker, update_schedule)
     };
     #[cfg(not(target_os = "macos"))]
     let dispatch_tables = BridgeDispatchTables::unavailable();
@@ -548,10 +701,19 @@ fn start_runtime(
                 .map_err(|error| format!("Openloop runtime bootstrap URL is invalid: {error}"))?,
         )
         .map_err(|error| format!("Openloop main webview navigation failed: {error}"))?;
+    #[cfg(target_os = "macos")]
+    let update_schedule = ScheduledUpdateWorker::start(
+        update_schedule,
+        update_state,
+        update_checker,
+        Arc::new(update_time),
+    )?;
     Ok(Some(RuntimeProcessState {
         _instance: instance,
         _update_lease: update_lease,
         _bridge: bridge,
+        #[cfg(target_os = "macos")]
+        _update_schedule: update_schedule,
         #[cfg(target_os = "macos")]
         _health: health,
         child: Mutex::new(child),

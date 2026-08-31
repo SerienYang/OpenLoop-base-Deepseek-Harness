@@ -259,6 +259,13 @@ impl BridgeHandlerError {
         }
     }
 
+    pub fn update_failure() -> Self {
+        Self {
+            code: "update_failure",
+            message: "desktop update operation failed",
+        }
+    }
+
     pub fn file_failure() -> Self {
         Self {
             code: "file_failure",

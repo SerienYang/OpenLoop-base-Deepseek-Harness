@@ -26,6 +26,8 @@ export interface UpdateStatus {
   readonly updateId?: string
   readonly version?: string
   readonly message?: string
+  readonly progress?: number
+  readonly lastCheckedAt?: number
 }
 
 export interface CredentialStatus {

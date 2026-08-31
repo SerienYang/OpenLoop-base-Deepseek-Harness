@@ -183,11 +183,13 @@ export class OpenloopDesktopRemoteService extends TypertRemoteService {
 
   @Remote
   getUpdateStatus(signal: AbortSignal): Promise<UpdateStatus> {
+    signal.throwIfAborted()
     return remoteBridgeClient(this).call<UpdateStatus>('getUpdateStatus', null, signal)
   }
 
   @Remote
   checkForUpdate(signal: AbortSignal): Promise<UpdateStatus> {
+    signal.throwIfAborted()
     return remoteBridgeClient(this).call<UpdateStatus>('checkForUpdate', null, signal)
   }
 
@@ -196,6 +198,7 @@ export class OpenloopDesktopRemoteService extends TypertRemoteService {
     updateId: string,
     signal: AbortSignal,
   ): Promise<'restarting' | 'cancelled'> {
+    signal.throwIfAborted()
     return remoteBridgeClient(this).call('installUpdateAndRestart', { updateId }, signal)
   }
 

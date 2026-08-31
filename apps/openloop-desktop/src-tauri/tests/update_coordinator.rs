@@ -13,10 +13,11 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use openloop_desktop_lib::update::{
     channel::ReleaseChannel,
     coordinator::{
-        check_update, install_checked_update, validate_download_url, DownloadStatus,
-        DownloadUrlPolicy, InstallPublication,
+        check_update, install_checked_update, install_checked_update_with_observer,
+        validate_download_url, DownloadStatus, DownloadUrlPolicy, InstallPublication,
     },
     recovery::{CandidateHealth, HealthStatus},
+    state::{UpdateInstallObserver, UpdateStateError},
 };
 use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime};
 use tauri_plugin_updater::{Update, Updater, UpdaterExt};
@@ -48,6 +49,7 @@ struct Response {
     status: &'static str,
     content_type: &'static str,
     body: Vec<u8>,
+    declared_length: Option<usize>,
 }
 
 struct TestServer<'fixture> {
@@ -151,7 +153,7 @@ fn serve(stream: &mut TcpStream, routes: &HashMap<&str, Response>) -> Result<(),
         "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         response.status,
         response.content_type,
-        response.body.len()
+        response.declared_length.unwrap_or(response.body.len())
     )
     .map_err(|error| error.to_string())?;
     stream
@@ -193,6 +195,7 @@ fn fixture_server_finishes_its_response_before_closing_the_socket() {
                 status: "200 OK",
                 content_type: "text/plain",
                 body: b"complete fixture response".to_vec(),
+                declared_length: None,
             },
         )])
     });
@@ -230,6 +233,7 @@ fn no_content() -> Response {
         status: "204 No Content",
         content_type: "application/json",
         body: Vec::new(),
+        declared_length: None,
     }
 }
 
@@ -253,6 +257,7 @@ fn manifest_with_url(version: &str, signature: &str, url: &str) -> Response {
             }
         }))
         .expect("manifest JSON"),
+        declared_length: None,
     }
 }
 
@@ -261,6 +266,7 @@ fn archive(body: Vec<u8>) -> Response {
         status: "200 OK",
         content_type: "application/octet-stream",
         body,
+        declared_length: None,
     }
 }
 
@@ -544,6 +550,50 @@ fn signature_failure_never_stages_or_publishes_a_candidate() {
 }
 
 #[test]
+fn interrupted_download_never_stages_or_publishes_a_candidate() {
+    let fixture = update_fixture_guard();
+    let server = TestServer::new(&fixture, 2, |base_url| {
+        HashMap::from([
+            ("/manifest", manifest(base_url, "0.2.0", TEST_SIGNATURE)),
+            (
+                "/archive",
+                Response {
+                    status: "200 OK",
+                    content_type: "application/octet-stream",
+                    body: b"partial".to_vec(),
+                    declared_length: Some(1024),
+                },
+            ),
+        ])
+    });
+    let (_app, update) = checked_update(&server, SIGNED_TEST_PUBLIC_KEY);
+    let root = tempdir().expect("update root");
+    let installed = installed_app(root.path());
+    let mut health =
+        HealthProbe(|_: &Path, _: Duration| panic!("health must not run after interruption"));
+    let policy =
+        DownloadUrlPolicy::local_test_fixture(&server.url("/archive")).expect("fixture policy");
+
+    let error = tauri::async_runtime::block_on(install_checked_update(
+        update,
+        &installed,
+        &mut health,
+        &policy,
+    ))
+    .expect_err("truncated response must fail");
+
+    assert!(matches!(
+        error,
+        openloop_desktop_lib::update::coordinator::CoordinatorError::Download(_)
+    ));
+    assert_eq!(
+        fs::read_dir(root.path()).expect("update root").count(),
+        1,
+        "interrupted download left a staged candidate"
+    );
+}
+
+#[test]
 fn verified_download_commits_healthy_candidate_and_rolls_back_failed_health() {
     let fixture = update_fixture_guard();
     for expected_publication in [
@@ -639,6 +689,100 @@ fn verified_download_commits_healthy_candidate_and_rolls_back_failed_health() {
             "one update must leave only installed and one preserved candidate"
         );
     }
+}
+
+#[derive(Default)]
+struct RecordingInstallObserver {
+    events: Mutex<Vec<&'static str>>,
+}
+
+impl UpdateInstallObserver for RecordingInstallObserver {
+    fn download_progress(
+        &self,
+        downloaded: u64,
+        total: Option<u64>,
+    ) -> Result<(), UpdateStateError> {
+        assert!(downloaded > 0);
+        assert!(total.is_some_and(|total| downloaded <= total));
+        self.events
+            .lock()
+            .expect("observer events")
+            .push("downloading");
+        Ok(())
+    }
+
+    fn verifying(&self) -> Result<(), UpdateStateError> {
+        self.events
+            .lock()
+            .expect("observer events")
+            .push("verifying");
+        Ok(())
+    }
+
+    fn ready_to_install(&self) -> Result<(), UpdateStateError> {
+        self.events
+            .lock()
+            .expect("observer events")
+            .push("ready-to-install");
+        Ok(())
+    }
+
+    fn installing(&self) -> Result<(), UpdateStateError> {
+        self.events
+            .lock()
+            .expect("observer events")
+            .push("installing");
+        Ok(())
+    }
+}
+
+#[test]
+fn coordinator_reports_download_verification_and_install_phases() {
+    let fixture = update_fixture_guard();
+    let server = TestServer::new(&fixture, 2, |base_url| {
+        HashMap::from([
+            (
+                "/manifest",
+                manifest(base_url, "0.2.0", VALID_ARCHIVE_SIGNATURE),
+            ),
+            (
+                "/archive",
+                archive(
+                    STANDARD
+                        .decode(VALID_ARCHIVE)
+                        .expect("valid archive base64"),
+                ),
+            ),
+        ])
+    });
+    let (_app, update) = checked_update(&server, VALID_ARCHIVE_PUBLIC_KEY);
+    let root = tempdir().expect("update root");
+    let installed = installed_app(root.path());
+    let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
+    let policy =
+        DownloadUrlPolicy::local_test_fixture(&server.url("/archive")).expect("fixture policy");
+    let observer = RecordingInstallObserver::default();
+
+    let report = tauri::async_runtime::block_on(install_checked_update_with_observer(
+        update,
+        &installed,
+        &mut health,
+        &policy,
+        &observer,
+    ))
+    .expect("observed install");
+
+    assert_eq!(report.publication, InstallPublication::Committed);
+    let events = observer.events.lock().expect("observer events");
+    assert_eq!(events.first(), Some(&"downloading"));
+    assert_eq!(
+        events
+            .iter()
+            .copied()
+            .filter(|event| *event != "downloading")
+            .collect::<Vec<_>>(),
+        ["verifying", "ready-to-install", "installing"]
+    );
 }
 
 #[test]
