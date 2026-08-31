@@ -82,6 +82,34 @@ impl<F: FnOnce()> CleanupTestHook for EntryActionAt<F> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum EntryCrashPoint {
+    AfterIsolation,
+    AfterDelete,
+}
+
+struct CrashEntryAt {
+    point: EntryCrashPoint,
+    name: &'static [u8],
+}
+
+impl CleanupTestHook for CrashEntryAt {
+    fn reached(&mut self, _: CleanupBoundary) {}
+
+    fn after_entry_isolation(&mut self, _: RawFd, original: &CStr, _: &CStr) {
+        if matches!(self.point, EntryCrashPoint::AfterIsolation) && original.to_bytes() == self.name
+        {
+            panic!("injected crash after entry isolation");
+        }
+    }
+
+    fn after_entry_delete(&mut self, _: RawFd, original: &CStr, _: &CStr) {
+        if matches!(self.point, EntryCrashPoint::AfterDelete) && original.to_bytes() == self.name {
+            panic!("injected crash after entry delete");
+        }
+    }
+}
+
 struct CrashAtCommitIntent;
 
 impl RecoveryTestHook for CrashAtCommitIntent {
@@ -141,17 +169,46 @@ fn active_backup(channel_root: &Path, candidate: &Path) -> PathBuf {
 }
 
 fn journal_isolated_backup(channel_root: &Path, candidate: &Path) -> PathBuf {
-    let journal: serde_json::Value = serde_json::from_slice(
-        &fs::read(cleanup_journal_path(channel_root, ReleaseChannel::Test))
-            .expect("cleanup journal"),
-    )
-    .expect("cleanup journal JSON");
+    let journal = cleanup_journal(channel_root);
     let isolated_name: Vec<u8> =
         serde_json::from_value(journal["isolatedName"].clone()).expect("isolated cleanup name");
     candidate
         .parent()
         .expect("backup parent")
         .join(OsString::from_vec(isolated_name))
+}
+
+fn cleanup_journal(channel_root: &Path) -> serde_json::Value {
+    serde_json::from_slice(
+        &fs::read(cleanup_journal_path(channel_root, ReleaseChannel::Test))
+            .expect("cleanup journal"),
+    )
+    .expect("cleanup journal JSON")
+}
+
+fn active_isolate(channel_root: &Path, candidate: &Path) -> (serde_json::Value, PathBuf) {
+    let journal = cleanup_journal(channel_root);
+    let active = journal["activeIsolate"]
+        .as_object()
+        .cloned()
+        .map(serde_json::Value::Object)
+        .expect("durable active isolate");
+    assert_eq!(active["publicationId"], journal["publicationId"]);
+    assert!(active.get("expectedIdentity").is_some());
+    assert!(active.get("expectedType").is_some());
+    let mut parent = journal_isolated_backup(channel_root, candidate);
+    for component in active["parentPath"]
+        .as_array()
+        .expect("active isolate parent path")
+    {
+        assert!(component.get("identity").is_some());
+        let name: Vec<u8> =
+            serde_json::from_value(component["name"].clone()).expect("parent component name");
+        parent.push(OsString::from_vec(name));
+    }
+    let isolated_name: Vec<u8> =
+        serde_json::from_value(active["isolationName"].clone()).expect("active isolation name");
+    (active, parent.join(OsString::from_vec(isolated_name)))
 }
 
 #[test]
@@ -815,6 +872,237 @@ fn cleanup_execution_crashes_are_idempotently_recoverable() {
             "new",
             "{boundary:?}"
         );
+    }
+}
+
+#[test]
+fn source_before_rename_crash_replays_the_journaled_child_and_leaf() {
+    for (name, boundary, directory) in [
+        (
+            b"child".as_slice(),
+            CleanupBoundary::BeforeChildIsolation,
+            true,
+        ),
+        (
+            b"leaf".as_slice(),
+            CleanupBoundary::BeforeLeafIsolation,
+            false,
+        ),
+    ] {
+        let (_root, channel_root, installed, candidate) = fixture();
+        if directory {
+            fs::create_dir(installed.join(OsString::from_vec(name.to_vec())))
+                .expect("cleanup child");
+        } else {
+            fs::write(
+                installed.join(OsString::from_vec(name.to_vec())),
+                b"original",
+            )
+            .expect("cleanup leaf");
+        }
+        commit(&channel_root, &installed, &candidate);
+        let mut pending = load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+            .expect("load cleanup")
+            .expect("pending cleanup");
+        let mut crash = EntryActionAt {
+            boundary,
+            name,
+            action: Some(|| panic!("injected crash before source rename")),
+        };
+
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            let _ = pending.execute_with_hook(&mut crash);
+        }))
+        .is_err());
+
+        let (active, isolated) = active_isolate(&channel_root, &candidate);
+        assert_eq!(active["phase"], "prepared");
+        assert!(!isolated.exists());
+        let original_name: Vec<u8> =
+            serde_json::from_value(active["originalName"].clone()).expect("active original name");
+        assert!(isolated
+            .parent()
+            .expect("active parent")
+            .join(OsString::from_vec(original_name))
+            .exists());
+
+        load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+            .expect("reload cleanup")
+            .expect("pending cleanup")
+            .execute()
+            .expect("replay source before rename");
+
+        assert!(
+            !cleanup_journal_path(&channel_root, ReleaseChannel::Test).exists(),
+            "{}",
+            String::from_utf8_lossy(name)
+        );
+    }
+}
+
+#[test]
+fn child_and_leaf_after_rename_crash_preserve_original_name_replacements() {
+    for (name, directory) in [(b"child".as_slice(), true), (b"leaf".as_slice(), false)] {
+        let (_root, channel_root, installed, candidate) = fixture();
+        if directory {
+            let child = installed.join(OsString::from_vec(name.to_vec()));
+            fs::create_dir(&child).expect("cleanup child");
+            fs::write(child.join("payload"), b"original").expect("child payload");
+        } else {
+            fs::write(
+                installed.join(OsString::from_vec(name.to_vec())),
+                b"original",
+            )
+            .expect("cleanup leaf");
+        }
+        commit(&channel_root, &installed, &candidate);
+        let mut pending = load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+            .expect("load cleanup")
+            .expect("pending cleanup");
+        let mut crash = CrashEntryAt {
+            point: EntryCrashPoint::AfterIsolation,
+            name,
+        };
+
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            let _ = pending.execute_with_hook(&mut crash);
+        }))
+        .is_err());
+
+        let (active, isolated) = active_isolate(&channel_root, &candidate);
+        assert_eq!(active["phase"], "prepared");
+        assert!(isolated.exists());
+        let original_name: Vec<u8> =
+            serde_json::from_value(active["originalName"].clone()).expect("active original name");
+        let original = isolated
+            .parent()
+            .expect("active parent")
+            .join(OsString::from_vec(original_name));
+        if directory {
+            fs::create_dir(&original).expect("replacement child");
+            fs::write(original.join("marker"), b"replacement").expect("replacement child marker");
+        } else {
+            fs::write(&original, b"replacement").expect("replacement leaf");
+        }
+
+        let error = load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+            .expect("reload isolated cleanup")
+            .expect("pending isolated cleanup")
+            .execute()
+            .expect_err("replacement conflict must retain a diagnostic journal");
+
+        assert!(error.to_string().contains("original name"));
+        assert!(!isolated.exists());
+        if directory {
+            assert_eq!(
+                fs::read_to_string(original.join("marker")).expect("replacement child marker"),
+                "replacement"
+            );
+        } else {
+            assert_eq!(
+                fs::read_to_string(&original).expect("replacement leaf"),
+                "replacement"
+            );
+        }
+        let (active, _) = active_isolate(&channel_root, &candidate);
+        assert_eq!(active["phase"], "deleted");
+        assert!(
+            cleanup_journal_path(&channel_root, ReleaseChannel::Test).exists(),
+            "{}",
+            String::from_utf8_lossy(name)
+        );
+    }
+}
+
+#[test]
+fn child_and_leaf_after_delete_crash_clear_active_before_continuing() {
+    for (name, directory) in [(b"child".as_slice(), true), (b"leaf".as_slice(), false)] {
+        let (_root, channel_root, installed, candidate) = fixture();
+        if directory {
+            fs::create_dir(installed.join(OsString::from_vec(name.to_vec())))
+                .expect("cleanup child");
+        } else {
+            fs::write(
+                installed.join(OsString::from_vec(name.to_vec())),
+                b"original",
+            )
+            .expect("cleanup leaf");
+        }
+        commit(&channel_root, &installed, &candidate);
+        let mut pending = load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+            .expect("load cleanup")
+            .expect("pending cleanup");
+        let mut crash = CrashEntryAt {
+            point: EntryCrashPoint::AfterDelete,
+            name,
+        };
+
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            let _ = pending.execute_with_hook(&mut crash);
+        }))
+        .is_err());
+
+        let (active, isolated) = active_isolate(&channel_root, &candidate);
+        assert_eq!(active["phase"], "deleting");
+        assert!(!isolated.exists());
+
+        load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+            .expect("reload deleted cleanup")
+            .expect("pending deleted cleanup")
+            .execute()
+            .expect("replay after delete");
+
+        assert!(
+            !cleanup_journal_path(&channel_root, ReleaseChannel::Test).exists(),
+            "{}",
+            String::from_utf8_lossy(name)
+        );
+    }
+}
+
+#[test]
+fn nested_leaf_crashes_replay_through_the_durable_parent_chain() {
+    for point in [
+        EntryCrashPoint::AfterIsolation,
+        EntryCrashPoint::AfterDelete,
+    ] {
+        let (_root, channel_root, installed, candidate) = fixture();
+        fs::create_dir(installed.join("nested")).expect("nested cleanup directory");
+        fs::write(installed.join("nested/leaf"), b"original").expect("nested cleanup leaf");
+        commit(&channel_root, &installed, &candidate);
+        let mut pending = load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+            .expect("load cleanup")
+            .expect("pending cleanup");
+        let mut crash = CrashEntryAt {
+            point,
+            name: b"leaf",
+        };
+
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            let _ = pending.execute_with_hook(&mut crash);
+        }))
+        .is_err());
+
+        let (active, isolated) = active_isolate(&channel_root, &candidate);
+        assert_eq!(
+            active["originalName"],
+            serde_json::json!([108, 101, 97, 102])
+        );
+        assert_eq!(active["parentIsolate"]["phase"], "deleting");
+        assert_eq!(active["parentIsolate"]["expectedType"], "directory");
+        assert_eq!(
+            isolated.exists(),
+            matches!(point, EntryCrashPoint::AfterIsolation)
+        );
+
+        load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+            .expect("reload nested cleanup")
+            .expect("pending nested cleanup")
+            .execute()
+            .expect("replay nested cleanup chain");
+
+        assert!(!cleanup_journal_path(&channel_root, ReleaseChannel::Test).exists());
+        assert!(!candidate.exists());
     }
 }
 
