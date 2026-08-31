@@ -15,6 +15,7 @@ use tauri_plugin_updater::{Update, Updater};
 use super::{
     archive::{stage_verified_archive, ArchiveStageError},
     channel::{ReleaseChannel, UPDATE_NETWORK_TIMEOUT},
+    cleanup::{CleanupCompanion, CleanupError},
     health::HEALTH_PROBE_ARGUMENT,
     recovery::{
         CandidateHealth, HealthStatus, PublicationOutcome, RecoveryError, RecoveryTransaction,
@@ -278,12 +279,16 @@ pub async fn check_update(
 pub async fn install_checked_update(
     update: Update,
     installed_app: &Path,
+    channel_root: &Path,
+    channel: ReleaseChannel,
     health: &mut impl CandidateHealth,
     policy: &DownloadUrlPolicy,
 ) -> Result<InstallReport, CoordinatorError> {
     install_checked_update_with_observer(
         update,
         installed_app,
+        channel_root,
+        channel,
         health,
         policy,
         &NoopInstallObserver,
@@ -294,6 +299,8 @@ pub async fn install_checked_update(
 pub async fn install_checked_update_with_observer(
     update: Update,
     installed_app: &Path,
+    channel_root: &Path,
+    channel: ReleaseChannel,
     health: &mut impl CandidateHealth,
     policy: &DownloadUrlPolicy,
     observer: &dyn UpdateInstallObserver,
@@ -340,8 +347,10 @@ pub async fn install_checked_update_with_observer(
     observer.installing().map_err(CoordinatorError::State)?;
     let transaction = RecoveryTransaction::open(root, installed_app, candidate.path())
         .map_err(CoordinatorError::Recovery)?;
+    let mut cleanup =
+        CleanupCompanion::new(channel_root, channel).map_err(CoordinatorError::Cleanup)?;
     let (publication, preserved_backup, failed_candidate) = match transaction
-        .publish(health)
+        .publish_with_companion(health, &mut cleanup)
         .map_err(CoordinatorError::Recovery)?
     {
         PublicationOutcome::Committed { preserved_backup } => {
@@ -436,6 +445,7 @@ pub enum CoordinatorError {
     DiskInspection(io::Error),
     State(UpdateStateError),
     Recovery(RecoveryError),
+    Cleanup(CleanupError),
     UnsafeDownloadUrl(String),
     Serialize(serde_json::Error),
 }
@@ -470,6 +480,7 @@ impl fmt::Display for CoordinatorError {
             Self::Recovery(source) => {
                 write!(formatter, "candidate recovery transaction failed: {source}")
             }
+            Self::Cleanup(source) => write!(formatter, "cleanup journal setup failed: {source}"),
             Self::UnsafeDownloadUrl(message) => {
                 write!(formatter, "unsafe update download URL: {message}")
             }
@@ -492,6 +503,7 @@ impl Error for CoordinatorError {
             Self::Stage(source) => Some(source),
             Self::State(source) => Some(source),
             Self::Recovery(source) => Some(source),
+            Self::Cleanup(source) => Some(source),
             Self::Serialize(source) => Some(source),
         }
     }

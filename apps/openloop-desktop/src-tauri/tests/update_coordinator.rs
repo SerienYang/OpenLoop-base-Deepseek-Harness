@@ -12,6 +12,7 @@ use std::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use openloop_desktop_lib::update::{
     channel::{ReleaseChannel, UPDATE_NETWORK_TIMEOUT},
+    cleanup::{cleanup_journal_path, load_pending_cleanup},
     coordinator::{
         check_update, install_checked_update, install_checked_update_with_observer,
         validate_download_url, DownloadStatus, DownloadUrlPolicy, InstallPublication,
@@ -538,6 +539,7 @@ fn signature_failure_never_stages_or_publishes_a_candidate() {
     });
     let (_app, update) = checked_update(&server, SIGNED_TEST_PUBLIC_KEY);
     let root = tempdir().expect("update root");
+    let channel_root = tempdir().expect("channel root");
     let installed = installed_app(root.path());
     let mut health =
         HealthProbe(|_: &Path, _: Duration| panic!("health must not run for a signature failure"));
@@ -547,6 +549,8 @@ fn signature_failure_never_stages_or_publishes_a_candidate() {
     let error = tauri::async_runtime::block_on(install_checked_update(
         update,
         &installed,
+        channel_root.path(),
+        ReleaseChannel::Test,
         &mut health,
         &policy,
     ))
@@ -586,6 +590,7 @@ fn interrupted_download_never_stages_or_publishes_a_candidate() {
     });
     let (_app, update) = checked_update(&server, SIGNED_TEST_PUBLIC_KEY);
     let root = tempdir().expect("update root");
+    let channel_root = tempdir().expect("channel root");
     let installed = installed_app(root.path());
     let mut health =
         HealthProbe(|_: &Path, _: Duration| panic!("health must not run after interruption"));
@@ -595,6 +600,8 @@ fn interrupted_download_never_stages_or_publishes_a_candidate() {
     let error = tauri::async_runtime::block_on(install_checked_update(
         update,
         &installed,
+        channel_root.path(),
+        ReleaseChannel::Test,
         &mut health,
         &policy,
     ))
@@ -636,6 +643,7 @@ fn verified_download_commits_healthy_candidate_and_rolls_back_failed_health() {
         });
         let (_app, update) = checked_update(&server, VALID_ARCHIVE_PUBLIC_KEY);
         let root = tempdir().expect("update root");
+        let channel_root = tempdir().expect("channel root");
         let installed = installed_app(root.path());
         let status = match &expected_publication {
             InstallPublication::Committed => HealthStatus::Healthy,
@@ -656,6 +664,8 @@ fn verified_download_commits_healthy_candidate_and_rolls_back_failed_health() {
         let report = tauri::async_runtime::block_on(install_checked_update(
             update,
             &installed,
+            channel_root.path(),
+            ReleaseChannel::Test,
             &mut health,
             &policy,
         ))
@@ -674,6 +684,10 @@ fn verified_download_commits_healthy_candidate_and_rolls_back_failed_health() {
         );
         match report.publication {
             InstallPublication::Committed => {
+                assert!(
+                    cleanup_journal_path(channel_root.path(), ReleaseChannel::Test).exists(),
+                    "committed install returned before cleanup intent was durable"
+                );
                 let backup = report.preserved_backup.as_ref().expect("committed backup");
                 assert_eq!(
                     fs::read_to_string(backup.join("marker")).expect("backup marker"),
@@ -687,6 +701,10 @@ fn verified_download_commits_healthy_candidate_and_rolls_back_failed_health() {
                 assert!(report.failed_candidate.is_none());
             }
             InstallPublication::RolledBack(_) => {
+                assert!(
+                    !cleanup_journal_path(channel_root.path(), ReleaseChannel::Test).exists(),
+                    "rollback created cleanup authority"
+                );
                 let failed = report.failed_candidate.as_ref().expect("failed candidate");
                 assert_eq!(
                     fs::read_to_string(failed.join("marker")).expect("failed candidate marker"),
@@ -775,6 +793,7 @@ fn coordinator_reports_download_verification_and_install_phases() {
     });
     let (_app, update) = checked_update(&server, VALID_ARCHIVE_PUBLIC_KEY);
     let root = tempdir().expect("update root");
+    let channel_root = tempdir().expect("channel root");
     let installed = installed_app(root.path());
     let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
     let policy =
@@ -784,6 +803,8 @@ fn coordinator_reports_download_verification_and_install_phases() {
     let report = tauri::async_runtime::block_on(install_checked_update_with_observer(
         update,
         &installed,
+        channel_root.path(),
+        ReleaseChannel::Test,
         &mut health,
         &policy,
         &observer,
@@ -807,6 +828,7 @@ fn coordinator_reports_download_verification_and_install_phases() {
 fn a_second_update_is_rejected_while_the_first_preserved_artifact_requires_cleanup() {
     let fixture = update_fixture_guard();
     let root = tempdir().expect("update root");
+    let channel_root = tempdir().expect("channel root");
     let installed = installed_app(root.path());
 
     let first_server = TestServer::new(&fixture, 2, |base_url| {
@@ -832,6 +854,8 @@ fn a_second_update_is_rejected_while_the_first_preserved_artifact_requires_clean
     let first_report = tauri::async_runtime::block_on(install_checked_update(
         first_update,
         &installed,
+        channel_root.path(),
+        ReleaseChannel::Test,
         &mut first_health,
         &first_policy,
     ))
@@ -864,6 +888,8 @@ fn a_second_update_is_rejected_while_the_first_preserved_artifact_requires_clean
     let error = tauri::async_runtime::block_on(install_checked_update(
         second_update,
         &installed,
+        channel_root.path(),
+        ReleaseChannel::Test,
         &mut second_health,
         &second_policy,
     ))
@@ -878,4 +904,61 @@ fn a_second_update_is_rejected_while_the_first_preserved_artifact_requires_clean
         2,
         "blocked update created another preserved artifact"
     );
+}
+
+#[test]
+fn acknowledged_cleanup_allows_the_next_archive_to_stage_and_install() {
+    let fixture = update_fixture_guard();
+    let root = tempdir().expect("update root");
+    let channel_root = tempdir().expect("channel root");
+    let installed = installed_app(root.path());
+
+    for version in ["0.2.0", "0.3.0"] {
+        let server = TestServer::new(&fixture, 2, |base_url| {
+            HashMap::from([
+                (
+                    "/manifest",
+                    manifest(base_url, version, VALID_ARCHIVE_SIGNATURE),
+                ),
+                (
+                    "/archive",
+                    archive(
+                        STANDARD
+                            .decode(VALID_ARCHIVE)
+                            .expect("valid archive base64"),
+                    ),
+                ),
+            ])
+        });
+        let (_app, update) = checked_update(&server, VALID_ARCHIVE_PUBLIC_KEY);
+        let policy =
+            DownloadUrlPolicy::local_test_fixture(&server.url("/archive")).expect("fixture policy");
+        let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
+
+        let report = tauri::async_runtime::block_on(install_checked_update(
+            update,
+            &installed,
+            channel_root.path(),
+            ReleaseChannel::Test,
+            &mut health,
+            &policy,
+        ))
+        .unwrap_or_else(|error| panic!("install {version}: {error}"));
+
+        assert_eq!(report.publication, InstallPublication::Committed);
+        assert!(
+            cleanup_journal_path(channel_root.path(), ReleaseChannel::Test).exists(),
+            "{version}"
+        );
+        load_pending_cleanup(channel_root.path(), ReleaseChannel::Test)
+            .expect("load committed cleanup")
+            .expect("pending committed cleanup")
+            .execute()
+            .expect("acknowledge committed cleanup");
+        assert!(
+            !cleanup_journal_path(channel_root.path(), ReleaseChannel::Test).exists(),
+            "{version}"
+        );
+        drop(server);
+    }
 }

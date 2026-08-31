@@ -32,8 +32,25 @@ pub trait CandidateHealth {
 }
 
 pub trait PublicationCompanion {
-    fn commit(&mut self) -> Result<(), String>;
+    fn commit(&mut self, publication: &CommittedPublication) -> Result<(), String>;
     fn rollback(&mut self) -> Result<(), String>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedPublication {
+    pub(crate) publication_id: Uuid,
+    pub(crate) update_root: PathBuf,
+    pub(crate) update_root_identity: FileIdentity,
+    pub(crate) installed_name: Vec<u8>,
+    pub(crate) installed_identity: FileIdentity,
+    pub(crate) backup_name: Vec<u8>,
+    pub(crate) backup_identity: FileIdentity,
+}
+
+impl CommittedPublication {
+    pub fn preserved_backup(&self) -> PathBuf {
+        self.update_root.join(OsStr::from_bytes(&self.backup_name))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,7 +112,7 @@ impl TransactionHook for NoopHook {
 struct NoopCompanion;
 
 impl PublicationCompanion for NoopCompanion {
-    fn commit(&mut self) -> Result<(), String> {
+    fn commit(&mut self, _: &CommittedPublication) -> Result<(), String> {
         Ok(())
     }
 
@@ -126,14 +143,14 @@ pub enum RecoveryState {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-struct FileIdentity {
-    device: u64,
-    inode: u64,
-    file_type: u32,
+pub(crate) struct FileIdentity {
+    pub(crate) device: u64,
+    pub(crate) inode: u64,
+    pub(crate) file_type: u32,
 }
 
 impl FileIdentity {
-    fn from_metadata(metadata: &fs::Metadata) -> Self {
+    pub(crate) fn from_metadata(metadata: &fs::Metadata) -> Self {
         Self {
             device: metadata.dev(),
             inode: metadata.ino(),
@@ -141,7 +158,7 @@ impl FileIdentity {
         }
     }
 
-    fn from_stat(metadata: &libc::stat) -> Self {
+    pub(crate) fn from_stat(metadata: &libc::stat) -> Self {
         Self {
             device: metadata.st_dev as u64,
             inode: metadata.st_ino,
@@ -149,7 +166,7 @@ impl FileIdentity {
         }
     }
 
-    fn is_directory(self) -> bool {
+    pub(crate) fn is_directory(self) -> bool {
         self.file_type == libc::S_IFDIR as u32
     }
 }
@@ -158,8 +175,9 @@ impl FileIdentity {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RecoveryJournal {
     transaction_id: Uuid,
-    installed_name: String,
-    candidate_name: String,
+    update_root_identity: FileIdentity,
+    installed_name: Vec<u8>,
+    candidate_name: Vec<u8>,
     installed_identity: FileIdentity,
     candidate_identity: FileIdentity,
     state: RecoveryState,
@@ -170,6 +188,7 @@ struct RecoveryJournal {
 pub struct RecoveryTransaction {
     root_path: PathBuf,
     root: OwnedFd,
+    root_identity: FileIdentity,
     installed_name: CString,
     candidate_name: CString,
     installed_identity: FileIdentity,
@@ -242,6 +261,7 @@ impl RecoveryTransaction {
         Ok(Self {
             root_path: canonical_root,
             root,
+            root_identity,
             installed_name,
             candidate_name,
             installed_identity,
@@ -330,12 +350,12 @@ impl RecoveryTransaction {
         companion: &mut impl PublicationCompanion,
         has_companion: bool,
     ) -> Result<PublicationOutcome, RecoveryError> {
-        if has_companion != self.migration_transaction_id.is_some() {
+        if !has_companion && self.migration_transaction_id.is_some() {
             return Err(RecoveryError::invalid(
                 "update migration transaction requires an exactly bound companion",
             ));
         }
-        if has_companion && !self.prepared {
+        if self.migration_transaction_id.is_some() && !self.prepared {
             return Err(RecoveryError::invalid(
                 "migration-bound update must be durably prepared before publication",
             ));
@@ -359,10 +379,11 @@ impl RecoveryTransaction {
         self.persist_journal(RecoveryState::CandidatePublished, hook)?;
 
         let installed_path = self.path(&self.installed_name);
-        let mut status = health.await_health(&installed_path, HEALTH_TIMEOUT);
+        let status = health.await_health(&installed_path, HEALTH_TIMEOUT);
         if status == HealthStatus::Healthy {
             self.persist_journal(RecoveryState::CommitIntent, hook)?;
-            match companion.commit() {
+            let publication = self.committed_publication();
+            match companion.commit(&publication) {
                 Ok(()) => {
                     hook.before(
                         RecoveryBoundary::AfterCompanionCommit,
@@ -371,14 +392,10 @@ impl RecoveryTransaction {
                     );
                     self.remove_journal()?;
                     return Ok(PublicationOutcome::Committed {
-                        preserved_backup: self.path(&self.candidate_name),
+                        preserved_backup: publication.preserved_backup(),
                     });
                 }
-                Err(_) => {
-                    self.persist_journal(RecoveryState::CandidatePublished, hook)?;
-                    status =
-                        HealthStatus::Failed("candidate companion health commit failed".to_owned());
-                }
+                Err(_) => return Err(RecoveryError::CompanionCommit),
             }
         }
 
@@ -599,11 +616,24 @@ impl RecoveryTransaction {
         self.root_path.join(OsStr::from_bytes(name.to_bytes()))
     }
 
+    fn committed_publication(&self) -> CommittedPublication {
+        CommittedPublication {
+            publication_id: self.transaction_id,
+            update_root: self.root_path.clone(),
+            update_root_identity: self.root_identity,
+            installed_name: self.installed_name.to_bytes().to_vec(),
+            installed_identity: self.candidate_identity,
+            backup_name: self.candidate_name.to_bytes().to_vec(),
+            backup_identity: self.installed_identity,
+        }
+    }
+
     fn journal(&self, state: RecoveryState) -> RecoveryJournal {
         RecoveryJournal {
             transaction_id: self.transaction_id,
-            installed_name: self.installed_name.to_string_lossy().into_owned(),
-            candidate_name: self.candidate_name.to_string_lossy().into_owned(),
+            update_root_identity: self.root_identity,
+            installed_name: self.installed_name.to_bytes().to_vec(),
+            candidate_name: self.candidate_name.to_bytes().to_vec(),
             installed_identity: self.installed_identity,
             candidate_identity: self.candidate_identity,
             state,
@@ -716,7 +746,7 @@ fn recover_interrupted_update_inner(
         return Ok(());
     };
     validate_recovery_journal(&journal)?;
-    if has_companion != expected_migration_transaction_id.is_some() {
+    if !has_companion && expected_migration_transaction_id.is_some() {
         return Err(RecoveryError::invalid(
             "update migration recovery requires an exactly bound companion",
         ));
@@ -729,9 +759,10 @@ fn recover_interrupted_update_inner(
     let transaction = RecoveryTransaction {
         root_path,
         root: root_descriptor,
-        installed_name: CString::new(journal.installed_name.as_bytes())
+        root_identity: journal.update_root_identity,
+        installed_name: CString::new(journal.installed_name.clone())
             .map_err(|_| RecoveryError::invalid("update journal installed name is invalid"))?,
-        candidate_name: CString::new(journal.candidate_name.as_bytes())
+        candidate_name: CString::new(journal.candidate_name.clone())
             .map_err(|_| RecoveryError::invalid("update journal candidate name is invalid"))?,
         installed_identity: journal.installed_identity,
         candidate_identity: journal.candidate_identity,
@@ -739,6 +770,14 @@ fn recover_interrupted_update_inner(
         migration_transaction_id: journal.migration_transaction_id,
         prepared: true,
     };
+    if descriptor_identity(transaction.root.as_raw_fd())
+        .map_err(|source| RecoveryError::io("inspect recovery update root", source))?
+        != transaction.root_identity
+    {
+        return Err(RecoveryError::invalid(
+            "recovery update root identity does not match its journal",
+        ));
+    }
     let installed_observed = identity_at(transaction.root.as_raw_fd(), &transaction.installed_name)
         .map_err(|source| RecoveryError::io("inspect recovery installed app", source))?;
     let candidate_observed = identity_at(transaction.root.as_raw_fd(), &transaction.candidate_name)
@@ -772,19 +811,9 @@ fn recover_interrupted_update_inner(
                     "committing update no longer owns the published app identities",
                 ));
             }
-            if companion.commit().is_err() {
-                transaction.persist_journal(RecoveryState::RollbackIntent, &mut NoopHook)?;
-                transaction
-                    .health_rollback_swap(&mut NoopHook)
-                    .map_err(|source| {
-                        RecoveryError::io("restore update after companion commit failure", source)
-                    })?;
-                transaction.persist_journal(RecoveryState::AppRestored, &mut NoopHook)?;
-                companion
-                    .rollback()
-                    .map_err(|_| RecoveryError::CompanionRollback)?;
-                transaction.persist_journal(RecoveryState::CompanionRolledBack, &mut NoopHook)?;
-            }
+            companion
+                .commit(&transaction.committed_publication())
+                .map_err(|_| RecoveryError::CompanionCommit)?;
         }
         RecoveryState::RollbackIntent => {
             if published {
@@ -909,7 +938,7 @@ fn validate_recovery_journal(journal: &RecoveryJournal) -> Result<(), RecoveryEr
         (&journal.installed_name, "installed"),
         (&journal.candidate_name, "candidate"),
     ] {
-        let path = Path::new(name);
+        let path = Path::new(OsStr::from_bytes(name));
         if name.is_empty()
             || !matches!(
                 path.components().collect::<Vec<_>>().as_slice(),
@@ -923,8 +952,10 @@ fn validate_recovery_journal(journal: &RecoveryJournal) -> Result<(), RecoveryEr
         }
     }
     if journal.installed_name == journal.candidate_name
+        || !journal.update_root_identity.is_directory()
         || !journal.installed_identity.is_directory()
         || !journal.candidate_identity.is_directory()
+        || journal.update_root_identity.device != journal.installed_identity.device
         || journal.installed_identity.device != journal.candidate_identity.device
     {
         return Err(RecoveryError::invalid(

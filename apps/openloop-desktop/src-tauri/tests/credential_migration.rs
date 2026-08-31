@@ -25,7 +25,8 @@ use openloop_desktop_lib::{
         channel::ReleaseChannel,
         recovery::{
             recover_interrupted_update_with_bound_companion, update_journal_path, CandidateHealth,
-            HealthStatus, PublicationCompanion, PublicationOutcome, RecoveryTransaction,
+            CommittedPublication, HealthStatus, PublicationCompanion, PublicationOutcome,
+            RecoveryTransaction,
         },
     },
 };
@@ -1379,7 +1380,7 @@ struct MigrationCompanion<'a, S> {
 }
 
 impl<S: MigrationStore> PublicationCompanion for MigrationCompanion<'_, S> {
-    fn commit(&mut self) -> Result<(), String> {
+    fn commit(&mut self, _: &CommittedPublication) -> Result<(), String> {
         commit_migration(
             self.channel_root,
             self.dsh_home,

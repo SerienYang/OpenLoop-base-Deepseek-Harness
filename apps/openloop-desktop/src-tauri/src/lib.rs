@@ -37,9 +37,10 @@ use crate::launcher::{
     InstanceAction, LaunchReadinessExpectation, LaunchSecrets, SingleInstance, SupervisedChild,
 };
 #[cfg(target_os = "macos")]
-use crate::update::recovery::PublicationCompanion;
+use crate::update::recovery::{CommittedPublication, PublicationCompanion};
 use crate::update::{
     archive::stage_verified_archive,
+    cleanup::{load_pending_cleanup, CleanupCompanion, PendingCleanup},
     coordinator::{
         parse_host_action, CheckReport, DownloadStatus, DownloadUrlPolicy, HostAction,
         InstallPublication, InstallReport,
@@ -52,8 +53,8 @@ use crate::update::{
     },
     lease::UpdateLease,
     recovery::{
-        pending_update_migration_transaction_id, recover_interrupted_update,
-        recover_interrupted_update_with_bound_companion, PublicationOutcome, RecoveryTransaction,
+        pending_update_migration_transaction_id, recover_interrupted_update_with_bound_companion,
+        PublicationOutcome, RecoveryTransaction,
     },
 };
 #[cfg(target_os = "macos")]
@@ -281,6 +282,7 @@ impl UpdateChecker<Update> for TauriUpdateChecker {
 struct TauriUpdateInstaller {
     installed_app: PathBuf,
     channel_root: PathBuf,
+    channel: update::channel::ReleaseChannel,
     dsh_home: PathBuf,
     policy: DownloadUrlPolicy,
 }
@@ -302,6 +304,8 @@ impl UpdateInstaller<Update> for TauriUpdateInstaller {
         let report = tauri::async_runtime::block_on(install_checked_update_with_observer(
             update,
             &self.installed_app,
+            &self.channel_root,
+            self.channel,
             &mut health,
             &self.policy,
             observer,
@@ -338,6 +342,7 @@ fn update_failure(error: &CoordinatorError) -> UpdateFailure {
         CoordinatorError::Download(_) => UpdateFailure::DownloadInterrupted,
         CoordinatorError::InsufficientDiskSpace { .. } => UpdateFailure::InsufficientDiskSpace,
         CoordinatorError::Recovery(_) => UpdateFailure::Recovery,
+        CoordinatorError::Cleanup(_) => UpdateFailure::Recovery,
         CoordinatorError::InvalidArguments
         | CoordinatorError::Stage(_)
         | CoordinatorError::MissingInstallationRoot
@@ -358,6 +363,36 @@ fn update_time() -> Duration {
 struct RuntimeHealthState {
     acknowledged: bool,
     pending_migration: Option<PendingCredentialMigration>,
+    pending_cleanup: Option<PendingCleanup>,
+}
+
+#[cfg(target_os = "macos")]
+impl RuntimeHealthState {
+    fn acknowledge(
+        &mut self,
+        migration_status: &CredentialMigrationStatusHandle,
+    ) -> Result<(), BridgeHandlerError> {
+        if self.acknowledged {
+            return Err(BridgeHandlerError::invalid_request());
+        }
+        if let Some(migration) = self.pending_migration.as_mut() {
+            migration
+                .commit_migration()
+                .map_err(|_| BridgeHandlerError::credential_failure())?;
+            migration_status
+                .complete()
+                .map_err(|_| BridgeHandlerError::credential_failure())?;
+        }
+        if let Some(cleanup) = self.pending_cleanup.as_mut() {
+            cleanup
+                .execute()
+                .map_err(|_| BridgeHandlerError::update_failure())?;
+        }
+        self.pending_migration.take();
+        self.pending_cleanup.take();
+        self.acknowledged = true;
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -419,7 +454,7 @@ impl PendingCredentialMigration {
 
 #[cfg(target_os = "macos")]
 impl PublicationCompanion for PendingCredentialMigration {
-    fn commit(&mut self) -> Result<(), String> {
+    fn commit(&mut self, _: &CommittedPublication) -> Result<(), String> {
         self.commit_migration()
     }
 
@@ -479,21 +514,34 @@ fn start_runtime(
     #[cfg(target_os = "macos")]
     let store = KeychainStore::new(updater_config.channel());
     #[cfg(target_os = "macos")]
-    let (migration_outcome, pending_migration, migration_lease) = {
+    let (migration_outcome, pending_migration, pending_cleanup, migration_lease) = {
         let migration_lease = UpdateLease::exclusive(channel_root)
             .map_err(|error| format!("credential migration lease acquisition failed: {error}"))?;
         let installed = current_app_bundle()?;
         let update_root = installed
             .parent()
             .ok_or_else(|| "installed app has no recovery root".to_owned())?;
-        recover_interrupted_publication(update_root, channel_root, &dsh_home, store)?;
+        recover_interrupted_publication(
+            update_root,
+            channel_root,
+            &dsh_home,
+            updater_config.channel(),
+            store,
+        )?;
+        let pending_cleanup = load_pending_cleanup(channel_root, updater_config.channel())
+            .map_err(|error| format!("load pending update cleanup failed: {error}"))?;
         let migration_outcome =
             prepare_migration(channel_root, &dsh_home, &store, &mut NoopMigrationHook)
                 .unwrap_or(MigrationOutcome::ReadOnlyLegacy);
         let pending_migration = migration_outcome.transaction_id().map(|transaction_id| {
             PendingCredentialMigration::new(channel_root, &dsh_home, transaction_id, store)
         });
-        (migration_outcome, pending_migration, migration_lease)
+        (
+            migration_outcome,
+            pending_migration,
+            pending_cleanup,
+            migration_lease,
+        )
     };
     #[cfg(not(target_os = "macos"))]
     let migration_lease = UpdateLease::exclusive(channel_root)
@@ -537,6 +585,7 @@ fn start_runtime(
     let health = Arc::new(Mutex::new(RuntimeHealthState {
         acknowledged: false,
         pending_migration,
+        pending_cleanup,
     }));
     #[cfg(target_os = "macos")]
     let migration_status = CredentialMigrationStatusHandle::from_outcome(&migration_outcome);
@@ -623,6 +672,7 @@ fn start_runtime(
         let update_installer: Arc<dyn UpdateInstaller<Update>> = Arc::new(TauriUpdateInstaller {
             installed_app,
             channel_root: channel_root.to_owned(),
+            channel: updater_config.channel(),
             dsh_home: dsh_home.clone(),
             policy: DownloadUrlPolicy::production(updater_config.channel()),
         });
@@ -674,19 +724,7 @@ fn start_runtime(
             let mut health = health_state
                 .lock()
                 .map_err(|_| BridgeHandlerError::credential_failure())?;
-            if health.acknowledged {
-                return Err(BridgeHandlerError::invalid_request());
-            }
-            if let Some(migration) = health.pending_migration.as_mut() {
-                migration
-                    .commit_migration()
-                    .map_err(|_| BridgeHandlerError::credential_failure())?;
-                completed_migration_status
-                    .complete()
-                    .map_err(|_| BridgeHandlerError::credential_failure())?;
-            }
-            health.pending_migration.take();
-            health.acknowledged = true;
+            health.acknowledge(&completed_migration_status)?;
             Ok(serde_json::Value::Null)
         });
         tables
@@ -748,6 +786,7 @@ fn recover_interrupted_publication(
     update_root: &Path,
     channel_root: &Path,
     dsh_home: &Path,
+    channel: update::channel::ReleaseChannel,
     store: KeychainStore,
 ) -> Result<(), String> {
     let transaction_id = pending_update_migration_transaction_id(update_root)
@@ -755,11 +794,19 @@ fn recover_interrupted_publication(
     if let Some(transaction_id) = transaction_id {
         let mut migration =
             PendingCredentialMigration::new(channel_root, dsh_home, transaction_id, store);
-        recover_interrupted_update_with_bound_companion(update_root, transaction_id, &mut migration)
+        let mut cleanup =
+            CleanupCompanion::with_companion(channel_root, channel, &mut migration)
+                .map_err(|error| format!("prepare interrupted update cleanup failed: {error}"))?;
+        recover_interrupted_update_with_bound_companion(update_root, transaction_id, &mut cleanup)
             .map_err(|error| format!("recover interrupted update failed: {error}"))
     } else {
-        recover_interrupted_update(update_root)
-            .map_err(|error| format!("recover interrupted update failed: {error}"))
+        let mut cleanup = CleanupCompanion::new(channel_root, channel)
+            .map_err(|error| format!("prepare interrupted update cleanup failed: {error}"))?;
+        crate::update::recovery::recover_interrupted_update_with_companion(
+            update_root,
+            &mut cleanup,
+        )
+        .map_err(|error| format!("recover interrupted update failed: {error}"))
     }
 }
 
@@ -935,10 +982,11 @@ async fn run_update_spike(
         update_root,
         channel_root,
         &dsh_home,
+        updater_config.channel(),
         KeychainStore::new(updater_config.channel()),
     )?;
     #[cfg(not(target_os = "macos"))]
-    recover_interrupted_update(update_root)
+    crate::update::recovery::recover_interrupted_update(update_root)
         .map_err(|error| format!("recover interrupted update failed: {error}"))?;
     let mut update = build_channel_updater(app, &updater_config)
         .map_err(|error| format!("create signed updater failed: {error}"))?
@@ -1011,15 +1059,20 @@ async fn run_update_spike(
         let credential_plan =
             credential_health_plan(channel_root, &dsh_home, migration.transaction_id())
                 .map_err(|error| format!("candidate credential health plan failed: {error}"))?;
-        let mut health = CandidateProcessHealth::new(&update.version, dsh_home)
+        let mut health = CandidateProcessHealth::new(&update.version, &dsh_home)
             .with_migration_expectation(
                 credential_plan.migration_transaction_id,
                 credential_plan.references.len(),
             );
         if let Some(companion) = pending_migration.as_mut() {
-            transaction.publish_with_companion(&mut health, companion)
+            let mut cleanup =
+                CleanupCompanion::with_companion(channel_root, updater_config.channel(), companion)
+                    .map_err(|error| format!("prepare update cleanup failed: {error}"))?;
+            transaction.publish_with_companion(&mut health, &mut cleanup)
         } else {
-            transaction.publish(&mut health)
+            let mut cleanup = CleanupCompanion::new(channel_root, updater_config.channel())
+                .map_err(|error| format!("prepare update cleanup failed: {error}"))?;
+            transaction.publish_with_companion(&mut health, &mut cleanup)
         }
     };
     #[cfg(not(target_os = "macos"))]
@@ -1168,7 +1221,15 @@ pub fn run() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::{fs, os::unix::net::UnixListener};
+
+    struct HealthyPublication;
+
+    impl crate::update::recovery::CandidateHealth for HealthyPublication {
+        fn await_health(&mut self, _: &Path, _: Duration) -> crate::update::recovery::HealthStatus {
+            crate::update::recovery::HealthStatus::Healthy
+        }
+    }
 
     #[test]
     fn reads_the_embedded_test_manifest() {
@@ -1200,5 +1261,60 @@ mod tests {
         fs::write(&runtime, b"runtime").expect("packaged runtime");
 
         assert_eq!(find_runtime_executable(&host, &resources), Some(runtime),);
+    }
+
+    #[test]
+    fn main_webview_ack_keeps_failed_cleanup_pending_and_allows_retry() {
+        let fixture = tempfile::tempdir().expect("runtime health fixture");
+        let channel_root = fixture.path().join("channel");
+        let update_root = fixture.path().join("Applications");
+        let installed = update_root.join("Openloop.app");
+        let candidate = update_root.join(".openloop-candidate-runtime.app");
+        fs::create_dir(&channel_root).expect("channel root");
+        fs::create_dir(&update_root).expect("update root");
+        fs::create_dir(&installed).expect("installed app");
+        fs::write(installed.join("marker"), b"old").expect("installed marker");
+        let socket = UnixListener::bind(installed.join("unsafe.socket")).expect("special file");
+        fs::create_dir(&candidate).expect("candidate app");
+        fs::write(candidate.join("marker"), b"new").expect("candidate marker");
+        let transaction = RecoveryTransaction::open(&update_root, &installed, &candidate)
+            .expect("recovery transaction");
+        let mut cleanup =
+            CleanupCompanion::new(&channel_root, update::channel::ReleaseChannel::Test)
+                .expect("cleanup companion");
+        transaction
+            .publish_with_companion(&mut HealthyPublication, &mut cleanup)
+            .expect("committed publication");
+        let pending_cleanup =
+            load_pending_cleanup(&channel_root, update::channel::ReleaseChannel::Test)
+                .expect("load cleanup")
+                .expect("pending cleanup");
+        let status = CredentialMigrationStatusHandle::from_outcome(&MigrationOutcome::NotNeeded);
+        let mut health = RuntimeHealthState {
+            acknowledged: false,
+            pending_migration: None,
+            pending_cleanup: Some(pending_cleanup),
+        };
+
+        assert!(health.acknowledge(&status).is_err());
+        assert!(!health.acknowledged);
+        assert!(health.pending_cleanup.is_some());
+        assert!(update::cleanup::cleanup_journal_path(
+            &channel_root,
+            update::channel::ReleaseChannel::Test
+        )
+        .exists());
+
+        drop(socket);
+        fs::remove_file(candidate.join("unsafe.socket")).expect("remove special file");
+        health.acknowledge(&status).expect("retry health ACK");
+        assert!(health.acknowledged);
+        assert!(health.pending_cleanup.is_none());
+        assert!(!candidate.exists());
+        assert!(!update::cleanup::cleanup_journal_path(
+            &channel_root,
+            update::channel::ReleaseChannel::Test
+        )
+        .exists());
     }
 }
