@@ -136,7 +136,7 @@ profile 的 `models` 列表是*替换*该路由已安装 catalog，而不是扩�
 
 每次解析产出一份**不可变**快照——profiles 加上一个持有各路由所建 `Provider` 的 `createModels()` 集合——每个操作都在自己第一个 `await` 之前整体捕获一份快照。配置变化会构造**新**集合，而不是改动正在被使用的那个：`Models.streamSimple()` 是惰性的，它在流首次被消费时才解析 provider，而那已在 credential await 之后，因此改动共享集合会让一个在旧配置下开始的请求在新配置下结束，或者撞上一个已不存在的 provider。这正是 seam 的每步调用冻结（`llm.prepareCall()`）能贯通到底的原因——回复途中切换模型会在下一步生效，绝不会影响在途的那一步。请求经 `Models.streamSimple()` 抵达提供方。保持 catalog 协议不变的 catalog 路由会**复用**已安装提供方，只替换其模型列表，因为该提供方持有本包无法重建的 API 实现——Bedrock 经由独立入口加载其 Smithy 模块——从零件重建会静默收窄可用提供方的范围。其余路由都由 `createProvider()` 基于 `supportedProtocols()` 背后的协议表构造，表中条目正是 pi-ai 自己的提供方工厂所用的同一批 factory。
 
-凭据绝不进入该集合。harness 在请求抵达 pi-ai 之前经自身 seam 解析路由密钥，并作为请求的 `apiKey` 选项传入，而 pi-ai 将其视为优先级最高的 auth 覆盖；因此 `Models` 不持有任何凭据存储，harness 也保住了自己明确失败的引用语义。没有点名任何凭据的路由会解析为「已配置但无密钥」，把该要求留给协议——那才是它真正所在的位置。
+凭据绝不进入该集合。harness 在请求抵达 pi-ai 之前经自身 seam 解析路由密钥。在 `api-key` 模式下，它把密钥作为请求的 `apiKey` 选项传入，而 pi-ai 将其视为优先级最高的提供方原生 auth 覆盖。在 `bearer` 模式下，它不会传入请求 `apiKey`；适配器会改为准确写入 `Authorization: Bearer <key>`，并在分派前移除已配置的 `Authorization`、`x-api-key` 与 `api-key` 标头。因此 `Models` 不持有任何凭据存储，harness 也保住了自己明确失败的引用语义。没有点名凭据的 `api-key` 路由会解析为「已配置但无密钥」，把该要求留给协议——那才是它真正所在的位置；bearer 路由必须点名 `apiKeyEnv`。
 
 所选模型 descriptor 提供协议实现。这包括原生 API 差异，例如 descriptor 使用 Responses API 而非 Chat Completions 的 OpenAI 模型；harness 适配器不会按模型名称硬编码端点选择。
 
