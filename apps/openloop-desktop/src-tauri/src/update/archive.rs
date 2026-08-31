@@ -20,6 +20,9 @@ use uuid::Uuid;
 
 use super::cleanup::is_cleanup_isolation_artifact_name;
 
+// This includes the top-level `.app` root and the final directory or file.
+const MAX_ARCHIVE_PATH_COMPONENTS: usize = 100;
+
 #[derive(Debug)]
 pub struct StagedCandidate {
     path: PathBuf,
@@ -117,6 +120,7 @@ pub fn stage_verified_archive(
     }
 
     reject_preserved_artifacts(&parent_path)?;
+    preflight_archive_depth(archive_bytes)?;
     let (candidate_name, candidate_identity) =
         create_unique_directory(parent.as_raw_fd(), ".openloop-candidate-", ".app")
             .map_err(|source| ArchiveStageError::io("create candidate app directory", source))?;
@@ -161,6 +165,25 @@ fn reject_preserved_artifacts(parent: &Path) -> Result<(), ArchiveStageError> {
             paths.len()
         ))
         .with_preserved_paths(paths));
+    }
+    Ok(())
+}
+
+fn preflight_archive_depth(bytes: &[u8]) -> Result<(), ArchiveStageError> {
+    let decoder = GzDecoder::new(Cursor::new(bytes));
+    let mut archive = Archive::new(decoder);
+    // Only depth is handled before staging. The full unpack pass retains the
+    // existing preserved-artifact behavior for other malformed archives.
+    let entries = match archive.entries() {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => return Ok(()),
+        };
+        enforce_archive_depth(&entry.path_bytes())?;
     }
     Ok(())
 }
@@ -296,6 +319,7 @@ fn strict_components(path: &[u8]) -> Result<Vec<Vec<u8>>, ArchiveStageError> {
             "archive path must be nonempty and relative",
         ));
     }
+    enforce_archive_depth(path)?;
     let mut raw = path.split(|byte| *byte == b'/').collect::<Vec<_>>();
     if raw.last() == Some(&b"".as_slice()) {
         raw.pop();
@@ -313,6 +337,17 @@ fn strict_components(path: &[u8]) -> Result<Vec<Vec<u8>>, ArchiveStageError> {
         ));
     }
     Ok(raw.into_iter().map(<[u8]>::to_vec).collect())
+}
+
+fn enforce_archive_depth(path: &[u8]) -> Result<(), ArchiveStageError> {
+    let trailing_separator = usize::from(path.ends_with(b"/"));
+    let component_count = path.split(|byte| *byte == b'/').count() - trailing_separator;
+    if component_count > MAX_ARCHIVE_PATH_COMPONENTS {
+        return Err(ArchiveStageError::invalid(format!(
+            "archive path exceeds the maximum depth of {MAX_ARCHIVE_PATH_COMPONENTS} components"
+        )));
+    }
+    Ok(())
 }
 
 fn components_to_path(components: &[Vec<u8>]) -> PathBuf {

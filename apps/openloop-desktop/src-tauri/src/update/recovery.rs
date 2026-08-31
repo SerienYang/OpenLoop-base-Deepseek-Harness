@@ -184,6 +184,47 @@ struct RecoveryJournal {
     migration_transaction_id: Option<Uuid>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyRecoveryJournal {
+    transaction_id: Uuid,
+    installed_name: String,
+    candidate_name: String,
+    installed_identity: FileIdentity,
+    candidate_identity: FileIdentity,
+    state: RecoveryState,
+    migration_transaction_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RecoveryJournalWire {
+    // The variants stay disjoint because legacy denies the current-only root
+    // identity field, so malformed current journals cannot fall back.
+    Current(RecoveryJournal),
+    Legacy(LegacyRecoveryJournal),
+}
+
+impl RecoveryJournalWire {
+    fn into_current(self, root: RawFd) -> Result<RecoveryJournal, RecoveryError> {
+        match self {
+            Self::Current(journal) => Ok(journal),
+            Self::Legacy(journal) => Ok(RecoveryJournal {
+                transaction_id: journal.transaction_id,
+                update_root_identity: descriptor_identity(root).map_err(|source| {
+                    RecoveryError::io("inspect legacy recovery update root", source)
+                })?,
+                installed_name: journal.installed_name.into_bytes(),
+                candidate_name: journal.candidate_name.into_bytes(),
+                installed_identity: journal.installed_identity,
+                candidate_identity: journal.candidate_identity,
+                state: journal.state,
+                migration_transaction_id: journal.migration_transaction_id,
+            }),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct RecoveryTransaction {
     root_path: PathBuf,
@@ -926,9 +967,9 @@ fn read_recovery_journal(root: RawFd) -> Result<Option<RecoveryJournal>, Recover
         if bytes.len() > MAX_UPDATE_JOURNAL_BYTES {
             return Err(RecoveryError::invalid("update journal is oversized"));
         }
-        let journal = serde_json::from_slice(&bytes)
+        let journal: RecoveryJournalWire = serde_json::from_slice(&bytes)
             .map_err(|source| RecoveryError::json("parse update journal", source))?;
-        return Ok(Some(journal));
+        return Ok(Some(journal.into_current(root)?));
     }
     Ok(None)
 }

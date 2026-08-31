@@ -14,10 +14,11 @@ use std::{
 use openloop_desktop_lib::update::{
     channel::{ReleaseChannel, UpdateChannelConfig, UPDATE_NETWORK_TIMEOUT},
     recovery::{
-        recover_interrupted_update, recover_interrupted_update_with_bound_companion,
-        recover_interrupted_update_with_companion, update_journal_path, CandidateHealth,
-        CommittedPublication, HealthStatus, PublicationCompanion, PublicationOutcome,
-        RecoveryBoundary, RecoveryError, RecoveryState, RecoveryTestHook, RecoveryTransaction,
+        pending_update_migration_transaction_id, recover_interrupted_update,
+        recover_interrupted_update_with_bound_companion, recover_interrupted_update_with_companion,
+        update_journal_path, CandidateHealth, CommittedPublication, HealthStatus,
+        PublicationCompanion, PublicationOutcome, RecoveryBoundary, RecoveryError, RecoveryState,
+        RecoveryTestHook, RecoveryTransaction,
     },
 };
 use tempfile::tempdir;
@@ -246,12 +247,58 @@ fn marker(path: &Path) -> String {
 }
 
 fn transaction_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    transaction_fixture_with_names("Openloop.app", "Openloop-candidate.app")
+}
+
+fn transaction_fixture_with_names(
+    installed_name: &str,
+    candidate_name: &str,
+) -> (tempfile::TempDir, PathBuf, PathBuf) {
     let fixture = tempdir().expect("temporary update root");
-    let installed = fixture.path().join("Openloop.app");
-    let candidate = fixture.path().join("Openloop-candidate.app");
+    let installed = fixture.path().join(installed_name);
+    let candidate = fixture.path().join(candidate_name);
     app_bundle(&installed, "old");
     app_bundle(&candidate, "new");
     (fixture, installed, candidate)
+}
+
+fn base_recovery_journal(
+    template: &str,
+    root: &Path,
+    installed: &Path,
+    candidate: &Path,
+) -> serde_json::Value {
+    RecoveryTransaction::open(root, installed, candidate)
+        .expect("recovery transaction")
+        .prepare(None)
+        .expect("current recovery journal");
+    let current: serde_json::Value = serde_json::from_slice(
+        &fs::read(update_journal_path(root)).expect("current recovery journal bytes"),
+    )
+    .expect("current recovery journal JSON");
+    let mut base: serde_json::Value =
+        serde_json::from_str(template).expect("BASE recovery journal fixture");
+    base["installedIdentity"] = current["installedIdentity"].clone();
+    base["candidateIdentity"] = current["candidateIdentity"].clone();
+    assert!(base["installedName"].is_string());
+    assert!(base["candidateName"].is_string());
+    assert!(base.get("updateRootIdentity").is_none());
+    base
+}
+
+fn write_recovery_journal(root: &Path, journal: &serde_json::Value) {
+    fs::write(
+        update_journal_path(root),
+        serde_json::to_vec(journal).expect("recovery journal bytes"),
+    )
+    .expect("write recovery journal");
+}
+
+fn swap_fixture_apps(root: &Path, installed: &Path, candidate: &Path) {
+    let temporary = root.join("base-fixture-swap.tmp");
+    fs::rename(installed, &temporary).expect("move installed app");
+    fs::rename(candidate, installed).expect("publish candidate app");
+    fs::rename(&temporary, candidate).expect("preserve old app");
 }
 
 fn fifo(path: &Path) {
@@ -264,6 +311,156 @@ fn fifo(path: &Path) {
         "create FIFO: {}",
         std::io::Error::last_os_error()
     );
+}
+
+#[test]
+fn recovers_base_schema_journals_with_original_state_and_migration_semantics() {
+    struct Case {
+        label: &'static str,
+        fixture: &'static str,
+        published: bool,
+        commits: usize,
+        rollbacks: usize,
+    }
+
+    let cases = [
+        Case {
+            label: "prepared",
+            fixture: include_str!("fixtures/update-recovery/base-prepared.json"),
+            published: false,
+            commits: 0,
+            rollbacks: 1,
+        },
+        Case {
+            label: "candidate-published",
+            fixture: include_str!("fixtures/update-recovery/base-candidate-published.json"),
+            published: true,
+            commits: 0,
+            rollbacks: 1,
+        },
+        Case {
+            label: "commit-intent",
+            fixture: include_str!("fixtures/update-recovery/base-commit-intent.json"),
+            published: true,
+            commits: 1,
+            rollbacks: 0,
+        },
+        Case {
+            label: "rollback-intent",
+            fixture: include_str!("fixtures/update-recovery/base-rollback-intent.json"),
+            published: true,
+            commits: 0,
+            rollbacks: 1,
+        },
+    ];
+
+    for case in cases {
+        let fixture_value: serde_json::Value =
+            serde_json::from_str(case.fixture).expect("BASE recovery journal fixture");
+        let (root, installed, candidate) = transaction_fixture_with_names(
+            fixture_value["installedName"]
+                .as_str()
+                .expect("BASE installed name"),
+            fixture_value["candidateName"]
+                .as_str()
+                .expect("BASE candidate name"),
+        );
+        let journal = base_recovery_journal(case.fixture, root.path(), &installed, &candidate);
+        write_recovery_journal(root.path(), &journal);
+        if case.published {
+            swap_fixture_apps(root.path(), &installed, &candidate);
+        }
+        let migration_id = journal["migrationTransactionId"]
+            .as_str()
+            .map(|value| uuid::Uuid::parse_str(value).expect("fixture migration UUID"));
+        assert_eq!(
+            pending_update_migration_transaction_id(root.path())
+                .unwrap_or_else(|error| panic!("read {} BASE journal: {error}", case.label)),
+            migration_id,
+        );
+        let mut companion = RecordingCompanion::default();
+
+        match migration_id {
+            Some(transaction_id) => recover_interrupted_update_with_bound_companion(
+                root.path(),
+                transaction_id,
+                &mut companion,
+            ),
+            None => recover_interrupted_update_with_companion(root.path(), &mut companion),
+        }
+        .unwrap_or_else(|error| panic!("recover {} BASE journal: {error}", case.label));
+
+        assert_eq!(companion.commits, case.commits, "{}", case.label);
+        assert_eq!(companion.rollbacks, case.rollbacks, "{}", case.label);
+        assert_eq!(
+            marker(&installed),
+            if case.commits == 1 { "new" } else { "old" },
+            "{}",
+            case.label
+        );
+        assert_eq!(
+            marker(&candidate),
+            if case.commits == 1 { "old" } else { "new" },
+            "{}",
+            case.label
+        );
+        assert!(!update_journal_path(root.path()).exists(), "{}", case.label);
+    }
+}
+
+#[test]
+fn recovery_wire_formats_reject_malformed_current_and_unknown_fields() {
+    for case in [
+        "current-name-type",
+        "current-unknown-field",
+        "base-invalid-name",
+        "base-unknown-field",
+    ] {
+        let (root, installed, candidate) = transaction_fixture();
+        RecoveryTransaction::open(root.path(), &installed, &candidate)
+            .expect("recovery transaction")
+            .prepare(None)
+            .expect("current recovery journal");
+        let current: serde_json::Value = serde_json::from_slice(
+            &fs::read(update_journal_path(root.path())).expect("current recovery journal bytes"),
+        )
+        .expect("current recovery journal JSON");
+        let mut journal = match case {
+            "base-invalid-name" | "base-unknown-field" => base_recovery_journal(
+                include_str!("fixtures/update-recovery/base-prepared.json"),
+                root.path(),
+                &installed,
+                &candidate,
+            ),
+            _ => current,
+        };
+        match case {
+            "current-name-type" => {
+                journal["installedName"] = serde_json::json!("Openloop.app");
+                journal["candidateName"] = serde_json::json!("Openloop-candidate.app");
+            }
+            "base-invalid-name" => {
+                journal["installedName"] = serde_json::json!("../Openloop.app");
+            }
+            "current-unknown-field" | "base-unknown-field" => {
+                journal["unexpected"] = serde_json::json!(true);
+            }
+            _ => unreachable!(),
+        }
+        write_recovery_journal(root.path(), &journal);
+        let mut companion = RecordingCompanion::default();
+
+        assert!(
+            recover_interrupted_update_with_companion(root.path(), &mut companion).is_err(),
+            "{case} journal must be rejected"
+        );
+
+        assert_eq!(companion.commits, 0, "{case}");
+        assert_eq!(companion.rollbacks, 0, "{case}");
+        assert_eq!(marker(&installed), "old", "{case}");
+        assert_eq!(marker(&candidate), "new", "{case}");
+        assert!(update_journal_path(root.path()).exists(), "{case}");
+    }
 }
 
 #[test]
