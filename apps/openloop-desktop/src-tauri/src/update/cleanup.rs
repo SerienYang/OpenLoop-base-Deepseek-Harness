@@ -22,6 +22,7 @@ const TEST_CLEANUP_JOURNAL_FILE: &str = ".openloop-update-cleanup-test.json";
 const TEST_CLEANUP_JOURNAL_TEMP: &str = ".openloop-update-cleanup-test.tmp";
 const STABLE_CLEANUP_JOURNAL_FILE: &str = ".openloop-update-cleanup-stable.json";
 const STABLE_CLEANUP_JOURNAL_TEMP: &str = ".openloop-update-cleanup-stable.tmp";
+const CLEANUP_ISOLATION_PREFIX: &str = ".openloop-cleanup-";
 const MAX_CLEANUP_JOURNAL_BYTES: usize = 64 * 1024;
 
 #[cfg(debug_assertions)]
@@ -33,6 +34,11 @@ pub enum CleanupBoundary {
     AfterJournalRename,
     BeforeJournalParentFsync,
     AfterJournalParentFsync,
+    BeforeBackupIsolation,
+    AfterBackupRenameBeforeVerify,
+    AfterBackupIsolation,
+    BeforeChildIsolation,
+    BeforeLeafIsolation,
     BeforeBackupUnlink,
     AfterBackupUnlink,
     BeforeUpdateRootFsync,
@@ -52,6 +58,11 @@ enum CleanupBoundary {
     AfterJournalRename,
     BeforeJournalParentFsync,
     AfterJournalParentFsync,
+    BeforeBackupIsolation,
+    AfterBackupRenameBeforeVerify,
+    AfterBackupIsolation,
+    BeforeChildIsolation,
+    BeforeLeafIsolation,
     BeforeBackupUnlink,
     AfterBackupUnlink,
     BeforeUpdateRootFsync,
@@ -65,10 +76,18 @@ enum CleanupBoundary {
 #[cfg(debug_assertions)]
 pub trait CleanupTestHook {
     fn reached(&mut self, boundary: CleanupBoundary);
+
+    fn reached_entry(&mut self, boundary: CleanupBoundary, _: RawFd, _: &CStr) {
+        self.reached(boundary);
+    }
 }
 
 trait CleanupHook {
     fn reached(&mut self, boundary: CleanupBoundary);
+
+    fn reached_entry(&mut self, boundary: CleanupBoundary, _: RawFd, _: &CStr) {
+        self.reached(boundary);
+    }
 }
 
 struct NoopCleanupHook;
@@ -84,6 +103,10 @@ struct TestCleanupHook<'a>(&'a mut dyn CleanupTestHook);
 impl CleanupHook for TestCleanupHook<'_> {
     fn reached(&mut self, boundary: CleanupBoundary) {
         self.0.reached(boundary);
+    }
+
+    fn reached_entry(&mut self, boundary: CleanupBoundary, parent: RawFd, name: &CStr) {
+        self.0.reached_entry(boundary, parent, name);
     }
 }
 
@@ -102,6 +125,7 @@ struct CleanupJournal {
     update_root_identity: FileIdentity,
     installed: CleanupEntry,
     backup: CleanupEntry,
+    isolated_name: Vec<u8>,
 }
 
 impl CleanupJournal {
@@ -118,7 +142,16 @@ impl CleanupJournal {
                 name: publication.backup_name.clone(),
                 identity: publication.backup_identity,
             },
+            isolated_name: new_isolation_name(publication.publication_id).into_bytes(),
         }
+    }
+
+    fn same_publication(&self, other: &Self) -> bool {
+        self.publication_id == other.publication_id
+            && self.update_root == other.update_root
+            && self.update_root_identity == other.update_root_identity
+            && self.installed == other.installed
+            && self.backup == other.backup
     }
 }
 
@@ -254,6 +287,7 @@ impl PendingCleanup {
         )?;
         let installed = entry_name(&self.journal.installed, "installed")?;
         let backup = entry_name(&self.journal.backup, "backup")?;
+        let isolated = journal_isolation_name(&self.journal)?;
         verify_identity(
             self.update_root.as_raw_fd(),
             &installed,
@@ -261,59 +295,117 @@ impl PendingCleanup {
             "installed app",
         )?;
 
-        match identity_at(self.update_root.as_raw_fd(), &backup) {
-            Ok(identity) => {
-                if identity != self.journal.backup.identity || !identity.is_directory() {
-                    return Err(CleanupError::invalid(
-                        "cleanup backup identity changed before deletion",
-                    ));
-                }
-                let directory = open_directory_at(self.update_root.as_raw_fd(), &backup)
-                    .map_err(|source| CleanupError::io("open cleanup backup", source))?;
-                verify_descriptor_identity(
-                    directory.as_raw_fd(),
-                    self.journal.backup.identity,
-                    "cleanup backup descriptor",
-                )?;
-                delete_directory_contents(
-                    directory.as_raw_fd(),
-                    self.journal.backup.identity.device,
-                )?;
+        let location = backup_location(
+            self.update_root.as_raw_fd(),
+            &backup,
+            &isolated,
+            self.journal.backup.identity,
+        )?;
+        let directory = match location {
+            BackupLocation::Original => {
                 verify_identity(
                     self.update_root.as_raw_fd(),
                     &installed,
                     self.journal.installed.identity,
-                    "installed app",
+                    "installed app before backup isolation",
                 )?;
+                hook.reached(CleanupBoundary::BeforeBackupIsolation);
+                rename_exclusive_at(self.update_root.as_raw_fd(), &backup, &isolated)
+                    .map_err(|source| CleanupError::io("isolate cleanup backup", source))?;
+                hook.reached(CleanupBoundary::AfterBackupRenameBeforeVerify);
+                if let Err(error) = verify_identity(
+                    self.update_root.as_raw_fd(),
+                    &isolated,
+                    self.journal.backup.identity,
+                    "isolated cleanup backup",
+                ) {
+                    restore_isolated_entry(
+                        self.update_root.as_raw_fd(),
+                        &isolated,
+                        &backup,
+                        "cleanup backup",
+                    )?;
+                    return Err(error);
+                }
+                let directory = open_freshly_isolated_directory(
+                    self.update_root.as_raw_fd(),
+                    &isolated,
+                    &backup,
+                    self.journal.backup.identity,
+                    "cleanup backup descriptor",
+                )?;
+                if let Err(error) = verify_identity(
+                    self.update_root.as_raw_fd(),
+                    &installed,
+                    self.journal.installed.identity,
+                    "installed app after backup isolation",
+                ) {
+                    drop(directory);
+                    restore_isolated_entry(
+                        self.update_root.as_raw_fd(),
+                        &isolated,
+                        &backup,
+                        "cleanup backup",
+                    )?;
+                    return Err(error);
+                }
+                sync_directory(self.update_root.as_raw_fd())
+                    .map_err(|source| CleanupError::io("sync cleanup backup isolation", source))?;
+                hook.reached(CleanupBoundary::AfterBackupIsolation);
+                Some(directory)
+            }
+            BackupLocation::Isolated => {
+                let directory = open_directory_at(self.update_root.as_raw_fd(), &isolated)
+                    .map_err(|source| CleanupError::io("open isolated cleanup backup", source))?;
                 verify_descriptor_identity(
                     directory.as_raw_fd(),
                     self.journal.backup.identity,
                     "cleanup backup descriptor",
                 )?;
-                verify_identity(
-                    self.update_root.as_raw_fd(),
-                    &backup,
-                    self.journal.backup.identity,
-                    "cleanup backup",
-                )?;
-                hook.reached(CleanupBoundary::BeforeBackupUnlink);
-                if unsafe {
-                    libc::unlinkat(
-                        self.update_root.as_raw_fd(),
-                        backup.as_ptr(),
-                        libc::AT_REMOVEDIR,
-                    )
-                } < 0
-                {
-                    return Err(CleanupError::io(
-                        "remove cleanup backup directory",
-                        io::Error::last_os_error(),
-                    ));
-                }
-                hook.reached(CleanupBoundary::AfterBackupUnlink);
+                Some(directory)
             }
-            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-            Err(source) => return Err(CleanupError::io("inspect cleanup backup", source)),
+            BackupLocation::Missing => None,
+        };
+
+        if let Some(directory) = directory {
+            delete_directory_contents(
+                directory.as_raw_fd(),
+                self.journal.backup.identity.device,
+                self.journal.publication_id,
+                hook,
+            )?;
+            verify_identity(
+                self.update_root.as_raw_fd(),
+                &installed,
+                self.journal.installed.identity,
+                "installed app",
+            )?;
+            verify_descriptor_identity(
+                directory.as_raw_fd(),
+                self.journal.backup.identity,
+                "cleanup backup descriptor",
+            )?;
+            verify_identity(
+                self.update_root.as_raw_fd(),
+                &isolated,
+                self.journal.backup.identity,
+                "isolated cleanup backup",
+            )?;
+            hook.reached(CleanupBoundary::BeforeBackupUnlink);
+            if unsafe {
+                libc::unlinkat(
+                    self.update_root.as_raw_fd(),
+                    isolated.as_ptr(),
+                    libc::AT_REMOVEDIR,
+                )
+            } < 0
+            {
+                return Err(CleanupError::io(
+                    "remove isolated cleanup backup directory",
+                    io::Error::last_os_error(),
+                ));
+            }
+            hook.reached(CleanupBoundary::AfterBackupUnlink);
         }
 
         hook.reached(CleanupBoundary::BeforeUpdateRootFsync);
@@ -374,16 +466,13 @@ pub fn load_pending_cleanup(
         "installed app",
     )?;
     let backup = entry_name(&journal.backup, "backup")?;
-    match identity_at(update_root.as_raw_fd(), &backup) {
-        Ok(identity) if identity == journal.backup.identity && identity.is_directory() => {}
-        Ok(_) => {
-            return Err(CleanupError::invalid(
-                "cleanup backup identity changed while loading",
-            ));
-        }
-        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-        Err(source) => return Err(CleanupError::io("inspect cleanup backup", source)),
-    }
+    let isolated = journal_isolation_name(&journal)?;
+    backup_location(
+        update_root.as_raw_fd(),
+        &backup,
+        &isolated,
+        journal.backup.identity,
+    )?;
     Ok(Some(PendingCleanup {
         channel_root,
         update_root,
@@ -412,7 +501,8 @@ fn persist_cleanup_journal_at(
 ) -> Result<(), CleanupError> {
     let (journal_name, temp_name) = journal_names(channel);
     if let Some((existing, _)) = read_cleanup_journal(channel_root, journal_name)? {
-        return if existing == *journal {
+        validate_cleanup_journal(&existing)?;
+        return if existing.same_publication(journal) {
             remove_optional_regular_file(channel_root, temp_name)?;
             hook.reached(CleanupBoundary::BeforeJournalParentFsync);
             sync_directory(channel_root)
@@ -549,7 +639,11 @@ fn validate_cleanup_journal(journal: &CleanupJournal) -> Result<(), CleanupError
     }
     entry_name(&journal.installed, "installed")?;
     entry_name(&journal.backup, "backup")?;
-    if journal.installed.name == journal.backup.name {
+    let isolated = journal_isolation_name(journal)?;
+    if journal.installed.name == journal.backup.name
+        || isolated.to_bytes() == journal.installed.name
+        || isolated.to_bytes() == journal.backup.name
+    {
         return Err(CleanupError::invalid("cleanup journal app names overlap"));
     }
     Ok(())
@@ -572,7 +666,12 @@ fn entry_name(entry: &CleanupEntry, label: &str) -> Result<CString, CleanupError
     cstring(&entry.name, "cleanup app name")
 }
 
-fn delete_directory_contents(directory: RawFd, expected_device: u64) -> Result<(), CleanupError> {
+fn delete_directory_contents(
+    directory: RawFd,
+    expected_device: u64,
+    publication_id: Uuid,
+    hook: &mut impl CleanupHook,
+) -> Result<(), CleanupError> {
     for name in directory_entries(directory)? {
         let first = match stat_at(directory, &name) {
             Ok(metadata) => metadata,
@@ -587,32 +686,58 @@ fn delete_directory_contents(directory: RawFd, expected_device: u64) -> Result<(
         match file_type(&first) {
             value if value == libc::S_IFDIR as u32 => {
                 let identity = FileIdentity::from_stat(&first);
-                let child = match open_directory_at(directory, &name) {
-                    Ok(child) => child,
-                    Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
-                    Err(source) => {
-                        return Err(CleanupError::io("open cleanup directory", source));
-                    }
-                };
+                let isolated = isolate_entry(
+                    directory,
+                    &name,
+                    identity,
+                    publication_id,
+                    "cleanup child directory",
+                    CleanupBoundary::BeforeChildIsolation,
+                    hook,
+                )?;
+                let child = open_freshly_isolated_directory(
+                    directory,
+                    &isolated,
+                    &name,
+                    identity,
+                    "cleanup child directory",
+                )?;
+                delete_directory_contents(
+                    child.as_raw_fd(),
+                    expected_device,
+                    publication_id,
+                    hook,
+                )?;
                 verify_descriptor_identity(child.as_raw_fd(), identity, "cleanup child directory")?;
-                delete_directory_contents(child.as_raw_fd(), expected_device)?;
-                verify_descriptor_identity(child.as_raw_fd(), identity, "cleanup child directory")?;
-                verify_identity(directory, &name, identity, "cleanup child directory")?;
-                if unsafe { libc::unlinkat(directory, name.as_ptr(), libc::AT_REMOVEDIR) } < 0 {
-                    let source = io::Error::last_os_error();
-                    if source.kind() != io::ErrorKind::NotFound {
-                        return Err(CleanupError::io("remove cleanup directory", source));
-                    }
+                verify_identity(
+                    directory,
+                    &isolated,
+                    identity,
+                    "isolated cleanup child directory",
+                )?;
+                if unsafe { libc::unlinkat(directory, isolated.as_ptr(), libc::AT_REMOVEDIR) } < 0 {
+                    return Err(CleanupError::io(
+                        "remove isolated cleanup directory",
+                        io::Error::last_os_error(),
+                    ));
                 }
             }
             value if value == libc::S_IFREG as u32 || value == libc::S_IFLNK as u32 => {
                 let identity = FileIdentity::from_stat(&first);
-                verify_identity(directory, &name, identity, "cleanup leaf")?;
-                if unsafe { libc::unlinkat(directory, name.as_ptr(), 0) } < 0 {
-                    let source = io::Error::last_os_error();
-                    if source.kind() != io::ErrorKind::NotFound {
-                        return Err(CleanupError::io("remove cleanup leaf", source));
-                    }
+                let isolated = isolate_entry(
+                    directory,
+                    &name,
+                    identity,
+                    publication_id,
+                    "cleanup leaf",
+                    CleanupBoundary::BeforeLeafIsolation,
+                    hook,
+                )?;
+                if unsafe { libc::unlinkat(directory, isolated.as_ptr(), 0) } < 0 {
+                    return Err(CleanupError::io(
+                        "remove isolated cleanup leaf",
+                        io::Error::last_os_error(),
+                    ));
                 }
             }
             _ => {
@@ -621,8 +746,188 @@ fn delete_directory_contents(directory: RawFd, expected_device: u64) -> Result<(
                 ));
             }
         }
+        sync_directory(directory)
+            .map_err(|source| CleanupError::io("sync cleanup directory", source))?;
     }
     Ok(())
+}
+
+fn new_isolation_name(publication_id: Uuid) -> String {
+    format!(
+        "{CLEANUP_ISOLATION_PREFIX}{publication_id}-{}",
+        Uuid::new_v4()
+    )
+}
+
+fn journal_isolation_name(journal: &CleanupJournal) -> Result<CString, CleanupError> {
+    let text = std::str::from_utf8(&journal.isolated_name)
+        .map_err(|_| CleanupError::invalid("cleanup journal isolation name is invalid"))?;
+    let prefix = format!("{CLEANUP_ISOLATION_PREFIX}{}-", journal.publication_id);
+    let Some(uuid) = text.strip_prefix(&prefix) else {
+        return Err(CleanupError::invalid(
+            "cleanup journal isolation name is not bound to its publication",
+        ));
+    };
+    let parsed = Uuid::parse_str(uuid)
+        .map_err(|_| CleanupError::invalid("cleanup journal isolation UUID is invalid"))?;
+    let path = Path::new(OsStr::from_bytes(&journal.isolated_name));
+    if parsed.to_string() != uuid
+        || !matches!(
+            path.components().collect::<Vec<_>>().as_slice(),
+            [std::path::Component::Normal(_)]
+        )
+    {
+        return Err(CleanupError::invalid(
+            "cleanup journal isolation name is invalid",
+        ));
+    }
+    cstring(&journal.isolated_name, "cleanup isolation name")
+}
+
+fn rename_exclusive_at(directory: RawFd, source: &CStr, destination: &CStr) -> io::Result<()> {
+    if unsafe {
+        libc::renameatx_np(
+            directory,
+            source.as_ptr(),
+            directory,
+            destination.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackupLocation {
+    Original,
+    Isolated,
+    Missing,
+}
+
+fn backup_location(
+    directory: RawFd,
+    original: &CStr,
+    isolated: &CStr,
+    expected: FileIdentity,
+) -> Result<BackupLocation, CleanupError> {
+    match identity_at(directory, isolated) {
+        Ok(actual) if actual == expected && actual.is_directory() => {
+            return match identity_at(directory, original) {
+                Ok(identity) if identity == expected => Err(CleanupError::invalid(
+                    "cleanup backup exists at both original and isolated names",
+                )),
+                Ok(_) => Err(CleanupError::invalid(
+                    "cleanup backup original name is occupied after isolation",
+                )),
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                    Ok(BackupLocation::Isolated)
+                }
+                Err(source) => Err(CleanupError::io("inspect original cleanup backup", source)),
+            };
+        }
+        Ok(_) => {
+            if matches!(
+                identity_at(directory, original),
+                Err(source) if source.kind() == io::ErrorKind::NotFound
+            ) {
+                restore_isolated_entry(directory, isolated, original, "cleanup backup")?;
+            }
+            return Err(CleanupError::invalid(
+                "isolated cleanup backup identity changed",
+            ));
+        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(CleanupError::io("inspect isolated cleanup backup", source));
+        }
+    }
+    match identity_at(directory, original) {
+        Ok(actual) if actual == expected && actual.is_directory() => Ok(BackupLocation::Original),
+        Ok(_) => Err(CleanupError::invalid(
+            "cleanup backup identity changed before isolation",
+        )),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(BackupLocation::Missing),
+        Err(source) => Err(CleanupError::io("inspect cleanup backup", source)),
+    }
+}
+
+fn isolate_entry(
+    directory: RawFd,
+    original: &CStr,
+    expected: FileIdentity,
+    publication_id: Uuid,
+    label: &str,
+    boundary: CleanupBoundary,
+    hook: &mut impl CleanupHook,
+) -> Result<CString, CleanupError> {
+    let isolated = cstring(
+        new_isolation_name(publication_id).as_bytes(),
+        "cleanup isolation name",
+    )?;
+    hook.reached_entry(boundary, directory, original);
+    rename_exclusive_at(directory, original, &isolated)
+        .map_err(|source| CleanupError::io("isolate cleanup entry", source))?;
+    match identity_at(directory, &isolated) {
+        Ok(actual) if actual == expected => {}
+        Ok(_) => {
+            restore_isolated_entry(directory, &isolated, original, label)?;
+            return Err(CleanupError::invalid(format!(
+                "{label} identity changed during isolation"
+            )));
+        }
+        Err(source) => {
+            restore_isolated_entry(directory, &isolated, original, label)?;
+            return Err(CleanupError::io("inspect isolated cleanup entry", source));
+        }
+    }
+    sync_directory(directory)
+        .map_err(|source| CleanupError::io("sync cleanup entry isolation", source))?;
+    Ok(isolated)
+}
+
+fn open_freshly_isolated_directory(
+    directory: RawFd,
+    isolated: &CStr,
+    original: &CStr,
+    expected: FileIdentity,
+    label: &str,
+) -> Result<OwnedFd, CleanupError> {
+    let child = match open_directory_at(directory, isolated) {
+        Ok(child) => child,
+        Err(source) => {
+            restore_isolated_entry(directory, isolated, original, label)?;
+            return Err(CleanupError::io("open isolated cleanup directory", source));
+        }
+    };
+    if let Err(error) = verify_descriptor_identity(child.as_raw_fd(), expected, label) {
+        drop(child);
+        restore_isolated_entry(directory, isolated, original, label)?;
+        return Err(error);
+    }
+    Ok(child)
+}
+
+fn restore_isolated_entry(
+    directory: RawFd,
+    isolated: &CStr,
+    original: &CStr,
+    label: &str,
+) -> Result<(), CleanupError> {
+    let restoration = rename_exclusive_at(directory, isolated, original);
+    sync_directory(directory)
+        .map_err(|source| CleanupError::io("sync cleanup entry restoration", source))?;
+    match restoration {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+            Err(CleanupError::invalid(format!(
+                "{label} changed during isolation; original name is occupied and isolation was preserved"
+            )))
+        }
+        Err(source) => Err(CleanupError::io("restore isolated cleanup entry", source)),
+    }
 }
 
 fn directory_entries(directory: RawFd) -> Result<Vec<CString>, CleanupError> {

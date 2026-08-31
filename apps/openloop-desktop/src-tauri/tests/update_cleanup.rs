@@ -1,6 +1,7 @@
 use std::{
-    ffi::OsString,
+    ffi::{CStr, OsString},
     fs,
+    os::fd::RawFd,
     os::unix::{
         ffi::OsStringExt,
         fs::{symlink, MetadataExt, PermissionsExt},
@@ -46,6 +47,37 @@ impl CleanupTestHook for CrashAt {
     fn reached(&mut self, boundary: CleanupBoundary) {
         if boundary == self.0 {
             panic!("injected cleanup journal crash");
+        }
+    }
+}
+
+struct ActionAt<F> {
+    boundary: CleanupBoundary,
+    action: Option<F>,
+}
+
+impl<F: FnOnce()> CleanupTestHook for ActionAt<F> {
+    fn reached(&mut self, boundary: CleanupBoundary) {
+        if boundary == self.boundary {
+            self.action.take().expect("cleanup action called once")();
+        }
+    }
+}
+
+struct EntryActionAt<F> {
+    boundary: CleanupBoundary,
+    name: &'static [u8],
+    action: Option<F>,
+}
+
+impl<F: FnOnce()> CleanupTestHook for EntryActionAt<F> {
+    fn reached(&mut self, _: CleanupBoundary) {}
+
+    fn reached_entry(&mut self, boundary: CleanupBoundary, _: RawFd, name: &CStr) {
+        if boundary == self.boundary && name.to_bytes() == self.name {
+            self.action
+                .take()
+                .expect("cleanup entry action called once")();
         }
     }
 }
@@ -99,6 +131,27 @@ fn commit(channel_root: &Path, installed: &Path, candidate: &Path) -> Publicatio
     transaction
         .publish_with_companion(&mut Healthy, &mut cleanup)
         .expect("publication")
+}
+
+fn active_backup(channel_root: &Path, candidate: &Path) -> PathBuf {
+    if candidate.exists() {
+        return candidate.to_owned();
+    }
+    journal_isolated_backup(channel_root, candidate)
+}
+
+fn journal_isolated_backup(channel_root: &Path, candidate: &Path) -> PathBuf {
+    let journal: serde_json::Value = serde_json::from_slice(
+        &fs::read(cleanup_journal_path(channel_root, ReleaseChannel::Test))
+            .expect("cleanup journal"),
+    )
+    .expect("cleanup journal JSON");
+    let isolated_name: Vec<u8> =
+        serde_json::from_value(journal["isolatedName"].clone()).expect("isolated cleanup name");
+    candidate
+        .parent()
+        .expect("backup parent")
+        .join(OsString::from_vec(isolated_name))
 }
 
 #[test]
@@ -358,13 +411,14 @@ fn cleanup_fails_closed_for_special_files_and_retries_from_the_same_journal() {
 
     assert!(error.to_string().contains("special"));
     assert!(!pending.is_acknowledged());
-    assert!(candidate.exists());
+    let isolated_backup = active_backup(&channel_root, &candidate);
+    assert!(isolated_backup.exists());
     assert!(cleanup_journal_path(&channel_root, ReleaseChannel::Test).exists());
     drop(listener);
-    fs::remove_file(candidate.join("unsafe.socket")).expect("remove unsafe socket");
+    fs::remove_file(isolated_backup.join("unsafe.socket")).expect("remove unsafe socket");
     pending.execute().expect("retry cleanup");
     assert!(pending.is_acknowledged());
-    assert!(!candidate.exists());
+    assert!(!isolated_backup.exists());
     assert!(!cleanup_journal_path(&channel_root, ReleaseChannel::Test).exists());
 }
 
@@ -414,6 +468,165 @@ fn top_level_identity_changes_never_delete_and_keep_the_journal() {
         assert!(outside.exists(), "{case}");
         assert!(cleanup_journal_path(&channel_root, ReleaseChannel::Test).exists());
     }
+}
+
+#[test]
+fn top_level_replacement_after_verification_is_preserved_with_the_journal() {
+    let (root, channel_root, installed, candidate) = fixture();
+    commit(&channel_root, &installed, &candidate);
+    let displaced = root.path().join("displaced-backup.app");
+    let candidate_for_hook = candidate.clone();
+    let displaced_for_hook = displaced.clone();
+    let mut hook = ActionAt {
+        boundary: CleanupBoundary::BeforeBackupIsolation,
+        action: Some(move || {
+            fs::rename(&candidate_for_hook, &displaced_for_hook).expect("displace backup");
+            app_bundle(&candidate_for_hook, "replacement");
+        }),
+    };
+    let mut pending = load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+        .expect("load cleanup")
+        .expect("pending cleanup");
+
+    pending
+        .execute_with_hook(&mut hook)
+        .expect_err("replaced backup must not be deleted");
+
+    assert_eq!(
+        fs::read_to_string(candidate.join("marker")).expect("replacement marker"),
+        "replacement"
+    );
+    assert_eq!(
+        fs::read_to_string(displaced.join("marker")).expect("displaced backup marker"),
+        "old"
+    );
+    assert!(cleanup_journal_path(&channel_root, ReleaseChannel::Test).exists());
+}
+
+#[test]
+fn occupied_original_name_preserves_both_entries_after_isolation_mismatch() {
+    struct OccupyOriginal {
+        candidate: PathBuf,
+        displaced: PathBuf,
+    }
+
+    impl CleanupTestHook for OccupyOriginal {
+        fn reached(&mut self, boundary: CleanupBoundary) {
+            match boundary {
+                CleanupBoundary::BeforeBackupIsolation => {
+                    fs::rename(&self.candidate, &self.displaced).expect("displace backup");
+                    app_bundle(&self.candidate, "isolated-replacement");
+                }
+                CleanupBoundary::AfterBackupRenameBeforeVerify => {
+                    app_bundle(&self.candidate, "original-occupant");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let (root, channel_root, installed, candidate) = fixture();
+    commit(&channel_root, &installed, &candidate);
+    let displaced = root.path().join("displaced-backup.app");
+    let mut hook = OccupyOriginal {
+        candidate: candidate.clone(),
+        displaced: displaced.clone(),
+    };
+    let mut pending = load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+        .expect("load cleanup")
+        .expect("pending cleanup");
+
+    pending
+        .execute_with_hook(&mut hook)
+        .expect_err("occupied original name must prevent restoration");
+
+    assert_eq!(
+        fs::read_to_string(candidate.join("marker")).expect("original occupant"),
+        "original-occupant"
+    );
+    assert_eq!(
+        fs::read_to_string(journal_isolated_backup(&channel_root, &candidate).join("marker"))
+            .expect("isolated replacement"),
+        "isolated-replacement"
+    );
+    assert_eq!(
+        fs::read_to_string(displaced.join("marker")).expect("displaced backup"),
+        "old"
+    );
+    assert!(cleanup_journal_path(&channel_root, ReleaseChannel::Test).exists());
+}
+
+#[test]
+fn nested_directory_replacement_after_verification_is_preserved_with_the_journal() {
+    let (root, channel_root, installed, candidate) = fixture();
+    fs::create_dir_all(installed.join("nested/original")).expect("nested backup directory");
+    commit(&channel_root, &installed, &candidate);
+    let displaced = root.path().join("displaced-nested");
+    let channel_for_hook = channel_root.clone();
+    let candidate_for_hook = candidate.clone();
+    let displaced_for_hook = displaced.clone();
+    let mut hook = EntryActionAt {
+        boundary: CleanupBoundary::BeforeChildIsolation,
+        name: b"nested",
+        action: Some(move || {
+            let backup = active_backup(&channel_for_hook, &candidate_for_hook);
+            let nested = backup.join("nested");
+            fs::rename(&nested, &displaced_for_hook).expect("displace nested directory");
+            fs::create_dir(&nested).expect("replacement nested directory");
+        }),
+    };
+    let mut pending = load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+        .expect("load cleanup")
+        .expect("pending cleanup");
+
+    pending
+        .execute_with_hook(&mut hook)
+        .expect_err("replaced nested directory must not be deleted");
+
+    assert!(active_backup(&channel_root, &candidate)
+        .join("nested")
+        .is_dir());
+    assert!(displaced.join("original").is_dir());
+    assert!(cleanup_journal_path(&channel_root, ReleaseChannel::Test).exists());
+}
+
+#[test]
+fn leaf_replacement_after_verification_is_preserved_with_the_journal() {
+    let (root, channel_root, installed, candidate) = fixture();
+    fs::write(installed.join("leaf"), "original").expect("backup leaf");
+    commit(&channel_root, &installed, &candidate);
+    let displaced = root.path().join("displaced-leaf");
+    let channel_for_hook = channel_root.clone();
+    let candidate_for_hook = candidate.clone();
+    let displaced_for_hook = displaced.clone();
+    let mut hook = EntryActionAt {
+        boundary: CleanupBoundary::BeforeLeafIsolation,
+        name: b"leaf",
+        action: Some(move || {
+            let backup = active_backup(&channel_for_hook, &candidate_for_hook);
+            let leaf = backup.join("leaf");
+            fs::rename(&leaf, &displaced_for_hook).expect("displace leaf");
+            fs::write(&leaf, "replacement").expect("replacement leaf");
+        }),
+    };
+    let mut pending = load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+        .expect("load cleanup")
+        .expect("pending cleanup");
+
+    pending
+        .execute_with_hook(&mut hook)
+        .expect_err("replaced leaf must not be deleted");
+
+    assert_eq!(
+        fs::read_to_string(active_backup(&channel_root, &candidate).join("leaf"))
+            .expect("replacement leaf"),
+        "replacement"
+    );
+    assert_eq!(
+        fs::read_to_string(displaced).expect("displaced leaf"),
+        "original"
+    );
+    assert!(cleanup_journal_path(&channel_root, ReleaseChannel::Test).exists());
 }
 
 trait ExpectErrOrElse<T> {
@@ -603,6 +816,77 @@ fn cleanup_execution_crashes_are_idempotently_recoverable() {
             "{boundary:?}"
         );
     }
+}
+
+#[test]
+fn crash_after_backup_isolation_replays_the_journaled_artifact() {
+    for boundary in [
+        CleanupBoundary::AfterBackupRenameBeforeVerify,
+        CleanupBoundary::AfterBackupIsolation,
+    ] {
+        let (_root, channel_root, installed, candidate) = fixture();
+        commit(&channel_root, &installed, &candidate);
+        let mut pending = load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+            .expect("load cleanup")
+            .expect("pending cleanup");
+        let mut crash = CrashAt(boundary);
+
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            let _ = pending.execute_with_hook(&mut crash);
+        }))
+        .is_err());
+
+        let isolated = active_backup(&channel_root, &candidate);
+        assert!(!candidate.exists(), "{boundary:?}");
+        assert!(isolated.exists(), "{boundary:?}");
+        assert!(
+            cleanup_journal_path(&channel_root, ReleaseChannel::Test).exists(),
+            "{boundary:?}"
+        );
+
+        load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+            .expect("reload isolated cleanup")
+            .expect("pending isolated cleanup")
+            .execute()
+            .unwrap_or_else(|error| panic!("replay isolated cleanup after {boundary:?}: {error}"));
+
+        assert!(!isolated.exists(), "{boundary:?}");
+        assert!(
+            !cleanup_journal_path(&channel_root, ReleaseChannel::Test).exists(),
+            "{boundary:?}"
+        );
+    }
+}
+
+#[test]
+fn crash_replay_preserves_an_original_name_conflict_and_the_journal() {
+    let (_root, channel_root, installed, candidate) = fixture();
+    commit(&channel_root, &installed, &candidate);
+    let mut pending = load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+        .expect("load cleanup")
+        .expect("pending cleanup");
+    let mut crash = CrashAt(CleanupBoundary::AfterBackupIsolation);
+
+    assert!(catch_unwind(AssertUnwindSafe(|| {
+        let _ = pending.execute_with_hook(&mut crash);
+    }))
+    .is_err());
+
+    let isolated = journal_isolated_backup(&channel_root, &candidate);
+    app_bundle(&candidate, "replacement");
+
+    load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+        .expect_err("occupied original backup name must remain a conflict");
+
+    assert_eq!(
+        fs::read_to_string(candidate.join("marker")).expect("replacement marker"),
+        "replacement"
+    );
+    assert_eq!(
+        fs::read_to_string(isolated.join("marker")).expect("isolated backup marker"),
+        "old"
+    );
+    assert!(cleanup_journal_path(&channel_root, ReleaseChannel::Test).exists());
 }
 
 #[test]

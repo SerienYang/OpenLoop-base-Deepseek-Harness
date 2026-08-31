@@ -1221,7 +1221,11 @@ pub fn run() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, os::unix::net::UnixListener};
+    use std::{
+        ffi::OsString,
+        fs,
+        os::unix::{ffi::OsStringExt, net::UnixListener},
+    };
 
     struct HealthyPublication;
 
@@ -1306,7 +1310,22 @@ mod tests {
         .exists());
 
         drop(socket);
-        fs::remove_file(candidate.join("unsafe.socket")).expect("remove special file");
+        let journal: serde_json::Value = serde_json::from_slice(
+            &fs::read(update::cleanup::cleanup_journal_path(
+                &channel_root,
+                update::channel::ReleaseChannel::Test,
+            ))
+            .expect("cleanup journal"),
+        )
+        .expect("cleanup journal JSON");
+        let isolated_name: Vec<u8> =
+            serde_json::from_value(journal["isolatedName"].clone()).expect("isolated cleanup name");
+        fs::remove_file(
+            update_root
+                .join(OsString::from_vec(isolated_name))
+                .join("unsafe.socket"),
+        )
+        .expect("remove special file");
         health.acknowledge(&status).expect("retry health ACK");
         assert!(health.acknowledged);
         assert!(health.pending_cleanup.is_none());
