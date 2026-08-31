@@ -210,7 +210,10 @@ describe('PiAiAdapter provider routing', () => {
           api: 'anthropic-messages',
           baseURL: `${server.url}/api/plan`,
           models: [{ id: 'ark-code-latest' }],
-          headers: { authorization: 'Bearer configured-wrong' },
+          headers: {
+            authorization: 'Bearer configured-wrong',
+            'X-Api-Key': 'configured-wrong',
+          },
         },
       },
     })

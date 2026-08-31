@@ -180,7 +180,10 @@ function requestHeaders(
 ): Record<string, string> {
   const attribution = attributionHeaders()
   const reserved = new Set(Object.keys(attribution).map(name => name.toLowerCase()))
-  if (bearerToken !== undefined) reserved.add('authorization')
+  if (bearerToken !== undefined) {
+    reserved.add('authorization')
+    reserved.add('x-api-key')
+  }
   return {
     ...Object.fromEntries(Object.entries(headers ?? {}).filter(([name]) => !reserved.has(name.toLowerCase()))),
     ...attribution,
