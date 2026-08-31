@@ -230,10 +230,10 @@ describe('PiAiAdapter provider routing', () => {
     expect(server.headers[0]?.['x-api-key']).toBeUndefined()
   })
 
-  it('sends bearer credentials for an Anthropic catalog route without native ambient auth', async () => {
-    vi.stubEnv('ANTHROPIC_API_KEY', undefined)
-    vi.stubEnv('ANTHROPIC_AUTH_TOKEN', undefined)
-    vi.stubEnv('ANTHROPIC_OAUTH_TOKEN', undefined)
+  it('ignores native ambient Anthropic credentials for a bearer catalog route', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'poison-anthropic-api-key')
+    vi.stubEnv('ANTHROPIC_AUTH_TOKEN', 'poison-anthropic-auth-token')
+    vi.stubEnv('ANTHROPIC_OAUTH_TOKEN', 'poison-anthropic-oauth-token')
     const server = await mockServer([{ status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }])
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
