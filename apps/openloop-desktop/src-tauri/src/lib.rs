@@ -40,7 +40,7 @@ use crate::launcher::{
 use crate::update::recovery::{CommittedPublication, PublicationCompanion};
 use crate::update::{
     archive::stage_verified_archive,
-    cleanup::{load_pending_cleanup, CleanupCompanion, PendingCleanup},
+    cleanup::{ensure_no_pending_cleanup, load_pending_cleanup, CleanupCompanion, PendingCleanup},
     coordinator::{
         parse_host_action, CheckReport, DownloadStatus, DownloadUrlPolicy, HostAction,
         InstallPublication, InstallReport,
@@ -294,6 +294,8 @@ impl UpdateInstaller<Update> for TauriUpdateInstaller {
         update: Update,
         observer: &dyn UpdateInstallObserver,
     ) -> Result<UpdateInstallResult, UpdateFailure> {
+        ensure_no_pending_cleanup(&self.channel_root, self.channel)
+            .map_err(|_| UpdateFailure::Recovery)?;
         let credential_plan = credential_health_plan(&self.channel_root, &self.dsh_home, None)
             .map_err(|_| UpdateFailure::Install)?;
         let mut health = CandidateProcessHealth::new(&update.version, &self.dsh_home)
@@ -1289,6 +1291,13 @@ mod tests {
         transaction
             .publish_with_companion(&mut HealthyPublication, &mut cleanup)
             .expect("committed publication");
+        let gate_error =
+            ensure_no_pending_cleanup(&channel_root, update::channel::ReleaseChannel::Test)
+                .expect_err("pending cleanup must reject another production install");
+        assert_eq!(
+            update_failure(&CoordinatorError::Cleanup(gate_error)),
+            UpdateFailure::Recovery
+        );
         let pending_cleanup =
             load_pending_cleanup(&channel_root, update::channel::ReleaseChannel::Test)
                 .expect("load cleanup")

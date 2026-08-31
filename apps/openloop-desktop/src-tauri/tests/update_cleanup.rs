@@ -15,8 +15,8 @@ use std::{
 use openloop_desktop_lib::update::{
     channel::ReleaseChannel,
     cleanup::{
-        cleanup_journal_path, load_pending_cleanup, CleanupBoundary, CleanupCompanion,
-        CleanupTestHook,
+        cleanup_journal_path, ensure_no_pending_cleanup, load_pending_cleanup, CleanupBoundary,
+        CleanupCompanion, CleanupTestHook,
     },
     recovery::{
         CandidateHealth, HealthStatus, PublicationOutcome, RecoveryBoundary, RecoveryState,
@@ -249,6 +249,48 @@ fn committed_publication_writes_one_owner_only_channel_scoped_cleanup_journal() 
 }
 
 #[test]
+fn update_start_gate_is_channel_scoped_and_reopens_after_cleanup_ack() {
+    let (_root, channel_root, installed, candidate) = fixture();
+
+    ensure_no_pending_cleanup(&channel_root, ReleaseChannel::Test)
+        .expect("channel without a journal is ready");
+    commit(&channel_root, &installed, &candidate);
+
+    ensure_no_pending_cleanup(&channel_root, ReleaseChannel::Test)
+        .expect_err("the owning channel must reject a second update");
+    ensure_no_pending_cleanup(&channel_root, ReleaseChannel::Stable)
+        .expect("a test cleanup journal must not leak into stable");
+
+    load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+        .expect("load pending cleanup")
+        .expect("pending cleanup")
+        .execute()
+        .expect("healthy runtime cleanup ACK");
+    ensure_no_pending_cleanup(&channel_root, ReleaseChannel::Test)
+        .expect("cleanup ACK must reopen the channel");
+}
+
+#[test]
+fn update_start_gate_rejects_a_journal_after_the_backup_was_deleted() {
+    let (_root, channel_root, installed, candidate) = fixture();
+    commit(&channel_root, &installed, &candidate);
+    let mut pending = load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+        .expect("load cleanup")
+        .expect("pending cleanup");
+    let mut crash = CrashAt(CleanupBoundary::AfterBackupUnlink);
+
+    assert!(catch_unwind(AssertUnwindSafe(|| {
+        let _ = pending.execute_with_hook(&mut crash);
+    }))
+    .is_err());
+    assert!(!candidate.exists());
+    assert!(cleanup_journal_path(&channel_root, ReleaseChannel::Test).exists());
+
+    ensure_no_pending_cleanup(&channel_root, ReleaseChannel::Test)
+        .expect_err("the durable journal must block updates until ACK completion");
+}
+
+#[test]
 fn cleanup_journal_rejects_symlinks_hardlinks_unsafe_modes_and_oversized_json() {
     for case in ["symlink", "hardlink", "mode", "oversized"] {
         let (root, channel_root, installed, candidate) = fixture();
@@ -281,6 +323,10 @@ fn cleanup_journal_rejects_symlinks_hardlinks_unsafe_modes_and_oversized_json() 
         assert!(
             load_pending_cleanup(&channel_root, ReleaseChannel::Test).is_err(),
             "{case} cleanup journal was accepted"
+        );
+        assert!(
+            ensure_no_pending_cleanup(&channel_root, ReleaseChannel::Test).is_err(),
+            "{case} cleanup journal bypassed the update-start gate"
         );
         assert!(candidate.exists(), "{case} cleanup deleted the backup");
     }

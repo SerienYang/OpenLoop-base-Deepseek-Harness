@@ -134,6 +134,32 @@ fn preserved_candidate_blocks_the_next_stage_until_recovery_cleanup() {
 }
 
 #[test]
+fn cleanup_isolation_blocks_staging_without_deleting_the_recovery_owned_artifact() {
+    let root = tempdir().expect("update root");
+    let installed = installed_app(root.path());
+    let isolated = root.path().join(
+        ".openloop-cleanup-0f40b072-8c3f-48f9-86c1-5f857d537aef-\
+         5345877f-ef7b-4fd8-a6e1-35f91385848d",
+    );
+    fs::create_dir(&isolated).expect("cleanup isolation");
+    fs::write(isolated.join("marker"), b"recovery-owned").expect("cleanup isolation marker");
+
+    let error = stage_verified_archive(&archive(&update_entries()), &installed)
+        .expect_err("cleanup isolation must block staging");
+
+    assert!(error.to_string().contains("requires recovery cleanup"));
+    assert_eq!(
+        error.preserved_paths(),
+        [fs::canonicalize(&isolated).expect("canonical cleanup isolation")]
+    );
+    assert_eq!(
+        fs::read(isolated.join("marker")).expect("preserved cleanup isolation marker"),
+        b"recovery-owned"
+    );
+    assert_eq!(fs::read_dir(root.path()).expect("update root").count(), 2);
+}
+
+#[test]
 fn any_legacy_candidate_or_temporary_artifact_blocks_staging() {
     for names in [
         vec![".openloop-candidate-existing.app"],

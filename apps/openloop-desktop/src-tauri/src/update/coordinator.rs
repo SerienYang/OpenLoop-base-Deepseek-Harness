@@ -15,7 +15,7 @@ use tauri_plugin_updater::{Update, Updater};
 use super::{
     archive::{stage_verified_archive, ArchiveStageError},
     channel::{ReleaseChannel, UPDATE_NETWORK_TIMEOUT},
-    cleanup::{CleanupCompanion, CleanupError},
+    cleanup::{ensure_no_pending_cleanup, CleanupCompanion, CleanupError},
     health::HEALTH_PROBE_ARGUMENT,
     recovery::{
         CandidateHealth, HealthStatus, PublicationOutcome, RecoveryError, RecoveryTransaction,
@@ -172,6 +172,10 @@ impl DownloadUrlPolicy {
         }
         validate_download_url(raw_url, &parsed_url, &update.version, self.channel)
     }
+
+    fn channel(&self) -> ReleaseChannel {
+        self.channel
+    }
 }
 
 pub fn validate_download_url(
@@ -305,6 +309,12 @@ pub async fn install_checked_update_with_observer(
     policy: &DownloadUrlPolicy,
     observer: &dyn UpdateInstallObserver,
 ) -> Result<InstallReport, CoordinatorError> {
+    ensure_no_pending_cleanup(channel_root, policy.channel()).map_err(CoordinatorError::Cleanup)?;
+    if channel != policy.channel() {
+        return Err(CoordinatorError::UnsafeDownloadUrl(
+            "update install channel does not match its download policy".to_owned(),
+        ));
+    }
     policy.validate_update(&update)?;
     let root = installed_app
         .parent()

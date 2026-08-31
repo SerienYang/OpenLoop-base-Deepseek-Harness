@@ -3,6 +3,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::{Shutdown, TcpListener, TcpStream},
+    panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
     thread,
@@ -12,12 +13,15 @@ use std::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use openloop_desktop_lib::update::{
     channel::{ReleaseChannel, UPDATE_NETWORK_TIMEOUT},
-    cleanup::{cleanup_journal_path, load_pending_cleanup},
+    cleanup::{
+        cleanup_journal_path, load_pending_cleanup, CleanupBoundary, CleanupCompanion,
+        CleanupTestHook,
+    },
     coordinator::{
         check_update, install_checked_update, install_checked_update_with_observer,
         validate_download_url, DownloadStatus, DownloadUrlPolicy, InstallPublication,
     },
-    recovery::{CandidateHealth, HealthStatus},
+    recovery::{CandidateHealth, HealthStatus, PublicationOutcome, RecoveryTransaction},
     state::{UpdateInstallObserver, UpdateStateError},
 };
 use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime};
@@ -336,11 +340,45 @@ where
     }
 }
 
+struct CrashCleanupAt(CleanupBoundary);
+
+impl CleanupTestHook for CrashCleanupAt {
+    fn reached(&mut self, boundary: CleanupBoundary) {
+        if boundary == self.0 {
+            panic!("injected cleanup crash");
+        }
+    }
+}
+
 fn installed_app(root: &Path) -> PathBuf {
     let installed = root.join("Openloop.app");
     fs::create_dir(&installed).expect("installed app");
     fs::write(installed.join("marker"), "old").expect("installed marker");
     installed
+}
+
+fn commit_pending_cleanup(channel_root: &Path, installed: &Path) {
+    let candidate = installed
+        .parent()
+        .expect("update root")
+        .join(".openloop-candidate-pending.app");
+    fs::create_dir(&candidate).expect("candidate app");
+    fs::write(candidate.join("marker"), "new").expect("candidate marker");
+    let transaction = RecoveryTransaction::open(
+        installed.parent().expect("update root"),
+        installed,
+        &candidate,
+    )
+    .expect("recovery transaction");
+    let mut cleanup =
+        CleanupCompanion::new(channel_root, ReleaseChannel::Test).expect("cleanup companion");
+    let mut health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
+    assert!(matches!(
+        transaction
+            .publish_with_companion(&mut health, &mut cleanup)
+            .expect("committed publication"),
+        PublicationOutcome::Committed { .. }
+    ));
 }
 
 fn checked_update(server: &TestServer<'_>, public_key: &str) -> (tauri::App<MockRuntime>, Update) {
@@ -824,46 +862,37 @@ fn coordinator_reports_download_verification_and_install_phases() {
     );
 }
 
-#[test]
-fn a_second_update_is_rejected_while_the_first_preserved_artifact_requires_cleanup() {
+fn assert_second_install_is_rejected_after_cleanup_crash(boundary: CleanupBoundary) {
     let fixture = update_fixture_guard();
     let root = tempdir().expect("update root");
     let channel_root = tempdir().expect("channel root");
     let installed = installed_app(root.path());
+    commit_pending_cleanup(channel_root.path(), &installed);
 
-    let first_server = TestServer::new(&fixture, 2, |base_url| {
-        HashMap::from([
-            (
-                "/manifest",
-                manifest(base_url, "0.2.0", VALID_ARCHIVE_SIGNATURE),
-            ),
-            (
-                "/archive",
-                archive(
-                    STANDARD
-                        .decode(VALID_ARCHIVE)
-                        .expect("valid archive base64"),
-                ),
-            ),
-        ])
-    });
-    let (_first_app, first_update) = checked_update(&first_server, VALID_ARCHIVE_PUBLIC_KEY);
-    let first_policy = DownloadUrlPolicy::local_test_fixture(&first_server.url("/archive"))
-        .expect("first fixture policy");
-    let mut first_health = HealthProbe(|_: &Path, _: Duration| HealthStatus::Healthy);
-    let first_report = tauri::async_runtime::block_on(install_checked_update(
-        first_update,
-        &installed,
-        channel_root.path(),
-        ReleaseChannel::Test,
-        &mut first_health,
-        &first_policy,
-    ))
-    .expect("first update");
-    assert_eq!(first_report.publication, InstallPublication::Committed);
-    drop(first_server);
+    let mut pending = load_pending_cleanup(channel_root.path(), ReleaseChannel::Test)
+        .expect("load first cleanup")
+        .expect("pending first cleanup");
+    let mut crash = CrashCleanupAt(boundary);
+    assert!(catch_unwind(AssertUnwindSafe(|| {
+        let _ = pending.execute_with_hook(&mut crash);
+    }))
+    .is_err());
+    let has_cleanup_isolation = fs::read_dir(root.path())
+        .expect("update root")
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".openloop-cleanup-")
+        });
+    assert_eq!(
+        has_cleanup_isolation,
+        boundary == CleanupBoundary::AfterBackupIsolation
+    );
+    assert!(cleanup_journal_path(channel_root.path(), ReleaseChannel::Test).exists());
 
-    let second_server = TestServer::new(&fixture, 2, |base_url| {
+    let second_server = TestServer::new(&fixture, 1, |base_url| {
         HashMap::from([
             (
                 "/manifest",
@@ -893,17 +922,74 @@ fn a_second_update_is_rejected_while_the_first_preserved_artifact_requires_clean
         &mut second_health,
         &second_policy,
     ))
-    .expect_err("preserved backup must block a second update");
+    .expect_err("pending cleanup must block a second update before download");
 
     assert!(
-        error.to_string().contains("requires recovery cleanup"),
+        error.to_string().contains("pending update cleanup"),
         "unexpected second-update error: {error}"
     );
     assert_eq!(
         fs::read_dir(root.path()).expect("update root").count(),
-        2,
+        if has_cleanup_isolation { 2 } else { 1 },
         "blocked update created another preserved artifact"
     );
+}
+
+#[test]
+fn a_second_install_is_rejected_before_download_after_cleanup_isolates_the_backup() {
+    assert_second_install_is_rejected_after_cleanup_crash(CleanupBoundary::AfterBackupIsolation);
+}
+
+#[test]
+fn a_second_install_is_rejected_when_only_the_cleanup_journal_remains() {
+    assert_second_install_is_rejected_after_cleanup_crash(CleanupBoundary::AfterBackupUnlink);
+}
+
+#[test]
+fn a_mismatched_install_channel_cannot_bypass_the_policy_channels_pending_cleanup() {
+    let fixture = update_fixture_guard();
+    let root = tempdir().expect("update root");
+    let channel_root = tempdir().expect("channel root");
+    let installed = installed_app(root.path());
+    commit_pending_cleanup(channel_root.path(), &installed);
+
+    let second_server = TestServer::new(&fixture, 1, |base_url| {
+        HashMap::from([
+            (
+                "/manifest",
+                manifest(base_url, "0.3.0", VALID_ARCHIVE_SIGNATURE),
+            ),
+            (
+                "/archive",
+                archive(
+                    STANDARD
+                        .decode(VALID_ARCHIVE)
+                        .expect("valid archive base64"),
+                ),
+            ),
+        ])
+    });
+    let (_second_app, second_update) = checked_update(&second_server, VALID_ARCHIVE_PUBLIC_KEY);
+    let second_policy = DownloadUrlPolicy::local_test_fixture(&second_server.url("/archive"))
+        .expect("second fixture policy");
+    let mut second_health =
+        HealthProbe(|_: &Path, _: Duration| panic!("blocked update must not run health"));
+
+    let error = tauri::async_runtime::block_on(install_checked_update(
+        second_update,
+        &installed,
+        channel_root.path(),
+        ReleaseChannel::Stable,
+        &mut second_health,
+        &second_policy,
+    ))
+    .expect_err("a mismatched channel must not bypass pending test cleanup");
+
+    assert!(
+        error.to_string().contains("pending update cleanup"),
+        "unexpected channel-bypass error: {error}"
+    );
+    assert!(cleanup_journal_path(channel_root.path(), ReleaseChannel::Test).exists());
 }
 
 #[test]

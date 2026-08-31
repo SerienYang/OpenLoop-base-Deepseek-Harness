@@ -18,6 +18,8 @@ use flate2::read::GzDecoder;
 use tar::Archive;
 use uuid::Uuid;
 
+use super::cleanup::is_cleanup_isolation_artifact_name;
+
 #[derive(Debug)]
 pub struct StagedCandidate {
     path: PathBuf,
@@ -147,6 +149,7 @@ fn reject_preserved_artifacts(parent: &Path) -> Result<(), ArchiveStageError> {
         let name = name.as_bytes();
         if (name.starts_with(b".openloop-candidate-") && name.ends_with(b".app"))
             || (name.starts_with(b".openloop-update-") && name.ends_with(b".tmp"))
+            || is_cleanup_isolation_artifact_name(entry.file_name().as_os_str())
         {
             paths.push(entry.path());
         }

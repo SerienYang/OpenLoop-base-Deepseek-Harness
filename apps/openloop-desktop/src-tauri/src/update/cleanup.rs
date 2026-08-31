@@ -235,6 +235,22 @@ pub fn cleanup_journal_path(channel_root: &Path, channel: ReleaseChannel) -> Pat
     channel_root.join(journal_names(channel).0)
 }
 
+pub fn ensure_no_pending_cleanup(
+    channel_root: &Path,
+    channel: ReleaseChannel,
+) -> Result<(), CleanupError> {
+    if load_pending_cleanup(channel_root, channel)?.is_some() {
+        return Err(CleanupError::invalid(
+            "pending update cleanup requires runtime health acknowledgement",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn is_cleanup_isolation_artifact_name(name: &OsStr) -> bool {
+    parse_cleanup_isolation_name(name.as_bytes()).is_some()
+}
+
 pub struct CleanupCompanion<'a> {
     channel_root: PathBuf,
     channel: ReleaseChannel,
@@ -1211,26 +1227,38 @@ fn cleanup_isolation_name(
     bytes: &[u8],
     label: &str,
 ) -> Result<CString, CleanupError> {
-    let text = std::str::from_utf8(bytes)
-        .map_err(|_| CleanupError::invalid(format!("{label} is invalid")))?;
-    let prefix = format!("{CLEANUP_ISOLATION_PREFIX}{publication_id}-");
-    let Some(uuid) = text.strip_prefix(&prefix) else {
+    let Some((bound_publication_id, _)) = parse_cleanup_isolation_name(bytes) else {
+        return Err(CleanupError::invalid(format!("{label} is invalid")));
+    };
+    if bound_publication_id != publication_id {
         return Err(CleanupError::invalid(format!(
             "{label} is not bound to its publication"
         )));
-    };
-    let parsed =
-        Uuid::parse_str(uuid).map_err(|_| CleanupError::invalid(format!("{label} is invalid")))?;
+    }
     let path = Path::new(OsStr::from_bytes(bytes));
-    if parsed.to_string() != uuid
-        || !matches!(
-            path.components().collect::<Vec<_>>().as_slice(),
-            [std::path::Component::Normal(_)]
-        )
-    {
+    if !matches!(
+        path.components().collect::<Vec<_>>().as_slice(),
+        [std::path::Component::Normal(_)]
+    ) {
         return Err(CleanupError::invalid(format!("{label} is invalid")));
     }
     cstring(bytes, label)
+}
+
+fn parse_cleanup_isolation_name(bytes: &[u8]) -> Option<(Uuid, Uuid)> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let suffix = text.strip_prefix(CLEANUP_ISOLATION_PREFIX)?;
+    if suffix.len() != 73 || suffix.as_bytes().get(36) != Some(&b'-') {
+        return None;
+    }
+    let publication = suffix.get(..36)?;
+    let isolation = suffix.get(37..)?;
+    let publication_id = Uuid::parse_str(publication).ok()?;
+    let isolation_id = Uuid::parse_str(isolation).ok()?;
+    if publication_id.to_string() != publication || isolation_id.to_string() != isolation {
+        return None;
+    }
+    Some((publication_id, isolation_id))
 }
 
 fn rename_exclusive_at(directory: RawFd, source: &CStr, destination: &CStr) -> io::Result<()> {
