@@ -198,6 +198,35 @@ describe('PiAiAdapter provider routing', () => {
     expect(server.paths).toEqual(['/v1/responses'])
   })
 
+  it('sends bearer credentials for a hand-declared Anthropic Messages route', async () => {
+    const server = await mockServer([{ status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'volcengine-agent-plan': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          credentialMode: 'bearer',
+          api: 'anthropic-messages',
+          baseURL: `${server.url}/api/plan`,
+          models: [{ id: 'ark-code-latest' }],
+          headers: { authorization: 'Bearer configured-wrong' },
+        },
+      },
+    })
+
+    const result = await assemble(ctx, {
+      provider: 'volcengine-agent-plan',
+      model: 'ark-code-latest',
+      messages: [],
+    })
+
+    expect(result.finish.kind).toBe('error')
+    expect(server.paths).toEqual(['/api/plan/v1/messages'])
+    expect(server.headers[0]?.authorization).toBe('Bearer test-key')
+    expect(server.headers[0]?.['x-api-key']).toBeUndefined()
+  })
+
   it('resolves an attachment service mounted after the adapter when dispatching an image', async () => {
     const server = await mockServer([{ status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }])
     const attachmentId = AttachmentId(`sha256:${'a'.repeat(64)}`)
