@@ -444,6 +444,47 @@ describe('WebSearchCardController', () => {
     expect(credentials.describe).not.toHaveBeenCalled()
   })
 
+  it('does not let an older describe overwrite the latest state for the same reference', async () => {
+    const host = stubSettingsScope<WebSearchSettings>()
+    const credentials = credentialsApi(false)
+    const stale = Promise.withResolvers<{
+      configured: boolean
+      writable: boolean
+    }>()
+    const latest = Promise.withResolvers<{
+      configured: boolean
+      source: string
+      writable: boolean
+    }>()
+    const describe = vi.fn()
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValueOnce(latest.promise)
+    const controller = new WebSearchCardController(
+      host.scope,
+      credentials.api,
+      { ...hostCredentialControl(false), describe },
+    )
+
+    const refresh = controller.refreshCredential()
+    latest.resolve({ configured: true, source: 'keychain', writable: true })
+    await refresh
+    expect(controller.inject().hooks.webSearchCard.getSnapshot()).toMatchObject({
+      credentialVersion: 1,
+      apiKeyConfigured: true,
+      apiKeyWritable: true,
+    })
+
+    stale.resolve({ configured: false, writable: false })
+    await stale.promise
+    await Promise.resolve()
+
+    expect(controller.inject().hooks.webSearchCard.getSnapshot()).toMatchObject({
+      credentialVersion: 1,
+      apiKeyConfigured: true,
+      apiKeyWritable: true,
+    })
+  })
+
   it('reads the credential state for the reference the tab names', async () => {
     const host = stubSettingsScope<WebSearchSettings>()
     const credentials = credentialsApi(true)

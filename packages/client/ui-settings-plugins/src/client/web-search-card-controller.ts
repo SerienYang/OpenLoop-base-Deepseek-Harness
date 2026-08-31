@@ -88,6 +88,7 @@ export class WebSearchCardController {
   private readonly store: SnapshotStore<WebSearchCardState>
   private credential: CredentialState = { ref: '', configured: false, writable: true }
   private credentialVersion = 0
+  private credentialReadGeneration = 0
 
   /**
    * @param scope - the bound settings scope for the `web-search-deepseek` namespace.
@@ -135,6 +136,7 @@ export class WebSearchCardController {
    */
   private async readCredential(): Promise<void> {
     const ref = refOf(this.scope.getSnapshot())
+    const generation = ++this.credentialReadGeneration
     if (ref !== this.credential.ref) {
       // A new reference knows nothing yet; keeping the old answer would claim
       // the key is configured under a name nobody has checked.
@@ -144,7 +146,8 @@ export class WebSearchCardController {
     try {
       if (this.credentialControl !== undefined) {
         const view = await this.credentialControl.describe(ref)
-        if (ref !== refOf(this.scope.getSnapshot())) return
+        if (generation !== this.credentialReadGeneration
+          || ref !== refOf(this.scope.getSnapshot())) return
         this.publishCredential({
           ref,
           configured: view.configured,
@@ -154,7 +157,9 @@ export class WebSearchCardController {
         return
       }
       const response = await this.api.credentials.describe({ refs: [ref] })
-      if (!response.result.ok || ref !== refOf(this.scope.getSnapshot())) return
+      if (!response.result.ok
+        || generation !== this.credentialReadGeneration
+        || ref !== refOf(this.scope.getSnapshot())) return
       const view = response.result.value.credentials[ref]
       this.publishCredential({
         ref,

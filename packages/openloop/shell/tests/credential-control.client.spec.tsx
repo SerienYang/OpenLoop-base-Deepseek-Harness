@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   createOpenloopCredentialControlAdapter,
@@ -290,6 +290,245 @@ describe('Openloop CredentialControl', () => {
     )
 
     expect(await screen.findByText('API 密钥已安全保存')).toBeTruthy()
+    expect(describeCredential).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    {
+      operation: 'replacement',
+      initial: { configured: false, writable: true },
+      button: '添加 API 密钥',
+      outcome: 'saved' as const,
+    },
+    {
+      operation: 'deletion',
+      initial: { configured: true, source: 'keychain', writable: true },
+      button: '删除 API 密钥',
+      outcome: 'deleted' as const,
+    },
+  ])('notifies once after confirmed $operation while a refresh-token read is in flight', async ({
+    initial,
+    button,
+    outcome,
+  }) => {
+    const mutation = Promise.withResolvers<{
+      ok: true
+      value: 'saved' | 'deleted'
+    }>()
+    const ownerRead = Promise.withResolvers<{
+      ok: true
+      value: { configured: boolean; source?: string; writable: boolean }
+    }>()
+    const describeCredential = vi.fn()
+      .mockReturnValueOnce(ok(initial))
+      .mockReturnValueOnce(ownerRead.promise)
+    const onChanged = vi.fn()
+    const host = remote({
+      describeCredential,
+      openCredentialReplacement: vi.fn(() => mutation.promise as never),
+      unsetCredential: vi.fn(() => mutation.promise as never),
+    })
+    const view = render(
+      <CredentialControl
+        reference="DEEPSEEK_API_KEY"
+        label="API 密钥"
+        remote={host}
+        refreshToken={0}
+        onChanged={onChanged}
+      />,
+    )
+    await screen.findByRole('button', { name: button })
+    fireEvent.click(screen.getByRole('button', { name: button }))
+
+    view.rerender(
+      <CredentialControl
+        reference="DEEPSEEK_API_KEY"
+        label="API 密钥"
+        remote={host}
+        refreshToken={1}
+        onChanged={onChanged}
+      />,
+    )
+    await waitFor(() => { expect(describeCredential).toHaveBeenCalledTimes(2) })
+
+    await act(async () => { mutation.resolve({ ok: true, value: outcome }) })
+
+    await waitFor(() => { expect(onChanged).toHaveBeenCalledOnce() })
+    await act(async () => {
+      ownerRead.resolve({ ok: true, value: initial })
+      await ownerRead.promise
+    })
+  })
+
+  it('keeps the last status and reports a refresh failure when a refresh-token read rejects', async () => {
+    const describeCredential = vi.fn()
+      .mockReturnValueOnce(ok({ configured: true, source: 'keychain', writable: true }))
+      .mockRejectedValueOnce(new Error('offline'))
+    const host = remote({ describeCredential })
+    const view = render(
+      <CredentialControl
+        reference="DEEPSEEK_API_KEY"
+        label="API 密钥"
+        remote={host}
+        refreshToken={0}
+      />,
+    )
+    await screen.findByText('API 密钥已安全保存')
+
+    view.rerender(
+      <CredentialControl
+        reference="DEEPSEEK_API_KEY"
+        label="API 密钥"
+        remote={host}
+        refreshToken={1}
+      />,
+    )
+
+    expect(await screen.findByText('无法刷新 API 密钥状态，请重试。')).toBeTruthy()
+    expect(screen.getByText('API 密钥已安全保存')).toBeTruthy()
+    expect(screen.getByText('macOS 钥匙串 · 不显示已保存内容')).toBeTruthy()
+    expect(screen.queryByText('正在读取凭据状态…')).toBeNull()
+    expect(screen.queryByText('无法读取 API 密钥状态，请重试。')).toBeNull()
+  })
+
+  it('reports a token-triggered retry as a refresh even when the initial read failed', async () => {
+    const describeCredential = vi.fn(() => Promise.reject(new Error('offline')))
+    const host = remote({ describeCredential })
+    const view = render(
+      <CredentialControl
+        reference="DEEPSEEK_API_KEY"
+        label="API 密钥"
+        remote={host}
+        refreshToken={0}
+      />,
+    )
+    await screen.findByText('无法读取 API 密钥状态，请重试。')
+
+    view.rerender(
+      <CredentialControl
+        reference="DEEPSEEK_API_KEY"
+        label="API 密钥"
+        remote={host}
+        refreshToken={1}
+      />,
+    )
+
+    expect(await screen.findByText('无法刷新 API 密钥状态，请重试。')).toBeTruthy()
+    expect(screen.queryByText('无法读取 API 密钥状态，请重试。')).toBeNull()
+  })
+
+  it('ignores a stale initial response after the credential reference changes', async () => {
+    const stale = Promise.withResolvers<{
+      ok: true
+      value: { configured: boolean; source: string; writable: boolean }
+    }>()
+    const describeCredential = vi.fn()
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValueOnce(ok({ configured: false, writable: true }))
+    const host = remote({ describeCredential })
+    const view = render(
+      <CredentialControl reference="OLD_KEY" label="API 密钥" remote={host} />,
+    )
+
+    view.rerender(
+      <CredentialControl reference="NEW_KEY" label="API 密钥" remote={host} />,
+    )
+    await screen.findByText('尚未配置 API 密钥')
+    stale.resolve({
+      ok: true,
+      value: { configured: true, source: 'keychain', writable: false },
+    })
+    await act(async () => { await stale.promise })
+
+    expect(screen.getByText('尚未配置 API 密钥')).toBeTruthy()
+    expect(screen.queryByText('API 密钥已安全保存')).toBeNull()
+  })
+
+  it.each(['reference change', 'unmount'])(
+    'does not notify after a confirmed mutation outlives a %s',
+    async (endLifetime) => {
+      const mutation = Promise.withResolvers<{
+        ok: true
+        value: 'saved'
+      }>()
+      const onChanged = vi.fn()
+      const describeCredential = vi.fn(() => ok({ configured: false, writable: true }))
+      const host = remote({
+        describeCredential,
+        openCredentialReplacement: vi.fn(() => mutation.promise),
+      })
+      const view = render(
+        <CredentialControl
+          reference="DEEPSEEK_API_KEY"
+          label="API 密钥"
+          remote={host}
+          onChanged={onChanged}
+        />,
+      )
+      await screen.findByRole('button', { name: '添加 API 密钥' })
+      fireEvent.click(screen.getByRole('button', { name: '添加 API 密钥' }))
+
+      if (endLifetime === 'unmount') {
+        view.unmount()
+      } else {
+        view.rerender(
+          <CredentialControl
+            reference="OTHER_KEY"
+            label="API 密钥"
+            remote={host}
+            onChanged={onChanged}
+          />,
+        )
+      }
+      await act(async () => { mutation.resolve({ ok: true, value: 'saved' }) })
+
+      expect(onChanged).not.toHaveBeenCalled()
+      expect(describeCredential).toHaveBeenCalledTimes(endLifetime === 'unmount' ? 1 : 2)
+      if (endLifetime === 'reference change') {
+        expect(screen.getByText('尚未配置 API 密钥')).toBeTruthy()
+        expect(screen.queryByRole('alert')).toBeNull()
+      }
+    },
+  )
+
+  it('does not duplicate a follow-up describe when the owner starts one', async () => {
+    const describeCredential = vi.fn()
+      .mockReturnValueOnce(ok({ configured: false, writable: true }))
+      .mockReturnValueOnce(ok({ configured: true, source: 'keychain', writable: true }))
+    const host = remote({
+      describeCredential,
+      openCredentialReplacement: vi.fn(() => ok('saved' as const)),
+    })
+    let refreshToken = 0
+    const view: { current?: ReturnType<typeof render> } = {}
+    const onChanged = vi.fn(async () => {
+      refreshToken++
+      view.current?.rerender(
+        <CredentialControl
+          reference="DEEPSEEK_API_KEY"
+          label="API 密钥"
+          remote={host}
+          refreshToken={refreshToken}
+          onChanged={onChanged}
+        />,
+      )
+      await Promise.resolve()
+    })
+    view.current = render(
+      <CredentialControl
+        reference="DEEPSEEK_API_KEY"
+        label="API 密钥"
+        remote={host}
+        refreshToken={refreshToken}
+        onChanged={onChanged}
+      />,
+    )
+    await screen.findByText('尚未配置 API 密钥')
+
+    fireEvent.click(screen.getByRole('button', { name: '添加 API 密钥' }))
+
+    expect(await screen.findByText('API 密钥已安全保存')).toBeTruthy()
+    expect(onChanged).toHaveBeenCalledOnce()
     expect(describeCredential).toHaveBeenCalledTimes(2)
   })
 })

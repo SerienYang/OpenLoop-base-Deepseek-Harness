@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type {
   CredentialControlAdapter,
@@ -45,33 +45,55 @@ export function CredentialControl(props: CredentialControlProps): ReactNode {
   const [status, setStatus] = useState<CredentialControlStatus | undefined>()
   const [busy, setBusy] = useState<'replace' | 'delete' | undefined>()
   const [failure, setFailure] = useState<string | undefined>()
-  const generation = useRef(0)
+  const statusRef = useRef<CredentialControlStatus | undefined>()
+  const lifetimeEpoch = useRef(0)
+  const readGeneration = useRef(0)
+  const initialReadPending = useRef(true)
+
+  const readStatus = useCallback(async (kind: 'initial' | 'refresh'): Promise<void> => {
+    const lifetime = lifetimeEpoch.current
+    const generation = ++readGeneration.current
+    setFailure(undefined)
+    try {
+      const next = valueOf(
+        await remote.describeCredential(reference),
+        'credential status read failed',
+      )
+      if (lifetimeEpoch.current !== lifetime || readGeneration.current !== generation) return
+      statusRef.current = next
+      setStatus(next)
+    } catch {
+      if (lifetimeEpoch.current !== lifetime || readGeneration.current !== generation) return
+      setFailure(kind === 'initial'
+        ? '无法读取 API 密钥状态，请重试。'
+        : '无法刷新 API 密钥状态，请重试。')
+    }
+  }, [reference, remote])
 
   useEffect(() => {
-    const current = ++generation.current
+    const lifetime = ++lifetimeEpoch.current
+    readGeneration.current++
+    initialReadPending.current = true
+    statusRef.current = undefined
     setStatus(undefined)
     setBusy(undefined)
     setFailure(undefined)
-    void remote.describeCredential(reference).then(
-      (result) => {
-        if (generation.current !== current || !result.ok) {
-          if (generation.current === current && !result.ok) {
-            setFailure('无法读取 API 密钥状态，请重试。')
-          }
-          return
-        }
-        setStatus(result.value)
-      },
-      () => {
-        if (generation.current === current) setFailure('无法读取 API 密钥状态，请重试。')
-      },
-    )
-    return () => { generation.current++ }
-  }, [props.refreshToken, reference, remote])
+    return () => {
+      if (lifetimeEpoch.current === lifetime) lifetimeEpoch.current++
+      readGeneration.current++
+    }
+  }, [reference, remote])
+
+  useEffect(() => {
+    const kind = initialReadPending.current ? 'initial' : 'refresh'
+    initialReadPending.current = false
+    void readStatus(kind)
+  }, [props.refreshToken, readStatus])
 
   const mutate = async (operation: 'replace' | 'delete'): Promise<void> => {
     if (busy !== undefined) return
-    const current = generation.current
+    const lifetime = lifetimeEpoch.current
+    const readAtStart = readGeneration.current
     setBusy(operation)
     setFailure(undefined)
     try {
@@ -87,32 +109,25 @@ export function CredentialControl(props: CredentialControlProps): ReactNode {
             : 'credential deletion failed',
         )
       } catch {
-        if (generation.current === current) {
+        if (lifetimeEpoch.current === lifetime) {
           setFailure(operation === 'replace'
             ? '无法更新 API 密钥，请重试。'
             : '无法删除 API 密钥，请重试。')
         }
         return
       }
-      if (outcome === 'cancelled' || generation.current !== current) return
+      if (outcome === 'cancelled' || lifetimeEpoch.current !== lifetime) return
       try {
         await onChanged?.()
-        // An awaited owner refresh may have published a new refresh token or
-        // unmounted this control. Its effect owns that generation's describe.
-        if (generation.current !== current) return
-        const refreshed = valueOf(
-          await remote.describeCredential(reference),
-          'credential refresh failed',
-        )
-        if (generation.current !== current) return
-        setStatus(refreshed)
       } catch {
-        if (generation.current === current) {
-          setFailure('无法刷新 API 密钥状态，请重试。')
-        }
+        // The confirmed Host outcome still needs local convergence below.
       }
+      if (lifetimeEpoch.current !== lifetime) return
+      // A newer owner read already covers the confirmed mutation. Otherwise
+      // this control owns one follow-up read so standalone usage converges.
+      if (readGeneration.current === readAtStart) await readStatus('refresh')
     } finally {
-      if (generation.current === current) setBusy(undefined)
+      if (lifetimeEpoch.current === lifetime) setBusy(undefined)
     }
   }
 
