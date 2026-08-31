@@ -455,7 +455,11 @@ impl PendingCleanup {
             while self.journal.active_isolate.is_some() {
                 self.resume_active_isolate(hook)?;
             }
-            self.delete_directory_contents(directory.as_raw_fd(), hook)?;
+            while self.prepare_next_directory_entry(directory.as_raw_fd(), hook)? {
+                while self.journal.active_isolate.is_some() {
+                    self.resume_active_isolate(hook)?;
+                }
+            }
             verify_identity(
                 self.update_root.as_raw_fd(),
                 &installed,
@@ -568,11 +572,11 @@ impl PendingCleanup {
         }
     }
 
-    fn delete_directory_contents(
+    fn prepare_next_directory_entry(
         &mut self,
         directory: RawFd,
         hook: &mut impl CleanupHook,
-    ) -> Result<(), CleanupError> {
+    ) -> Result<bool, CleanupError> {
         for name in directory_entries(directory)? {
             if name
                 .to_bytes()
@@ -595,8 +599,9 @@ impl PendingCleanup {
             }
             let expected_type = CleanupEntryType::from_identity(identity)?;
             self.delete_entry(&name, identity, expected_type, hook)?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     fn delete_entry(
@@ -617,8 +622,7 @@ impl PendingCleanup {
             phase: CleanupIsolatePhase::Prepared,
             parent_isolate,
         });
-        self.persist_journal_update(previous, hook)?;
-        self.resume_active_isolate(hook)
+        self.persist_journal_update(previous, hook)
     }
 
     fn resume_active_isolate(&mut self, hook: &mut impl CleanupHook) -> Result<(), CleanupError> {
@@ -721,7 +725,9 @@ impl PendingCleanup {
                             active.expected_identity,
                             "active cleanup isolate directory",
                         )?;
-                        self.delete_directory_contents(directory.as_raw_fd(), hook)?;
+                        if self.prepare_next_directory_entry(directory.as_raw_fd(), hook)? {
+                            return Ok(());
+                        }
                         verify_descriptor_identity(
                             directory.as_raw_fd(),
                             active.expected_identity,
@@ -1344,21 +1350,14 @@ fn restore_isolated_entry(
 }
 
 fn directory_entries(directory: RawFd) -> Result<Vec<CString>, CleanupError> {
-    let duplicate = unsafe { libc::fcntl(directory, libc::F_DUPFD_CLOEXEC, 0) };
-    if duplicate < 0 {
-        return Err(CleanupError::io(
-            "duplicate cleanup directory descriptor",
-            io::Error::last_os_error(),
-        ));
-    }
-    let stream = unsafe { libc::fdopendir(duplicate) };
+    let duplicate = open_directory_at(directory, c".")
+        .map_err(|source| CleanupError::io("open cleanup directory descriptor", source))?;
+    let stream = unsafe { libc::fdopendir(duplicate.as_raw_fd()) };
     if stream.is_null() {
         let source = io::Error::last_os_error();
-        unsafe {
-            libc::close(duplicate);
-        }
         return Err(CleanupError::io("open cleanup directory stream", source));
     }
+    std::mem::forget(duplicate);
     struct Stream(*mut libc::DIR);
     impl Drop for Stream {
         fn drop(&mut self) {

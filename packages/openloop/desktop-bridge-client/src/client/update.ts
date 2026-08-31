@@ -124,12 +124,17 @@ export class OpenloopUpdateService {
   private installGeneration = 0
   private updateId: string | undefined
   private inFlightCheck: Promise<void> | undefined
+  private inFlightInstall: Promise<'restarting' | 'cancelled'> | undefined
   private closed: Error | undefined
 
   constructor(private readonly remoteSource: OpenloopUpdateRemoteSource) {}
 
   async refresh(): Promise<void> {
     this.requireOpen()
+    if (this.inFlightInstall !== undefined) {
+      await this.inFlightInstall.catch(() => {})
+      return
+    }
     const status = await (this.inFlightCheck
       ?? this.readStatus('status', remote => remote.getUpdateStatus())
     )
@@ -138,6 +143,10 @@ export class OpenloopUpdateService {
 
   async checkForUpdate(): Promise<void> {
     this.requireOpen()
+    if (this.inFlightInstall !== undefined) {
+      await this.inFlightInstall.catch(() => {})
+      return
+    }
     if (this.inFlightCheck !== undefined) {
       await this.inFlightCheck
       return
@@ -164,21 +173,42 @@ export class OpenloopUpdateService {
     await check
   }
 
-  async installUpdateAndRestart(): Promise<'restarting' | 'cancelled'> {
+  installUpdateAndRestart(): Promise<'restarting' | 'cancelled'> {
     this.requireOpen()
+    if (this.inFlightInstall !== undefined) return this.inFlightInstall
     const updateId = this.updateId
     if (updateId === undefined) {
-      throw new Error('Openloop update install failed: no current update is available')
+      return Promise.reject(
+        new Error('Openloop update install failed: no current update is available'),
+      )
     }
+    const operation = Promise.withResolvers<'restarting' | 'cancelled'>()
+    this.inFlightInstall = operation.promise
     const generation = ++this.installGeneration
+    this.statusGeneration += 1
     const previous = this.view.getSnapshot()
     this.view.set({
       ...previous,
-      actions: {
-        check: previous.actions.check,
-        installAndRestart: { enabled: false, pending: true },
-      },
+      phase: 'installing',
+      actions: actions('installing'),
     })
+    void this.performInstall(updateId, previous, generation).then(
+      operation.resolve,
+      operation.reject,
+    )
+    void operation.promise.finally(() => {
+      if (this.inFlightInstall === operation.promise) {
+        this.inFlightInstall = undefined
+      }
+    }).catch(() => {})
+    return operation.promise
+  }
+
+  private async performInstall(
+    updateId: string,
+    previous: UpdateView,
+    generation: number,
+  ): Promise<'restarting' | 'cancelled'> {
     try {
       const remote = await this.remote()
       const result = await remote.installUpdateAndRestart(updateId)

@@ -1,6 +1,6 @@
 use std::{
     ffi::{CStr, OsString},
-    fs,
+    fs::{self, File},
     os::fd::RawFd,
     os::unix::{
         ffi::OsStringExt,
@@ -9,6 +9,7 @@ use std::{
     },
     panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
+    process::Command,
     time::Duration,
 };
 
@@ -24,6 +25,64 @@ use openloop_desktop_lib::update::{
     },
 };
 use tempfile::tempdir;
+
+const LOW_NOFILE_CHILD_ENV: &str = "OPENLOOP_LOW_NOFILE_CLEANUP_CHILD";
+
+struct NoFileLimitGuard {
+    original: libc::rlimit,
+    restored: bool,
+}
+
+impl NoFileLimitGuard {
+    fn lower_to(limit: libc::rlim_t) -> Self {
+        let mut original = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut original) },
+            0,
+            "read RLIMIT_NOFILE"
+        );
+        assert!(
+            original.rlim_max >= limit,
+            "RLIMIT_NOFILE hard limit {} is below required test limit {limit}",
+            original.rlim_max
+        );
+        let lowered = libc::rlimit {
+            rlim_cur: limit,
+            rlim_max: original.rlim_max,
+        };
+        assert_eq!(
+            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lowered) },
+            0,
+            "lower RLIMIT_NOFILE"
+        );
+        Self {
+            original,
+            restored: false,
+        }
+    }
+
+    fn restore(mut self) {
+        assert_eq!(
+            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &self.original) },
+            0,
+            "restore RLIMIT_NOFILE"
+        );
+        self.restored = true;
+    }
+}
+
+impl Drop for NoFileLimitGuard {
+    fn drop(&mut self) {
+        if !self.restored {
+            unsafe {
+                libc::setrlimit(libc::RLIMIT_NOFILE, &self.original);
+            }
+        }
+    }
+}
 
 struct Healthy;
 
@@ -1256,6 +1315,62 @@ fn deep_cleanup_journal_stays_bounded_and_replays_the_parent_operation_chain() {
 
     assert!(!candidate.exists());
     assert!(!journal_path.exists());
+}
+
+#[test]
+fn deep_cleanup_succeeds_with_low_nofile_limit_and_clears_the_journal() {
+    let output = Command::new(std::env::current_exe().expect("current update cleanup test binary"))
+        .args([
+            "--exact",
+            "deep_cleanup_low_nofile_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(LOW_NOFILE_CHILD_ENV, "1")
+        .output()
+        .expect("run isolated low-RLIMIT_NOFILE cleanup test");
+
+    assert!(
+        output.status.success(),
+        "low-RLIMIT_NOFILE cleanup child failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+#[ignore = "run by deep_cleanup_succeeds_with_low_nofile_limit_and_clears_the_journal"]
+fn deep_cleanup_low_nofile_child() {
+    if std::env::var_os(LOW_NOFILE_CHILD_ENV).is_none() {
+        return;
+    }
+
+    const DEPTH: usize = 100;
+    const RESERVED_FDS: usize = 64;
+    let limit = NoFileLimitGuard::lower_to(192);
+    let reserved = (0..RESERVED_FDS)
+        .map(|_| File::open("/dev/null").expect("reserve file descriptor"))
+        .collect::<Vec<_>>();
+    let (_root, channel_root, installed, candidate) = fixture();
+    let mut deepest = installed.clone();
+    for index in 0..DEPTH {
+        deepest.push(format!("d{index:03}"));
+        fs::create_dir(&deepest).expect("deep cleanup directory");
+    }
+    fs::write(deepest.join("leaf"), b"deep payload").expect("deep cleanup leaf");
+    commit(&channel_root, &installed, &candidate);
+    let journal_path = cleanup_journal_path(&channel_root, ReleaseChannel::Test);
+
+    load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+        .expect("load low-RLIMIT_NOFILE cleanup")
+        .expect("pending low-RLIMIT_NOFILE cleanup")
+        .execute()
+        .expect("execute low-RLIMIT_NOFILE cleanup");
+
+    assert!(!candidate.exists());
+    assert!(!journal_path.exists());
+    drop(reserved);
+    limit.restore();
 }
 
 #[test]

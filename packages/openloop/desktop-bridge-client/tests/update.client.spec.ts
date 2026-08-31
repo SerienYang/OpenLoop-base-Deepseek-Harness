@@ -235,6 +235,155 @@ describe('Openloop browser update facade', () => {
     })
   })
 
+  it('does not let a refresh started before install republish availability', async () => {
+    const staleStatus = deferred<RemoteResult<OpenloopUpdateStatus>>()
+    const installResult = deferred<RemoteResult<'restarting' | 'cancelled'>>()
+    const getUpdateStatus = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        value: status('available', {
+          updateId: 'install-id',
+          version: '2.0.0',
+        }),
+      })
+      .mockReturnValueOnce(staleStatus.promise)
+    const service = new OpenloopUpdateService(remote({
+      getUpdateStatus,
+      installUpdateAndRestart: vi.fn(() => installResult.promise),
+    }))
+    await service.refresh()
+
+    const staleRefresh = service.refresh()
+    const install = service.installUpdateAndRestart()
+    staleStatus.resolve({
+      ok: true,
+      value: status('available', {
+        updateId: 'stale-id',
+        version: '1.9.0',
+      }),
+    })
+    await staleRefresh
+
+    expect(service.view.getSnapshot()).toMatchObject({
+      phase: 'installing',
+      actions: {
+        check: { enabled: false },
+        installAndRestart: { enabled: false, pending: true },
+      },
+    })
+
+    installResult.resolve({ ok: true, value: 'cancelled' })
+    await install
+  })
+
+  it('does not start or publish a new refresh during install', async () => {
+    const installResult = deferred<RemoteResult<'restarting' | 'cancelled'>>()
+    const getUpdateStatus = vi.fn(() => ok(status('available', {
+      updateId: 'install-id',
+      version: '2.0.0',
+    })))
+    const service = new OpenloopUpdateService(remote({
+      getUpdateStatus,
+      installUpdateAndRestart: vi.fn(() => installResult.promise),
+    }))
+    await service.refresh()
+
+    const install = service.installUpdateAndRestart()
+    const refresh = service.refresh()
+    await Promise.resolve()
+
+    expect(getUpdateStatus).toHaveBeenCalledOnce()
+    expect(service.view.getSnapshot().phase).toBe('installing')
+
+    installResult.resolve({ ok: true, value: 'cancelled' })
+    await Promise.all([install, refresh])
+    expect(getUpdateStatus).toHaveBeenCalledOnce()
+  })
+
+  it('coalesces double-click installs and restores cancellation once', async () => {
+    const installResult = deferred<RemoteResult<'restarting' | 'cancelled'>>()
+    const installUpdateAndRestart = vi.fn(() => installResult.promise)
+    const service = new OpenloopUpdateService(remote({
+      getUpdateStatus: vi.fn(() => ok(status('available', {
+        updateId: 'single-flight-id',
+        version: '2.0.0',
+      }))),
+      installUpdateAndRestart,
+    }))
+    await service.refresh()
+    const listener = vi.fn()
+    const unsubscribe = service.view.subscribe(listener)
+
+    const first = service.installUpdateAndRestart()
+    const second = service.installUpdateAndRestart()
+    await Promise.resolve()
+
+    expect(installUpdateAndRestart).toHaveBeenCalledExactlyOnceWith('single-flight-id')
+    installResult.resolve({ ok: true, value: 'cancelled' })
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      'cancelled',
+      'cancelled',
+    ])
+    expect(listener).toHaveBeenCalledTimes(2)
+    expect(service.view.getSnapshot()).toMatchObject({
+      phase: 'available',
+      actions: {
+        check: { enabled: true },
+        installAndRestart: { enabled: true },
+      },
+    })
+
+    unsubscribe()
+  })
+
+  it('keeps install ownership when an older refresh errors before cancellation', async () => {
+    const staleStatus = deferred<RemoteResult<OpenloopUpdateStatus>>()
+    const installResult = deferred<RemoteResult<'restarting' | 'cancelled'>>()
+    const getUpdateStatus = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        value: status('available', {
+          updateId: 'install-id',
+          version: '2.0.0',
+        }),
+      })
+      .mockReturnValueOnce(staleStatus.promise)
+    const service = new OpenloopUpdateService(remote({
+      getUpdateStatus,
+      installUpdateAndRestart: vi.fn(() => installResult.promise),
+    }))
+    await service.refresh()
+
+    const staleRefresh = service.refresh()
+    const install = service.installUpdateAndRestart()
+    staleStatus.resolve({
+      ok: false,
+      error: {
+        code: 'update_failure',
+        message: 'stale status failed',
+        details: {},
+      },
+    })
+    await expect(staleRefresh).rejects.toThrow('stale status failed')
+    expect(service.view.getSnapshot()).toMatchObject({
+      phase: 'installing',
+      actions: {
+        check: { enabled: false },
+        installAndRestart: { enabled: false, pending: true },
+      },
+    })
+
+    installResult.resolve({ ok: true, value: 'cancelled' })
+    await expect(install).resolves.toBe('cancelled')
+    expect(service.view.getSnapshot()).toMatchObject({
+      phase: 'available',
+      actions: {
+        check: { enabled: true },
+        installAndRestart: { enabled: true },
+      },
+    })
+  })
+
   it('projects a rolled-back Host terminal state while preserving install error propagation', async () => {
     const getUpdateStatus = vi.fn()
       .mockResolvedValueOnce({
@@ -280,8 +429,7 @@ describe('Openloop browser update facade', () => {
     })
   })
 
-  it('lets install failure recovery own the terminal status despite a concurrent refresh', async () => {
-    const refreshStatus = deferred<RemoteResult<OpenloopUpdateStatus>>()
+  it('lets install failure recovery own the terminal status while refresh waits', async () => {
     const getUpdateStatus = vi.fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -290,7 +438,6 @@ describe('Openloop browser update facade', () => {
           version: '3.1.0',
         }),
       })
-      .mockReturnValueOnce(refreshStatus.promise)
       .mockResolvedValueOnce({
         ok: true,
         value: status('rolled-back', {
@@ -307,9 +454,8 @@ describe('Openloop browser update facade', () => {
 
     const install = service.installUpdateAndRestart()
     const refresh = service.refresh()
-    await vi.waitFor(() => {
-      expect(getUpdateStatus).toHaveBeenCalledTimes(2)
-    })
+    await Promise.resolve()
+    expect(getUpdateStatus).toHaveBeenCalledOnce()
     installResult.resolve({
       ok: false,
       error: {
@@ -322,17 +468,9 @@ describe('Openloop browser update facade', () => {
     await expect(install).rejects.toThrow(
       'Openloop update install failed: update_failure: desktop update operation failed',
     )
-    expect(getUpdateStatus).toHaveBeenCalledTimes(3)
-    expect(service.view.getSnapshot().phase).toBe('rolled-back')
-
-    refreshStatus.resolve({
-      ok: true,
-      value: status('installing', {
-        updateId: 'racing-update-id',
-        version: '3.1.0',
-      }),
-    })
     await refresh
+    expect(getUpdateStatus).toHaveBeenCalledTimes(2)
+    expect(service.view.getSnapshot().phase).toBe('rolled-back')
 
     expect(service.view.getSnapshot()).toEqual({
       phase: 'rolled-back',
