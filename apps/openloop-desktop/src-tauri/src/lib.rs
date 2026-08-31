@@ -975,6 +975,10 @@ async fn run_update_spike(
         .ok_or_else(|| "Openloop channel data root is unavailable".to_owned())?;
     let _update_lease = UpdateLease::exclusive(channel_root)
         .map_err(|error| format!("exclusive update lease acquisition failed: {error}"))?;
+    if action == HostAction::Install {
+        ensure_no_pending_cleanup(channel_root, updater_config.channel())
+            .map_err(|error| format!("pending update cleanup check failed: {error}"))?;
+    }
     let installed = current_app_bundle()?;
     let update_root = installed
         .parent()
@@ -1253,6 +1257,32 @@ mod tests {
         assert_eq!(artifacts.artifacts.web, WEB_SHA256);
         assert_eq!(artifacts.artifacts.bundle_graph, BUNDLE_GRAPH_SHA256);
         assert_eq!(ARTIFACT_MANIFEST_SHA256.len(), 64);
+    }
+
+    #[test]
+    fn update_spike_install_cleanup_gate_precedes_recovery_and_network_check() {
+        let source = include_str!("lib.rs");
+        let spike = source
+            .split_once("async fn run_update_spike(")
+            .expect("update spike entry")
+            .1
+            .split_once("\npub fn run()")
+            .expect("update spike boundary")
+            .0;
+        let install_branch = spike
+            .find("if action == HostAction::Install")
+            .expect("Install-specific cleanup gate");
+        let cleanup_gate = spike
+            .find("ensure_no_pending_cleanup(channel_root, updater_config.channel())")
+            .expect("channel-scoped cleanup gate");
+        let recovery = spike
+            .find("recover_interrupted_publication(")
+            .expect("publication recovery");
+        let network_check = spike.find(".check()").expect("network update check");
+
+        assert!(install_branch < cleanup_gate);
+        assert!(cleanup_gate < recovery);
+        assert!(cleanup_gate < network_check);
     }
 
     #[test]

@@ -161,13 +161,6 @@ impl CleanupEntryType {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CleanupPathComponent {
-    name: Vec<u8>,
-    identity: FileIdentity,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 enum CleanupIsolatePhase {
@@ -180,7 +173,6 @@ enum CleanupIsolatePhase {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ActiveCleanupIsolate {
     publication_id: Uuid,
-    parent_path: Vec<CleanupPathComponent>,
     original_name: Vec<u8>,
     expected_identity: FileIdentity,
     expected_type: CleanupEntryType,
@@ -463,7 +455,7 @@ impl PendingCleanup {
             while self.journal.active_isolate.is_some() {
                 self.resume_active_isolate(hook)?;
             }
-            self.delete_directory_contents(directory.as_raw_fd(), &[], hook)?;
+            self.delete_directory_contents(directory.as_raw_fd(), hook)?;
             verify_identity(
                 self.update_root.as_raw_fd(),
                 &installed,
@@ -579,7 +571,6 @@ impl PendingCleanup {
     fn delete_directory_contents(
         &mut self,
         directory: RawFd,
-        parent_path: &[CleanupPathComponent],
         hook: &mut impl CleanupHook,
     ) -> Result<(), CleanupError> {
         for name in directory_entries(directory)? {
@@ -603,14 +594,13 @@ impl PendingCleanup {
                 ));
             }
             let expected_type = CleanupEntryType::from_identity(identity)?;
-            self.delete_entry(parent_path, &name, identity, expected_type, hook)?;
+            self.delete_entry(&name, identity, expected_type, hook)?;
         }
         Ok(())
     }
 
     fn delete_entry(
         &mut self,
-        parent_path: &[CleanupPathComponent],
         original: &CStr,
         expected_identity: FileIdentity,
         expected_type: CleanupEntryType,
@@ -620,7 +610,6 @@ impl PendingCleanup {
         let parent_isolate = self.journal.active_isolate.take().map(Box::new);
         self.journal.active_isolate = Some(ActiveCleanupIsolate {
             publication_id: self.journal.publication_id,
-            parent_path: parent_path.to_vec(),
             original_name: original.to_bytes().to_vec(),
             expected_identity,
             expected_type,
@@ -732,12 +721,7 @@ impl PendingCleanup {
                             active.expected_identity,
                             "active cleanup isolate directory",
                         )?;
-                        let mut child_path = active.parent_path.clone();
-                        child_path.push(CleanupPathComponent {
-                            name: active.isolation_name.clone(),
-                            identity: active.expected_identity,
-                        });
-                        self.delete_directory_contents(directory.as_raw_fd(), &child_path, hook)?;
+                        self.delete_directory_contents(directory.as_raw_fd(), hook)?;
                         verify_descriptor_identity(
                             directory.as_raw_fd(),
                             active.expected_identity,
@@ -822,19 +806,29 @@ impl PendingCleanup {
             self.journal.backup.identity,
             "cleanup top quarantine",
         )?;
-        for component in &active.parent_path {
-            let name = path_component(&component.name, "active cleanup parent component")?;
+        let mut ancestors = Vec::new();
+        let mut ancestor = active.parent_isolate.as_deref();
+        while let Some(operation) = ancestor {
+            ancestors.push(operation);
+            ancestor = operation.parent_isolate.as_deref();
+        }
+        for operation in ancestors.into_iter().rev() {
+            let name = cleanup_isolation_name(
+                self.journal.publication_id,
+                &operation.isolation_name,
+                "active cleanup parent isolation name",
+            )?;
             let child = open_directory_at(current.as_raw_fd(), &name)
                 .map_err(|source| CleanupError::io("open active cleanup parent", source))?;
             verify_descriptor_identity(
                 child.as_raw_fd(),
-                component.identity,
+                operation.expected_identity,
                 "active cleanup parent",
             )?;
             verify_identity(
                 current.as_raw_fd(),
                 &name,
-                component.identity,
+                operation.expected_identity,
                 "active cleanup parent",
             )?;
             current = child;
@@ -1125,16 +1119,6 @@ fn validate_active_isolate(
             "active cleanup isolate is not bound to its publication",
         ));
     }
-    for component in &active.parent_path {
-        path_component(&component.name, "active cleanup parent component")?;
-        if !component.identity.is_directory()
-            || component.identity.device != journal.update_root_identity.device
-        {
-            return Err(CleanupError::invalid(
-                "active cleanup parent path is invalid",
-            ));
-        }
-    }
     let original = path_component(&active.original_name, "active cleanup original name")?;
     let isolated = cleanup_isolation_name(
         journal.publication_id,
@@ -1150,29 +1134,15 @@ fn validate_active_isolate(
             "active cleanup isolate names overlap",
         ));
     }
-    match active.parent_isolate.as_deref() {
-        Some(parent) => {
-            validate_active_isolate(journal, parent)?;
-            let mut expected_parent_path = parent.parent_path.clone();
-            expected_parent_path.push(CleanupPathComponent {
-                name: parent.isolation_name.clone(),
-                identity: parent.expected_identity,
-            });
-            if parent.expected_type != CleanupEntryType::Directory
-                || parent.phase != CleanupIsolatePhase::Deleting
-                || active.parent_path != expected_parent_path
-            {
-                return Err(CleanupError::invalid(
-                    "active cleanup isolate parent chain is invalid",
-                ));
-            }
-        }
-        None if !active.parent_path.is_empty() => {
+    if let Some(parent) = active.parent_isolate.as_deref() {
+        validate_active_isolate(journal, parent)?;
+        if parent.expected_type != CleanupEntryType::Directory
+            || parent.phase != CleanupIsolatePhase::Deleting
+        {
             return Err(CleanupError::invalid(
-                "active cleanup isolate parent chain is incomplete",
+                "active cleanup isolate parent chain is invalid",
             ));
         }
-        None => {}
     }
     Ok(())
 }

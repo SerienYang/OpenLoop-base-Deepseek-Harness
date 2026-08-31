@@ -197,13 +197,17 @@ fn active_isolate(channel_root: &Path, candidate: &Path) -> (serde_json::Value, 
     assert!(active.get("expectedIdentity").is_some());
     assert!(active.get("expectedType").is_some());
     let mut parent = journal_isolated_backup(channel_root, candidate);
-    for component in active["parentPath"]
-        .as_array()
-        .expect("active isolate parent path")
-    {
-        assert!(component.get("identity").is_some());
-        let name: Vec<u8> =
-            serde_json::from_value(component["name"].clone()).expect("parent component name");
+    let mut ancestors = Vec::new();
+    let mut ancestor = active.get("parentIsolate");
+    while let Some(operation) = ancestor.and_then(serde_json::Value::as_object) {
+        ancestors.push(operation);
+        ancestor = operation.get("parentIsolate");
+    }
+    for operation in ancestors.into_iter().rev() {
+        assert_eq!(operation["expectedType"], "directory");
+        assert!(operation.get("expectedIdentity").is_some());
+        let name: Vec<u8> = serde_json::from_value(operation["isolationName"].clone())
+            .expect("parent isolation name");
         parent.push(OsString::from_vec(name));
     }
     let isolated_name: Vec<u8> =
@@ -291,8 +295,8 @@ fn update_start_gate_rejects_a_journal_after_the_backup_was_deleted() {
 }
 
 #[test]
-fn cleanup_journal_rejects_symlinks_hardlinks_unsafe_modes_and_oversized_json() {
-    for case in ["symlink", "hardlink", "mode", "oversized"] {
+fn cleanup_journal_rejects_symlinks_hardlinks_unsafe_modes_corruption_and_oversized_json() {
+    for case in ["symlink", "hardlink", "mode", "corrupt", "oversized"] {
         let (root, channel_root, installed, candidate) = fixture();
         commit(&channel_root, &installed, &candidate);
         let journal = cleanup_journal_path(&channel_root, ReleaseChannel::Test);
@@ -311,6 +315,9 @@ fn cleanup_journal_rejects_symlinks_hardlinks_unsafe_modes_and_oversized_json() 
             "mode" => {
                 fs::set_permissions(&journal, fs::Permissions::from_mode(0o640))
                     .expect("unsafe journal mode");
+            }
+            "corrupt" => {
+                fs::write(&journal, b"{").expect("corrupt journal");
             }
             "oversized" => {
                 fs::write(&journal, vec![b' '; 64 * 1024 + 1]).expect("oversized journal");
@@ -1150,6 +1157,105 @@ fn nested_leaf_crashes_replay_through_the_durable_parent_chain() {
         assert!(!cleanup_journal_path(&channel_root, ReleaseChannel::Test).exists());
         assert!(!candidate.exists());
     }
+}
+
+#[test]
+fn cleanup_rejects_a_parent_operation_bound_to_another_publication() {
+    let (_root, channel_root, installed, candidate) = fixture();
+    fs::create_dir(installed.join("nested")).expect("nested cleanup directory");
+    fs::write(installed.join("nested/leaf"), b"original").expect("nested cleanup leaf");
+    commit(&channel_root, &installed, &candidate);
+    let mut pending = load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+        .expect("load cleanup")
+        .expect("pending cleanup");
+    let mut crash = CrashEntryAt {
+        point: EntryCrashPoint::AfterIsolation,
+        name: b"leaf",
+    };
+    assert!(catch_unwind(AssertUnwindSafe(|| {
+        let _ = pending.execute_with_hook(&mut crash);
+    }))
+    .is_err());
+
+    let journal_path = cleanup_journal_path(&channel_root, ReleaseChannel::Test);
+    let mut journal = cleanup_journal(&channel_root);
+    journal["activeIsolate"]["parentIsolate"]["publicationId"] =
+        serde_json::json!("00000000-0000-4000-8000-000000000000");
+    fs::write(
+        &journal_path,
+        serde_json::to_vec(&journal).expect("malicious cleanup journal JSON"),
+    )
+    .expect("replace cleanup journal with malicious chain");
+
+    load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+        .expect_err("cross-publication parent operation must be rejected");
+    assert!(journal_path.exists());
+    assert!(journal_isolated_backup(&channel_root, &candidate).exists());
+}
+
+#[test]
+fn deep_cleanup_journal_stays_bounded_and_replays_the_parent_operation_chain() {
+    const DEPTH: usize = 100;
+
+    let (_root, channel_root, installed, candidate) = fixture();
+    let mut deepest = installed.clone();
+    for index in 0..DEPTH {
+        deepest.push(format!("d{index:03}"));
+        fs::create_dir(&deepest).expect("deep cleanup directory");
+    }
+    fs::write(deepest.join("leaf"), b"deep payload").expect("deep cleanup leaf");
+    commit(&channel_root, &installed, &candidate);
+    let mut pending = load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+        .expect("load deep cleanup")
+        .expect("pending deep cleanup");
+    let mut crash = CrashEntryAt {
+        point: EntryCrashPoint::AfterIsolation,
+        name: b"leaf",
+    };
+
+    let crash_result = catch_unwind(AssertUnwindSafe(|| pending.execute_with_hook(&mut crash)));
+    assert!(
+        crash_result.is_err(),
+        "deep cleanup stopped before reaching the injected leaf crash: {crash_result:?}"
+    );
+
+    let journal_path = cleanup_journal_path(&channel_root, ReleaseChannel::Test);
+    let bytes = fs::read(&journal_path).expect("deep cleanup journal");
+    assert!(
+        bytes.len() <= 64 * 1024,
+        "deep cleanup journal grew to {} bytes",
+        bytes.len()
+    );
+    let journal: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("deep cleanup journal JSON");
+    let mut operation = journal
+        .get("activeIsolate")
+        .and_then(serde_json::Value::as_object)
+        .expect("deep active isolate");
+    let mut operation_count = 1;
+    assert!(
+        !operation.contains_key("parentPath"),
+        "active isolate redundantly stored its full parent path"
+    );
+    while let Some(parent) = operation
+        .get("parentIsolate")
+        .and_then(serde_json::Value::as_object)
+    {
+        assert_eq!(parent["expectedType"], "directory");
+        assert!(!parent.contains_key("parentPath"));
+        operation_count += 1;
+        operation = parent;
+    }
+    assert_eq!(operation_count, DEPTH + 1);
+
+    load_pending_cleanup(&channel_root, ReleaseChannel::Test)
+        .expect("reload bounded deep cleanup")
+        .expect("pending bounded deep cleanup")
+        .execute()
+        .expect("replay bounded deep cleanup");
+
+    assert!(!candidate.exists());
+    assert!(!journal_path.exists());
 }
 
 #[test]
