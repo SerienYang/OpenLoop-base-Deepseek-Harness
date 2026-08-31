@@ -14,9 +14,9 @@
  * inside the one in flight.
  *
  * Credentials stay outside that collection. The harness resolves a route's key
- * through its own seam and passes it as the request's `apiKey` option, which
- * pi-ai treats as the highest-priority auth override — so `Models` never holds
- * a credential store and the harness keeps its fail-loud reference semantics.
+ * per request: api-key mode passes it as pi-ai's request `apiKey`, while bearer
+ * mode injects a harness-owned `Authorization` header. Neither mode stores
+ * credentials in `Models`, preserving fail-loud reference semantics.
  *
  * @module dsh-llm-pi-ai/adapter
  */
