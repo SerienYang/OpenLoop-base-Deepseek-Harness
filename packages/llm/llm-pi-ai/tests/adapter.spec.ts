@@ -227,6 +227,36 @@ describe('PiAiAdapter provider routing', () => {
     expect(server.headers[0]?.['x-api-key']).toBeUndefined()
   })
 
+  it('sends bearer credentials for an Anthropic catalog route without native ambient auth', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', undefined)
+    vi.stubEnv('ANTHROPIC_AUTH_TOKEN', undefined)
+    vi.stubEnv('ANTHROPIC_OAUTH_TOKEN', undefined)
+    const server = await mockServer([{ status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        anthropic: {
+          apiKeyEnv: 'PI_TEST_KEY',
+          credentialMode: 'bearer',
+          baseURL: `${server.url}/api/plan`,
+          models: [{ id: 'claude-sonnet-4' }],
+        },
+      },
+    })
+
+    const result = await assemble(ctx, {
+      provider: 'anthropic',
+      model: 'claude-sonnet-4',
+      messages: [],
+    })
+
+    expect(result.finish.kind).toBe('error')
+    expect(server.paths).toEqual(['/api/plan/v1/messages'])
+    expect(server.headers[0]?.authorization).toBe('Bearer test-key')
+    expect(server.headers[0]?.['x-api-key']).toBeUndefined()
+  })
+
   it('resolves an attachment service mounted after the adapter when dispatching an image', async () => {
     const server = await mockServer([{ status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }])
     const attachmentId = AttachmentId(`sha256:${'a'.repeat(64)}`)
