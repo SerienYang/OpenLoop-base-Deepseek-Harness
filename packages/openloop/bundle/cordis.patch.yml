@@ -3,6 +3,18 @@
     printUrl: false
     surfaceContext: true
     trustedHosts: !!js ctx.webStartup.trustedHosts
+- id: llm-pi-ai
+  config:
+    providers:
+      volcengine-agent-plan:
+        displayName: 火山方舟 Agent Plan
+        apiKeyEnv: VOLCENGINE_ARK_AGENT_PLAN_API_KEY
+        credentialMode: bearer
+        api: anthropic-messages
+        baseURL: https://ark.cn-beijing.volces.com/api/plan
+        models:
+          - id: ark-code-latest
+            name: Ark Code Latest
 - insert:
     - id: openloop-bootstrap
       name: '@openloop/bundle/bootstrap-host'

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { assertServiceable, Config } from '../src/config.ts'
+import type { PiAiCredentialMode } from '@deepseek-ai/dsh-llm-pi-ai'
+import { assertServiceable, Config, resolveProfiles } from '../src/config.ts'
 
 /** Validate one hand-declared route, with the caller's fields layered onto it. */
 const routeWith = (profile: Record<string, unknown>): (() => unknown) =>
@@ -17,6 +18,57 @@ const routeWith = (profile: Record<string, unknown>): (() => unknown) =>
 /** Validate that route with the caller's fields on its single model entry. */
 const configWith = (model: Record<string, unknown>): (() => unknown) =>
   routeWith({ models: [{ id: 'm', ...model }] })
+
+describe('credential mode', () => {
+  it('resolves bearer mode as bearer', () => {
+    const credentialMode: PiAiCredentialMode = 'bearer'
+    const profile = resolveProfiles({
+      'acme-gateway': {
+        apiKeyEnv: 'ACME_API_KEY',
+        credentialMode,
+        api: 'openai-completions',
+        baseURL: 'https://acme.test',
+        models: [{ id: 'm' }],
+      },
+    }).get('acme-gateway')
+
+    expect(profile?.credentialMode).toBe('bearer')
+  })
+
+  it('rejects bearer mode without apiKeyEnv', () => {
+    expect(() => resolveProfiles({
+      'acme-gateway': {
+        credentialMode: 'bearer',
+        api: 'openai-completions',
+        baseURL: 'https://acme.test',
+        models: [{ id: 'm' }],
+      },
+    })).toThrow(/bearer.*apiKeyEnv/)
+  })
+
+  it('rejects bearer mode for a catalog model without generic header support', () => {
+    expect(() => resolveProfiles({
+      'openai-codex': {
+        apiKeyEnv: 'CODEX_TOKEN',
+        credentialMode: 'bearer',
+      },
+    })).toThrow(
+      /provider "openai-codex" model "[^"]+" uses api "openai-codex-responses".*bearer credential mode/,
+    )
+  })
+
+  it('defaults an omitted mode to api-key', () => {
+    const profile = resolveProfiles({
+      'acme-gateway': {
+        api: 'openai-completions',
+        baseURL: 'https://acme.test',
+        models: [{ id: 'm' }],
+      },
+    }).get('acme-gateway')
+
+    expect(profile?.credentialMode).toBe('api-key')
+  })
+})
 
 describe('reasoning schema boundary', () => {
   it('rejects a level pi-ai does not know at the write that produced it', () => {

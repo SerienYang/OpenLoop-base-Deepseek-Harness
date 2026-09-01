@@ -14,9 +14,9 @@
  * inside the one in flight.
  *
  * Credentials stay outside that collection. The harness resolves a route's key
- * through its own seam and passes it as the request's `apiKey` option, which
- * pi-ai treats as the highest-priority auth override — so `Models` never holds
- * a credential store and the harness keeps its fail-loud reference semantics.
+ * per request: api-key mode passes it as pi-ai's request `apiKey`, while bearer
+ * mode injects a harness-owned `Authorization` header. Neither mode stores
+ * credentials in `Models`, preserving fail-loud reference semantics.
  *
  * @module dsh-llm-pi-ai/adapter
  */
@@ -173,13 +173,22 @@ function reasoningInfo(
   }
 }
 
-/** Merge deployment headers while removing case-insensitive attribution collisions. */
-function requestHeaders(headers: Readonly<Record<string, string>> | undefined): Record<string, string> {
+/** Merge deployment headers while removing case-insensitive owned-header collisions. */
+function requestHeaders(
+  headers: Readonly<Record<string, string>> | undefined,
+  bearerToken: string | undefined,
+): Record<string, string> {
   const attribution = attributionHeaders()
   const reserved = new Set(Object.keys(attribution).map(name => name.toLowerCase()))
+  if (bearerToken !== undefined) {
+    reserved.add('authorization')
+    reserved.add('x-api-key')
+    reserved.add('api-key')
+  }
   return {
     ...Object.fromEntries(Object.entries(headers ?? {}).filter(([name]) => !reserved.has(name.toLowerCase()))),
     ...attribution,
+    ...bearerToken === undefined ? {} : { Authorization: `Bearer ${bearerToken}` },
   }
 }
 
@@ -295,6 +304,7 @@ export class PiAiAdapter extends LlmAdapter {
       options.reasoningEffort ?? profile.reasoning,
     )
     const apiKey = await this.config.resolveApiKey(options.provider, profile)
+    const bearerToken = profile.credentialMode === 'bearer' ? apiKey : undefined
 
     const consumer = new AbortController()
     const upstream = options.signal === undefined
@@ -319,14 +329,14 @@ export class PiAiAdapter extends LlmAdapter {
         ? toPiContext(options, undefined, onReplayDegrade)
         : await toPiContext(options, attachments, onReplayDegrade)
       const events = snapshot.models.streamSimple(model, context, {
-        ...profileOptions(profile, reasoning, apiKey),
+        ...profileOptions(profile, reasoning, profile.credentialMode === 'api-key' ? apiKey : undefined),
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
         ...options.sessionId === undefined ? {} : { sessionId: String(options.sessionId) },
         signal: watchdog.signal,
         // Profile headers are deployment-owned; attribution names are
         // Harness-owned and therefore win collisions.
-        headers: requestHeaders(profile.headers),
+        headers: requestHeaders(profile.headers, bearerToken),
       })
       const iterator = toStreamChunks(events, model.contextWindow)[Symbol.asyncIterator]()
       let exhausted = false

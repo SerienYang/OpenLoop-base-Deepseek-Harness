@@ -13,5 +13,19 @@
 `surfaceContext` 和由调用参数派生的 `trustedHosts`。后续 OpenLoop 产品能力必须
 通过此补丁添加；不得为了 OpenLoop 组合去修改 `packages/bundle/web-app`。
 
+## 内置提供方
+
+该补丁还会添加以下 `llm-pi-ai` 提供方预设：
+
+- 提供方 ID：`volcengine-agent-plan`
+- 显示名称：`火山方舟 Agent Plan`
+- 端点：`https://ark.cn-beijing.volces.com/api/plan`
+- 凭据引用：`VOLCENGINE_ARK_AGENT_PLAN_API_KEY`
+- 凭据模式：`bearer`
+- 模型：`ark-code-latest`
+
+Agent Plan 密钥与普通方舟密钥、Coding Plan 密钥互不通用；请将 Agent Plan
+密钥存入上述凭据引用。
+
 `ensureOpenloopProfile()` 仅在 `package.json` 不存在时创建 `openloop` profile。
 该清单一旦存在，profile 和所有同级文件即归用户所有，本包不会再改动其字节。

@@ -13,8 +13,7 @@
  *
  * Credentials never reach this module's storage: the harness resolves a route's
  * key through `ctx.credentials` before the request enters pi-ai and hands it
- * over as a stream option, which `Models` presents to `resolve()` as the
- * credential key.
+ * over either as a stream option or as a harness-owned bearer header.
  *
  * @module dsh-llm-pi-ai/provider
  */
@@ -98,16 +97,23 @@ export interface ProviderSpec {
   models: readonly Model<Api>[]
   /**
    * Whether the profile names a credential, which it does through `apiKeyEnv`
-   * alone: configuration carries the reference, never the secret. Only that
-   * decides whether {@link routeAuth} adds the harness's own api-key method to
-   * a catalog provider that offers none; the key itself still arrives per
-   * request, never at construction.
+   * alone: configuration carries the reference, never the secret. For
+   * non-bearer routes this decides whether {@link routeAuth} adds the harness's
+   * own api-key method to a catalog provider that offers none; the key itself
+   * still arrives per request, never at construction.
    */
   namesCredential: boolean
+  /** Credential transport; omission preserves the native api-key behavior. */
+  credentialMode?: 'api-key' | 'bearer'
 }
 
 /**
  * The auth one route resolves its credential through.
+ *
+ * A bearer route owns authentication through its request header, so its
+ * provider auth is the harness method alone. It resolves successfully without
+ * an apiKey option and neither consults catalog ambient credentials nor adds
+ * provider-native auth headers.
  *
  * A catalog route keeps the installed provider's own auth, which is what
  * preserves provider-native ambient discovery for a profile naming no
@@ -115,20 +121,22 @@ export interface ProviderSpec {
  * environment a provider reads is a property of the provider, not of the wire
  * format its models speak.
  *
- * The single addition covers a catalog provider that offers no api-key method
- * at all. pi-ai resolves a request's `apiKey` override only when the provider
- * declares one (`resolveProviderAuth` checks `provider.auth.apiKey` before
- * honouring the override), so an OAuth-only provider — `openai-codex` is the
- * one the installed catalog ships — would refuse a profile's explicit key with
- * `Provider is not configured` before any request went out. Adding the harness
- * method beside the provider's own restores that route. A keyless profile adds
- * nothing and still reports the honest refusal, because this adapter resolves
- * credentials through its own seam and holds no OAuth store to fall back on.
+ * For non-bearer routes, the single addition covers a catalog provider that
+ * offers no api-key method at all. pi-ai resolves a request's `apiKey` override
+ * only when the provider declares one (`resolveProviderAuth` checks
+ * `provider.auth.apiKey` before honouring the override), so an OAuth-only
+ * provider — `openai-codex` is the one the installed catalog ships — would
+ * refuse a profile's explicit key with `Provider is not configured` before any
+ * request went out. Adding the harness method beside the provider's own
+ * restores that route. A keyless profile adds nothing and still reports the
+ * honest refusal, because this adapter resolves credentials through its own
+ * seam and holds no OAuth store to fall back on.
  * @param spec - the resolved route facts.
  * @param catalog - the installed catalog provider, when pi-ai ships one.
  * @returns the auth to construct this route's provider with.
  */
 function routeAuth(spec: ProviderSpec, catalog: Provider | undefined): Provider['auth'] {
+  if (spec.credentialMode === 'bearer') return { apiKey: harnessApiKeyAuth(spec.displayName) }
   if (catalog === undefined) return { apiKey: harnessApiKeyAuth(spec.displayName) }
   if (catalog.auth.apiKey !== undefined || !spec.namesCredential) return catalog.auth
   return { ...catalog.auth, apiKey: harnessApiKeyAuth(spec.displayName) }
