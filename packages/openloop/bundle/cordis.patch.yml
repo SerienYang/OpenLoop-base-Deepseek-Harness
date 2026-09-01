@@ -15,6 +15,7 @@
         models:
           - id: ark-code-latest
             name: Ark Code Latest
+            input: [text, image]
 - insert:
     - id: openloop-bootstrap
       name: '@openloop/bundle/bootstrap-host'
