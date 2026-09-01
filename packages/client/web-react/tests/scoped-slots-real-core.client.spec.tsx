@@ -19,10 +19,18 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     // only this suite's own test keys merge here.
     'spec.single': { kind: 'single'; scope: 'root'; owner: { label?: string } }
     'spec.list': { kind: 'list'; scope: 'root' }
+    'spec.keyed': {
+      kind: 'keyed'
+      scope: 'root'
+      owner: { crash?: boolean; label?: string }
+      keyProps: { row: object }
+      hookContext: string
+    }
   }
 }
 
-type FrameSlots = PropsRenderSlots<'spec.single' | 'spec.list'>
+type BaseFrameSlots = PropsRenderSlots<'spec.single' | 'spec.list'>
+type FrameSlots = PropsRenderSlots<'spec.single' | 'spec.list' | 'spec.keyed'>
 
 /** Passthrough host over the real core (store/session seats unused here). */
 function hostOver(core: SlotCore): SlotRendererHost {
@@ -53,6 +61,7 @@ function mountFrame(core: SlotCore, body: (renderSlot: FrameSlots['renderSlot'])
     children: {
       'spec.single': { kind: 'single', scope: 'root' },
       'spec.list': { kind: 'list', scope: 'root' },
+      'spec.keyed': { kind: 'keyed', scope: 'root' },
     },
   }, (props: FrameSlots) => <>{body(props.renderSlot)}</>)
   const view = render(<>{createSlotRenderer().renderRoot(hostOver(core), {})}</>)
@@ -88,12 +97,51 @@ describe('createSlotRenderer over the real SlotCore', () => {
     expect(view.container.textContent).toBe('12')
   })
 
+  it('does not retire a contextual keyed renderer when one occurrence crashes', async () => {
+    const core = new SlotCore()
+    const { view } = mountFrame(core, renderSlot => (
+      <>
+        <section data-testid="bad">
+          {renderSlot('spec.keyed', { crash: true }, {
+            entryKey: 'row',
+            hookContext: 'bad-row',
+            fallback: <i>recovered</i>,
+          })}
+        </section>
+        <section data-testid="good">
+          {renderSlot('spec.keyed', { label: 'alive' }, {
+            entryKey: 'row',
+            hookContext: 'good-row',
+          })}
+        </section>
+      </>
+    ))
+    const errors: Array<{ abdicated: boolean }> = []
+    core.onEntryError((_key, _entry, _error, info) => { errors.push(info) })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await act(async () => {
+      core.register(
+        { name: 'spec.keyed', key: 'row' },
+        ({ crash, label }: { crash?: boolean; label?: string }) => {
+          if (crash) throw new Error('one row boom')
+          return <span>{label}</span>
+        },
+      )
+    })
+    spy.mockRestore()
+
+    expect(view.getByTestId('bad').textContent).toBe('recovered')
+    expect(view.getByTestId('good').textContent).toBe('alive')
+    expect(errors).toEqual([{ abdicated: false }])
+    expect(core.entriesOfSlot('spec.keyed')).toHaveLength(1)
+  })
+
   it('passes owner props through and keeps sibling entries() references stable across mutations', async () => {
     const core = new SlotCore()
     core.register({ name: 'root', children: {
       'spec.single': { kind: 'single', scope: 'root' },
       'spec.list': { kind: 'list', scope: 'root' },
-    } }, (props: FrameSlots) => <>
+    } }, (props: BaseFrameSlots) => <>
       {props.renderSlot('spec.single', { label: 'owner' })}
       {props.renderSlot('spec.list', {})}
     </>)

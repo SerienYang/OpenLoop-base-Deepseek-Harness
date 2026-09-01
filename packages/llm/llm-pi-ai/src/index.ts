@@ -71,6 +71,7 @@ export type { PiAiAdapterOptions } from './adapter.ts'
 export { Config } from './config.ts'
 export type {
   PiAiCompatProfile,
+  PiAiCredentialMode,
   PiAiModality,
   PiAiModelOverride,
   PiAiModelProfile,

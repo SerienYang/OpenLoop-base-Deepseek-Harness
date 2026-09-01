@@ -61,10 +61,15 @@ export type {
   PiAiThinkingFormat,
 } from './catalog.ts'
 
+/** Credential transport used for requests on a provider route. */
+export type PiAiCredentialMode = 'api-key' | 'bearer'
+
 /** Configuration for one pi-ai provider route; the `providers` dict key IS the route. */
 export interface PiAiProviderProfile {
   /** Credential reference (environment-variable name) resolved per request through `ctx.credentials`. */
   apiKeyEnv?: string
+  /** Credential transport; omission uses pi-ai's native API-key handling. */
+  credentialMode?: PiAiCredentialMode
   /** Name shown by configuration surfaces; defaults to the route key. */
   displayName?: string
   /**
@@ -142,13 +147,15 @@ export interface PiAiProviderProfile {
 
 /** Validated profile with its route stamped and every adapter-owned default resolved. */
 export interface ResolvedPiAiProviderProfile
-  extends Omit<PiAiProviderProfile, 'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName'> {
+  extends Omit<PiAiProviderProfile, 'apiKeyEnv' | 'credentialMode' | 'retryPolicy' | 'models' | 'displayName'> {
   /** Harness route key and the `Models` collection key (the configuration dict key). */
   provider: string
   /** Resolved display name for selectors and configuration surfaces. */
   displayName: string
   /** Validated credential reference, when one is configured. */
   apiKeyEnv?: CredentialRef
+  /** Credential transport after applying the default. */
+  credentialMode: PiAiCredentialMode
   /** Positive finite provider-idle interval after defaulting. */
   streamIdleTimeoutMs: number
   /** Immutable retry policy captured with this provider route. */
@@ -231,6 +238,7 @@ const modelOverride: z<PiAiModelOverride> = z.object(modelFields)
 
 const profile = z.object({
   apiKeyEnv: z.string().role('credential-ref'),
+  credentialMode: z.union(['api-key', 'bearer']),
   displayName: z.string(),
   api: z.union(supportedProtocols()),
   baseURL: z.string(),
@@ -315,6 +323,10 @@ export function resolveProfiles(
     if (source.displayName !== undefined && source.displayName.length === 0) {
       throw new Error(`llm-pi-ai: provider "${provider}" has an empty displayName`)
     }
+    const credentialMode = source.credentialMode ?? 'api-key'
+    if (credentialMode === 'bearer' && source.apiKeyEnv === undefined) {
+      throw new Error(`llm-pi-ai: provider "${provider}" uses bearer credential mode but does not set apiKeyEnv`)
+    }
     const streamIdleTimeoutMs = source.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
     if (!Number.isFinite(streamIdleTimeoutMs)
       || streamIdleTimeoutMs <= 0
@@ -347,12 +359,30 @@ export function resolveProfiles(
       defaultContextWindow: source.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
       defaultMaxTokens: source.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
     })
-    const { apiKeyEnv, retryPolicy, models: _models, displayName: _displayName, ...rest } = source
+    if (credentialMode === 'bearer') {
+      const protocols = supportedProtocols()
+      const incompatible = catalog.models.find(model => !protocols.includes(model.api))
+      if (incompatible !== undefined) {
+        throw new Error(
+          `llm-pi-ai: provider "${provider}" model "${incompatible.id}" uses api "${incompatible.api}",`
+          + ` which cannot use bearer credential mode; supported protocols are ${protocols.join(', ')}`,
+        )
+      }
+    }
+    const {
+      apiKeyEnv,
+      credentialMode: _credentialMode,
+      retryPolicy,
+      models: _models,
+      displayName: _displayName,
+      ...rest
+    } = source
     resolved.set(provider, {
       ...rest,
       provider,
       displayName,
       ...apiKeyEnv === undefined ? {} : { apiKeyEnv: credentialRef(apiKeyEnv) },
+      credentialMode,
       streamIdleTimeoutMs,
       retryPolicy: resolveRetryPolicy(retryPolicy, `llm-pi-ai: provider "${provider}" retryPolicy`),
       ...rest.headers === undefined ? {} : { headers: { ...rest.headers } },
@@ -365,6 +395,7 @@ export function resolveProfiles(
         ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
         models: catalog.models,
         namesCredential: apiKeyEnv !== undefined,
+        credentialMode,
       }),
     })
   }

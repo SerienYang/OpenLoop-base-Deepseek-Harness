@@ -339,6 +339,90 @@ describe('child outlets and the renderSlot binding', () => {
     expect(view.container.textContent).toBe('alive')
     expect(view.container.querySelector('[data-slot-error]')).not.toBeNull()
   })
+
+  it('isolates a contextual keyed crash to its occurrence and renders the caller fallback', async () => {
+    const h = makeHost()
+    h.declare('k.keyed', { kind: 'keyed', scope: 'session' })
+    h.addSession('s1')
+    h.current.set('s1')
+    h.add('k.keyed', {
+      component: ({ crash, label }: { crash?: boolean; label?: string }) => {
+        if (crash) throw new Error('one row boom')
+        return <span>{label}</span>
+      },
+      options: { key: 'row' },
+    })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { view } = mountRoot(h, { 'k.keyed': { kind: 'keyed', scope: 'session' } },
+      renderSlot => (
+        <SessionProvider>
+          {() => (
+            <>
+              <section data-testid="bad">
+                {renderSlot('k.keyed', { crash: true }, {
+                  entryKey: 'row',
+                  hookContext: 'bad-row',
+                  fallback: <i>recovered</i>,
+                })}
+              </section>
+              <section data-testid="good">
+                {renderSlot('k.keyed', { label: 'alive' }, {
+                  entryKey: 'row',
+                  hookContext: 'good-row',
+                  fallback: <i>unexpected fallback</i>,
+                })}
+              </section>
+            </>
+          )}
+        </SessionProvider>
+      ))
+    await act(async () => {})
+    spy.mockRestore()
+
+    expect(view.getByTestId('bad').textContent).toBe('recovered')
+    expect(view.getByTestId('good').textContent).toBe('alive')
+    expect(view.container.querySelectorAll('[data-slot-error="k.keyed"]')).toHaveLength(1)
+  })
+
+  it('isolates contextual session-maybe crashes without a current session', async () => {
+    const h = makeHost()
+    h.declare('k.keyed', { kind: 'keyed', scope: 'session-maybe' })
+    h.add('k.keyed', {
+      component: ({ crash, label }: { crash?: boolean; label?: string }) => {
+        if (crash) throw new Error('optional session row boom')
+        return <span>{label}</span>
+      },
+      options: { key: 'row' },
+    })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { view } = mountRoot(
+      h,
+      { 'k.keyed': { kind: 'keyed', scope: 'session-maybe' } },
+      renderSlot => (
+        <>
+          <section data-testid="maybe-bad">
+            {renderSlot('k.keyed', { crash: true }, {
+              entryKey: 'row',
+              hookContext: 'maybe-bad-row',
+              fallback: <i>recovered</i>,
+            })}
+          </section>
+          <section data-testid="maybe-good">
+            {renderSlot('k.keyed', { label: 'alive' }, {
+              entryKey: 'row',
+              hookContext: 'maybe-good-row',
+            })}
+          </section>
+        </>
+      ),
+    )
+    await act(async () => {})
+    spy.mockRestore()
+
+    expect(view.getByTestId('maybe-bad').textContent).toBe('recovered')
+    expect(view.getByTestId('maybe-good').textContent).toBe('alive')
+    expect(view.container.querySelectorAll('[data-slot-error="k.keyed"]')).toHaveLength(1)
+  })
 })
 
 describe('chain outlets and the renderSlotChain binding', () => {
@@ -1001,6 +1085,70 @@ describe('session-maybe adoption identity', () => {
     act(() => { h.current.set('s2') })
     // New incarnation (#2): strict-session behavior after adoption.
     expect(view.container.textContent).toBe('s2#2')
+  })
+
+  it('recovers a failed contextual entry when the session incarnation changes', async () => {
+    const h = makeHost()
+    h.addSession('s1')
+    h.addSession('s2')
+    h.current.set('s1')
+    h.declare('k.keyed', { kind: 'keyed', scope: 'session-maybe' })
+    h.add('k.keyed', {
+      component: ({ sessionId }: { sessionId?: string }) => {
+        if (sessionId === 's1') throw new Error('s1 row boom')
+        return <span>{sessionId}</span>
+      },
+      options: { key: 'row' },
+    })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { view } = mountRoot(
+      h,
+      { 'k.keyed': { kind: 'keyed', scope: 'session-maybe' } },
+      renderSlot => renderSlot('k.keyed', {}, {
+        entryKey: 'row',
+        hookContext: 'maybe-row',
+        fallback: <i>recovered</i>,
+      }),
+    )
+    await act(async () => {})
+    expect(view.container.textContent).toBe('recovered')
+
+    act(() => { h.current.set('s2') })
+    spy.mockRestore()
+
+    expect(view.container.textContent).toBe('s2')
+    expect(view.container.querySelector('[data-slot-error]')).toBeNull()
+  })
+
+  it('recovers a failed contextual entry when a blank incarnation adopts its first session', async () => {
+    const h = makeHost()
+    h.addSession('s1')
+    h.declare('k.keyed', { kind: 'keyed', scope: 'session-maybe' })
+    h.add('k.keyed', {
+      component: ({ sessionId }: { sessionId?: string }) => {
+        if (sessionId === undefined) throw new Error('blank row boom')
+        return <span>{sessionId}</span>
+      },
+      options: { key: 'row' },
+    })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { view } = mountRoot(
+      h,
+      { 'k.keyed': { kind: 'keyed', scope: 'session-maybe' } },
+      renderSlot => renderSlot('k.keyed', {}, {
+        entryKey: 'row',
+        hookContext: 'adopting-row',
+        fallback: <i>recovered</i>,
+      }),
+    )
+    await act(async () => {})
+    expect(view.container.textContent).toBe('recovered')
+
+    act(() => { h.current.set('s1') })
+    spy.mockRestore()
+
+    expect(view.container.textContent).toBe('s1')
+    expect(view.container.querySelector('[data-slot-error]')).toBeNull()
   })
 
   it('remounts into a fresh blank incarnation on session loss, then adopts anew', () => {
