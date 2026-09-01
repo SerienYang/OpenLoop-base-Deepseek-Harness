@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "openloop-e2e", allow(dead_code))]
+
 #[cfg(target_os = "macos")]
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
@@ -213,6 +215,35 @@ fn validate_embedded_artifact_manifest() -> Result<(), String> {
 fn build_manifest() -> Result<OpenloopBuildManifest, String> {
     validate_embedded_artifact_manifest()?;
     embedded_build_manifest()
+}
+
+#[cfg(feature = "openloop-e2e")]
+#[tauri::command]
+fn openloop_e2e_action(
+    window: tauri::WebviewWindow,
+    action: String,
+) -> Result<serde_json::Value, String> {
+    let window_label = window.label();
+    match action.as_str() {
+        "check-update" => Ok(serde_json::json!({
+            "state": "available",
+            "version": "0.2.0",
+        })),
+        "install-update" => Ok(serde_json::json!({
+            "state": "cancelled",
+            "windowLabel": window_label,
+        })),
+        "replace-credential" => Ok(serde_json::json!({
+            "state": "presented",
+            "windowLabel": window_label,
+        })),
+        "add-workspace" => Ok(serde_json::json!({
+            "state": "ready",
+            "name": "Fixture Workspace",
+            "windowLabel": window_label,
+        })),
+        _ => Err("unsupported Openloop E2E action".to_owned()),
+    }
 }
 
 fn embedded_build_manifest() -> Result<OpenloopBuildManifest, String> {
@@ -1191,8 +1222,17 @@ pub fn run() -> i32 {
         .build();
     let builder = tauri::Builder::default()
         .plugin(updater_plugin)
-        .manage(updater_config)
-        .invoke_handler(tauri::generate_handler![build_manifest]);
+        .manage(updater_config);
+    #[cfg(feature = "openloop-e2e")]
+    let builder = builder
+        .plugin(tauri_plugin_wdio::init())
+        .plugin(tauri_plugin_wdio_webdriver::init())
+        .invoke_handler(tauri::generate_handler![
+            build_manifest,
+            openloop_e2e_action
+        ]);
+    #[cfg(not(feature = "openloop-e2e"))]
+    let builder = builder.invoke_handler(tauri::generate_handler![build_manifest]);
     let runtime_manifest = manifest.clone();
     let app = builder
         .setup(move |app| {
@@ -1204,10 +1244,20 @@ pub fn run() -> i32 {
             if action != HostAction::Normal {
                 return Ok(());
             }
-            if let Some(state) = start_runtime(app.handle(), &updater_config, &runtime_manifest)? {
-                app.manage(state);
+            #[cfg(feature = "openloop-e2e")]
+            {
+                let _ = (&updater_config, &runtime_manifest);
+                Ok(())
             }
-            Ok(())
+            #[cfg(not(feature = "openloop-e2e"))]
+            {
+                if let Some(state) =
+                    start_runtime(app.handle(), &updater_config, &runtime_manifest)?
+                {
+                    app.manage(state);
+                }
+                Ok(())
+            }
         })
         .build(tauri::generate_context!())
         .expect("failed to build Openloop desktop application");

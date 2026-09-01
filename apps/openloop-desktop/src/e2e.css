@@ -1,0 +1,10 @@
+.e2e-controls {
+  display: grid;
+  gap: 8px;
+  margin: 24px;
+}
+
+.e2e-controls [role='dialog'] {
+  padding: 16px;
+  border: 1px solid currentColor;
+}

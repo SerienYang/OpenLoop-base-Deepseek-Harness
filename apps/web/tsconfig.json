@@ -45,6 +45,8 @@
     "tests/onboarding-usable-provider.e2e.ts",
     "tests/openloop-bridge-server.ts",
     "tests/openloop-credential-boundary.e2e.ts",
+    "tests/openloop-minimum-shell-server.ts",
+    "tests/openloop-minimum-shell.e2e.ts",
     "tests/openloop-workspace-authority.e2e.ts",
     "tests/remote-welcome.e2e.ts",
     "tests/workspace-management.e2e.ts",

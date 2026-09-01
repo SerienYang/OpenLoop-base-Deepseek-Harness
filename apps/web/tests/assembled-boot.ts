@@ -15,7 +15,7 @@ import type { WebBootEntry } from '@deepseek-ai/dsh-client-modules/client'
 import { AppWebEntry } from '@deepseek-ai/dsh-client-web'
 
 /** Boot entries for the minimal assembled graph, each carrying the workspace bundle it loads. */
-const PLUGINS: readonly (WebBootEntry & { bundlePath: string })[] = [
+const DSH_PLUGINS: readonly (WebBootEntry & { bundlePath: string })[] = [
   { id: '@deepseek-ai/dsh-typert-registry', bundlePath: 'packages/typert/registry/lib/client.js', url: '/plugins/typert-registry.js', rev: 'fx', inject: [], immediately: true },
   { id: '@deepseek-ai/dsh-client-connection', bundlePath: 'packages/client/connection/lib/client.js', url: '/plugins/connection.js', rev: 'fx', inject: [], immediately: true },
   { id: '@deepseek-ai/dsh-api-gateway', bundlePath: 'packages/api/gateway/lib/client.js', url: '/plugins/api-gateway.js', rev: 'fx', inject: ['@deepseek-ai/dsh-typert-registry', '@deepseek-ai/dsh-client-connection'], immediately: true },
@@ -47,7 +47,32 @@ const PLUGINS: readonly (WebBootEntry & { bundlePath: string })[] = [
   { id: '@deepseek-ai/dsh-client-ui-trajectory', bundlePath: 'packages/client/ui-trajectory/lib/client.js', url: '/plugins/ui-trajectory.js', rev: 'fx', inject: ['@deepseek-ai/dsh-client-ui-conversation'] },
 ]
 
-const bundles = new Map(PLUGINS.map(plugin => [
+const OPENLOOP_PLUGINS: readonly (WebBootEntry & { bundlePath: string })[] = [
+  ...DSH_PLUGINS.filter(plugin => ![
+    '@deepseek-ai/dsh-client-ui-settings',
+    '@deepseek-ai/dsh-client-ui-layout',
+    '@deepseek-ai/dsh-client-ui-workspace',
+  ].includes(plugin.id)).map(plugin => ({
+    ...plugin,
+    inject: (plugin.inject ?? []).map(id =>
+      id === '@deepseek-ai/dsh-client-ui-settings'
+        ? '@openloop/settings-foundation'
+        : id === '@deepseek-ai/dsh-client-ui-layout'
+          ? '@openloop/shell'
+          : id),
+  })),
+  { id: '@openloop/settings-foundation', bundlePath: 'packages/openloop/settings-foundation/lib/client.js', url: '/plugins/openloop-settings-foundation.js', rev: 'fx', inject: ['@deepseek-ai/dsh-client-runtime'], immediately: true },
+  { id: '@openloop/desktop-bridge-client', bundlePath: 'packages/openloop/desktop-bridge-client/lib/client.js', url: '/plugins/openloop-desktop-bridge.js', rev: 'fx', inject: ['@deepseek-ai/dsh-api-gateway'], immediately: true },
+  { id: '@openloop/shell', bundlePath: 'packages/openloop/shell/lib/client.js', url: '/plugins/openloop-shell.js', rev: 'fx', inject: ['@deepseek-ai/dsh-client-ui-theme', '@deepseek-ai/dsh-client-locale', '@deepseek-ai/dsh-api-remotes', '@openloop/desktop-bridge-client', '@openloop/settings-foundation'] },
+  { id: '@openloop/workspace-client', bundlePath: 'packages/openloop/workspace-client/lib/client.js', url: '/plugins/openloop-workspace.js', rev: 'fx', inject: ['@openloop/desktop-bridge-client', '@openloop/shell', '@deepseek-ai/dsh-client-ui-conversation', '@deepseek-ai/dsh-client-ui-sidebar', '@openloop/settings-foundation'] },
+  { id: '@deepseek-ai/dsh-client-ui-model-selection', bundlePath: 'packages/client/ui-model-selection/lib/client.js', url: '/plugins/ui-model-selection.js', rev: 'fx', inject: ['@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-client-ui-conversation'] },
+  { id: '@deepseek-ai/dsh-client-ui-input-trigger', bundlePath: 'packages/client/ui-input-trigger/lib/client.js', url: '/plugins/ui-input-trigger.js', rev: 'fx', inject: ['@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-client-ui-conversation'] },
+  { id: '@deepseek-ai/dsh-client-ui-commands', bundlePath: 'packages/client/ui-commands/lib/client.js', url: '/plugins/ui-commands.js', rev: 'fx', inject: ['@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-client-ui-conversation', '@deepseek-ai/dsh-client-ui-input-trigger'] },
+  { id: '@deepseek-ai/dsh-client-ui-plan', bundlePath: 'packages/client/ui-plan/lib/client.js', url: '/plugins/ui-plan.js', rev: 'fx', inject: ['@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-client-ui-conversation'] },
+  { id: '@deepseek-ai/dsh-client-ui-user-questions', bundlePath: 'packages/client/ui-user-questions/lib/client.js', url: '/plugins/ui-user-questions.js', rev: 'fx', inject: ['@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-client-ui-conversation'] },
+]
+
+const bundles = new Map([...DSH_PLUGINS, ...OPENLOOP_PLUGINS].map(plugin => [
   plugin.url,
   readFileSync(join(process.cwd(), plugin.bundlePath), 'utf8'),
 ]))
@@ -55,6 +80,7 @@ const bundles = new Map(PLUGINS.map(plugin => [
 interface FixtureWindow extends Window {
   __DSH_BOOT__?: { rev: string; entries: WebBootEntry[] }
   __ModuleLoader__?: unknown
+  __OPENLOOP_BOOTSTRAP__?: unknown
 }
 
 class ResizeObserverStub {
@@ -95,6 +121,7 @@ export function installAssembledBootEnv(): void {
     cleanup()
     delete win.__DSH_BOOT__
     delete win.__ModuleLoader__
+    delete win.__OPENLOOP_BOOTSTRAP__
     document.body.innerHTML = ''
     document.head.querySelectorAll('style[data-plugin]').forEach((style) => { style.remove() })
     document.title = ''
@@ -112,12 +139,28 @@ export function installAssembledBootEnv(): void {
  * Mount the assembled application on the fixture transport; the teardown
  * registered by installAssembledBootEnv disposes it.
  */
-export function mountAssembledApp(): void {
+export function mountAssembledApp(
+  options: { readonly profile?: 'dsh' | 'openloop' } = {},
+): void {
+  const plugins = options.profile === 'openloop' ? OPENLOOP_PLUGINS : DSH_PLUGINS
   history.replaceState(null, '', '/?fixture')
   const root = document.createElement('div')
   root.id = 'root'
   document.body.appendChild(root)
-  win.__DSH_BOOT__ = { rev: 'fx', entries: PLUGINS.map(({ bundlePath: _bundlePath, ...plugin }) => plugin) }
+  win.__DSH_BOOT__ = {
+    rev: 'fx',
+    entries: plugins.map(({ bundlePath: _bundlePath, ...plugin }) => plugin),
+  }
+  if (options.profile === 'openloop') {
+    win.__OPENLOOP_BOOTSTRAP__ = Object.freeze({
+      coreManifest: Object.freeze({
+        appVersion: '0.1.0',
+        channel: 'test',
+        dshCommit: '99f6f02fecdb7dff40c3fbc9470f5907c29f74ca',
+        brand: Object.freeze({ attribution: 'Built on DeepSeek Harness' }),
+      }),
+    })
+  }
   act(() => {
     const entry = new AppWebEntry(root, {
       loadBundle: async (url) => {

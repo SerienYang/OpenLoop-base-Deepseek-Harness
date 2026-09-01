@@ -110,13 +110,6 @@ function scriptArguments(script: string): readonly string[] {
   return script.trim().split(/\s+/u)
 }
 
-function commandNamesFromBuildScript(source: string): readonly string[] {
-  const calls = [...source.matchAll(/\.commands\s*\(\s*&\s*\[([\s\S]*?)\]\s*\)/gu)]
-  if (calls.length !== 1) return []
-  return [...(calls[0]?.[1] ?? '').matchAll(/"([a-z][a-z0-9_]*)"/gu)]
-    .map((match, index) => requiredValue(match[1], `build command ${index}`))
-}
-
 function embeddedManifestPath(source: string): string | undefined {
   const direct = /PathBuf::from\("([^"]*dist-openloop\/)"\)\.join\("openloop-core\.json"\)/u
     .exec(source)
@@ -293,6 +286,14 @@ describe('Openloop desktop foundation configuration', () => {
     expect(dependencies).toEqual({ '@tauri-apps/api': '2.11.1' })
     expect(devDependencies).toEqual({
       '@tauri-apps/cli': '2.11.4',
+      '@wdio/cli': '9.29.1',
+      '@wdio/globals': '9.29.1',
+      '@wdio/local-runner': '9.29.1',
+      '@wdio/mocha-framework': '9.29.1',
+      '@wdio/spec-reporter': '9.29.1',
+      '@wdio/tauri-plugin': '1.3.0',
+      '@wdio/tauri-service': '1.3.0',
+      '@wdio/types': '9.29.1',
       typescript: '6.0.3',
       vite: '8.0.16',
     })
@@ -580,19 +581,28 @@ describe('Openloop desktop foundation configuration', () => {
     ))).toBe(false)
 
     const buildScript = readText('apps/openloop-desktop/src-tauri/build.rs')
-    expect(commandNamesFromBuildScript(buildScript)).toEqual(['build_manifest'])
+    expect(buildScript).toContain('&["build_manifest"]')
+    expect(buildScript).toContain('&["build_manifest", "openloop_e2e_action"]')
     expect([...buildScript.matchAll(/\.commands\s*\(/gu)]).toHaveLength(1)
 
     const library = readText('apps/openloop-desktop/src-tauri/src/lib.rs')
-    expect(tauriCommandNames(library)).toEqual(['build_manifest'])
-    expect(invokeHandlerCommands(library)).toEqual(['build_manifest'])
-    expect([...library.matchAll(/tauri::generate_handler!\s*\[/gu)]).toHaveLength(1)
+    expect(tauriCommandNames(library)).toEqual([
+      'build_manifest',
+      'openloop_e2e_action',
+    ])
+    expect([...invokeHandlerCommands(library)].sort()).toEqual([
+      'build_manifest',
+      'openloop_e2e_action',
+    ])
+    expect([...library.matchAll(/tauri::generate_handler!\s*\[/gu)]).toHaveLength(2)
     expect(library).toContain(
       '.invoke_handler(tauri::generate_handler![build_manifest])',
     )
+    expect(library).toMatch(
+      /#\[cfg\(feature = "openloop-e2e"\)\][\s\S]+fn openloop_e2e_action/u,
+    )
     expect(library).not.toMatch(/SecurePromptState|credentials_(?:set|unset|status)/u)
     expect(serialized).not.toMatch(/resolve|spike|open_secure_prompt/u)
-    expect(commandNamesFromBuildScript(buildScript)).not.toContain('resolve')
     expect(invokeHandlerCommands(library)).not.toContain('resolve')
     expect(tauriCommandNames(library)).not.toContain('open_secure_prompt')
 
@@ -610,6 +620,51 @@ describe('Openloop desktop foundation configuration', () => {
       repositoryRoot,
       'apps/openloop-desktop/src-tauri/src/credentials/secure_prompt.rs',
     ))).toBe(false)
+  })
+
+  test('keeps WDIO permissions and plugins exclusive to the E2E build', () => {
+    const releaseConfig = readJson('apps/openloop-desktop/src-tauri/tauri.conf.json')
+    const releaseSecurity = record(
+      record(releaseConfig.app, 'release app').security,
+      'release security',
+    )
+    const releaseCapability = readJson(
+      'apps/openloop-desktop/src-tauri/capabilities/main.json',
+    )
+    const e2eConfig = readJson('apps/openloop-desktop/tauri.e2e.conf.json')
+    const e2eSecurity = record(record(e2eConfig.app, 'E2E app').security, 'E2E security')
+    const e2eCapability = readJson(
+      'apps/openloop-desktop/capabilities/e2e.json',
+    )
+    const { $schema: _schema, ...inlineE2eCapability } = e2eCapability
+    const releaseStyles = readText('apps/openloop-desktop/src/styles.css')
+    const cargo = record(
+      parseToml(readText('apps/openloop-desktop/src-tauri/Cargo.toml')),
+      'Cargo.toml',
+    )
+    const features = record(cargo.features, 'Cargo features')
+    const dependencies = record(cargo.dependencies, 'Cargo dependencies')
+
+    expect(releaseSecurity.capabilities).toEqual(['main'])
+    expect(JSON.stringify([releaseConfig, releaseCapability])).not.toContain('wdio')
+    expect(releaseStyles).not.toContain('.e2e-controls')
+    expect(e2eSecurity.capabilities).toEqual([inlineE2eCapability])
+    expect(stringArray(e2eCapability.permissions, 'E2E permissions')).toEqual([
+      'allow-build-manifest',
+      'allow-openloop-e2e-action',
+      'wdio:default',
+      'wdio-webdriver:default',
+    ])
+    expect(features['openloop-e2e']).toEqual([
+      'dep:tauri-plugin-wdio',
+      'dep:tauri-plugin-wdio-webdriver',
+    ])
+    for (const name of ['tauri-plugin-wdio', 'tauri-plugin-wdio-webdriver']) {
+      expect(record(dependencies[name], `${name} dependency`)).toMatchObject({
+        version: '=1.3.0',
+        optional: true,
+      })
+    }
   })
 
   test('keeps the Rust and TypeScript build-manifest contracts identical', () => {

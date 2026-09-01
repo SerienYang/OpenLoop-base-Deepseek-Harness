@@ -182,6 +182,24 @@ function openSettings(locale: keyof typeof SHELL_COPY = 'en') {
   fireEvent.click(screen.getByRole('button', { name: SHELL_COPY[locale].settings }))
 }
 
+function provideUpdates(ctx: Context) {
+  const view = createSnapshotStore({
+    phase: 'idle' as const,
+    actions: {
+      check: { enabled: true },
+      installAndRestart: { enabled: false },
+    },
+  })
+  const updates = {
+    view,
+    refresh: vi.fn(() => Promise.resolve()),
+    checkForUpdate: vi.fn(() => Promise.resolve()),
+    installUpdateAndRestart: vi.fn(() => Promise.resolve('cancelled' as const)),
+  }
+  ctx.provide('openloopUpdates', updates as never)
+  return updates
+}
+
 function DynamicSection() {
   const [transientDisabled, setTransientDisabled] = useState(false)
   return (
@@ -427,15 +445,15 @@ describe('About and Updates typed view', () => {
     attribution: 'Built on DeepSeek Harness' as const,
   }
 
-  it('renders identity and an unavailable update without enabling actions', () => {
+  it('renders identity and an idle update with only checking enabled', () => {
     render(
       <AboutUpdateSection
         app={readyApp}
         update={{
-          phase: 'unavailable',
+          phase: 'idle',
           lastCheckedAt: '2026-08-30T10:00:00.000Z',
           actions: {
-            check: { enabled: false },
+            check: { enabled: true },
             installAndRestart: { enabled: false },
           },
         }}
@@ -449,9 +467,9 @@ describe('About and Updates typed view', () => {
     expect(screen.getByText('a'.repeat(40))).toBeTruthy()
     expect(screen.getByText('Built on DeepSeek Harness')).toBeTruthy()
     expect(screen.getByText('2026-08-30T10:00:00.000Z')).toBeTruthy()
-    expect(screen.getByText('Update service unavailable')).toBeTruthy()
+    expect(screen.getByText('Ready to check')).toBeTruthy()
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Check for updates' }).disabled)
-      .toBe(true)
+      .toBe(false)
     expect(screen.getByRole<HTMLButtonElement>('button', {
       name: 'Install and restart',
     }).disabled).toBe(true)
@@ -551,9 +569,9 @@ describe('About and Updates typed view', () => {
       <AboutUpdateSection
         app={app}
         update={{
-          phase: 'unavailable',
+          phase: 'idle',
           actions: {
-            check: { enabled: false },
+            check: { enabled: true },
             installAndRestart: { enabled: false },
           },
         }}
@@ -592,6 +610,7 @@ describe('Openloop Settings slot owner', () => {
     }
     ctx.provide('remote', { openloopDesktop } as never)
     ctx.provide('remote.openloopDesktop', openloopDesktop)
+    provideUpdates(ctx)
 
     const fiber = ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
@@ -652,6 +671,7 @@ describe('Openloop Settings slot owner', () => {
     }
     ctx.provide('remote', { openloopDesktop } as never)
     ctx.provide('remote.openloopDesktop', openloopDesktop)
+    provideUpdates(ctx)
 
     const fiber = ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
@@ -722,6 +742,7 @@ describe('Openloop Settings slot owner', () => {
     }
     ctx.provide('remote', { openloopDesktop } as never)
     ctx.provide('remote.openloopDesktop', openloopDesktop)
+    provideUpdates(ctx)
 
     const fiber = ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
@@ -785,6 +806,7 @@ describe('Openloop Settings slot owner', () => {
       $on: () => () => {},
     } as never)
     ctx.provide('remote.openloopDesktop', openloopDesktop)
+    provideUpdates(ctx)
     ctx.provide('connection', {
       isLoopback: true,
       api: {

@@ -39,6 +39,12 @@
       "path": "../../client/ui-theme"
     },
     {
+      "path": "../../client/web-react"
+    },
+    {
+      "path": "../desktop-bridge-client"
+    },
+    {
       "path": "../../runtime-diagnostics/invariants"
     }
   ]

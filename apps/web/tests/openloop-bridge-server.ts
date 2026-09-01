@@ -28,6 +28,28 @@ export interface RecordedBridgeCall {
   readonly payload: unknown
 }
 
+export interface FixtureUpdateStatus {
+  readonly state:
+    | 'idle'
+    | 'checking'
+    | 'up-to-date'
+    | 'available'
+    | 'failed'
+    | 'downloading'
+    | 'verifying'
+    | 'ready-to-install'
+    | 'installing'
+    | 'restarting'
+    | 'committed'
+    | 'rolled-back'
+  readonly updateId?: string
+  readonly version?: string
+  readonly releaseNotes?: string
+  readonly message?: string
+  readonly progress?: number
+  readonly lastCheckedAt?: number
+}
+
 interface AuthenticatedUnixBridgeOptions {
   readonly launchId: string
   readonly secret: Uint8Array
@@ -96,12 +118,15 @@ export class AuthenticatedUnixBridgeServer {
   readonly #pendingRequestCancels = new Map<string, () => void>()
   readonly #callWaiters = new Set<BridgeCallWaiter>()
   readonly #callRequestIds: string[] = []
+  readonly #updateChecks: Array<FixtureUpdateStatus | Error> = []
+  readonly #updateInstalls: Array<'cancelled' | 'restarting' | Error> = []
   readonly #replacementOpened: Promise<void>
   #resolveReplacementOpened!: () => void
   #resolveReplacement: ((result: 'saved' | 'cancelled') => void) | undefined
   #grantGeneration = 0
   #transaction: WorkspaceTransaction | null = null
   #authorizationSequence = 0
+  #updateStatus: FixtureUpdateStatus = { state: 'idle' }
 
   private constructor(
     directory: string,
@@ -166,6 +191,18 @@ export class AuthenticatedUnixBridgeServer {
 
   enqueueWorkspaceRevoke(outcome: 'cancelled' | 'confirmed'): void {
     this.#revokeQueue.push(outcome)
+  }
+
+  setUpdateStatus(status: FixtureUpdateStatus): void {
+    this.#updateStatus = status
+  }
+
+  enqueueUpdateCheck(status: FixtureUpdateStatus | Error): void {
+    this.#updateChecks.push(status)
+  }
+
+  enqueueUpdateInstall(outcome: 'cancelled' | 'restarting' | Error): void {
+    this.#updateInstalls.push(outcome)
   }
 
   setWorkspaceGrantState(
@@ -370,6 +407,26 @@ export class AuthenticatedUnixBridgeServer {
         return null
       case 'getAppInfo':
         return { appVersion: '0.1.0', channel: 'test' }
+      case 'getUpdateStatus':
+        return this.#updateStatus
+      case 'checkForUpdate': {
+        const result = this.#updateChecks.shift()
+        if (result === undefined) throw new Error('no fake update check result is queued')
+        if (result instanceof Error) throw result
+        this.#updateStatus = result
+        return result
+      }
+      case 'installUpdateAndRestart': {
+        const updateId = this.#stringField(request.payload, 'updateId')
+        if (updateId !== this.#updateStatus.updateId) {
+          throw new Error('fake update install used an unknown update id')
+        }
+        const result = this.#updateInstalls.shift()
+        if (result === undefined) throw new Error('no fake update install result is queued')
+        if (result instanceof Error) throw result
+        if (result === 'restarting') this.#updateStatus = { state: 'restarting' }
+        return result
+      }
       case 'getCandidateCredentialHealthPlan':
         return { migrationTransactionId: null, references: [] }
       case 'acknowledgeMainWebviewHealth':

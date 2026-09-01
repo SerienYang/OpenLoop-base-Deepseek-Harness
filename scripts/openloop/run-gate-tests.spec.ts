@@ -355,7 +355,9 @@ describe('OpenLoop focused test gate', () => {
 
     expect(calls).toHaveLength(1)
     expect(calls[0]?.args).toEqual([
-      'exec', 'wdio', 'run', 'wdio.conf.ts', '--spec', 'tests/window.e2e.ts',
+      '--dir', '.',
+      'exec', 'wdio', 'run', join(root, 'wdio.conf.ts'),
+      '--spec', join(root, 'tests/window.e2e.ts'),
     ])
     expect(calls[0]?.env?.OPENLOOP_WDIO_BINARY).toBe(join(root, 'target/openloop'))
   })
@@ -955,6 +957,28 @@ describe('OpenLoop focused test gate', () => {
         stderr: '',
       }),
     })).rejects.toThrow('WDIO all discovered tests were skipped')
+  })
+
+  it('accepts the WDIO spec reporter passing summary', async () => {
+    const { runGateTests } = await loadGateModule()
+    const root = fixtureRoot()
+    write(root, 'wdio.conf.ts', 'export const config = {}\n')
+    write(root, 'target/openloop', 'binary')
+    write(root, 'tests/window.e2e.ts', "describe('window', () => {})\n")
+
+    await expect(runGateTests([
+      'wdio',
+      '--config', 'wdio.conf.ts',
+      '--binary', 'target/openloop',
+      '--file', 'tests/window.e2e.ts',
+    ], {
+      root,
+      runCommand: () => ({
+        status: 0,
+        stdout: '1 passing (619ms)\n',
+        stderr: '',
+      }),
+    })).resolves.toBeUndefined()
   })
 
   it('validates both browser Vitest and WDIO zero-execution summaries', async () => {

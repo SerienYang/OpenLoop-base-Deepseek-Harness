@@ -440,9 +440,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         updater_key.environment, updater_key.value
     );
 
-    tauri_build::try_build(
-        Attributes::new().app_manifest(AppManifest::new().commands(&["build_manifest"])),
-    )?;
+    let commands: &'static [&'static str] = if env::var_os("CARGO_FEATURE_OPENLOOP_E2E").is_some() {
+        &["build_manifest", "openloop_e2e_action"]
+    } else {
+        &["build_manifest"]
+    };
+    tauri_build::try_build(Attributes::new().app_manifest(AppManifest::new().commands(commands)))?;
     Ok(())
 }
 

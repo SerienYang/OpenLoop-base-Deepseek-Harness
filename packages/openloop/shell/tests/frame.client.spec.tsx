@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 import { Context } from '@deepseek-ai/cordis'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
-import { SlotRegistry, type SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
+import {
+  createSnapshotStore,
+  SlotRegistry,
+  type SessionListState,
+} from '@deepseek-ai/dsh-client-runtime/client'
 import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { ThemeTokenOverrides } from '@deepseek-ai/dsh-client-ui-theme/client'
 import { readFileSync } from 'node:fs'
@@ -175,10 +179,29 @@ describe('Openloop root shell Slot contract', () => {
     }
     ctx.provide('remote', { openloopDesktop } as never)
     ctx.provide('remote.openloopDesktop', openloopDesktop)
+    ctx.provide('openloopUpdates', {
+      view: createSnapshotStore({
+        phase: 'idle' as const,
+        actions: {
+          check: { enabled: true },
+          installAndRestart: { enabled: false },
+        },
+      }),
+      refresh: vi.fn(() => Promise.resolve()),
+      checkForUpdate: vi.fn(() => Promise.resolve()),
+      installUpdateAndRestart: vi.fn(() => Promise.resolve('cancelled' as const)),
+    } as never)
     await ctx.plugin({ inject: [...inject], apply }).await()
 
     const slots = ctx.get('slots') as SlotRegistry
-    expect(inject).toEqual(['slots', 'theme', 'locale', 'remote', 'remote.openloopDesktop'])
+    expect(inject).toEqual([
+      'slots',
+      'theme',
+      'locale',
+      'remote',
+      'remote.openloopDesktop',
+      'openloopUpdates',
+    ])
     const settingsShellOwner = ctx.get('settingsShellOwner') as {
       credentialControl?: CredentialControlAdapter
     }

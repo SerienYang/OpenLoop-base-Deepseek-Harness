@@ -246,6 +246,10 @@
   font-size: 12px;
 }
 
+.releaseNotes {
+  white-space: pre-wrap;
+}
+
 .update progress {
   width: 100%;
 }

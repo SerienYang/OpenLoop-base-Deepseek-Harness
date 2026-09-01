@@ -9,7 +9,7 @@ import {
   readdirSync,
   statSync,
 } from 'node:fs'
-import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 
@@ -454,14 +454,18 @@ function assertPlaywrightResult(result) {
 }
 
 function assertWdioResult(result) {
-  const summaries = [...`${result.stdout}\n${result.stderr}`.matchAll(
+  const output = `${result.stdout}\n${result.stderr}`
+  const summaries = [...output.matchAll(
     /(\d+)\s+passed,\s+(\d+)\s+failed,\s+(\d+)\s+skipped/gu,
   )]
-  const executed = summaries.reduce(
+  const structuredExecuted = summaries.reduce(
     (total, match) => total + Number(match[1]) + Number(match[2]),
     0,
   )
   const skipped = summaries.reduce((total, match) => total + Number(match[3]), 0)
+  const specPassing = [...output.matchAll(/(\d+)\s+passing\b/gu)]
+    .reduce((total, match) => total + Number(match[1]), 0)
+  const executed = structuredExecuted + specPassing
   if (executed === 0 && skipped > 0) throw new Error('WDIO all discovered tests were skipped')
   if (executed === 0) throw new Error('WDIO executed zero tests')
   assertCommandPassed(result, 'WDIO')
@@ -566,11 +570,17 @@ export async function runGateTests(args, dependencies = {}) {
   const binary = repoPath(root, request.binary, 'WDIO binary')
   const file = repoPath(root, request.file, 'target')
   validateSkips(root, [file.absolute], allowlist)
+  const packageDirectory =
+    normalizedRelativePath(root, dirname(config.absolute)) || '.'
   const result = await invoke(
     runCommand,
     root,
     'pnpm',
-    ['exec', 'wdio', 'run', config.relative, '--spec', file.relative],
+    [
+      '--dir', packageDirectory,
+      'exec', 'wdio', 'run', config.absolute,
+      '--spec', file.absolute,
+    ],
     {
       env: {
         ...process.env,

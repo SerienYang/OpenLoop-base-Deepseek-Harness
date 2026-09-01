@@ -1,7 +1,16 @@
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import type {
+  OpenloopUpdateState,
+  UpdateActionView as BridgeUpdateActionView,
+  UpdateView as BridgeUpdateView,
+} from '@openloop/desktop-bridge-client/client'
 import type { ShellKey } from './locales.ts'
 import css from './OpenloopSettings.module.css'
+
+export type UpdatePhase = OpenloopUpdateState
+export type UpdateActionView = BridgeUpdateActionView
+export type UpdateView = BridgeUpdateView
 
 /** Application identity shown by the About section. */
 export type AppView =
@@ -14,39 +23,6 @@ export type AppView =
     readonly attribution: 'Built on DeepSeek Harness'
   }
   | { readonly state: 'error'; readonly message?: string }
-
-export type UpdatePhase =
-  | 'unavailable'
-  | 'idle'
-  | 'checking'
-  | 'up-to-date'
-  | 'available'
-  | 'failed'
-  | 'downloading'
-  | 'verifying'
-  | 'ready-to-install'
-  | 'installing'
-  | 'restarting'
-  | 'committed'
-  | 'rolled-back'
-
-export interface UpdateActionView {
-  readonly enabled: boolean
-  readonly pending?: boolean
-}
-
-/** Update state shown by the About section. */
-export interface UpdateView {
-  readonly phase: UpdatePhase
-  readonly lastCheckedAt?: string
-  readonly targetVersion?: string
-  readonly message?: string
-  readonly progress?: number
-  readonly actions: {
-    readonly check: UpdateActionView
-    readonly installAndRestart: UpdateActionView
-  }
-}
 
 const APP_ERROR: AppView = Object.freeze({ state: 'error' })
 const SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u
@@ -127,9 +103,8 @@ const ENGLISH: Partial<Record<ShellKey, string>> = {
   updateProgress: 'Update progress',
 }
 
-function phaseKey(phase: UpdatePhase): ShellKey {
-  const keys: Record<UpdatePhase, ShellKey> = {
-    unavailable: 'updateUnavailable',
+function phaseKey(phase: UpdateView['phase']): ShellKey {
+  const keys: Record<UpdateView['phase'], ShellKey> = {
     idle: 'updateIdle',
     checking: 'updateChecking',
     'up-to-date': 'updateUpToDate',
@@ -189,6 +164,9 @@ export function AboutUpdateSection({
         <p role={update.phase === 'failed' ? 'alert' : 'status'}>
           {update.message ?? text(phaseKey(update.phase))}
         </p>
+        {update.releaseNotes !== undefined && (
+          <p className={css.releaseNotes}>{update.releaseNotes}</p>
+        )}
         {update.progress !== undefined && (
           <progress
             aria-label={text('updateProgress')}

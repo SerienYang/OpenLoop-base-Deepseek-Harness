@@ -23,12 +23,12 @@
 // (the plugin-row path discards the ReplayHandle; the direct install keeps
 // assertConsumed for the teardown fixture-consumption check).
 import { existsSync } from 'node:fs'
+import { deepStrictEqual, doesNotMatch, strictEqual } from 'node:assert'
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { Page } from 'playwright'
-import { expect } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include, { type PatchOptions } from '@deepseek-ai/cordis-plugin-include'
@@ -872,13 +872,14 @@ function normalizeAria(snapshot: string, workspaceCwd: string): string {
 export async function captureStableAria(page: Page, selector: string, workspaceCwd: string): Promise<string> {
   const region = page.locator(selector).first()
   let previous = normalizeAria(await region.ariaSnapshot(), workspaceCwd)
-  await expect.poll(async () => {
+  const deadline = Date.now() + 5_000
+  while (true) {
     const current = normalizeAria(await region.ariaSnapshot(), workspaceCwd)
-    const stable = current === previous
+    if (current === previous) return current
     previous = current
-    return stable
-  }, { timeout: 5_000, message: 'aria snapshot did not stabilize' }).toBe(true)
-  return previous
+    if (Date.now() >= deadline) throw new Error('aria snapshot did not stabilize')
+    await new Promise<void>(resolve => setTimeout(resolve, 100))
+  }
 }
 
 /**
@@ -898,7 +899,7 @@ export async function compareOrRefreshGolden(goldenPath: string, actual: string,
   if (!existsSync(goldenPath)) {
     throw new Error(`missing golden ${goldenPath} — run DSH_SNAPSHOT=refresh pnpm run test:web to generate it`)
   }
-  expect(payload).toBe(await readFile(goldenPath, 'utf8'))
+  strictEqual(payload, await readFile(goldenPath, 'utf8'))
 }
 
 /**
@@ -910,12 +911,19 @@ export async function compareOrRefreshGolden(goldenPath: string, actual: string,
  */
 export async function assertFixtureInventory(dir: string, expected: string[]): Promise<void> {
   const entries = (await readdir(dir)).sort()
-  expect(entries).toEqual([...expected].sort())
+  deepStrictEqual(entries, [...expected].sort())
   for (const entry of entries.filter(name => name.endsWith('.jsonl'))) {
     const content = await readFile(join(dir, entry), 'utf8')
-    expect(scrubRequestHeaders(content), `${dir}/${entry} carries request-header bulk`).toBe(content)
-    expect(content, `${dir}/${entry} carries a run-local rpcId`)
-      .not.toMatch(/"rpcId":"(?!\{\{rpcId\}\})[^"]+"/)
+    strictEqual(
+      scrubRequestHeaders(content),
+      content,
+      `${dir}/${entry} carries request-header bulk`,
+    )
+    doesNotMatch(
+      content,
+      /"rpcId":"(?!\{\{rpcId\}\})[^"]+"/,
+      `${dir}/${entry} carries a run-local rpcId`,
+    )
   }
 }
 

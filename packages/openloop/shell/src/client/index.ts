@@ -1,5 +1,6 @@
 /** Openloop browser root shell. */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
 import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
 import type { BoundActions } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ILayout } from '@deepseek-ai/dsh-client-ui-layout/client'
@@ -8,10 +9,9 @@ import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { SettingsShellOwner } from '@deepseek-ai/dsh-client-ui-settings/client'
 import {
-  AboutUpdateSection,
   parseBootstrapAppView,
-  type UpdateView,
 } from './AboutUpdateSection.tsx'
+import { ConnectedAboutUpdateSection } from './ConnectedAboutUpdateSection.tsx'
 import {
   createOpenloopCredentialControlAdapter,
   type OpenloopCredentialRemote,
@@ -137,17 +137,17 @@ class ThemeDocumentPresenter {
 }
 
 export const name = 'shell'
-export const inject = ['slots', 'theme', 'locale', 'remote', 'remote.openloopDesktop']
+export const inject = [
+  'slots',
+  'theme',
+  'locale',
+  'remote',
+  'remote.openloopDesktop',
+  'openloopUpdates',
+]
 
 /** Dictionary namespace owned by the Openloop shell. */
 const NS = 'openloop.shell'
-const UNAVAILABLE_UPDATE: UpdateView = Object.freeze({
-  phase: 'unavailable',
-  actions: Object.freeze({
-    check: Object.freeze({ enabled: false }),
-    installAndRestart: Object.freeze({ enabled: false }),
-  }),
-})
 
 interface OpenloopBootstrapGlobal {
   readonly __OPENLOOP_BOOTSTRAP__?: unknown
@@ -285,6 +285,12 @@ export function apply(ctx: ClientContext): void {
 
   const bootstrap = globalThis as typeof globalThis & OpenloopBootstrapGlobal
   const app = parseBootstrapAppView(bootstrap.__OPENLOOP_BOOTSTRAP__)
+  const updates = ctx.openloopUpdates
+  const useUpdate = bindSnapshotSelector(updates.view)
+  ctx.effect(() => {
+    void updates.refresh().catch(() => {})
+    return () => {}
+  }, 'openloop-shell: refresh update status on mount')
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'about-update',
@@ -293,11 +299,13 @@ export function apply(ctx: ClientContext): void {
     locale: NS,
     inject: () => ({
       app,
-      update: UNAVAILABLE_UPDATE,
-      onCheck: () => {},
-      onInstallAndRestart: () => {},
+      useUpdate,
+      onCheck: () => { void updates.checkForUpdate().catch(() => {}) },
+      onInstallAndRestart: () => {
+        void updates.installUpdateAndRestart().catch(() => {})
+      },
     }),
-  }, AboutUpdateSection))
+  }, ConnectedAboutUpdateSection))
 
   ctx.effect(() => {
     const presenter = new ThemeDocumentPresenter()
