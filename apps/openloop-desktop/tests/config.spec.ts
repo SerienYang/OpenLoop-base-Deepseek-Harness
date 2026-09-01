@@ -367,6 +367,34 @@ describe('Openloop desktop foundation configuration', () => {
     expect(buildDependencies.sha2).toBe('=0.10.9')
   })
 
+  test('persists only the main window position, size, and maximized state', () => {
+    const cargo = record(
+      parseToml(readText('apps/openloop-desktop/src-tauri/Cargo.toml')),
+      'Cargo.toml',
+    )
+    const dependencies = record(cargo.dependencies, 'Cargo.toml dependencies')
+    const library = readText('apps/openloop-desktop/src-tauri/src/lib.rs')
+    const windowStatePlugin = /let window_state_plugin = ([\s\S]*?)\.build\(\);/u
+      .exec(library)?.[1] ?? ''
+    const stateFlags = /\.with_state_flags\(([^)]*)\)/u.exec(windowStatePlugin)?.[1]
+      ?.replace(/\s+/gu, ' ')
+      .trim()
+    const builderPlugins = /let builder = tauri::Builder::default\(\)([\s\S]*?)\.manage\(/u
+      .exec(library)?.[1] ?? ''
+
+    expect(dependencies['tauri-plugin-window-state']).toBe('=2.4.1')
+    expect(library).toContain('use tauri_plugin_window_state::StateFlags;')
+    expect(stateFlags).toBe(
+      'StateFlags::POSITION | StateFlags::SIZE | StateFlags::MAXIMIZED',
+    )
+    expect(windowStatePlugin).toContain('.with_filter(|label| label == "main")')
+    expect(library).not.toContain('StateFlags::FULLSCREEN')
+    expect(builderPlugins.indexOf('.plugin(window_state_plugin)')).toBeGreaterThanOrEqual(0)
+    expect(builderPlugins.indexOf('.plugin(window_state_plugin)')).toBeLessThan(
+      builderPlugins.indexOf('.plugin(updater_plugin)'),
+    )
+  })
+
   test('serializes the external Cargo metadata probe in the process-bound lane', () => {
     const vitestConfig = readText('vitest.config.ts')
     const processBoundBlock = /const processBoundTests = \[([\s\S]*?)\n\]/u.exec(vitestConfig)?.[1]
