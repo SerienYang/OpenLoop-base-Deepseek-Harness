@@ -83,7 +83,11 @@ describe('OpenLoop profile', () => {
           credentialMode: 'bearer',
           api: 'anthropic-messages',
           baseURL: 'https://ark.cn-beijing.volces.com/api/plan',
-          models: [{ id: 'ark-code-latest', name: 'Ark Code Latest' }],
+          models: [{
+            id: 'ark-code-latest',
+            name: 'Ark Code Latest',
+            input: ['text', 'image'],
+          }],
         },
       },
     })
