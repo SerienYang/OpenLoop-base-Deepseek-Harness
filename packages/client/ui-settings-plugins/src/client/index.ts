@@ -63,7 +63,11 @@ export const inject = [
  * @param ctx - the browser plugin context.
  */
 export function apply(ctx: ClientContext): void {
-  const { api } = ctx.get('connection') as ConnectionHandle
+  const connection = ctx.get('connection') as ConnectionHandle
+  const settingsApi = ctx.settingsShellOwner.settingsApi
+  const api = settingsApi === undefined
+    ? connection.api
+    : { ...connection.api, settings: settingsApi.settings, llm: settingsApi.llm }
   const credentialControl = ctx.settingsShellOwner.credentialControl
   const t = ctx.locale.bind(NS)
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-plugins: section dictionaries')

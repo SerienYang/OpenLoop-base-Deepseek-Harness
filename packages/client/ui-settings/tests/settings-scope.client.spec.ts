@@ -366,6 +366,38 @@ describe('SettingsScopeController', () => {
   })
 })
 describe('SettingsScopeBinder.bind', () => {
+  it('uses a product settings API override instead of the connection API', async () => {
+    const connectionDescribe = vi.fn()
+    const productDescribe = vi.fn()
+      .mockResolvedValueOnce(described({ preference: 'dark' }, 4))
+    const ctx = new Context()
+    ctx.provide('connection', {
+      api: { settings: { describe: connectionDescribe } },
+      isLoopback: true,
+    } as never)
+    let scope!: SettingsScope<UiTestSettings>
+    new TestRemote(ctx)
+    new SettingsScopeBinder(ctx, { settings: { describe: productDescribe } } as never)
+    const fiber = ctx.plugin({
+      inject: ['connection', 'remote', 'settingsScope'],
+      apply: (plugin: Context) => {
+        scope = plugin.settingsScope.bind<UiTestSettings>({ namespace: 'ui-test' })
+      },
+    })
+
+    await fiber.await()
+    await vi.waitFor(() => {
+      expect(scope.getSnapshot()).toMatchObject({
+        status: 'ready',
+        value: { preference: 'dark' },
+        revision: 4,
+      })
+    })
+    expect(productDescribe).toHaveBeenCalledOnce()
+    expect(connectionDescribe).not.toHaveBeenCalled()
+    await fiber.dispose()
+  })
+
   it('subscribes before the initial read and converges to the latest queued invalidation', async () => {
     const initial = deferred<ReturnType<typeof described>>()
     const describeCall = vi.fn()

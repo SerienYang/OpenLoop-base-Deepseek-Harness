@@ -225,11 +225,15 @@ declare module '@deepseek-ai/cordis' {
  * (`packages/client/tsdown.client.ts`).
  */
 export class SettingsScopeBinder extends Service {
+  private readonly settingsApi: SettingsFace | undefined
+
   /**
    * @param ctx - the providing plugin's context.
+   * @param settingsApi - optional product-scoped settings transport.
    */
-  constructor(ctx: Context) {
+  constructor(ctx: Context, settingsApi?: SettingsFace) {
     super(ctx, 'settingsScope')
+    this.settingsApi = settingsApi
   }
 
   /**
@@ -246,9 +250,9 @@ export class SettingsScopeBinder extends Service {
     const ctx = this.ctx
     const connection = ctx.get('connection') as ConnectionHandle
     const controller = new SettingsScopeController<T>(
-      connection.api,
+      this.settingsApi ?? connection.api,
       spec,
-      connection.isLoopback ? 'host' : 'memory',
+      this.settingsApi !== undefined || connection.isLoopback ? 'host' : 'memory',
     )
     ctx.effect(() => {
       const refresh = (namespace?: string): void => {

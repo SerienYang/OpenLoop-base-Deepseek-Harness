@@ -9,8 +9,12 @@
  * through ui-layout and ui-theme. Export discipline: packages/client/AGENTS.md.
  */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
 import type { CredentialControlAdapter } from './credential-control.ts'
 import { SettingsScopeBinder } from './settings-scope.ts'
+
+/** Product-filtered settings and provider directory used by a custom Settings shell. */
+export type ProductSettingsApi = Pick<IApiClient, 'settings' | 'llm'>
 
 /** Browser service selecting the Settings shell and its optional product controls. */
 export interface SettingsShellOwner {
@@ -18,6 +22,8 @@ export interface SettingsShellOwner {
   readonly id: string
   /** Product-owned credential UI; absent in the default DSH profile. */
   readonly credentialControl?: CredentialControlAdapter
+  /** Product-scoped settings API; absent in the default DSH profile. */
+  readonly settingsApi?: ProductSettingsApi
 }
 
 declare module '@deepseek-ai/cordis' {

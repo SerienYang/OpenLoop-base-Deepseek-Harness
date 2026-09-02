@@ -15,7 +15,11 @@ import { WelcomeNotice } from '../src/client/WelcomeNotice.tsx'
 // the shipped Chinese copy, so they state the browser they assume.
 usePinnedBrowserLanguages('zh-CN')
 
-async function bench(isLoopback = true, credentialControl?: CredentialControlAdapter) {
+async function bench(
+  isLoopback = true,
+  credentialControl?: CredentialControlAdapter,
+  settingsApi?: unknown,
+) {
   const ctx = new Context()
   await ctx.plugin(SlotRegistry).await()
   const locale = new LocaleRuntime(ctx)
@@ -31,6 +35,7 @@ async function bench(isLoopback = true, credentialControl?: CredentialControlAda
       ? '@deepseek-ai/dsh-client-ui-settings-general'
       : '@openloop/shell',
     ...credentialControl === undefined ? {} : { credentialControl },
+    ...settingsApi === undefined ? {} : { settingsApi },
   } as never)
   return { ctx, slots: ctx.get('slots') as SlotRegistry, locale }
 }
@@ -119,6 +124,24 @@ describe('ui-settings-models apply', () => {
     )()
     expect(modelsFace.credentialControl).toBe(credentialControl)
     expect(onboardingFace.credentialControl).toBe(credentialControl)
+  })
+
+  it('uses the product settings API for the Models surfaces', async () => {
+    const settingsApi = {
+      settings: { describe: vi.fn(), mutate: vi.fn() },
+      llm: { providers: vi.fn(), discoverModels: vi.fn() },
+    }
+    const b = await bench(true, undefined, settingsApi)
+    declare(b.slots)
+    await b.ctx.plugin({ inject: [...inject], apply }).await()
+
+    const models = b.slots.entries('settings.section')[0]!
+    const face = (
+      models.inject as unknown as
+      () => import('../src/client/ModelsSection.tsx').ModelsSectionInjected
+    )()
+    expect(face.api.settings).toBe(settingsApi.settings)
+    expect(face.api.llm).toBe(settingsApi.llm)
   })
 
   it('the label thunk follows the active locale without re-registration', async () => {

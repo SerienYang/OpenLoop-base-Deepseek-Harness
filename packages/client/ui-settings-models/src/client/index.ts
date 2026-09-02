@@ -70,7 +70,11 @@ export function apply(ctx: ClientContext): void {
 
   const connection = ctx.get('connection') as ConnectionHandle
   const credentialControl = ctx.settingsShellOwner.credentialControl
-  const controller = new ModelsSettingsStore(connection.api, credentialControl)
+  const settingsApi = ctx.settingsShellOwner.settingsApi
+  const api = settingsApi === undefined
+    ? connection.api
+    : { ...connection.api, settings: settingsApi.settings, llm: settingsApi.llm }
+  const controller = new ModelsSettingsStore(api, credentialControl)
   const useSnapshot = bindSnapshotSelector(controller.store)
   // Registration-time text (the nav label thunk) and the inject faces share
   // one bound translate; copy freshness rides the locale revision.
@@ -78,19 +82,19 @@ export function apply(ctx: ClientContext): void {
   const injected = (): ModelsSectionInjected => ({
     controller,
     useSnapshot,
-    api: connection.api,
+    api,
     t,
     ...credentialControl === undefined ? {} : { credentialControl },
   })
   const deepSeekOnboardingInjected = (): DeepSeekOnboardingInjected => ({
     controller,
     hooks: { models: controller.store },
-    api: connection.api,
+    api,
     t,
     ...credentialControl === undefined ? {} : { credentialControl },
   })
   const welcomeController = new WelcomeNoticeStore(
-    connection.api,
+    api,
     connection.isLoopback ? 'host' : 'memory',
   )
   const welcomeInjected = (): WelcomeNoticeInjected => ({
