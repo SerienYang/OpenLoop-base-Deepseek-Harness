@@ -1,7 +1,4 @@
-import type {
-  IApiClient,
-  RpcResponse,
-} from '@deepseek-ai/dsh-api-remotes/client'
+import type { RpcResponse } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ProductSettingsApi } from '@deepseek-ai/dsh-client-ui-settings/client'
 
 const DESCRIBE_PATH = '/api/openloop/settings/describe'
@@ -20,10 +17,6 @@ const NAMESPACES = [
 ] as const
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
-type DescribeResponse = Awaited<ReturnType<IApiClient['settings']['describe']>>
-type MutateResponse = Awaited<ReturnType<IApiClient['settings']['mutate']>>
-type ProvidersResponse = Awaited<ReturnType<IApiClient['llm']['providers']>>
-type DiscoverResponse = Awaited<ReturnType<IApiClient['llm']['discoverModels']>>
 
 let rpcSequence = 0
 
@@ -70,30 +63,30 @@ export class OpenloopSettingsApi implements ProductSettingsApi {
 
   constructor(private readonly fetcher: Fetcher = globalThis.fetch.bind(globalThis)) {
     this.settings = {
-      describe: async (_payload, signal) => this.call(
+      describe: (_payload, signal) => this.call(
         DESCRIBE_PATH,
         { namespaces: NAMESPACES },
         signal,
-      ) as Promise<DescribeResponse>,
-      mutate: async (payload, signal) => this.call(
+      ),
+      mutate: (payload, signal) => this.call(
         MUTATE_PATH,
         payload,
         signal,
-      ) as Promise<MutateResponse>,
-      openDocument: async () => failed('policy-denied'),
-      update: async () => failed('policy-denied'),
-      replace: async () => failed('policy-denied'),
+      ),
+      openDocument: () => Promise.resolve(failed('policy-denied')),
+      update: () => Promise.resolve(failed('policy-denied')),
+      replace: () => Promise.resolve(failed('policy-denied')),
     }
     this.llm = {
-      providers: async (_payload, signal) => this.call(
+      providers: (_payload, signal) => this.call(
         PROVIDERS_PATH,
         {},
         signal,
-      ) as Promise<ProvidersResponse>,
-      discoverModels: async () => failed(
+      ),
+      discoverModels: () => Promise.resolve(failed(
         'policy-denied',
         'Model discovery is unavailable in Openloop',
-      ) as DiscoverResponse,
+      )),
     }
   }
 
@@ -111,7 +104,7 @@ export class OpenloopSettingsApi implements ProductSettingsApi {
         body: JSON.stringify(payload),
         ...signal === undefined ? {} : { signal },
       })
-      return decode<T>(response)
+      return await decode<T>(response)
     } catch {
       return failed('settings-unavailable')
     }
