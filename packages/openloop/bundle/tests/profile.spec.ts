@@ -33,6 +33,22 @@ interface BundleManifest {
 
 const tmp = (): string => mkdtempSync(join(tmpdir(), 'openloop-profile-'))
 
+const OFFICIAL_AGENT_PLAN_MODELS = [
+  { id: 'ark-code-latest', name: 'ark-code-latest', contextWindow: 256_000, maxTokens: 32_000, input: ['text', 'image'] },
+  { id: 'doubao-seed-2.1-turbo', name: 'doubao-seed-2.1-turbo', contextWindow: 256_000, maxTokens: 65_536, input: ['text', 'image'] },
+  { id: 'doubao-seed-evolving', name: 'doubao-seed-evolving', contextWindow: 1_024_000, maxTokens: 65_536, input: ['text', 'image'] },
+  { id: 'glm-5.3', name: 'glm-5.3', contextWindow: 1_024_000, maxTokens: 65_536, input: ['text'] },
+  { id: 'glm-5.3-flash', name: 'glm-5.3-flash', contextWindow: 1_024_000, maxTokens: 65_536, input: ['text', 'image'] },
+  { id: 'glm-latest', name: 'glm-latest', contextWindow: 1_024_000, maxTokens: 65_536, input: ['text'] },
+  { id: 'deepseek-v4-flash', name: 'deepseek-v4-flash', contextWindow: 1_024_000, maxTokens: 65_536, input: ['text'] },
+  { id: 'deepseek-v4-pro', name: 'deepseek-v4-pro', contextWindow: 1_024_000, maxTokens: 65_536, input: ['text'] },
+  { id: 'doubao-seed-2.0-lite', name: 'doubao-seed-2.0-lite', contextWindow: 256_000, maxTokens: 65_536, input: ['text', 'image'] },
+  { id: 'doubao-seed-2.0-mini', name: 'doubao-seed-2.0-mini', contextWindow: 256_000, maxTokens: 65_536, input: ['text', 'image'] },
+  { id: 'minimax-m3', name: 'minimax-m3', contextWindow: 1_024_000, maxTokens: 65_536, input: ['text', 'image'] },
+  { id: 'kimi-k2.7-code', name: 'kimi-k2.7-code', contextWindow: 256_000, maxTokens: 32_000, input: ['text', 'image'] },
+  { id: 'kimi-k3', name: 'kimi-k3', contextWindow: 1_024_000, maxTokens: 65_536, input: ['text', 'image'] },
+] as const
+
 describe('OpenLoop profile', () => {
   it('uses the exact base, Web, and OpenLoop bundle order', () => {
     expect(OPENLOOP_PROFILE_BUNDLES).toEqual([
@@ -81,13 +97,9 @@ describe('OpenLoop profile', () => {
           displayName: '火山方舟 Agent Plan',
           apiKeyEnv: 'VOLCENGINE_ARK_AGENT_PLAN_API_KEY',
           credentialMode: 'bearer',
-          api: 'anthropic-messages',
-          baseURL: 'https://ark.cn-beijing.volces.com/api/plan',
-          models: [{
-            id: 'ark-code-latest',
-            name: 'Ark Code Latest',
-            input: ['text', 'image'],
-          }],
+          api: 'openai-responses',
+          baseURL: 'https://ark.cn-beijing.volces.com/api/plan/v3',
+          models: OFFICIAL_AGENT_PLAN_MODELS,
         },
       },
     })
