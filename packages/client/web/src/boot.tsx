@@ -40,6 +40,7 @@ import {
   ClientModuleSystem, parseBootManifest,
   type BootManifest, type ClientModuleSystemOptions, type DshWindow,
 } from '@deepseek-ai/dsh-client-modules/client'
+import type { ProductBrand } from '@deepseek-ai/dsh-client-ui-primitives'
 import * as AppShell from './app-shell.ts'
 import { APP_SHELL_ID } from './app-shell.ts'
 import { AppRoot } from './AppRoot.tsx'
@@ -47,8 +48,14 @@ import { getStaticModules } from './seed.ts'
 import { STATE_LABELS, createLoaderStatusStore, createSignal } from './loader-status.ts'
 import './base.css'
 
-/** Module transport hook the shell passes through (jsdom tests replace the <script> path). */
-export type BootSeams = Pick<ClientModuleSystemOptions, 'loadBundle'>
+export { AppRoot, createLoaderStatusStore, createSignal }
+
+/** Trusted bootstrap inputs; jsdom tests also replace the module transport. */
+export interface BootSeams {
+  readonly loadBundle?: ClientModuleSystemOptions['loadBundle']
+  readonly brand?: ProductBrand
+  readonly reactRoot?: Root
+}
 
 interface DshPrebootWindow {
   __DSH_PREBOOT__?: Promise<void>
@@ -88,7 +95,7 @@ export class AppWebEntry {
   /**
    * Hold the mount point; all work happens in {@link run}.
    * @param el - mount point (the app's #root).
-   * @param seams - Optional module transport overrides for test environments.
+   * @param seams - Optional trusted brand and module transport overrides.
    */
   constructor(el: HTMLElement, seams?: BootSeams) {
     this.el = el
@@ -105,8 +112,11 @@ export class AppWebEntry {
   async run(): Promise<void> {
     this.manifest = parseBootManifest((globalThis as DshWindow).__DSH_BOOT__)
 
+    const loadBundle = this.seams?.loadBundle
     this.modules = new ClientModuleSystem({
-      modules: this.manifest.modules, staticModules: getStaticModules(), ...this.seams,
+      modules: this.manifest.modules,
+      staticModules: getStaticModules(),
+      ...(loadBundle === undefined ? {} : { loadBundle }),
     })
     // The app-shell assembly is the only shell-own module: every other graph
     // row is a plugin bundle arriving through fetch.
@@ -119,7 +129,7 @@ export class AppWebEntry {
     this.modules.registerStatic(MODULES_ID, ModulesClient)
     ;(globalThis as DshWindow).__DSH_MODULES__ = this.modules
 
-    this.root = createRoot(this.el)
+    this.root = this.seams?.reactRoot ?? createRoot(this.el)
     this.root.render(
       <AppRoot
         settled={this.settled}
@@ -131,6 +141,7 @@ export class AppWebEntry {
           if (shell === undefined) throw new Error('web boot: appShell service missing after settled')
           return shell.renderApp()
         }}
+        {...this.seams?.brand === undefined ? {} : { brand: this.seams.brand }}
       />,
     )
 

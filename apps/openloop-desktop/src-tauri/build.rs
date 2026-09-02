@@ -20,6 +20,18 @@ struct CanonicalBuildManifest {
     plugin_package_spec_version: String,
     openloop_data_version: u64,
     dsh_data_version: u64,
+    brand: OpenloopBrandManifest,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OpenloopBrandManifest {
+    product_name: String,
+    document_suffix: String,
+    mark_asset: String,
+    hero_title: String,
+    preview_label: String,
+    attribution: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -203,6 +215,16 @@ fn validate_core(manifest: &CanonicalBuildManifest) -> Result<(), Box<dyn std::e
         return Err(
             invalid_data("Openloop core manifest contains an invalid required value").into(),
         );
+    }
+    let brand = &manifest.brand;
+    if brand.product_name != "Openloop"
+        || brand.document_suffix != "Openloop"
+        || !brand.mark_asset.starts_with("data:image/svg+xml;base64,")
+        || brand.hero_title != "Openloop"
+        || brand.preview_label != "预览版"
+        || brand.attribution != "Built on DeepSeek Harness"
+    {
+        return Err(invalid_data("Openloop core manifest brand identity is invalid").into());
     }
     Ok(())
 }
@@ -418,14 +440,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         updater_key.environment, updater_key.value
     );
 
-    tauri_build::try_build(
-        Attributes::new().app_manifest(AppManifest::new().commands(&[
-            "build_manifest",
-            "credentials_set",
-            "credentials_unset",
-            "credentials_status",
-        ])),
-    )?;
+    let commands: &'static [&'static str] = &["build_manifest"];
+    tauri_build::try_build(Attributes::new().app_manifest(AppManifest::new().commands(commands)))?;
     Ok(())
 }
 
@@ -473,6 +489,14 @@ mod tests {
             plugin_package_spec_version: "0.1.0".into(),
             openloop_data_version: 0,
             dsh_data_version: 0,
+            brand: OpenloopBrandManifest {
+                product_name: "Openloop".into(),
+                document_suffix: "Openloop".into(),
+                mark_asset: "data:image/svg+xml;base64,PHN2Zy8+".into(),
+                hero_title: "Openloop".into(),
+                preview_label: "预览版".into(),
+                attribution: "Built on DeepSeek Harness".into(),
+            },
         }
     }
 

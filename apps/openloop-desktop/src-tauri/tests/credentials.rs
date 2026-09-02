@@ -1,20 +1,45 @@
 #![cfg(target_os = "macos")]
 
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
-    time::{SystemTime, UNIX_EPOCH},
+    fs,
+    os::unix::fs::PermissionsExt,
+    process,
+    sync::{mpsc, Arc, Mutex},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use openloop_desktop_lib::{
-    credentials::{
-        credentials_navigation_allowed, parse_keychain_spike_action, CredentialAccount,
-        KeychainSpikeAction, KeychainSpikeReport, KeychainStore, SecurePromptState,
-        CREDENTIALS_PAGE, CREDENTIALS_WINDOW_HEIGHT, CREDENTIALS_WINDOW_LABEL,
-        CREDENTIALS_WINDOW_WIDTH, MAX_SECRET_BYTES,
+    bridge::{
+        protocol::{
+            encode_frame, read_json_frame, sign_request, sign_response,
+            AuthenticatedBridgeResponse, BridgeRequest, BRIDGE_PROTOCOL_VERSION,
+            MAX_BRIDGE_FRAME_BYTES,
+        },
+        server::{AuthenticatedBridgeDispatcher, CancellationToken, PeerIdentity},
     },
+    credentials::{
+        credential_bridge_dispatch_tables, credential_bridge_dispatch_tables_with_legacy,
+        delete_credential_with_confirmation, migration::ReadOnlyLegacySource,
+        parse_keychain_spike_action, AppKitCredentialDeletionBackend,
+        AppKitCredentialDeletionConfirmation, AppKitCredentialSheet, AppKitCredentialSheetBackend,
+        CredentialAccount, CredentialConsumerDisplay, CredentialConsumerLabel,
+        CredentialDeletionCompletion, CredentialDeletionConfirmation, CredentialDeletionOutcome,
+        CredentialDeletionPlan, CredentialDeletionSheetPresentation, CredentialDeletionStore,
+        CredentialError, CredentialReplacement, CredentialReplacementStore, CredentialSheetAction,
+        CredentialSheetCompletion, CredentialSheetCoordinator, CredentialSheetGate,
+        CredentialSheetOutcome, CredentialSheetPresentation, CredentialSheetSecret,
+        KeychainSpikeAction, KeychainSpikeReport, KeychainStore, MAX_SECRET_BYTES,
+    },
+    launcher::capture_process_identity,
     update::channel::ReleaseChannel,
 };
-use tauri::Url;
+use security_framework::passwords::{set_generic_password_options, PasswordOptions};
+use serde_json::json;
+use tempfile::tempdir;
+use uuid::Uuid;
 
 fn unique_account(label: &str) -> CredentialAccount {
     let nonce = SystemTime::now()
@@ -22,11 +47,8 @@ fn unique_account(label: &str) -> CredentialAccount {
         .expect("clock follows Unix epoch")
         .as_nanos();
     let label = label.replace('-', "_").to_ascii_uppercase();
-    CredentialAccount::new(
-        "foundation-task",
-        &format!("{label}_{}_{nonce}", std::process::id()),
-    )
-    .expect("unique account is valid")
+    CredentialAccount::new(&format!("{label}_{}_{nonce}", std::process::id()))
+        .expect("unique account is valid")
 }
 
 struct KeychainCleanup {
@@ -58,38 +80,389 @@ fn services_are_exact_and_derived_only_from_release_channel() {
     );
 }
 
+fn credential_dispatcher(
+    confirmation: Arc<dyn CredentialDeletionConfirmation>,
+) -> (AuthenticatedBridgeDispatcher, Uuid, Vec<u8>, PeerIdentity) {
+    credential_dispatcher_with_ui(None, Some(confirmation))
+}
+
+fn credential_dispatcher_with_ui(
+    replacement: Option<Arc<dyn CredentialReplacement>>,
+    confirmation: Option<Arc<dyn CredentialDeletionConfirmation>>,
+) -> (AuthenticatedBridgeDispatcher, Uuid, Vec<u8>, PeerIdentity) {
+    let executable = std::env::current_exe().expect("test executable");
+    let launch_id = Uuid::new_v4();
+    let secret: Vec<u8> = (0..32).collect();
+    let peer = PeerIdentity {
+        uid: unsafe { libc::geteuid() },
+        pid: process::id(),
+    };
+    let dispatcher = AuthenticatedBridgeDispatcher::new(
+        peer.uid,
+        capture_process_identity(process::id(), &executable).expect("process identity"),
+        executable,
+        launch_id,
+        secret.clone(),
+        credential_bridge_dispatch_tables(
+            KeychainStore::new(ReleaseChannel::Test),
+            replacement,
+            confirmation,
+        )
+        .expect("credential tables"),
+    )
+    .expect("credential dispatcher");
+    (dispatcher, launch_id, secret, peer)
+}
+
+fn dispatch_credential(method: &str, payload: serde_json::Value) -> serde_json::Value {
+    let (dispatcher, launch_id, secret, peer) =
+        credential_dispatcher(Arc::new(FixedConfirmation::new(false)));
+    let request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "credential-request".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: method.to_owned(),
+        payload,
+    };
+    let response = dispatcher
+        .dispatch(
+            peer,
+            sign_request(request, [7; 32], &secret).expect("signed credential request"),
+        )
+        .expect("authenticated credential response");
+    serde_json::to_value(response).expect("response JSON")
+}
+
+#[test]
+fn credential_bridge_dispatch_is_strict_and_keeps_resolution_host_only() {
+    let missing = dispatch_credential(
+        "resolveCredential",
+        json!({ "ref": "OPENLOOP_TASK_13_MISSING" }),
+    );
+    assert_eq!(missing["ok"], true);
+    assert!(missing["result"].is_null());
+
+    let malformed = dispatch_credential(
+        "openCredentialReplacement",
+        json!({ "ref": "OPENLOOP_TASK_13_MISSING", "consumerNames": ["spoof"] }),
+    );
+    assert_eq!(malformed["ok"], false);
+    assert_eq!(malformed["error"]["code"], "invalid_request");
+}
+
+#[test]
+fn credential_migration_status_is_value_only_and_retry_mutation_is_unavailable() {
+    let status = dispatch_credential("getCredentialMigrationStatus", json!(null));
+    assert_eq!(status["ok"], true);
+    assert_eq!(
+        status["result"],
+        json!({
+            "state": "not-required",
+            "readOnly": false,
+            "retryRequired": false,
+        })
+    );
+    assert!(!status.to_string().contains('/'));
+    assert!(!status.to_string().contains("credential:"));
+
+    let retry = dispatch_credential("retryCredentialMigration", json!(null));
+    assert_eq!(retry["ok"], false);
+    assert_eq!(retry["error"]["code"], "method_not_found");
+}
+
+#[test]
+fn native_credential_status_is_read_only_without_both_mutation_presenters() {
+    let account = unique_account("native_read_only");
+    let _cleanup = KeychainCleanup::new(account.clone());
+    let reference = account
+        .as_str()
+        .strip_prefix("credential:")
+        .expect("credential account prefix");
+
+    let missing = dispatch_credential("describeCredential", json!({ "ref": reference }));
+    assert_eq!(missing["ok"], true);
+    assert_eq!(
+        missing["result"],
+        json!({ "configured": false, "writable": false })
+    );
+
+    KeychainStore::new(ReleaseChannel::Test)
+        .set(&account, b"configured")
+        .expect("store configured credential");
+    let configured = dispatch_credential("describeCredential", json!({ "ref": reference }));
+    assert_eq!(configured["ok"], true);
+    assert_eq!(
+        configured["result"],
+        json!({ "configured": true, "source": "keychain", "writable": false })
+    );
+}
+
+#[test]
+fn native_read_only_fallback_prefers_legacy_over_partial_keychain_values() {
+    let account = unique_account("legacy_first");
+    let _cleanup = KeychainCleanup::new(account.clone());
+    let reference = account
+        .as_str()
+        .strip_prefix("credential:")
+        .expect("credential account prefix");
+    let store = KeychainStore::new(ReleaseChannel::Test);
+    store
+        .set(&account, b"partial-keychain")
+        .expect("seed partial migration value");
+    let root = tempdir().expect("legacy root");
+    let channel_root = root.path().join("Openloop-Test");
+    let dsh_home = channel_root.join("dsh");
+    fs::create_dir_all(&dsh_home).expect("legacy DSH_HOME");
+    let legacy_path = dsh_home.join(".credentials.yaml");
+    fs::write(&legacy_path, format!("{reference}: legacy-authority\n"))
+        .expect("legacy credential file");
+    fs::set_permissions(&legacy_path, fs::Permissions::from_mode(0o600))
+        .expect("legacy credential permissions");
+    let legacy =
+        ReadOnlyLegacySource::new(&channel_root, &dsh_home).expect("read-only legacy source");
+
+    let executable = std::env::current_exe().expect("test executable");
+    let launch_id = Uuid::new_v4();
+    let secret: Vec<u8> = (0..32).collect();
+    let peer = PeerIdentity {
+        uid: unsafe { libc::geteuid() },
+        pid: process::id(),
+    };
+    let dispatcher = AuthenticatedBridgeDispatcher::new(
+        peer.uid,
+        capture_process_identity(process::id(), &executable).expect("process identity"),
+        executable,
+        launch_id,
+        secret.clone(),
+        credential_bridge_dispatch_tables_with_legacy(store, None, None, Some(legacy))
+            .expect("legacy-first credential tables"),
+    )
+    .expect("credential dispatcher");
+    let dispatch = |request_id: &str, method: &str, nonce: [u8; 32]| {
+        dispatcher
+            .dispatch(
+                peer,
+                sign_request(
+                    BridgeRequest {
+                        version: BRIDGE_PROTOCOL_VERSION,
+                        request_id: request_id.to_owned(),
+                        launch_id: launch_id.to_string(),
+                        method: method.to_owned(),
+                        payload: json!({ "ref": reference }),
+                    },
+                    nonce,
+                    &secret,
+                )
+                .expect("signed fallback request"),
+            )
+            .expect("fallback response")
+            .result
+            .expect("fallback result")
+    };
+
+    assert_eq!(
+        dispatch("legacy-describe", "describeCredential", [21; 32]),
+        json!({ "configured": true, "source": "legacy-file", "writable": false })
+    );
+    assert_eq!(
+        dispatch("legacy-resolve", "resolveCredential", [22; 32]),
+        json!({
+            "bytes": b"legacy-authority",
+            "source": "legacy-file",
+        })
+    );
+}
+
+#[derive(Default)]
+struct RecordingReplacement {
+    accounts: Mutex<Vec<String>>,
+}
+
+impl CredentialReplacement for RecordingReplacement {
+    fn replace(
+        &self,
+        account: CredentialAccount,
+        _cancellation: &CancellationToken,
+    ) -> Result<CredentialSheetOutcome, CredentialError> {
+        self.accounts
+            .lock()
+            .expect("replacement account lock")
+            .push(account.as_str().to_owned());
+        Ok(CredentialSheetOutcome::Saved)
+    }
+}
+
+#[derive(Default)]
+struct BridgeBoundReplacementStore {
+    accounts: Mutex<Vec<CredentialAccount>>,
+}
+
+impl CredentialReplacementStore for BridgeBoundReplacementStore {
+    fn replace_credential(
+        &self,
+        account: &CredentialAccount,
+        _secret: &[u8],
+    ) -> Result<(), CredentialError> {
+        self.accounts
+            .lock()
+            .expect("bridge-bound account lock")
+            .push(account.clone());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct BridgeBoundAppKitBackend {
+    presentations: Mutex<Vec<CredentialSheetPresentation>>,
+}
+
+impl AppKitCredentialSheetBackend for BridgeBoundAppKitBackend {
+    fn begin_sheet(
+        &self,
+        presentation: CredentialSheetPresentation,
+        completion: CredentialSheetCompletion,
+    ) -> Result<(), CredentialError> {
+        self.presentations
+            .lock()
+            .expect("bridge-bound presentation lock")
+            .push(presentation);
+        completion(Ok(CredentialSheetAction::Save(CredentialSheetSecret::new(
+            b"replacement".to_vec(),
+        ))));
+        Ok(())
+    }
+
+    fn cancel_sheet(&self) {}
+
+    fn clear_secret_control(&self) {}
+}
+
+#[test]
+fn bridge_is_writable_and_replaces_only_when_both_native_presenters_are_installed() {
+    let replacement = Arc::new(RecordingReplacement::default());
+    let (dispatcher, launch_id, secret, peer) = credential_dispatcher_with_ui(
+        Some(replacement.clone()),
+        Some(Arc::new(FixedConfirmation::new(false))),
+    );
+    let status_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "native-status".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "describeCredential".to_owned(),
+        payload: json!({ "ref": "NATIVE_WRITABLE" }),
+    };
+    let status = dispatcher
+        .dispatch(
+            peer,
+            sign_request(status_request, [4; 32], &secret).expect("signed status request"),
+        )
+        .expect("status response");
+    let status = serde_json::to_value(status).expect("status JSON");
+    assert_eq!(
+        status["result"],
+        json!({ "configured": false, "writable": true })
+    );
+
+    let replacement_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "native-replacement".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "openCredentialReplacement".to_owned(),
+        payload: json!({ "ref": "NATIVE_WRITABLE" }),
+    };
+    let outcome = dispatcher
+        .dispatch(
+            peer,
+            sign_request(replacement_request, [5; 32], &secret)
+                .expect("signed replacement request"),
+        )
+        .expect("replacement response");
+    let outcome = serde_json::to_value(outcome).expect("replacement JSON");
+    assert_eq!(outcome["result"], "saved");
+    assert_eq!(
+        replacement
+            .accounts
+            .lock()
+            .expect("replacement account lock")
+            .as_slice(),
+        &["credential:NATIVE_WRITABLE"]
+    );
+}
+
+#[test]
+fn bridge_binds_validated_ref_to_appkit_target_and_rejects_invalid_ref_before_presentation() {
+    let backend = Arc::new(BridgeBoundAppKitBackend::default());
+    let replacement_store = Arc::new(BridgeBoundReplacementStore::default());
+    let replacement = Arc::new(CredentialSheetCoordinator::new(
+        Arc::new(AppKitCredentialSheet::with_backend(backend.clone())),
+        replacement_store.clone(),
+    ));
+    let (dispatcher, launch_id, secret, peer) = credential_dispatcher_with_ui(
+        Some(replacement),
+        Some(Arc::new(FixedConfirmation::new(false))),
+    );
+    let replacement_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "bound-native-replacement".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "openCredentialReplacement".to_owned(),
+        payload: json!({ "ref": "BROWSER_BOUND_KEY" }),
+    };
+    let response = dispatcher
+        .dispatch(
+            peer,
+            sign_request(replacement_request, [19; 32], &secret)
+                .expect("signed replacement request"),
+        )
+        .expect("replacement response");
+    let response = serde_json::to_value(response).expect("replacement response JSON");
+    assert_eq!(response["result"], "saved");
+
+    let presentations = backend
+        .presentations
+        .lock()
+        .expect("bridge-bound presentation lock");
+    let accounts = replacement_store
+        .accounts
+        .lock()
+        .expect("bridge-bound account lock");
+    assert_eq!(presentations.len(), 1);
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(presentations[0].target_identity, accounts[0].as_str());
+    drop(accounts);
+    drop(presentations);
+
+    let invalid_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "invalid-native-replacement".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "openCredentialReplacement".to_owned(),
+        payload: json!({ "ref": "DIFFERENT:INVALID_KEY" }),
+    };
+    let response = dispatcher
+        .dispatch(
+            peer,
+            sign_request(invalid_request, [20; 32], &secret)
+                .expect("signed invalid replacement request"),
+        )
+        .expect("invalid replacement response");
+    let response = serde_json::to_value(response).expect("invalid response JSON");
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"]["code"], "invalid_request");
+    assert_eq!(
+        backend
+            .presentations
+            .lock()
+            .expect("bridge-bound presentation lock")
+            .len(),
+        1
+    );
+}
+
 #[test]
 fn account_is_exact_and_rejects_ambiguous_or_non_ascii_identifiers() {
-    let account =
-        CredentialAccount::new("anthropic-api", "DEEPSEEK_API_KEY").expect("valid account");
-    assert_eq!(account.as_str(), "anthropic-api:DEEPSEEK_API_KEY");
-
-    for invalid_provider in [
-        "",
-        "Uppercase",
-        " leading",
-        "trailing ",
-        "-leading",
-        "trailing-",
-        "_leading",
-        "trailing_",
-        ".leading",
-        "trailing.",
-        "has:colon",
-        "has/slash",
-        "has%percent",
-        "has space",
-        "has\tcontrol",
-        "unicodé",
-        "double..separator",
-        "double--separator",
-        "double__separator",
-    ] {
-        assert!(
-            CredentialAccount::new(invalid_provider, "VALID_REFERENCE").is_err(),
-            "accepted invalid provider {invalid_provider:?}"
-        );
-    }
+    let account = CredentialAccount::new("DEEPSEEK_API_KEY").expect("valid account");
+    assert_eq!(account.as_str(), "credential:DEEPSEEK_API_KEY");
 
     for invalid_reference in [
         "",
@@ -108,14 +481,790 @@ fn account_is_exact_and_rejects_ambiguous_or_non_ascii_identifiers() {
         "unicodé",
     ] {
         assert!(
-            CredentialAccount::new("provider", invalid_reference).is_err(),
+            CredentialAccount::new(invalid_reference).is_err(),
             "accepted invalid reference {invalid_reference:?}"
         );
     }
 
-    assert!(CredentialAccount::new(&"a".repeat(64), &format!("A{}", "b".repeat(127))).is_ok());
-    assert!(CredentialAccount::new(&"a".repeat(65), "VALID_REFERENCE").is_err());
-    assert!(CredentialAccount::new("provider", &format!("A{}", "b".repeat(128))).is_err());
+    assert!(CredentialAccount::new(&format!("A{}", "b".repeat(127))).is_ok());
+    assert!(CredentialAccount::new(&format!("A{}", "b".repeat(128))).is_err());
+}
+
+#[derive(Default)]
+struct RecordingDeletionStore {
+    deleted: Mutex<Vec<String>>,
+}
+
+impl CredentialDeletionStore for RecordingDeletionStore {
+    fn delete_credential(&self, account: &CredentialAccount) -> Result<(), CredentialError> {
+        self.deleted
+            .lock()
+            .expect("recording store lock")
+            .push(account.as_str().to_owned());
+        Ok(())
+    }
+}
+
+struct FixedConfirmation {
+    confirmed: bool,
+    observed: Mutex<Vec<CredentialDeletionPlan>>,
+}
+
+impl FixedConfirmation {
+    fn new(confirmed: bool) -> Self {
+        Self {
+            confirmed,
+            observed: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl CredentialDeletionConfirmation for FixedConfirmation {
+    fn confirm_deletion(&self, plan: &CredentialDeletionPlan) -> Result<bool, CredentialError> {
+        self.observed
+            .lock()
+            .expect("confirmation lock")
+            .push(plan.clone());
+        Ok(self.confirmed)
+    }
+}
+
+fn deletion_plan() -> CredentialDeletionPlan {
+    CredentialDeletionPlan {
+        reference: "SHARED_API_KEY".to_owned(),
+        consumers: vec![
+            CredentialConsumerLabel {
+                owner_id: "model-route:deepseek-official".to_owned(),
+                kind: "model-route".to_owned(),
+                display: CredentialConsumerDisplay {
+                    key: "openloop.credentials.consumer.model-route".to_owned(),
+                    values: BTreeMap::from([(
+                        "routeId".to_owned(),
+                        "deepseek-official".to_owned(),
+                    )]),
+                },
+            },
+            CredentialConsumerLabel {
+                owner_id: "plugin:web-search-deepseek".to_owned(),
+                kind: "plugin".to_owned(),
+                display: CredentialConsumerDisplay {
+                    key: "openloop.credentials.consumer.web-search-deepseek".to_owned(),
+                    values: BTreeMap::new(),
+                },
+            },
+        ],
+    }
+}
+
+fn deletion_plan_payload(reference: &str) -> serde_json::Value {
+    json!({
+        "reference": reference,
+        "consumers": [{
+            "ownerId": "model-route:deepseek-official",
+            "kind": "model-route",
+            "display": {
+                "key": "openloop.credentials.consumer.model-route",
+                "values": { "routeId": "deepseek-official" },
+            },
+        }],
+    })
+}
+
+#[derive(Default)]
+struct RecordingAppKitDeletionBackend {
+    confirmed: bool,
+    presentations: Mutex<Vec<CredentialDeletionSheetPresentation>>,
+    callback_count: Mutex<usize>,
+}
+
+impl AppKitCredentialDeletionBackend for RecordingAppKitDeletionBackend {
+    fn begin_sheet(
+        &self,
+        presentation: CredentialDeletionSheetPresentation,
+        completion: CredentialDeletionCompletion,
+    ) -> Result<(), CredentialError> {
+        self.presentations
+            .lock()
+            .expect("deletion presentation lock")
+            .push(presentation);
+        *self
+            .callback_count
+            .lock()
+            .expect("deletion callback count lock") += 1;
+        completion(Ok(self.confirmed));
+        Ok(())
+    }
+
+    fn cancel_sheet(&self) {}
+}
+
+struct BlockingAppKitDeletionBackend {
+    entered: Mutex<Option<mpsc::Sender<()>>>,
+    active_completion: Mutex<Option<CredentialDeletionCompletion>>,
+    presentations: Mutex<usize>,
+    cancellations: Mutex<usize>,
+}
+
+impl AppKitCredentialDeletionBackend for BlockingAppKitDeletionBackend {
+    fn begin_sheet(
+        &self,
+        _presentation: CredentialDeletionSheetPresentation,
+        completion: CredentialDeletionCompletion,
+    ) -> Result<(), CredentialError> {
+        let mut presentations = self.presentations.lock().expect("presentation count lock");
+        *presentations += 1;
+        if *presentations == 1 {
+            *self
+                .active_completion
+                .lock()
+                .expect("active completion lock") = Some(completion);
+            if let Some(entered) = self.entered.lock().expect("entered lock").take() {
+                entered.send(()).expect("report deletion sheet entry");
+            }
+        } else {
+            completion(Ok(false));
+        }
+        Ok(())
+    }
+
+    fn cancel_sheet(&self) {
+        *self.cancellations.lock().expect("cancellation count lock") += 1;
+        if let Some(completion) = self
+            .active_completion
+            .lock()
+            .expect("active completion lock")
+            .take()
+        {
+            completion(Ok(false));
+        }
+    }
+}
+
+fn appkit_deletion_confirmation(
+    backend: Arc<RecordingAppKitDeletionBackend>,
+) -> Arc<AppKitCredentialDeletionConfirmation> {
+    Arc::new(AppKitCredentialDeletionConfirmation::with_backend(
+        backend,
+        Arc::new(CredentialSheetGate::default()),
+    ))
+}
+
+#[test]
+fn bridge_cancellation_dismisses_appkit_deletion_and_releases_both_gates() {
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let backend = Arc::new(BlockingAppKitDeletionBackend {
+        entered: Mutex::new(Some(entered_tx)),
+        active_completion: Mutex::new(None),
+        presentations: Mutex::new(0),
+        cancellations: Mutex::new(0),
+    });
+    let confirmation = Arc::new(AppKitCredentialDeletionConfirmation::with_backend(
+        backend.clone(),
+        Arc::new(CredentialSheetGate::default()),
+    ));
+    let (dispatcher, launch_id, secret, peer) = credential_dispatcher_with_ui(
+        Some(Arc::new(RecordingReplacement::default())),
+        Some(confirmation),
+    );
+    let delete_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "blocking-appkit-delete".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "unsetCredential".to_owned(),
+        payload: deletion_plan_payload("BLOCKING_APPKIT_DELETE"),
+    };
+    let delete_dispatcher = dispatcher.clone();
+    let delete_secret = secret.clone();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let response = delete_dispatcher
+            .dispatch(
+                peer,
+                sign_request(delete_request, [16; 32], &delete_secret)
+                    .expect("signed deletion request"),
+            )
+            .expect("deletion response");
+        finished_tx.send(response).expect("report deletion outcome");
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("deletion sheet opened");
+
+    let cancel_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "cancel-blocking-appkit-delete".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "$cancel".to_owned(),
+        payload: json!({ "requestId": "blocking-appkit-delete" }),
+    };
+    dispatcher
+        .dispatch(
+            peer,
+            sign_request(cancel_request, [17; 32], &secret).expect("signed cancellation request"),
+        )
+        .expect("cancellation response");
+
+    let cancelled = finished_rx
+        .recv_timeout(Duration::from_millis(250))
+        .expect("cancellation must dismiss the deletion sheet");
+    let cancelled = serde_json::to_value(cancelled).expect("cancelled response JSON");
+    assert_eq!(cancelled["result"], "cancelled");
+
+    let subsequent_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "subsequent-appkit-delete".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "unsetCredential".to_owned(),
+        payload: deletion_plan_payload("SUBSEQUENT_APPKIT_DELETE"),
+    };
+    let subsequent = dispatcher
+        .dispatch(
+            peer,
+            sign_request(subsequent_request, [18; 32], &secret)
+                .expect("signed subsequent deletion request"),
+        )
+        .expect("subsequent deletion response");
+    let subsequent = serde_json::to_value(subsequent).expect("subsequent response JSON");
+    assert_eq!(subsequent["result"], "cancelled");
+    assert_eq!(
+        *backend
+            .presentations
+            .lock()
+            .expect("presentation count lock"),
+        2
+    );
+    assert_eq!(
+        *backend
+            .cancellations
+            .lock()
+            .expect("cancellation count lock"),
+        1
+    );
+}
+
+#[test]
+fn bridge_cancel_uses_appkit_confirmation_with_all_labels_and_retains_keychain_item() {
+    let account = unique_account("appkit_cancel");
+    let _cleanup = KeychainCleanup::new(account.clone());
+    let store = KeychainStore::new(ReleaseChannel::Test);
+    store
+        .set(&account, b"retained-secret")
+        .expect("seed credential");
+    let reference = account
+        .as_str()
+        .strip_prefix("credential:")
+        .expect("credential account prefix");
+    let backend = Arc::new(RecordingAppKitDeletionBackend::default());
+    let confirmation = appkit_deletion_confirmation(backend.clone());
+    let (dispatcher, launch_id, secret, peer) = credential_dispatcher_with_ui(
+        Some(Arc::new(RecordingReplacement::default())),
+        Some(confirmation),
+    );
+    let request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "appkit-cancel".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "unsetCredential".to_owned(),
+        payload: json!({
+            "reference": reference,
+            "consumers": [
+                {
+                    "ownerId": "model-route:deepseek-official",
+                    "kind": "model-route",
+                    "display": {
+                        "key": "openloop.credentials.consumer.model-route",
+                        "values": { "routeId": "deepseek-official" },
+                    },
+                },
+                {
+                    "ownerId": "plugin:web-search-deepseek",
+                    "kind": "plugin",
+                    "display": {
+                        "key": "openloop.credentials.consumer.web-search-deepseek",
+                        "values": {},
+                    },
+                },
+                {
+                    "ownerId": "plugin:mcp-client:docs",
+                    "kind": "plugin",
+                    "display": {
+                        "key": "openloop.credentials.consumer.mcp-server",
+                        "values": { "serverName": "docs" },
+                    },
+                },
+            ],
+        }),
+    };
+
+    let response = dispatcher
+        .dispatch(
+            peer,
+            sign_request(request, [14; 32], &secret).expect("signed deletion request"),
+        )
+        .expect("deletion response");
+    let response = serde_json::to_value(response).expect("deletion JSON");
+
+    assert_eq!(response["result"], "cancelled");
+    assert_eq!(
+        store
+            .resolve(&account)
+            .expect("credential retained")
+            .as_slice(),
+        b"retained-secret"
+    );
+    assert_eq!(
+        backend
+            .presentations
+            .lock()
+            .expect("deletion presentation lock")
+            .as_slice(),
+        &[CredentialDeletionSheetPresentation {
+            target_identity: CredentialAccount::new(reference)
+                .expect("validated deletion account")
+                .as_str()
+                .to_owned(),
+            parent_window_label: "main",
+            consumer_labels: vec![
+                "Model route: deepseek-official".to_owned(),
+                "DeepSeek Web Search".to_owned(),
+                "MCP server: docs".to_owned(),
+            ],
+            creates_independent_window_identity: false,
+        }]
+    );
+    assert_eq!(
+        *backend
+            .callback_count
+            .lock()
+            .expect("deletion callback count lock"),
+        1
+    );
+}
+
+#[test]
+fn bridge_approval_displays_and_deletes_only_the_validated_keychain_account() {
+    let account = unique_account("appkit_approve");
+    let retained_account = unique_account("appkit_approve_retained");
+    let _cleanup = KeychainCleanup::new(account.clone());
+    let _retained_cleanup = KeychainCleanup::new(retained_account.clone());
+    let store = KeychainStore::new(ReleaseChannel::Test);
+    store
+        .set(&account, b"deleted-secret")
+        .expect("seed deleted credential");
+    store
+        .set(&retained_account, b"retained-secret")
+        .expect("seed retained credential");
+    let reference = account
+        .as_str()
+        .strip_prefix("credential:")
+        .expect("credential account prefix");
+    let backend = Arc::new(RecordingAppKitDeletionBackend {
+        confirmed: true,
+        ..Default::default()
+    });
+    let confirmation = appkit_deletion_confirmation(backend.clone());
+    let (dispatcher, launch_id, secret, peer) = credential_dispatcher_with_ui(
+        Some(Arc::new(RecordingReplacement::default())),
+        Some(confirmation),
+    );
+    let request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "appkit-approve".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "unsetCredential".to_owned(),
+        payload: deletion_plan_payload(reference),
+    };
+
+    let response = dispatcher
+        .dispatch(
+            peer,
+            sign_request(request, [21; 32], &secret).expect("signed deletion request"),
+        )
+        .expect("deletion response");
+    let response = serde_json::to_value(response).expect("deletion JSON");
+
+    assert_eq!(response["result"], "deleted");
+    assert!(!store.status(&account).expect("deleted credential status"));
+    assert_eq!(
+        store
+            .resolve(&retained_account)
+            .expect("unrelated credential retained")
+            .as_slice(),
+        b"retained-secret"
+    );
+    let presentations = backend
+        .presentations
+        .lock()
+        .expect("deletion presentation lock");
+    assert_eq!(presentations.len(), 1);
+    assert_eq!(
+        presentations[0].target_identity,
+        CredentialAccount::new(reference)
+            .expect("validated deletion account")
+            .as_str()
+    );
+}
+
+#[test]
+fn bridge_rejects_invalid_deletion_targets_and_consumer_labels_before_appkit() {
+    let backend = Arc::new(RecordingAppKitDeletionBackend::default());
+    let confirmation = appkit_deletion_confirmation(backend.clone());
+    let (dispatcher, launch_id, secret, peer) = credential_dispatcher_with_ui(
+        Some(Arc::new(RecordingReplacement::default())),
+        Some(confirmation),
+    );
+    let invalid_payloads = [
+        json!({
+            "reference": "INVALID:REFERENCE",
+            "consumers": deletion_plan().consumers,
+        }),
+        json!({
+            "reference": "SHARED_API_KEY",
+            "targetIdentity": "browser-controlled-label",
+            "consumers": deletion_plan().consumers,
+        }),
+        json!({
+            "reference": "SHARED_API_KEY",
+            "consumers": [{
+                "ownerId": "model-route:deepseek-official",
+                "kind": "model-route",
+                "display": {
+                    "key": "browser.controls.this",
+                    "values": { "routeId": "deepseek-official" },
+                },
+            }],
+        }),
+        json!({
+            "reference": "SHARED_API_KEY",
+            "consumers": [{
+                "ownerId": "model-route:deepseek-official",
+                "kind": "model-route",
+                "display": {
+                    "key": "openloop.credentials.consumer.model-route",
+                    "values": { "browserLabel": "spoof" },
+                },
+            }],
+        }),
+        json!({
+            "reference": "SHARED_API_KEY",
+            "consumers": [{
+                "ownerId": "plugin:web-search-deepseek",
+                "kind": "plugin",
+                "display": {
+                    "key": "openloop.credentials.consumer.web-search-deepseek",
+                    "values": { "label": "spoof" },
+                },
+            }],
+        }),
+    ];
+
+    for (index, payload) in invalid_payloads.into_iter().enumerate() {
+        let request = BridgeRequest {
+            version: BRIDGE_PROTOCOL_VERSION,
+            request_id: format!("injected-label-{index}"),
+            launch_id: launch_id.to_string(),
+            method: "unsetCredential".to_owned(),
+            payload,
+        };
+        let mut nonce = [15; 32];
+        nonce[0] = u8::try_from(index).expect("small test index");
+        let response = dispatcher
+            .dispatch(
+                peer,
+                sign_request(request, nonce, &secret).expect("signed injected-label request"),
+            )
+            .expect("authenticated error response");
+        let response = serde_json::to_value(response).expect("injected-label JSON");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "invalid_request");
+    }
+
+    assert!(backend
+        .presentations
+        .lock()
+        .expect("deletion presentation lock")
+        .is_empty());
+    assert_eq!(
+        *backend
+            .callback_count
+            .lock()
+            .expect("deletion callback count lock"),
+        0
+    );
+}
+
+#[test]
+fn native_deletion_confirmation_cancel_retains_the_keychain_item() {
+    let store = RecordingDeletionStore::default();
+    let confirmation = FixedConfirmation::new(false);
+    let plan = deletion_plan();
+
+    assert_eq!(
+        delete_credential_with_confirmation(&store, &confirmation, plan.clone())
+            .expect("cancel deletion"),
+        CredentialDeletionOutcome::Cancelled
+    );
+    assert!(store.deleted.lock().expect("store lock").is_empty());
+    assert_eq!(
+        confirmation
+            .observed
+            .lock()
+            .expect("confirmation lock")
+            .as_slice(),
+        &[plan]
+    );
+}
+
+#[test]
+fn native_deletion_confirmation_deletes_only_after_confirmation() {
+    let store = RecordingDeletionStore::default();
+    let confirmation = FixedConfirmation::new(true);
+
+    assert_eq!(
+        delete_credential_with_confirmation(&store, &confirmation, deletion_plan())
+            .expect("confirmed deletion"),
+        CredentialDeletionOutcome::Deleted
+    );
+    assert_eq!(
+        store.deleted.lock().expect("store lock").as_slice(),
+        &["credential:SHARED_API_KEY"]
+    );
+}
+
+struct BlockingApproval {
+    entered: Mutex<Option<mpsc::Sender<()>>>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl CredentialDeletionConfirmation for BlockingApproval {
+    fn confirm_deletion(&self, _plan: &CredentialDeletionPlan) -> Result<bool, CredentialError> {
+        if let Some(entered) = self.entered.lock().expect("entered lock").take() {
+            entered.send(()).expect("report confirmation entry");
+        }
+        self.release
+            .lock()
+            .expect("release lock")
+            .recv()
+            .expect("release confirmation");
+        Ok(true)
+    }
+}
+
+#[test]
+fn bridge_cancellation_while_confirmation_is_pending_prevents_deletion() {
+    let reference = format!(
+        "CANCEL_PENDING_{}_{}",
+        process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock follows Unix epoch")
+            .as_nanos()
+    );
+    let account = CredentialAccount::new(&reference).expect("cancellation account");
+    let _cleanup = KeychainCleanup::new(account.clone());
+    let store = KeychainStore::new(ReleaseChannel::Test);
+    store
+        .set(&account, b"pending-cancellation-secret")
+        .expect("seed cancellation credential");
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let confirmation = Arc::new(BlockingApproval {
+        entered: Mutex::new(Some(entered_tx)),
+        release: Mutex::new(release_rx),
+    });
+    let (dispatcher, launch_id, secret, peer) = credential_dispatcher(confirmation);
+    let delete_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "pending-delete".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "unsetCredential".to_owned(),
+        payload: deletion_plan_payload(&reference),
+    };
+    let delete_dispatcher = dispatcher.clone();
+    let delete_secret = secret.clone();
+    let pending = thread::spawn(move || {
+        delete_dispatcher
+            .dispatch(
+                peer,
+                sign_request(delete_request, [8; 32], &delete_secret)
+                    .expect("signed deletion request"),
+            )
+            .expect("deletion response")
+    });
+    entered_rx.recv().expect("confirmation opened");
+
+    let cancel_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "cancel-pending-delete".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "$cancel".to_owned(),
+        payload: json!({ "requestId": "pending-delete" }),
+    };
+    dispatcher
+        .dispatch(
+            peer,
+            sign_request(cancel_request, [9; 32], &secret).expect("signed cancellation request"),
+        )
+        .expect("cancellation response");
+    release_tx.send(()).expect("approve confirmation");
+
+    let response =
+        serde_json::to_value(pending.join().expect("deletion thread")).expect("response JSON");
+    assert_eq!(response["result"], "cancelled");
+    assert_eq!(
+        store
+            .resolve(&account)
+            .expect("credential retained")
+            .as_slice(),
+        b"pending-cancellation-secret"
+    );
+}
+
+#[test]
+fn bridge_serializes_replacement_against_confirmed_deletion_commit() {
+    let reference = format!(
+        "MUTATION_SERIALIZATION_{}_{}",
+        process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock follows Unix epoch")
+            .as_nanos()
+    );
+    let replacement = Arc::new(RecordingReplacement::default());
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let confirmation = Arc::new(BlockingApproval {
+        entered: Mutex::new(Some(entered_tx)),
+        release: Mutex::new(release_rx),
+    });
+    let (dispatcher, launch_id, secret, peer) =
+        credential_dispatcher_with_ui(Some(replacement.clone()), Some(confirmation));
+    let delete_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "serialized-delete".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "unsetCredential".to_owned(),
+        payload: deletion_plan_payload(&reference),
+    };
+    let delete_dispatcher = dispatcher.clone();
+    let delete_secret = secret.clone();
+    let pending = thread::spawn(move || {
+        delete_dispatcher
+            .dispatch(
+                peer,
+                sign_request(delete_request, [12; 32], &delete_secret)
+                    .expect("signed deletion request"),
+            )
+            .expect("deletion response")
+    });
+    entered_rx.recv().expect("confirmation opened");
+
+    let replace_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "overlapping-replacement".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "openCredentialReplacement".to_owned(),
+        payload: json!({ "ref": reference }),
+    };
+    let replacement_response = dispatcher
+        .dispatch(
+            peer,
+            sign_request(replace_request, [13; 32], &secret).expect("signed replacement request"),
+        )
+        .expect("replacement response");
+    let replacement_response =
+        serde_json::to_value(replacement_response).expect("replacement JSON");
+    assert_eq!(replacement_response["ok"], false);
+    assert_eq!(replacement_response["error"]["code"], "credential_failure");
+    assert!(replacement
+        .accounts
+        .lock()
+        .expect("replacement account lock")
+        .is_empty());
+
+    release_tx.send(()).expect("release confirmation");
+    let deletion_response =
+        serde_json::to_value(pending.join().expect("deletion thread")).expect("deletion JSON");
+    assert_eq!(deletion_response["result"], "deleted");
+}
+
+#[test]
+fn bridge_pre_cancellation_skips_confirmation_and_deletion() {
+    let reference = format!(
+        "CANCEL_BEFORE_{}_{}",
+        process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock follows Unix epoch")
+            .as_nanos()
+    );
+    let account = CredentialAccount::new(&reference).expect("pre-cancellation account");
+    let _cleanup = KeychainCleanup::new(account.clone());
+    let store = KeychainStore::new(ReleaseChannel::Test);
+    store
+        .set(&account, b"pre-cancellation-secret")
+        .expect("seed pre-cancellation credential");
+    let confirmation = Arc::new(FixedConfirmation::new(true));
+    let (dispatcher, launch_id, secret, peer) = credential_dispatcher(confirmation.clone());
+    let cancel_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "cancel-before-delete".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "$cancel".to_owned(),
+        payload: json!({ "requestId": "pre-cancelled-delete" }),
+    };
+    dispatcher
+        .dispatch(
+            peer,
+            sign_request(cancel_request, [10; 32], &secret)
+                .expect("signed pre-cancellation request"),
+        )
+        .expect("pre-cancellation response");
+    let delete_request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "pre-cancelled-delete".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "unsetCredential".to_owned(),
+        payload: deletion_plan_payload(&reference),
+    };
+
+    let response = dispatcher
+        .dispatch(
+            peer,
+            sign_request(delete_request, [11; 32], &secret).expect("signed deletion request"),
+        )
+        .expect("deletion response");
+    let response = serde_json::to_value(response).expect("response JSON");
+
+    assert_eq!(response["result"], "cancelled");
+    assert!(confirmation
+        .observed
+        .lock()
+        .expect("confirmation lock")
+        .is_empty());
+    assert_eq!(
+        store
+            .resolve(&account)
+            .expect("credential retained")
+            .as_slice(),
+        b"pre-cancellation-secret"
+    );
+}
+
+#[test]
+fn native_deletion_rejects_unrecognized_display_keys_before_confirmation() {
+    let store = RecordingDeletionStore::default();
+    let confirmation = FixedConfirmation::new(true);
+    let mut plan = deletion_plan();
+    plan.consumers[0].display.key = "browser.controls.this".to_owned();
+
+    assert!(delete_credential_with_confirmation(&store, &confirmation, plan).is_err());
+    assert!(confirmation
+        .observed
+        .lock()
+        .expect("confirmation lock")
+        .is_empty());
+    assert!(store.deleted.lock().expect("store lock").is_empty());
 }
 
 #[test]
@@ -188,98 +1337,73 @@ fn secret_size_bounds_are_enforced_before_keychain_access() {
     assert!(store
         .set(&account, &vec![b'x'; MAX_SECRET_BYTES + 1])
         .is_err());
+    assert!(!store
+        .status(&account)
+        .expect("oversized write was not attempted"));
 }
 
 #[test]
-fn prompt_context_rejects_stale_tokens_and_wrong_window_labels() {
-    let state = SecurePromptState::default();
-    let account = unique_account("prompt");
-    let prompt_token = "11".repeat(32);
-    let stale_token = "22".repeat(32);
+fn maximum_secret_resolves_through_a_bounded_bridge_response_frame() {
+    let account = unique_account("bridge_maximum");
+    let _cleanup = KeychainCleanup::new(account.clone());
+    let store = KeychainStore::new(ReleaseChannel::Test);
+    let maximum = vec![u8::MAX; MAX_SECRET_BYTES];
+    store
+        .set(&account, &maximum)
+        .expect("store maximum credential");
+    let reference = account
+        .as_str()
+        .strip_prefix("credential:")
+        .expect("credential account prefix");
+    let (dispatcher, launch_id, secret, peer) =
+        credential_dispatcher(Arc::new(FixedConfirmation::new(false)));
+    let request = BridgeRequest {
+        version: BRIDGE_PROTOCOL_VERSION,
+        request_id: "maximum-secret".to_owned(),
+        launch_id: launch_id.to_string(),
+        method: "resolveCredential".to_owned(),
+        payload: json!({ "ref": reference }),
+    };
+    let response = dispatcher
+        .dispatch(
+            peer,
+            sign_request(request, [10; 32], &secret).expect("signed resolve request"),
+        )
+        .expect("maximum credential response");
+    let response = sign_response(response, [10; 32], &secret).expect("signed credential response");
+    let frame = encode_frame(&response).expect("maximum credential frame");
 
-    state
-        .activate(account.clone(), prompt_token.clone())
-        .expect("first prompt activation");
-    assert!(state.activate(account.clone(), "33".repeat(32)).is_err());
-    assert!(state.account_for_prompt("main", &prompt_token).is_err());
-    assert!(state
-        .account_for_prompt(CREDENTIALS_WINDOW_LABEL, &stale_token)
-        .is_err());
+    assert!(frame.len() - 4 <= MAX_BRIDGE_FRAME_BYTES);
+    let decoded: AuthenticatedBridgeResponse =
+        read_json_frame(&mut frame.as_slice()).expect("maximum credential round trip");
     assert_eq!(
-        state
-            .account_for_prompt(CREDENTIALS_WINDOW_LABEL, &prompt_token)
-            .expect("credentials context"),
-        account
+        decoded.response.result.expect("credential result"),
+        json!({
+            "bytes": maximum,
+            "source": "keychain",
+        })
     );
 }
 
 #[test]
-fn stale_prompt_clear_is_a_no_op_for_a_newer_session() {
-    let state = SecurePromptState::default();
-    let first_account = unique_account("first-prompt");
-    let second_account = unique_account("second-prompt");
-    let first_token = "44".repeat(32);
-    let second_token = "55".repeat(32);
+fn oversized_existing_keychain_value_fails_before_bridge_serialization() {
+    let account = unique_account("bridge_oversized");
+    let _cleanup = KeychainCleanup::new(account.clone());
+    let store = KeychainStore::new(ReleaseChannel::Test);
+    let mut options = PasswordOptions::new_generic_password(store.service(), account.as_str());
+    options.set_access_synchronized(Some(false));
+    set_generic_password_options(&vec![b'x'; MAX_SECRET_BYTES + 1], options)
+        .expect("seed oversized external Keychain item");
+    let reference = account
+        .as_str()
+        .strip_prefix("credential:")
+        .expect("credential account prefix");
 
-    state
-        .activate(first_account, first_token.clone())
-        .expect("first prompt activation");
-    assert!(state
-        .clear_for_prompt(CREDENTIALS_WINDOW_LABEL, &first_token)
-        .expect("clear first prompt"));
-    state
-        .activate(second_account.clone(), second_token.clone())
-        .expect("second prompt activation");
-    assert!(!state
-        .clear_for_prompt(CREDENTIALS_WINDOW_LABEL, &first_token)
-        .expect("stale clear"));
-    assert_eq!(
-        state
-            .account_for_prompt(CREDENTIALS_WINDOW_LABEL, &second_token)
-            .expect("new prompt remains active"),
-        second_account
-    );
-    state
-        .clear_for_prompt(CREDENTIALS_WINDOW_LABEL, &second_token)
-        .expect("clear second prompt");
-    assert!(state
-        .account_for_prompt(CREDENTIALS_WINDOW_LABEL, &second_token)
-        .is_err());
-}
+    let response = dispatch_credential("resolveCredential", json!({ "ref": reference }));
 
-#[test]
-fn prompt_navigation_allows_only_the_exact_local_app_page() {
-    assert_eq!(CREDENTIALS_WINDOW_LABEL, "credentials");
-    assert_eq!(CREDENTIALS_PAGE, "src/credentials.html");
-    assert_eq!(
-        (CREDENTIALS_WINDOW_WIDTH, CREDENTIALS_WINDOW_HEIGHT),
-        (420.0, 300.0)
-    );
-
-    for allowed in [
-        "tauri://localhost/src/credentials.html",
-        "http://localhost:1420/src/credentials.html",
-    ] {
-        assert!(
-            credentials_navigation_allowed(&Url::parse(allowed).expect("valid URL")),
-            "rejected prompt page {allowed}"
-        );
-    }
-    for denied in [
-        "tauri://localhost/",
-        "tauri://localhost/src/credentials.html?query=1",
-        "tauri://localhost/src/credentials.html#fragment",
-        "tauri://localhost/src%2fcredentials.html",
-        "https://localhost/src/credentials.html",
-        "http://localhost:1420/src/other.html",
-        "http://127.0.0.1:1420/src/credentials.html",
-        "https://example.com/src/credentials.html",
-    ] {
-        assert!(
-            !credentials_navigation_allowed(&Url::parse(denied).expect("valid URL")),
-            "accepted prompt navigation {denied}"
-        );
-    }
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"]["code"], "credential_failure");
+    assert!(serde_json::to_vec(&response).expect("response JSON").len() < 1024);
 }
 
 #[test]

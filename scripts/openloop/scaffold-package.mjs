@@ -12,13 +12,25 @@ import {
 } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { dump, load } from 'js-yaml'
+import { dump, JSON_SCHEMA, load, Type } from 'js-yaml'
 import ts from 'typescript'
 
 const faces = new Set(['host', 'client', 'pure'])
 const packageNamePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const ownedPaths = ['package.json', 'src', 'README.md', 'tsconfig.json']
 const cordisPackage = '@deepseek-ai/cordis'
+const jsExpressionType = new Type('tag:yaml.org,2002:js', {
+  kind: 'scalar',
+  resolve: data => typeof data === 'string',
+  construct: data => ({ __jsExpr: data }),
+  predicate: value => (
+    typeof value === 'object'
+    && value !== null
+    && typeof value.__jsExpr === 'string'
+  ),
+  represent: value => value.__jsExpr,
+})
+const entryListSchema = JSON_SCHEMA.extend(jsExpressionType)
 
 function optionValue(args, index, option) {
   const value = args[index + 1]
@@ -162,7 +174,8 @@ function prepareBundle(root, bundleName, packageName, rowId) {
   }
 
   const manifest = readJson(manifestPath)
-  const document = load(readFileSync(patchPath, 'utf8')) ?? []
+  const patchSource = readFileSync(patchPath, 'utf8')
+  const document = load(patchSource, { schema: entryListSchema }) ?? []
   if (!Array.isArray(document)) {
     throw new Error(`bundle ${bundleName} cordis.patch.yml must contain a list`)
   }
@@ -178,8 +191,12 @@ function prepareBundle(root, bundleName, packageName, rowId) {
     ...(manifest.dependencies ?? {}),
     [packageName]: 'workspace:*',
   }
-  document.push({ insert: [{ id: rowId, name: packageName }] })
-  return { manifestPath, manifest, patchPath, document }
+  const row = { insert: [{ id: rowId, name: packageName }] }
+  const rowSource = dump([row], { lineWidth: -1, noRefs: true, schema: entryListSchema })
+  const patchContent = document.length === 0
+    ? rowSource
+    : `${patchSource}${patchSource.endsWith('\n') ? '' : '\n'}${rowSource}`
+  return { manifestPath, manifest, patchPath, patchContent }
 }
 
 function packageManifest({ name, face, clientBundle, service, cordisPlugin }) {
@@ -195,11 +212,29 @@ function packageManifest({ name, face, clientBundle, service, cordisPlugin }) {
         types: './lib/types/index.d.ts',
         default: './lib/index.js',
       },
+      './invariant': {
+        types: './lib/types/invariant.d.ts',
+        default: './lib/invariant.js',
+      },
     },
+    files: [
+      'lib/index.js',
+      'lib/invariant.js',
+      ...(clientBundle ? ['lib/client.js'] : []),
+      'lib/types/**/*.d.ts',
+    ],
     openloop: {
       face,
       ...(cordisPlugin ? { cordisPlugin: true } : {}),
       ...(service === undefined ? {} : { service }),
+    },
+    peerDependencies: {
+      [cordisPackage]: 'workspace:^',
+      '@deepseek-ai/dsh-invariants': 'workspace:^',
+    },
+    devDependencies: {
+      [cordisPackage]: 'workspace:^',
+      '@deepseek-ai/dsh-invariants': 'workspace:^',
     },
   }
   if (clientBundle) {
@@ -218,14 +253,10 @@ function packageManifest({ name, face, clientBundle, service, cordisPlugin }) {
       watch: 'tsdown --watch',
     }
   }
-  if (cordisPlugin) {
-    manifest.peerDependencies = { [cordisPackage]: 'workspace:^' }
-    manifest.devDependencies = { [cordisPackage]: 'workspace:^' }
-  }
   return manifest
 }
 
-function packageTsconfig(face, cordisPlugin) {
+function packageTsconfig(face) {
   return {
     extends: face === 'client'
       ? '../../../tsconfig.base.client.json'
@@ -235,9 +266,10 @@ function packageTsconfig(face, cordisPlugin) {
       outDir: 'lib/types',
     },
     include: ['src'],
-    ...(cordisPlugin
-      ? { references: [{ path: '../../../vendor/cordis' }] }
-      : {}),
+    references: [
+      { path: '../../../vendor/cordis' },
+      { path: '../../runtime-diagnostics/invariants' },
+    ],
   }
 }
 
@@ -306,6 +338,25 @@ function packageIndex(name, service, cordisPlugin) {
 
 function clientIndex(name) {
   return namespacePlugin(name, `@openloop/${name} browser bundle entry.`)
+}
+
+function invariantPlugin(name) {
+  return [
+    `/** Package-owned invariant companion for \`@openloop/${name}\`. */`,
+    '',
+    "import type { Context } from '@deepseek-ai/cordis'",
+    "import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'",
+    '',
+    `export const name = 'openloop-${name}-invariant'`,
+    "export const inject = ['invariants']",
+    '',
+    '// No runtime invariant: package behavior is enforced by its focused tests.',
+    'const install: InvariantInstaller = () => {}',
+    '',
+    'export const apply = (ctx: Context): Promise<() => void> =>',
+    `  Promise.resolve(ctx.invariants.register('@openloop/${name}', install))`,
+    '',
+  ].join('\n')
 }
 
 function clientBundleConfig(name) {
@@ -438,6 +489,10 @@ export function scaffoldPackage(options, dependencies = {}) {
       path: join(directory, 'src', 'index.ts'),
       content: packageIndex(name, service, cordisPlugin),
     },
+    {
+      path: join(directory, 'src', 'invariant.ts'),
+      content: invariantPlugin(name),
+    },
   ]
   if (clientBundle) {
     outputs.push(
@@ -458,7 +513,7 @@ export function scaffoldPackage(options, dependencies = {}) {
     },
     {
       path: join(directory, 'tsconfig.json'),
-      content: jsonText(packageTsconfig(face, cordisPlugin)),
+      content: jsonText(packageTsconfig(face)),
     },
     {
       path: aggregate.path,
@@ -474,7 +529,7 @@ export function scaffoldPackage(options, dependencies = {}) {
       },
       {
         path: bundle.patchPath,
-        content: dump(bundle.document, { lineWidth: -1, noRefs: true }),
+        content: bundle.patchContent,
       },
     )
   }

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ApiProxy, HostFrame, MuxFrame } from '../src/api/index.ts'
-import type { ClientResponse, RpcMessage, RpcReceipt, RpcRequest } from '../src/api/rpc.ts'
+import type { ClientResponse, RpcError, RpcMessage, RpcReceipt, RpcRequest } from '../src/api/rpc.ts'
 import { RpcId } from '../src/api/rpc.ts'
 import { toFetchHandler } from '../src/fetch/handler.ts'
 import { AbstractApiClient, InProcessApiClient } from '../src/fetch/client.ts'
@@ -587,6 +587,338 @@ describe('unary round trip (handler ⇄ client, no network)', () => {
 describe('handler carrier-layer statuses', () => {
   const handler = toFetchHandler(fakeApi())
 
+  it('projects successful unary values before returning them and preserves default responses', async () => {
+    const api = fakeApi()
+    api.host.describe = async request => ({
+      rpcId: request.rpcId,
+      result: {
+        ok: true,
+        value: {
+          version: 'projection-test',
+          cwd: '/private/canonical/workspace',
+          attachedSessions: 1,
+          canOpenPath: true,
+        },
+      },
+    })
+    const projectResult = vi.fn((method: string, value: unknown) => {
+      if (method !== 'host.describe') return value
+      return { ...(value as object), cwd: '' }
+    })
+    const request = new Request('http://x/api/host.describe', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'r-projected-describe',
+        method: 'host.describe',
+        payload: {},
+      }),
+    })
+
+    const projected = await toFetchHandler(api, {
+      version: 1,
+      allows: () => true,
+      projectResult,
+    } as never).fetch(request.clone())
+    const projectedBody = await projected.json() as {
+      result: { ok: true; value: { cwd: string; attachedSessions: number } }
+    }
+    expect(projectedBody.result.value).toMatchObject({ cwd: '', attachedSessions: 1 })
+    expect(projectResult).toHaveBeenCalledExactlyOnceWith(
+      'host.describe',
+      expect.objectContaining({ cwd: '/private/canonical/workspace' }),
+    )
+
+    const unchanged = await toFetchHandler(api).fetch(request)
+    const unchangedBody = await unchanged.json() as {
+      result: { ok: true; value: { cwd: string } }
+    }
+    expect(unchangedBody.result.value.cwd).toBe('/private/canonical/workspace')
+  })
+
+  it('applies the policy error projection while preserving default business errors', async () => {
+    const api = fakeApi()
+    api.sessions.history = async request => ({
+      rpcId: request.rpcId,
+      result: {
+        ok: false,
+        error: {
+          code: 'session-not-found',
+          message: 'session log is unavailable',
+          details: {
+            sessionId: 'missing-session' as never,
+            path: '/private/canonical/workspace/session.jsonl',
+          },
+        },
+      },
+    })
+    const request = new Request('http://x/api/session.history', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'r-projected-error',
+        method: 'session.history',
+        payload: { sessionId: 'missing-session' },
+      }),
+    })
+
+    const projected = await toFetchHandler(api, {
+      version: 1,
+      allows: () => true,
+      projectResult: (_method: string, value: unknown) => value,
+      projectError: (_method: string, error: {
+        code: string
+        message: string
+        details: Record<string, unknown>
+      }) => {
+        const { path: _path, ...details } = error.details
+        return { ...error, details }
+      },
+    } as never).fetch(request.clone())
+    const projectedText = await projected.text()
+    expect(projectedText).not.toContain('/private/canonical/workspace')
+    expect(JSON.parse(projectedText)).toMatchObject({
+      result: {
+        ok: false,
+        error: {
+          code: 'session-not-found',
+          message: 'session log is unavailable',
+          details: { sessionId: 'missing-session' },
+        },
+      },
+    })
+
+    const unchanged = await toFetchHandler(api).fetch(request)
+    expect(await unchanged.text()).toContain('/private/canonical/workspace')
+  })
+
+  it('checks an optional browser policy before payload parsing, route lookup, or business dispatch', async () => {
+    const api = fakeApi()
+    const set = vi.spyOn(api.credentials, 'set')
+    const allows = vi.fn((method: string) => method === 'session.list')
+    const restricted = toFetchHandler(api, { version: 1, allows })
+    const deniedBody = JSON.stringify({
+      type: 'client-request',
+      rpcId: 'r-denied',
+      method: 'credentials.set',
+      payload: { name: 'TOKEN', value: 'secret' },
+    })
+
+    const denied = await restricted.fetch(new Request('http://x/api/credentials.set', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: deniedBody,
+    }))
+    expect(denied.status).toBe(403)
+    expect(await denied.text()).toBe('forbidden')
+    expect(allows).toHaveBeenCalledWith('credentials.set', { name: 'TOKEN', value: 'secret' })
+    expect(set).not.toHaveBeenCalled()
+
+    const unknown = await restricted.fetch(new Request('http://x/api/future.method', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'r-unknown',
+        method: 'future.method',
+        payload: {},
+      }),
+    }))
+    expect(unknown.status).toBe(403)
+  })
+
+  it('runs asynchronous invocation admission before the DSH session handler', async () => {
+    const api = fakeApi()
+    const create = vi.spyOn(api.sessions, 'create')
+    const allowsInvocation = vi.fn(async () => ({ allowed: false as const }))
+    const restricted = toFetchHandler(api, {
+      version: 1,
+      allows: () => true,
+      allowsInvocation,
+    })
+    const payload = { workspaceId: 'workspace-1', agentPreset: 'standard' }
+
+    const denied = await restricted.fetch(new Request('http://x/api/session.create', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'r-session-create',
+        method: 'session.create',
+        payload,
+      }),
+    }))
+
+    expect(denied.status).toBe(403)
+    expect(await denied.text()).toBe('forbidden')
+    expect(allowsInvocation).toHaveBeenCalledExactlyOnceWith(
+      'session.create',
+      payload,
+      expect.any(AbortSignal),
+      expect.any(Function),
+    )
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('keeps asynchronous admission active until the DSH session handler settles', async () => {
+    const api = fakeApi()
+    const events: string[] = []
+    let admissionCalls = 0
+    const create = vi.spyOn(api.sessions, 'create').mockImplementationOnce(async (request) => {
+      events.push('create')
+      return { rpcId: request.rpcId, result: { ok: true, value: { sessionId: 's-new' as never } } }
+    })
+    const allowsInvocation = async <T>(
+      _method: string,
+      _payload: unknown,
+      _signal: AbortSignal,
+      invoke: () => Promise<T>,
+    ): Promise<
+      | { readonly allowed: false }
+      | { readonly allowed: true; readonly value: T }
+    > => {
+      admissionCalls += 1
+      events.push('admission-enter')
+      const value = await invoke()
+      events.push('admission-exit')
+      return { allowed: true as const, value }
+    }
+    const restricted = toFetchHandler(api, {
+      version: 1,
+      allows: () => true,
+      allowsInvocation,
+    })
+
+    const response = await restricted.fetch(new Request('http://x/api/session.create', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'r-session-create-lease',
+        method: 'session.create',
+        payload: { workspaceId: 'workspace-1', agentPreset: 'standard' },
+      }),
+    }))
+
+    expect(response.status).toBe(200)
+    expect(events).toEqual(['admission-enter', 'create', 'admission-exit'])
+    expect(create).toHaveBeenCalledOnce()
+    expect(admissionCalls).toBe(1)
+  })
+
+  it('turns an asynchronous invocation policy rejection into a closed response', async () => {
+    const api = fakeApi()
+    const create = vi.spyOn(api.sessions, 'create')
+    const restricted = toFetchHandler(api, {
+      version: 1,
+      allows: () => true,
+      allowsInvocation: async () => { throw new Error('policy unavailable') },
+    })
+
+    const response = await restricted.fetch(new Request('http://x/api/session.create', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'r-session-create-policy-error',
+        method: 'session.create',
+        payload: { workspaceId: 'workspace-1' },
+      }),
+    }))
+
+    expect(response.status).toBe(403)
+    expect(await response.text()).toBe('forbidden')
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('gates no-envelope transport routes before touching their business objects', async () => {
+    const api = fakeApi()
+    const mux = vi.spyOn(api.events, 'mux')
+    const host = vi.spyOn(api.events, 'host')
+    const respond = vi.spyOn(api, 'respond')
+    const sessionLog = vi.spyOn(api.downloads, 'sessionLog')
+    const allows = vi.fn((target: string) =>
+      target === 'GET /api/events.mux'
+      || target === 'GET /api/events.host'
+      || target === 'POST /api/respond'
+      || target === 'GET /api/session.export'
+      || target === 'HEAD /api/session.export')
+    const allowsTarget = vi.fn(() => false)
+    const restricted = toFetchHandler(api, { version: 1, allows, allowsTarget })
+
+    expect((await restricted.fetch(new Request('http://x/api/events.mux'))).status).toBe(200)
+    expect((await restricted.fetch(new Request('http://x/api/events.host'))).status).toBe(200)
+    expect((await restricted.fetch(new Request('http://x/api/respond', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-response',
+        rpcId: 'known',
+        result: { ok: true, value: null },
+      }),
+    }))).status).toBe(200)
+    expect((await restricted.fetch(new Request('http://x/api/session.export?sessionId=s'))).status).toBe(404)
+    expect((await restricted.fetch(new Request('http://x/api/session.export?sessionId=s', {
+      method: 'HEAD',
+    }))).status).toBe(404)
+    expect(mux).toHaveBeenCalledOnce()
+    expect(host).toHaveBeenCalledOnce()
+    expect(respond).toHaveBeenCalledOnce()
+    expect(sessionLog).toHaveBeenCalledTimes(2)
+    expect(allowsTarget).not.toHaveBeenCalledWith('respond')
+
+    for (const request of [
+      new Request('http://x/api/future-route'),
+      new Request('http://x/api/events.mux', { method: 'HEAD' }),
+      new Request('http://x/api/events.host', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      }),
+      new Request('http://x/api/respond'),
+      new Request('http://x/api/session.export?sessionId=s', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      }),
+    ]) {
+      expect((await restricted.fetch(request)).status).toBe(403)
+    }
+    expect(mux).toHaveBeenCalledOnce()
+    expect(host).toHaveBeenCalledOnce()
+    expect(respond).toHaveBeenCalledOnce()
+    expect(sessionLog).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not touch respond, export, or event objects when their route is denied', async () => {
+    const api = fakeApi()
+    const mux = vi.spyOn(api.events, 'mux')
+    const host = vi.spyOn(api.events, 'host')
+    const respond = vi.spyOn(api, 'respond')
+    const sessionLog = vi.spyOn(api.downloads, 'sessionLog')
+    const restricted = toFetchHandler(api, { version: 1, allows: () => false })
+
+    for (const request of [
+      new Request('http://x/api/events.mux'),
+      new Request('http://x/api/events.host'),
+      new Request('http://x/api/respond', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      }),
+      new Request('http://x/api/session.export?sessionId=s'),
+      new Request('http://x/api/session.export?sessionId=s', { method: 'HEAD' }),
+    ]) {
+      expect((await restricted.fetch(request)).status).toBe(403)
+    }
+    expect(mux).not.toHaveBeenCalled()
+    expect(host).not.toHaveBeenCalled()
+    expect(respond).not.toHaveBeenCalled()
+    expect(sessionLog).not.toHaveBeenCalled()
+  })
+
   it('404s unknown paths and non-POST non-stream methods', async () => {
     expect((await handler.fetch(new Request('http://x/other', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }))).status).toBe(404)
     expect((await handler.fetch(new Request('http://x/api/session.list', { method: 'GET' }))).status).toBe(404)
@@ -702,6 +1034,83 @@ describe('SSE streams through the carrier', () => {
     const frames = await collect(client(api).events.mux({}, new AbortController().signal))
     expect(frames).toHaveLength(2)
     expect(frames[1]?.payload).toMatchObject({ type: 'stream/error', error: { code: 'internal' } })
+  })
+
+  it('projects a source failure before SSE serialization', async () => {
+    const canonicalPath = '/private/canonical/workspace'
+    const api = fakeApi()
+    api.events.mux = (_request, _signal) => (async function * (): AsyncGenerator<RpcRequest<MuxFrame>> {
+      throw new Error(`stream source died at ${canonicalPath}`)
+    })()
+    const projectError = vi.fn((_method: string, _error: RpcError): RpcError => ({
+      code: 'internal',
+      message: 'stream source died',
+      details: { requestedCwd: canonicalPath, retained: 'public detail' },
+    }))
+    const projectStreamFrame = vi.fn((frame: MuxFrame | HostFrame) => {
+      if (frame.type !== 'stream/error') return frame
+      const { requestedCwd: _requestedCwd, ...details } = frame.error.details as Record<string, unknown>
+      return { ...frame, error: { ...frame.error, details } } as MuxFrame | HostFrame
+    })
+    const projected = toFetchHandler(api, {
+      version: 1,
+      allows: () => true,
+      projectError,
+      projectStreamFrame,
+    } as never)
+
+    const response = await projected.fetch(new Request('http://x/api/events.mux'))
+    const text = await response.text()
+    const data = text.split('\n').find(line => line.startsWith('data: '))
+    if (data === undefined) throw new Error('projected SSE response omitted its failure frame')
+    const frame = JSON.parse(data.slice('data: '.length)) as {
+      payload: MuxFrame | HostFrame
+    }
+
+    expect(frame.payload).toEqual({
+      type: 'stream/error',
+      error: {
+        code: 'internal',
+        message: 'stream source died',
+        details: { retained: 'public detail' },
+      },
+    })
+    expect(text).not.toContain(canonicalPath)
+    expect(projectError).toHaveBeenCalledExactlyOnceWith('stream/error', {
+      code: 'internal',
+      message: `Error: stream source died at ${canonicalPath}`,
+      details: {},
+    })
+    expect(projectStreamFrame).toHaveBeenCalledExactlyOnceWith({
+      type: 'stream/error',
+      error: {
+        code: 'internal',
+        message: 'stream source died',
+        details: { requestedCwd: canonicalPath, retained: 'public detail' },
+      },
+    })
+  })
+
+  it('does not serialize a source failure frame dropped by the SSE policy', async () => {
+    const api = fakeApi()
+    api.events.mux = (_request, _signal) => (async function * (): AsyncGenerator<RpcRequest<MuxFrame>> {
+      throw new Error('stream source died')
+    })()
+    const projectStreamFrame = vi.fn((frame: MuxFrame | HostFrame) =>
+      frame.type === 'stream/error' ? undefined : frame)
+    const projected = new InProcessApiClient(toFetchHandler(api, {
+      version: 1,
+      allows: () => true,
+      projectStreamFrame,
+    } as never))
+
+    const frames = await collect(projected.events.mux({}, new AbortController().signal))
+
+    expect(frames).toEqual([])
+    expect(projectStreamFrame).toHaveBeenCalledExactlyOnceWith({
+      type: 'stream/error',
+      error: { code: 'internal', message: 'Error: stream source died', details: {} },
+    })
   })
 })
 

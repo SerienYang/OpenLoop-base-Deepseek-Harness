@@ -5,6 +5,7 @@ import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
 import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { usePinnedBrowserLanguages } from '@deepseek-ai/dsh-client-test-runtime'
+import type { SettingsShellOwner } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { apply, inject } from '@deepseek-ai/dsh-client-ui-settings-general/client'
 import { CloseLabel, HeaderContent, TriggerContent } from '../src/client/chrome.tsx'
 import { GeneralSection } from '../src/client/GeneralSection.tsx'
@@ -24,7 +25,12 @@ const SEATS = [
   ['settings.section', GeneralSection],
 ] as const
 
-async function bench(isLoopback = true) {
+async function bench(
+  isLoopback = true,
+  settingsShellOwner: SettingsShellOwner = {
+    id: '@deepseek-ai/dsh-client-ui-settings-general',
+  },
+) {
   const ctx = new Context()
   await ctx.plugin(SlotRegistry).await()
   const locale = new LocaleRuntime(ctx)
@@ -48,6 +54,7 @@ async function bench(isLoopback = true) {
     api: { settings: { describe: settingsDescribe, openDocument: settingsOpenDocument } },
     isLoopback,
   } as never)
+  ctx.provide('settingsShellOwner', settingsShellOwner)
   return { ctx, slots: ctx.get('slots') as SlotRegistry, locale, settingsDescribe, settingsOpenDocument }
 }
 
@@ -75,7 +82,7 @@ function generalEntry(slots: SlotRegistry) {
 
 describe('ui-settings-general apply', () => {
   it('declares the services it uses', () => {
-    expect(inject).toEqual(['slots', 'locale', 'connection'])
+    expect(inject).toEqual(['slots', 'locale', 'connection', 'settingsShellOwner'])
   })
 
   it('fills all five seats for declarations before or after apply', async () => {
@@ -88,7 +95,7 @@ describe('ui-settings-general apply', () => {
     const entry = generalEntry(before.slots)!
     expect(entry.options).toMatchObject({ id: 'general', order: 0 })
     // The nav label is a locale-following thunk; owners resolve at read time.
-    expect(resolveSlotLabel(entry.options.label)).toBe('通用设置')
+    expect(resolveSlotLabel(entry.options.label)).toBe('通用')
     expect(before.slots.spec('settings.general.item')).toEqual({ kind: 'list', scope: 'root' })
     expect(before.slots.entries('settings.general.item')).toEqual([])
     // The onboarding hole stays declared for feature-owned steps; this plugin
@@ -146,7 +153,21 @@ describe('ui-settings-general apply', () => {
     })
     expect(resolveSlotLabel(generalEntry(b.slots)!.options.label)).toBe('General')
     b.locale.setLocale('zh')
-    expect(resolveSlotLabel(generalEntry(b.slots)!.options.label)).toBe('通用设置')
+    expect(resolveSlotLabel(generalEntry(b.slots)!.options.label)).toBe('通用')
+  })
+
+  it('defers shell ownership to an optional product marker while retaining General and safe actions', async () => {
+    const b = await bench(true, { id: '@openloop/shell' })
+    declare(b.slots)
+    await b.ctx.plugin({ inject: [...inject], apply }).await()
+
+    expect(b.slots.entries('sidebar.settings')).toEqual([])
+    expect(b.slots.entries('settings.trigger')).toEqual([])
+    expect(b.slots.entries('settings.header')).toEqual([])
+    expect(b.slots.entries('settings.close')).toEqual([])
+    expect(b.slots.entries('settings.action')[0]?.component).toBe(SettingsDocumentAction)
+    expect(generalEntry(b.slots)?.options).toMatchObject({ id: 'general', order: 0 })
+    expect(resolveSlotLabel(generalEntry(b.slots)!.options.label)).toBe('通用')
   })
 
   it('refreshes loaded document availability on reconnect without reading it eagerly', async () => {

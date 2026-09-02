@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import Schema from '@deepseek-ai/schemastery'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
 import type { RpcResponse, SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
+import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { ModelsSection, providerCopy } from '../src/client/ModelsSection.tsx'
 import type { ModelsSectionInjected } from '../src/client/ModelsSection.tsx'
 import { CustomProviderCard } from '../src/client/CustomProviderCard.tsx'
@@ -17,6 +18,18 @@ afterEach(cleanup)
 const t: ModelsSectionInjected['t'] = key => en[key]
 
 const PROTOCOLS = ['openai-completions', 'openai-responses', 'anthropic-messages']
+
+function hostCredentialControl(): CredentialControlAdapter {
+  return {
+    describe: vi.fn(() => Promise.resolve({
+      configured: false,
+      writable: true,
+    })),
+    render: ({ label }) => <div data-testid="host-credential-control">{label}</div>,
+    materializeApiKeyEnv: true,
+    deleteCredentialWithProfile: false,
+  }
+}
 
 /** The pi-ai profile shape as the host serializes it, including the layer-1 fields. */
 const PiAiConfig = Schema.object({
@@ -706,6 +719,32 @@ describe('hand-declared providers', () => {
       expectedRevision: 7,
     })
     expect(set).toHaveBeenCalledWith({ ref: 'ACME_GATEWAY_API_KEY', value: 'gw-key' })
+  })
+
+  it('materializes an Openloop credential reference without accepting or probing a secret', async () => {
+    const credentialControl = hostCredentialControl()
+    const { mutate, set, discover, onClose } = mountCard({ credentialControl })
+
+    fireEvent.change(screen.getByLabelText(en.customRoute), { target: { value: 'acme-gateway' } })
+    fireEvent.change(screen.getByLabelText(en.baseUrl), { target: { value: 'https://gateway.acme.example/v1' } })
+    fireEvent.click(screen.getByRole('button', { name: en.addModel }))
+    fireEvent.change(screen.getByLabelText(`${en.modelId} 1`), { target: { value: 'acme-large' } })
+
+    expect(screen.getByText(en.keyManagedAfterCreate)).toBeTruthy()
+    expect(screen.queryByTestId('host-credential-control')).toBeNull()
+    expect(screen.queryByLabelText(en.keyInput)).toBeNull()
+    expect(document.querySelector('input[type="password"]')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: en.fetchModels }))
+    await waitFor(() => { expect(discover).toHaveBeenCalledOnce() })
+    expect(firstProbe(discover)).not.toHaveProperty('apiKey')
+
+    fireEvent.click(screen.getByText(en.create))
+    await waitFor(() => { expect(onClose).toHaveBeenCalledWith(true) })
+    expect(firstMutate(mutate).ops[0]?.value).toMatchObject({
+      apiKeyEnv: 'ACME_GATEWAY_API_KEY',
+    })
+    expect(set).not.toHaveBeenCalled()
   })
 
   it('scopes each card to fields a provider can actually own', async () => {

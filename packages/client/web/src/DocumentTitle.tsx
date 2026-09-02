@@ -1,4 +1,7 @@
 import { useEffect, useRef } from 'react'
+import {
+  DEFAULT_PRODUCT_BRAND, useProductBrand,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 
 /** Props for the shell-owned browser title projection. */
 export interface DocumentTitleProps {
@@ -14,9 +17,11 @@ export interface DocumentTitleProps {
  */
 export function DocumentTitle({ title }: DocumentTitleProps): null {
   const original = useRef(document.title)
+  const brand = useProductBrand()
+  const suffix = brand === DEFAULT_PRODUCT_BRAND ? original.current : brand.documentSuffix
   useEffect(() => {
-    document.title = title === undefined ? original.current : `${title} — ${original.current}`
+    document.title = title === undefined ? suffix : `${title} — ${suffix}`
     return () => { document.title = original.current }
-  }, [title])
+  }, [suffix, title])
   return null
 }

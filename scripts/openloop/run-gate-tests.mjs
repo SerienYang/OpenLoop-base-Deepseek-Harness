@@ -1,17 +1,21 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   existsSync,
+  mkdtempSync,
   readFileSync,
   realpathSync,
   readdirSync,
   statSync,
+  writeFileSync,
 } from 'node:fs'
-import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { tmpdir } from 'node:os'
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
+import { cleanupWdioRun } from './wdio-cleanup.mjs'
 
 const allowlistPath = 'scripts/openloop/test-skip-allowlist.json'
 const ignoredDirectories = new Set([
@@ -76,6 +80,10 @@ export function parseGateArguments(args) {
       const options = optionMap(rest, ['--file'])
       return { mode, file: options['--file'] }
     }
+    case 'web-vitest': {
+      const options = optionMap(rest, ['--file'])
+      return { mode, file: options['--file'] }
+    }
     case 'wdio': {
       const options = optionMap(rest, ['--config', '--binary', '--file'])
       return {
@@ -89,7 +97,7 @@ export function parseGateArguments(args) {
       if (rest.length > 0) throw new Error('scan-repo accepts no options')
       return { mode }
     default:
-      throw new Error('mode must be vitest, cargo, playwright, wdio, or scan-repo')
+      throw new Error('mode must be vitest, cargo, playwright, web-vitest, wdio, or scan-repo')
   }
 }
 
@@ -115,6 +123,17 @@ function repoPath(root, value, label) {
     absolute,
     relative: rel.split(sep).join('/'),
   }
+}
+
+function repoCandidatePath(root, value, label) {
+  if (globCharacters.test(value)) throw new Error(`${label} must be an exact path: ${value}`)
+  const absolute = isAbsolute(value) ? resolve(value) : resolve(root, value)
+  const rel = relative(root, absolute)
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error(`${label} must stay inside the repository: ${value}`)
+  }
+  if (existsSync(absolute)) return repoPath(root, value, label)
+  return { absolute, relative: rel.split(sep).join('/') }
 }
 
 function walkFiles(root, start = root) {
@@ -449,18 +468,36 @@ function assertPlaywrightResult(result) {
   assertCommandPassed(result, 'Playwright')
 }
 
-function assertWdioResult(result) {
-  const summaries = [...`${result.stdout}\n${result.stderr}`.matchAll(
-    /(\d+)\s+passed,\s+(\d+)\s+failed,\s+(\d+)\s+skipped/gu,
-  )]
-  const executed = summaries.reduce(
-    (total, match) => total + Number(match[1]) + Number(match[2]),
-    0,
-  )
-  const skipped = summaries.reduce((total, match) => total + Number(match[3]), 0)
-  if (executed === 0 && skipped > 0) throw new Error('WDIO all discovered tests were skipped')
-  if (executed === 0) throw new Error('WDIO executed zero tests')
+function assertWdioResult(result, auditPath) {
   assertCommandPassed(result, 'WDIO')
+  const records = readFileSync(auditPath, 'utf8')
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line)
+      } catch {
+        throw new Error('WDIO produced an invalid structured test audit')
+      }
+    })
+  const executed = records.filter(record =>
+    record?.state === 'passed' || record?.state === 'failed').length
+  if (executed > 0) return
+  const auditedSkipped = records.filter(record => record?.state === 'skipped').length
+  if (auditedSkipped > 0) throw new Error('WDIO all discovered tests were skipped')
+  const output = `${result.stdout}\n${result.stderr}`
+  const summaries = [...output.matchAll(
+    /^Spec Files:\s+(\d+)\s+passed,\s+(?:(\d+)\s+retries,\s+)?(?:(\d+)\s+failed,\s+)?(?:(\d+)\s+skipped,\s+)?(\d+)\s+total\s+\(\d+%\s+completed\)\s+in\s+\d{2}:\d{2}:\d{2}\s*$/gmu,
+  )]
+  const allSkipped = summaries.some(match => {
+    const passed = Number(match[1])
+    const failed = Number(match[3] ?? 0)
+    const skipped = Number(match[4] ?? 0)
+    const total = Number(match[5])
+    return passed === 0 && failed === 0 && skipped > 0 && skipped === total
+  })
+  if (allSkipped) throw new Error('WDIO all discovered tests were skipped')
+  throw new Error('WDIO executed zero tests')
 }
 
 function defaultRunCommand(command, args, options = {}) {
@@ -528,33 +565,99 @@ export async function runGateTests(args, dependencies = {}) {
   if (request.mode === 'playwright') {
     const file = repoPath(root, request.file, 'target')
     validateSkips(root, [file.absolute], allowlist)
+    const build = await invoke(runCommand, root, 'pnpm', ['run', 'e2e:build:web'])
+    assertCommandPassed(build, 'Playwright E2E build')
     const result = await invoke(
       runCommand,
       root,
       'pnpm',
-      ['exec', 'playwright', 'test', file.relative, '--reporter=json'],
+      [
+        'exec', 'playwright', 'test', file.relative,
+        '--config', 'apps/web/playwright.config.ts',
+        '--reporter=json',
+      ],
     )
     assertPlaywrightResult(result)
     return
   }
 
+  if (request.mode === 'web-vitest') {
+    const file = repoPath(root, request.file, 'target')
+    validateSkips(root, [file.absolute], allowlist)
+    const build = await invoke(runCommand, root, 'pnpm', ['run', 'build'])
+    assertCommandPassed(build, 'Web test build')
+    const result = await invoke(
+      runCommand,
+      root,
+      'pnpm',
+      [
+        'exec', 'vitest', 'run',
+        '--config', 'vitest.web.config.ts',
+        file.relative,
+        '--reporter=json',
+      ],
+    )
+    assertVitestResult(result)
+    return
+  }
+
   const config = repoPath(root, request.config, 'WDIO config')
-  const binary = repoPath(root, request.binary, 'WDIO binary')
+  repoCandidatePath(root, request.binary, 'WDIO binary')
   const file = repoPath(root, request.file, 'target')
   validateSkips(root, [file.absolute], allowlist)
-  const result = await invoke(
-    runCommand,
-    root,
-    'pnpm',
-    ['exec', 'wdio', 'run', config.relative, '--spec', file.relative],
-    {
-      env: {
-        ...process.env,
-        OPENLOOP_WDIO_BINARY: binary.absolute,
+  const build = await invoke(runCommand, root, 'pnpm', ['run', 'e2e:build'])
+  assertCommandPassed(build, 'WDIO E2E build')
+  const binary = repoPath(root, request.binary, 'WDIO binary')
+  const packageDirectory =
+    normalizedRelativePath(root, dirname(config.absolute)) || '.'
+  const e2eRoot = mkdtempSync(join(tmpdir(), 'openloop-wdio-'))
+  const runId = randomUUID()
+  const runtimeAudit = join(e2eRoot, 'runtime-process.json')
+  const resultAudit = join(e2eRoot, 'wdio-results.jsonl')
+  writeFileSync(resultAudit, '', { mode: 0o600 })
+  let failure
+  try {
+    const result = await invoke(
+      runCommand,
+      root,
+      'pnpm',
+      [
+        '--dir', packageDirectory,
+        'exec', 'wdio', 'run', config.absolute,
+        '--spec', file.absolute,
+      ],
+      {
+        env: {
+          ...process.env,
+          OPENLOOP_WDIO_BINARY: binary.absolute,
+          OPENLOOP_E2E_ROOT: e2eRoot,
+          OPENLOOP_E2E_RUN_ID: runId,
+          OPENLOOP_E2E_RUNTIME_AUDIT: runtimeAudit,
+          OPENLOOP_WDIO_RESULT_AUDIT: resultAudit,
+        },
       },
-    },
-  )
-  assertWdioResult(result)
+    )
+    assertWdioResult(result, resultAudit)
+  } catch (error) {
+    failure = error
+  }
+  try {
+    await cleanupWdioRun({
+      root: e2eRoot,
+      auditPath: runtimeAudit,
+      expectedRunId: runId,
+      requireAudit: failure === undefined,
+    })
+  } catch (cleanupError) {
+    if (failure === undefined) throw cleanupError
+    throw new AggregateError(
+      [failure, cleanupError],
+      `${failure instanceof Error ? failure.message : String(failure)}; ${
+        cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+      }`,
+    )
+  }
+  if (failure !== undefined) throw failure
 }
 
 const isMain = process.argv[1] !== undefined

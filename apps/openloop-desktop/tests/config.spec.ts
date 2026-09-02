@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
+import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 import ts from 'typescript'
 import { parse as parseToml } from 'smol-toml'
@@ -108,13 +109,6 @@ function scriptArguments(script: string): readonly string[] {
     throw new Error(`Desktop scripts must not require shell parsing: ${script}`)
   }
   return script.trim().split(/\s+/u)
-}
-
-function commandNamesFromBuildScript(source: string): readonly string[] {
-  const calls = [...source.matchAll(/\.commands\s*\(\s*&\s*\[([\s\S]*?)\]\s*\)/gu)]
-  if (calls.length !== 1) return []
-  return [...(calls[0]?.[1] ?? '').matchAll(/"([a-z][a-z0-9_]*)"/gu)]
-    .map((match, index) => requiredValue(match[1], `build command ${index}`))
 }
 
 function embeddedManifestPath(source: string): string | undefined {
@@ -266,6 +260,7 @@ describe('Openloop desktop foundation configuration', () => {
     expect(Object.keys(scripts).sort()).toEqual([
       'build',
       'dev',
+      'e2e:build',
       'frontend:build',
       'frontend:dev',
       'icon',
@@ -293,6 +288,13 @@ describe('Openloop desktop foundation configuration', () => {
     expect(dependencies).toEqual({ '@tauri-apps/api': '2.11.1' })
     expect(devDependencies).toEqual({
       '@tauri-apps/cli': '2.11.4',
+      '@wdio/cli': '9.29.1',
+      '@wdio/globals': '9.29.1',
+      '@wdio/local-runner': '9.29.1',
+      '@wdio/mocha-framework': '9.29.1',
+      '@wdio/spec-reporter': '9.29.1',
+      '@wdio/tauri-service': '1.3.0',
+      '@wdio/types': '9.29.1',
       typescript: '6.0.3',
       vite: '8.0.16',
     })
@@ -315,6 +317,13 @@ describe('Openloop desktop foundation configuration', () => {
       'aarch64-apple-darwin',
       '--bundle',
       'app',
+    ])
+    expect(scriptArguments(requiredValue(scripts['e2e:build'], 'e2e:build script'))).toEqual([
+      'pnpm',
+      '--dir',
+      '../..',
+      'run',
+      'e2e:build',
     ])
     expect(scriptArguments(requiredValue(scripts.icon, 'icon script'))).toEqual([
       'tauri',
@@ -360,6 +369,32 @@ describe('Openloop desktop foundation configuration', () => {
     expect(record(dependencies.serde, 'Cargo.toml serde dependency').version).toBe('=1.0.229')
     expect(dependencies.serde_json).toBe('=1.0.151')
     expect(macosDependencies).toEqual({
+      block2: '=0.6.2',
+      'core-foundation': '=0.10.1',
+      objc2: '=0.6.4',
+      'objc2-app-kit': {
+        version: '=0.3.2',
+        'default-features': false,
+        features: [
+          'NSAlert',
+          'NSApplication',
+          'NSButton',
+          'NSControl',
+          'NSOpenPanel',
+          'NSPanel',
+          'NSResponder',
+          'NSSavePanel',
+          'NSSecureTextField',
+          'NSTextField',
+          'NSView',
+          'NSWindow',
+        ],
+      },
+      'objc2-foundation': {
+        version: '=0.3.2',
+        'default-features': false,
+        features: ['NSArray', 'NSGeometry', 'NSString', 'NSThread', 'NSURL'],
+      },
       'security-framework': '=3.7.0',
       'security-framework-sys': '=2.17.0',
     })
@@ -388,6 +423,10 @@ describe('Openloop desktop foundation configuration', () => {
       'StateFlags::POSITION | StateFlags::SIZE | StateFlags::MAXIMIZED',
     )
     expect(windowStatePlugin).toContain('.with_filter(|label| label == "main")')
+    expect(library).toContain(
+      'let builder = if action == HostAction::Normal {',
+    )
+    expect(library).toContain('builder.plugin(window_state_plugin)')
     expect(library).not.toContain('StateFlags::FULLSCREEN')
     expect(builderPlugins.indexOf('.plugin(window_state_plugin)')).toBeGreaterThanOrEqual(0)
     expect(builderPlugins.indexOf('.plugin(window_state_plugin)')).toBeLessThan(
@@ -510,7 +549,7 @@ describe('Openloop desktop foundation configuration', () => {
       maximizable: true,
       fullscreen: false,
     }])
-    expect(security.capabilities).toEqual(['main', 'credentials'])
+    expect(security.capabilities).toEqual(['main'])
     expect(security.freezePrototype).toBe(true)
     expect(csp).toEqual(new Map([
       ['default-src', ["'self'"]],
@@ -561,12 +600,9 @@ describe('Openloop desktop foundation configuration', () => {
     })
   })
 
-  test('grants exact non-wildcard commands to the main and credentials windows', () => {
+  test('grants only the non-wildcard build command to the main window', () => {
     const mainCapability = readJson('apps/openloop-desktop/src-tauri/capabilities/main.json')
-    const credentialsCapability = readJson(
-      'apps/openloop-desktop/src-tauri/capabilities/credentials.json',
-    )
-    const serialized = JSON.stringify([mainCapability, credentialsCapability])
+    const serialized = JSON.stringify([mainCapability])
 
     expect(mainCapability).toEqual({
       $schema: '../gen/schemas/desktop-schema.json',
@@ -577,86 +613,163 @@ describe('Openloop desktop foundation configuration', () => {
       platforms: ['macOS'],
       permissions: ['allow-build-manifest'],
     })
-    expect(credentialsCapability).toEqual({
-      $schema: '../gen/schemas/desktop-schema.json',
-      identifier: 'credentials',
-      description: 'Local capability for the Openloop credential prompt.',
-      local: true,
-      windows: ['credentials'],
-      platforms: ['macOS'],
-      permissions: [
-        'allow-credentials-set',
-        'allow-credentials-unset',
-        'allow-credentials-status',
-      ],
-    })
     expect(mainCapability).not.toHaveProperty('remote')
-    expect(credentialsCapability).not.toHaveProperty('remote')
     expect(serialized).not.toContain('*')
+    expect(fs.existsSync(path.join(
+      repositoryRoot,
+      'apps/openloop-desktop/src-tauri/capabilities/credentials.json',
+    ))).toBe(false)
 
     const buildScript = readText('apps/openloop-desktop/src-tauri/build.rs')
-    expect(commandNamesFromBuildScript(buildScript)).toEqual([
-      'build_manifest',
-      'credentials_set',
-      'credentials_unset',
-      'credentials_status',
-    ])
+    expect(buildScript).toContain('&["build_manifest"]')
+    expect(buildScript).not.toContain('openloop_e2e_action')
     expect([...buildScript.matchAll(/\.commands\s*\(/gu)]).toHaveLength(1)
 
     const library = readText('apps/openloop-desktop/src-tauri/src/lib.rs')
-    expect(tauriCommandNames(library)).toEqual([
-      'build_manifest',
-      'credentials_set',
-      'credentials_unset',
-      'credentials_status',
-    ])
-    expect(invokeHandlerCommands(library)).toEqual([
-      'build_manifest',
-      'credentials_set',
-      'credentials_unset',
-      'credentials_status',
-    ])
-    expect([...library.matchAll(/tauri::generate_handler!\s*\[/gu)]).toHaveLength(2)
-    const macosBuilder = /#\[cfg\(target_os = "macos"\)\]\s*let builder = builder([\s\S]*?);/u
-      .exec(library)?.[1] ?? ''
-    const otherBuilder = /#\[cfg\(not\(target_os = "macos"\)\)\]\s*let builder = builder([\s\S]*?);/u
-      .exec(library)?.[1] ?? ''
-    expect(macosBuilder).toContain('.manage(KeychainStore::new(channel))')
-    expect(macosBuilder).toContain('.manage(SecurePromptState::default())')
-    expect(macosBuilder).toContain('credentials_status')
-    expect(otherBuilder).toContain(
+    expect(tauriCommandNames(library)).toEqual(['build_manifest'])
+    expect([...invokeHandlerCommands(library)]).toEqual(['build_manifest'])
+    expect([...library.matchAll(/tauri::generate_handler!\s*\[/gu)]).toHaveLength(1)
+    expect(library).toContain(
       '.invoke_handler(tauri::generate_handler![build_manifest])',
     )
-    expect(otherBuilder).not.toMatch(/KeychainStore|SecurePromptState|credentials_/u)
+    expect(library).not.toContain('openloop_e2e_action')
+    expect(library).not.toMatch(
+      /#\[cfg\(feature = "openloop-e2e"\)\]\s*\{\s*let _ = \(&updater_config, &runtime_manifest\);\s*Ok\(\(\)\)\s*\}/u,
+    )
+    expect([...library.matchAll(/start_runtime\s*\(\s*app\.handle\(\)/gu)]).toHaveLength(1)
+    expect(library).not.toMatch(/SecurePromptState|credentials_(?:set|unset|status)/u)
     expect(serialized).not.toMatch(/resolve|spike|open_secure_prompt/u)
-    expect(commandNamesFromBuildScript(buildScript)).not.toContain('resolve')
     expect(invokeHandlerCommands(library)).not.toContain('resolve')
     expect(tauriCommandNames(library)).not.toContain('open_secure_prompt')
 
     const credentialsModule = readText(
       'apps/openloop-desktop/src-tauri/src/credentials/mod.rs',
     )
-    const securePrompt = readText(
-      'apps/openloop-desktop/src-tauri/src/credentials/secure_prompt.rs',
-    )
     expect(fs.existsSync(path.join(
       repositoryRoot,
       'apps/openloop-desktop/src-tauri/src/credentials.rs',
     ))).toBe(false)
-    expect(credentialsModule).toContain('mod secure_prompt;')
-    expect(credentialsModule).toContain('pub use secure_prompt::{')
-    expect(credentialsModule).not.toContain('pub struct SecurePromptState')
-    expect(securePrompt).toContain('pub struct SecurePromptState')
-    expect(securePrompt).toContain('.initialization_script(')
-    expect(securePrompt).toContain('Object.defineProperty')
+    expect(credentialsModule).toContain('mod secure_sheet;')
+    expect(credentialsModule).toContain('pub use secure_sheet::{')
+    expect(credentialsModule).not.toContain('mod secure_prompt;')
+    expect(fs.existsSync(path.join(
+      repositoryRoot,
+      'apps/openloop-desktop/src-tauri/src/credentials/secure_prompt.rs',
+    ))).toBe(false)
+  })
+
+  test('keeps WDIO permissions and plugins exclusive to the E2E build', () => {
+    const releaseConfig = readJson('apps/openloop-desktop/src-tauri/tauri.conf.json')
+    const releaseSecurity = record(
+      record(releaseConfig.app, 'release app').security,
+      'release security',
+    )
+    const releaseCapability = readJson(
+      'apps/openloop-desktop/src-tauri/capabilities/main.json',
+    )
+    const e2eConfig = readJson('apps/openloop-desktop/tauri.e2e.conf.json')
+    const e2eSecurity = record(record(e2eConfig.app, 'E2E app').security, 'E2E security')
+    const e2eCapability = readJson(
+      'apps/openloop-desktop/capabilities/e2e.json',
+    )
+    const { $schema: _schema, ...inlineE2eCapability } = e2eCapability
+    const releaseStyles = readText('apps/openloop-desktop/src/styles.css')
+    const cargo = record(
+      parseToml(readText('apps/openloop-desktop/src-tauri/Cargo.toml')),
+      'Cargo.toml',
+    )
+    const features = record(cargo.features, 'Cargo features')
+    const dependencies = record(cargo.dependencies, 'Cargo dependencies')
+    const rootScripts = stringRecord(
+      readJson('package.json').scripts,
+      'root package.json scripts',
+    )
+    const wdioConfig = readText('apps/openloop-desktop/wdio.conf.ts')
+
+    expect(releaseSecurity.capabilities).toEqual(['main'])
+    expect(JSON.stringify([releaseConfig, releaseCapability])).not.toContain('wdio')
+    expect(releaseStyles).not.toContain('.e2e-controls')
+    expect(e2eSecurity.capabilities).toEqual([inlineE2eCapability])
+    expect(e2eConfig.identifier).toBe('ai.openloop.desktop.e2e')
+    expect(e2eConfig.productName).toBe('Openloop E2E')
+    expect(stringArray(e2eCapability.permissions, 'E2E permissions')).toEqual([
+      'allow-build-manifest',
+      'wdio:default',
+      'wdio-webdriver:default',
+    ])
+    expect(record(e2eConfig.bundle, 'E2E bundle').active).toBe(true)
+    expect(rootScripts['e2e:build']).toBe('node scripts/openloop/build-e2e.mjs')
+    expect(rootScripts['e2e:build:web']).toBe(
+      'node scripts/openloop/build-e2e.mjs --web-only',
+    )
+    expect(wdioConfig).toContain('.artifacts/openloop-e2e-target')
+    expect(wdioConfig).not.toContain('src-tauri/target')
+    expect(wdioConfig).not.toContain('pgrep')
+    expect(features['openloop-e2e']).toEqual([
+      'dep:tauri-plugin-wdio',
+      'dep:tauri-plugin-wdio-webdriver',
+    ])
+    for (const name of ['tauri-plugin-wdio', 'tauri-plugin-wdio-webdriver']) {
+      expect(record(dependencies[name], `${name} dependency`)).toMatchObject({
+        version: '=1.3.0',
+        optional: true,
+      })
+    }
+
+    const mainSource = readText('apps/openloop-desktop/src/main.ts')
+    expect(mainSource).not.toContain('openloop_e2e_action')
+    expect(mainSource).not.toContain('data-e2e')
+    expect(mainSource).not.toContain("import('./e2e.css')")
+    expect(fs.existsSync(path.join(
+      repositoryRoot,
+      'apps/openloop-desktop/src/e2e.css',
+    ))).toBe(false)
+  })
+
+  test('audits passed, failed, and dynamically skipped WDIO results distinctly', async () => {
+    const root = fs.mkdtempSync(path.join(tmpdir(), 'openloop-wdio-audit-'))
+    const audit = path.join(root, 'results.jsonl')
+    try {
+      const { writeWdioResultAudit } = await import('../wdio-result-audit.ts')
+
+      writeWdioResultAudit(audit, 'passes', {
+        passed: true,
+        skipped: false,
+      })
+      writeWdioResultAudit(audit, 'fails', {
+        error: new Error('failed'),
+        passed: false,
+        skipped: false,
+      })
+      writeWdioResultAudit(audit, 'skips at runtime', {
+        passed: false,
+        skipped: true,
+      })
+
+      expect(fs.readFileSync(audit, 'utf8').trim().split('\n').map(line =>
+        JSON.parse(line) as unknown,
+      )).toEqual([
+        { state: 'passed', title: 'passes' },
+        { state: 'failed', title: 'fails' },
+        { state: 'skipped', title: 'skips at runtime' },
+      ])
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
   })
 
   test('keeps the Rust and TypeScript build-manifest contracts identical', () => {
+    const buildScript = readText('apps/openloop-desktop/src-tauri/build.rs')
     const library = readText('apps/openloop-desktop/src-tauri/src/lib.rs')
     const rustFields = rustStructFields(library, 'OpenloopBuildManifest')
     const typeScriptFields = interfaceFields(
       'apps/openloop-desktop/src/main.ts',
       'OpenloopBuildManifest',
+    )
+    const rustBrandFields = rustStructFields(library, 'OpenloopBrandManifest')
+    const typeScriptBrandFields = interfaceFields(
+      'apps/openloop-desktop/src/main.ts',
+      'OpenloopBrandManifest',
     )
 
     expect(library).toMatch(/#\s*\[\s*serde\s*\(\s*rename_all\s*=\s*"camelCase"\s*,\s*deny_unknown_fields\s*\)\s*\]/u)
@@ -671,6 +784,7 @@ describe('Openloop desktop foundation configuration', () => {
       plugin_package_spec_version: 'String',
       openloop_data_version: 'u64',
       dsh_data_version: 'u64',
+      brand: 'OpenloopBrandManifest',
     })
     expect(typeScriptFields).toEqual({
       appVersion: 'string',
@@ -683,7 +797,26 @@ describe('Openloop desktop foundation configuration', () => {
       pluginPackageSpecVersion: 'string',
       openloopDataVersion: 'number',
       dshDataVersion: 'number',
+      brand: 'OpenloopBrandManifest',
     })
+    expect(rustBrandFields).toEqual({
+      product_name: 'String',
+      document_suffix: 'String',
+      mark_asset: 'String',
+      hero_title: 'String',
+      preview_label: 'String',
+      attribution: 'String',
+    })
+    expect(typeScriptBrandFields).toEqual({
+      productName: 'string',
+      documentSuffix: 'string',
+      markAsset: 'string',
+      heroTitle: 'string',
+      previewLabel: 'string',
+      attribution: 'string',
+    })
+    expect(buildScript).toContain('brand.preview_label != "预览版"')
+    expect(buildScript).toContain('preview_label: "预览版".into()')
   })
 
   test('embeds validated manifests and keeps updater ownership in the Rust Host', () => {
@@ -744,7 +877,23 @@ describe('Openloop desktop foundation configuration', () => {
     expect(library).toContain('tauri_plugin_updater::Builder::new()')
     expect(library).toContain('.target("darwin-aarch64")')
     expect(library).toContain('UpdaterExt')
-    expect(library).toMatch(/\.updater\s*\(\s*\)[^]*\.check\s*\(\s*\)\s*\.await/u)
+    expect(library).toContain('fn build_channel_updater(')
+    expect(library).not.toMatch(
+      /#\[cfg\(target_os = "macos"\)\]\s*fn build_channel_updater/u,
+    )
+    expect(library).toContain('app.updater_builder()')
+    expect(library).toContain('.endpoints(endpoints)?')
+    expect(library).toContain('.pubkey(public_key)')
+    expect(library).toContain('.timeout(timeout)')
+    expect(library).toContain(
+      'update.timeout = Some(update::channel::UPDATE_NETWORK_TIMEOUT)',
+    )
+    expect(library).toContain('updater_config: updater_config.clone()')
+    expect(library).toContain('build_channel_updater(&self.app, &self.updater_config)')
+    expect(library).toMatch(
+      /build_channel_updater\s*\(\s*app\s*,\s*&updater_config\s*\)[^]*\.check\s*\(\s*\)\s*\.await/u,
+    )
+    expect(library).not.toMatch(/\.updater\s*\(\s*\)/u)
     expect(library).toMatch(/\.download\s*\(/u)
     expect(library).not.toMatch(/\.install\s*\(|download_and_install/u)
     expect(library).toContain('RecoveryTransaction')
@@ -781,39 +930,23 @@ describe('Openloop desktop foundation configuration', () => {
     const mainSource = readText('apps/openloop-desktop/src/main.ts')
     const styles = readText('apps/openloop-desktop/src/styles.css')
     const index = readText('apps/openloop-desktop/index.html')
-    const credentials = readText('apps/openloop-desktop/src/credentials.ts')
-    const credentialsStyles = readText('apps/openloop-desktop/src/credentials.css')
-    const credentialsHtml = readText('apps/openloop-desktop/src/credentials.html')
     const frontend = [
       viteConfig,
       mainSource,
       styles,
       index,
-      credentials,
-      credentialsStyles,
-      credentialsHtml,
     ].join('\n').toLowerCase()
 
     expect(viteConfig).toMatch(/port:\s*1420/u)
     expect(viteConfig).toMatch(/strictPort:\s*true/u)
     expect(viteConfig).toContain("main: resolve(import.meta.dirname, 'index.html')")
-    expect(viteConfig).toContain(
-      "credentials: resolve(import.meta.dirname, 'src/credentials.html')",
-    )
+    expect(viteConfig).not.toMatch(/credentials/u)
     expect(mainSource).toContain('../../../assets/brand/openloop-icon.svg')
     expect(mainSource).toContain("invoke<OpenloopBuildManifest>('build_manifest')")
     expect(index).toContain('<title>Openloop</title>')
-    expect(credentialsHtml).toContain('<title>Openloop Credentials</title>')
-    expect(credentials).toContain(
-      "invokeCredential('credentials_set', { promptToken, secret })",
-    )
-    expect(credentials).toContain(
-      "invokeCredential('credentials_status', { promptToken })",
-    )
-    expect(credentials).toContain(
-      "invokeCredential('credentials_unset', { promptToken })",
-    )
-    expect(credentials).not.toMatch(/credentials_(?:resolve|open)|keychain_spike/u)
+    expect(fs.existsSync(path.join(appRoot, 'src/credentials.html'))).toBe(false)
+    expect(fs.existsSync(path.join(appRoot, 'src/credentials.ts'))).toBe(false)
+    expect(fs.existsSync(path.join(appRoot, 'src/credentials.css'))).toBe(false)
     expect(frontend).not.toMatch(/\bcyan\b|#00ffff|#0ff\b|rgb\s*\(\s*0\s*,\s*255\s*,\s*255\s*\)/u)
     expect(frontend).not.toMatch(/\b(?:linear|radial|conic)-gradient\s*\(/u)
     expect(frontend).not.toMatch(/\borbs?\b|\bcards?\b/u)
@@ -897,6 +1030,10 @@ describe('Openloop desktop foundation configuration', () => {
     const workspaces = record(knip.workspaces, 'knip workspaces')
     const runtime = record(workspaces['apps/openloop-runtime'], 'Openloop runtime knip config')
     const bundle = record(workspaces['packages/openloop/bundle'], 'Openloop bundle knip config')
+    const adapters = record(
+      workspaces['packages/openloop/adapters'],
+      'Openloop adapters knip config',
+    )
 
     expect(ignoredWorkspaces.filter(workspace => workspace.startsWith('runtime/'))).toEqual([
       'runtime/openloop',
@@ -925,7 +1062,23 @@ describe('Openloop desktop foundation configuration', () => {
       '@deepseek-ai/dsh-base',
       '@deepseek-ai/dsh-web-app',
       '@openloop/chat-zoom',
+      '@openloop/file-broker',
+      '@openloop/fs-workspace',
+      '@openloop/sandbox-workspace',
+      '@openloop/settings-foundation',
+      '@openloop/workspace-client',
+      '@openloop/workspace-authority',
     ])
+    expect(stringArray(adapters.entry, 'Openloop adapters entry')).toEqual([
+      'tests/**/*.spec.ts',
+      'contracts/**/*.ts',
+    ])
+    expect(stringArray(adapters.project, 'Openloop adapters project')).toEqual([
+      'src/**/*.ts',
+      'tests/**/*.ts',
+      'contracts/**/*.ts',
+    ])
+    expect(adapters.ignoreDependencies).toBeUndefined()
   })
 
   test('bootstraps host build tools before the only desktop build orchestrator', () => {
@@ -935,13 +1088,13 @@ describe('Openloop desktop foundation configuration', () => {
     const desktopScripts = stringRecord(desktopPackage.scripts, 'desktop package scripts')
 
     expect(rootScripts['openloop:build-desktop']).toBe(
-      'pnpm run build:lib:host && node scripts/openloop/build-desktop.mjs',
+      'node scripts/openloop/build-desktop.mjs',
     )
     expect(desktopScripts.build).toContain('openloop:build-desktop')
     expect(desktopScripts.build).not.toContain('tauri build')
     expect(Object.values(rootScripts).filter(script =>
       script.includes('build-desktop.mjs'))).toEqual([
-      'pnpm run build:lib:host && node scripts/openloop/build-desktop.mjs',
+      'node scripts/openloop/build-desktop.mjs',
     ])
   })
 

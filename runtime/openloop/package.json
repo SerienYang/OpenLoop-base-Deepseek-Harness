@@ -202,7 +202,17 @@
     "@openloop/build-contract": "workspace:^",
     "@openloop/bundle": "workspace:^",
     "@openloop/chat-zoom": "workspace:^",
+    "@openloop/credentials-keychain": "workspace:^",
+    "@openloop/desktop-bridge-client": "workspace:^",
+    "@openloop/desktop-bridge-host": "workspace:^",
+    "@openloop/file-broker": "workspace:^",
+    "@openloop/fs-workspace": "workspace:^",
     "@openloop/runtime": "workspace:^",
-    "@openloop/runtime-bootstrap": "workspace:^"
+    "@openloop/runtime-bootstrap": "workspace:^",
+    "@openloop/sandbox-workspace": "workspace:^",
+    "@openloop/settings-foundation": "workspace:^",
+    "@openloop/shell": "workspace:^",
+    "@openloop/workspace-authority": "workspace:^",
+    "@openloop/workspace-client": "workspace:^"
   }
 }

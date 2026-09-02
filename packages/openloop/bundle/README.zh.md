@@ -13,6 +13,18 @@
 `surfaceContext` 和由调用参数派生的 `trustedHosts`。后续 OpenLoop 产品能力必须
 通过此补丁添加；不得为了 OpenLoop 组合去修改 `packages/bundle/web-app`。
 
+该补丁还会挂载 `@openloop/desktop-bridge-host`，作为唯一的
+`browserApiPolicy` 所有者。`connection` 与 `typert-gateway` 两个条目都将该
+服务声明为 required injection，因此 policy 卸载时浏览器分派器会暂停，而不会
+出现 fail-open 窗口。此依赖只存在于 OpenLoop 层；默认 DSH Web bundle 不变。
+
+首发 profile 会禁用继承来的 `cordis-client-runner` 与 `ui-cordis` 两行，因此
+只加载静态签名的 Client roster。它还会禁用首版 policy 未开放其宽泛 Host 调用的
+上游设置、权限、agent-preset 与 Workspace Client owner。后续任务用专用 Host
+facade 替代前，这些界面不会加载。Openloop Desktop Bridge client 会提供由
+profile 选择的 runtime adapter，因此共享 client runtime 不会构造 legacy
+Workspace runtime，也不会调用任何 `workspace.*` 方法。
+
 ## 内置提供方
 
 该补丁还会添加以下 `llm-pi-ai` 提供方预设：
@@ -29,3 +41,6 @@ Agent Plan 密钥与普通方舟密钥、Coding Plan 密钥互不通用；请将
 
 `ensureOpenloopProfile()` 仅在 `package.json` 不存在时创建 `openloop` profile。
 该清单一旦存在，profile 和所有同级文件即归用户所有，本包不会再改动其字节。
+但 Openloop runtime 只接受精确的 shipped bundle 元组；profile patch 文件只能
+替换既有、非保护、非 group row 的 `config`。新增 row、未知 id、拓扑字段，以及
+对 policy、transport、dynamic Client 与 bootstrap row 的任何修改都会被拒绝。

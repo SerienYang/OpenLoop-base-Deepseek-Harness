@@ -23,12 +23,12 @@
 // (the plugin-row path discards the ReplayHandle; the direct install keeps
 // assertConsumed for the teardown fixture-consumption check).
 import { existsSync } from 'node:fs'
+import { deepStrictEqual, doesNotMatch, strictEqual } from 'node:assert'
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { Page } from 'playwright'
-import { expect } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include, { type PatchOptions } from '@deepseek-ai/cordis-plugin-include'
@@ -61,6 +61,10 @@ import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-agent'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
+import {
+  installRuntimeBootstrap,
+  type RuntimeLaunchSecrets,
+} from '@openloop/runtime-bootstrap'
 import { REPO_ROOT, requireDist } from './support.ts'
 
 // Host-side web e2e cannot import a browser package: doing so would pull that
@@ -99,8 +103,10 @@ export function webSnapshotMode(): WebSnapshotMode {
 /** The shipped composition under test: the dsh-base and dsh-web-app bundle patches over the empty profile root. */
 const BASE_PATCH_PATH = join(REPO_ROOT, 'packages/bundle/base/cordis.patch.yml')
 const WEB_PATCH_PATH = join(REPO_ROOT, 'packages/bundle/web-app/cordis.patch.yml')
+const OPENLOOP_PATCH_PATH = join(REPO_ROOT, 'packages/openloop/bundle/cordis.patch.yml')
 /** The installation anchor whose dependency surface the profile module fallback mirrors. */
 const INSTALL_ANCHOR = join(REPO_ROOT, 'apps/cli/package.json')
+const OPENLOOP_INSTALL_ANCHOR = join(REPO_ROOT, 'runtime/openloop/package.json')
 /** The deployment's own agent-preset root, shipped beside the app's config. */
 const SHIPPED_PRESET_DIR = join(REPO_ROOT, 'apps/cli/config/agent-presets')
 
@@ -183,8 +189,19 @@ export interface WebScaffold {
   close(): Promise<void>
 }
 
+/** Launch identity supplied by the fake native endpoint to the real Openloop plugins. */
+interface OpenloopFixtureRuntime extends RuntimeLaunchSecrets {
+  readonly coreManifest: Readonly<Record<string, unknown>>
+  readonly coreManifestSha256: string
+}
+
 /** Options for {@link launchWebScaffold}. */
 export interface LaunchOptions {
+  /**
+   * Boot the shipped Openloop product patch against a fake native UDS endpoint.
+   * The production runtime-bootstrap and desktop bridge plugins own all wiring.
+   */
+  openloop?: OpenloopFixtureRuntime
   /**
    * Optional product overlay applied after the shipped Web surface and before
    * the scaffold's hermetic test patches, matching the launcher's `--patch`
@@ -368,10 +385,18 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
   // drifting).
   const basePatches = loadOverlayPatches('web e2e scaffold', BASE_PATCH_PATH)
   const surfacePatches = loadOverlayPatches('web e2e scaffold', WEB_PATCH_PATH)
+  const openloopPatches = options.openloop === undefined
+    ? []
+    : loadOverlayPatches('web e2e scaffold', OPENLOOP_PATCH_PATH)
   const extraOverlayPatches = options.extraOverlayPath === undefined
     ? []
     : loadOverlayPatches('web e2e scaffold', options.extraOverlayPath)
-  const composedRows = composeEntries([basePatches, surfacePatches, extraOverlayPatches])
+  const composedRows = composeEntries([
+    basePatches,
+    surfacePatches,
+    openloopPatches,
+    extraOverlayPatches,
+  ])
   const webRuntimeConfig = composedRows.find(row => row.id === 'web-runtime')?.config as {
     surfaceContext?: boolean
   } | undefined
@@ -379,6 +404,7 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
   const patches: PatchOptions[] = [
     ...basePatches,
     ...surfacePatches,
+    ...openloopPatches,
     ...extraOverlayPatches,
     // The roster's `roots` is an assembly fact AppCLIEntry resolves and patches
     // in, exactly like `distIndex` on the webserver row — the shipped preset
@@ -501,7 +527,10 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
     // The production module-resolution setup: an empty profile root inside the temp
     // harness home, with bare plugin names resolving through the flat module
     // fallback the launcher heals under <home>/profiles.
-    healProfilesModuleFallback(INSTALL_ANCHOR, harnessHome)
+    healProfilesModuleFallback(
+      options.openloop === undefined ? INSTALL_ANCHOR : OPENLOOP_INSTALL_ANCHOR,
+      harnessHome,
+    )
     const profileDir = join(harnessHome, 'profiles', 'scaffold')
     await mkdir(profileDir, { recursive: true })
     const rootConfig = join(profileDir, 'cordis.yml')
@@ -519,6 +548,21 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
         throw new Error(`web e2e scaffold: the web app requested exit ${String(code)} with no arguments to reject`)
       },
     })
+    if (options.openloop !== undefined) {
+      const {
+        coreManifest,
+        coreManifestSha256,
+        ...launchSecrets
+      } = options.openloop
+      const disposeRuntimeBootstrap = installRuntimeBootstrap(ctx, launchSecrets, {
+        manifest: coreManifest,
+        sha256: coreManifestSha256,
+      })
+      ctx.effect(
+        () => disposeRuntimeBootstrap,
+        'web e2e scaffold: Openloop runtime bootstrap',
+      )
+    }
     await ctx.plugin(Loader)
     ctx.loader.builtins.include = Include
     // `cordis:group` beside it, exactly as `boot()` registers it: a group row is
@@ -532,7 +576,7 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
     })
     await ctx.loader.await()
     assertEntriesLoaded(ctx, 'web e2e scaffold')
-    if (options.welcomeNoticePending !== true) {
+    if (options.openloop === undefined && options.welcomeNoticePending !== true) {
       await ctx.settings.mutate(settingsNamespace(WELCOME_NOTICE_SETTINGS_NAMESPACE), [{
         op: 'set', path: [WELCOME_NOTICE_ACK_FIELD], value: WELCOME_NOTICE_VERSION,
       }])
@@ -828,13 +872,14 @@ function normalizeAria(snapshot: string, workspaceCwd: string): string {
 export async function captureStableAria(page: Page, selector: string, workspaceCwd: string): Promise<string> {
   const region = page.locator(selector).first()
   let previous = normalizeAria(await region.ariaSnapshot(), workspaceCwd)
-  await expect.poll(async () => {
+  const deadline = Date.now() + 5_000
+  while (true) {
     const current = normalizeAria(await region.ariaSnapshot(), workspaceCwd)
-    const stable = current === previous
+    if (current === previous) return current
     previous = current
-    return stable
-  }, { timeout: 5_000, message: 'aria snapshot did not stabilize' }).toBe(true)
-  return previous
+    if (Date.now() >= deadline) throw new Error('aria snapshot did not stabilize')
+    await new Promise<void>(resolve => setTimeout(resolve, 100))
+  }
 }
 
 /**
@@ -854,7 +899,7 @@ export async function compareOrRefreshGolden(goldenPath: string, actual: string,
   if (!existsSync(goldenPath)) {
     throw new Error(`missing golden ${goldenPath} — run DSH_SNAPSHOT=refresh pnpm run test:web to generate it`)
   }
-  expect(payload).toBe(await readFile(goldenPath, 'utf8'))
+  strictEqual(payload, await readFile(goldenPath, 'utf8'))
 }
 
 /**
@@ -866,12 +911,19 @@ export async function compareOrRefreshGolden(goldenPath: string, actual: string,
  */
 export async function assertFixtureInventory(dir: string, expected: string[]): Promise<void> {
   const entries = (await readdir(dir)).sort()
-  expect(entries).toEqual([...expected].sort())
+  deepStrictEqual(entries, [...expected].sort())
   for (const entry of entries.filter(name => name.endsWith('.jsonl'))) {
     const content = await readFile(join(dir, entry), 'utf8')
-    expect(scrubRequestHeaders(content), `${dir}/${entry} carries request-header bulk`).toBe(content)
-    expect(content, `${dir}/${entry} carries a run-local rpcId`)
-      .not.toMatch(/"rpcId":"(?!\{\{rpcId\}\})[^"]+"/)
+    strictEqual(
+      scrubRequestHeaders(content),
+      content,
+      `${dir}/${entry} carries request-header bulk`,
+    )
+    doesNotMatch(
+      content,
+      /"rpcId":"(?!\{\{rpcId\}\})[^"]+"/,
+      `${dir}/${entry} carries a run-local rpcId`,
+    )
   }
 }
 

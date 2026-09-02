@@ -5,6 +5,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
+import { FishLogo, ProductBrandProvider } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { ProductBrand } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   createSnapshotStore, EMPTY_CHAT_SNAPSHOT, EMPTY_CONVERSATION_VIEWS,
 } from '@deepseek-ai/dsh-client-runtime/client'
@@ -54,6 +56,15 @@ beforeEach(() => {
 
 // Mirrors the real lookup chain (conversation namespace, then common).
 const t: ConversationRootProps['t'] = makeTranslate(zh, commonZh)
+
+const openloopBrand: ProductBrand = {
+  productName: 'Openloop',
+  documentSuffix: 'Openloop',
+  markAsset: 'openloop-icon',
+  heroTitle: 'Openloop',
+  previewLabel: '预览版',
+  attribution: 'Built on DeepSeek Harness',
+}
 
 const sid = (id: string) => id as SessionId
 const wid = (id: string) => id as WorkspaceId
@@ -260,8 +271,26 @@ function mount(
 describe('Hero chrome', () => {
   it('renders the English preview badge through the hero locale seat', () => {
     const view = render(<HeroShell t={makeTranslate(en, commonEn)} />)
-    expect(view.getByText('Into the Unknown')).toBeTruthy()
-    expect(view.getByText('Preview')).toBeTruthy()
+    expect(view.getByText('Into the Unknown').textContent).toBe('Into the Unknown')
+    expect(view.getByText('Preview').textContent).toBe('Preview')
+    const reference = render(<FishLogo size={34} />)
+    const heroFish = view.container.querySelector('svg[viewBox="0 0 23.16 17.04"]')
+    expect(heroFish?.innerHTML).toBe(reference.container.firstElementChild?.innerHTML)
+    expect(heroFish?.getAttribute('width')).toBe('34')
+    expect(heroFish?.getAttribute('height')).toBe(reference.container.firstElementChild?.getAttribute('height'))
+  })
+
+  it('renders the injected mark, title, and preview label without the DeepSeek fish', () => {
+    const view = render(
+      <ProductBrandProvider brand={openloopBrand}>
+        <HeroShell t={makeTranslate(en, commonEn)} />
+      </ProductBrandProvider>,
+    )
+    expect(view.container.querySelector('img')?.getAttribute('src')).toBe('openloop-icon')
+    expect(view.getByText('Openloop')).toBeTruthy()
+    expect(view.getByText('预览版')).toBeTruthy()
+    expect(view.queryByText('Into the Unknown')).toBeNull()
+    expect(view.container.querySelector('svg[viewBox="0 0 23.16 17.04"]')).toBeNull()
   })
 })
 

@@ -701,6 +701,7 @@
         "tests/**/*.e2e.ts",
         "tests/**/*.perf.ts",
         "tests/**/*.snapshot.ts",
+        "tests/openloop-minimum-shell-server.ts",
         "tests/support.ts",
         "src/node-module-stub.ts"
       ],
@@ -709,13 +710,24 @@
         "tests/**/*.ts"
       ],
       "ignoreDependencies": [
-        "@deepseek-ai/dsh-client-ui-primitives",
         "@deepseek-ai/dsh-client-ui-slots",
-        "@deepseek-ai/dsh-client-web-react",
-        "@types/react",
-        "@types/react-dom",
-        "react",
-        "react-dom"
+        "@deepseek-ai/dsh-client-web-react"
+      ]
+    },
+    "apps/openloop-desktop": {
+      "entry": [
+        "tests/**/*.spec.ts",
+        "tests/**/*.e2e.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "tests/**/*.ts",
+        "*.config.ts"
+      ],
+      "ignoreDependencies": [
+        "@wdio/cli",
+        "@wdio/local-runner",
+        "@wdio/tauri-service"
       ]
     },
     "apps/cli": {
@@ -780,11 +792,37 @@
         "@deepseek-ai/dsh"
       ]
     },
+    "packages/openloop/adapters": {
+      "entry": [
+        "tests/**/*.spec.ts",
+        "contracts/**/*.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "tests/**/*.ts",
+        "contracts/**/*.ts"
+      ]
+    },
     "packages/openloop/bundle": {
       "ignoreDependencies": [
         "@deepseek-ai/dsh-base",
         "@deepseek-ai/dsh-web-app",
-        "@openloop/chat-zoom"
+        "@openloop/chat-zoom",
+        "@openloop/file-broker",
+        "@openloop/fs-workspace",
+        "@openloop/sandbox-workspace",
+        "@openloop/settings-foundation",
+        "@openloop/workspace-client",
+        "@openloop/workspace-authority"
+      ]
+    },
+    "packages/openloop/desktop-bridge-host": {
+      "entry": [
+        "tests/**/*.spec.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "tests/**/*.ts"
       ]
     }
   }

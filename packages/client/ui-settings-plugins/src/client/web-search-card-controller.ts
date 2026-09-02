@@ -11,6 +11,10 @@
 
 import type { IApiClient } from '@deepseek-ai/dsh-client-connection/client'
 import type { SettingsScope, SettingsScopeSnapshot, SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+import type {
+  CredentialControlAdapter,
+  CredentialControlStatus,
+} from '@deepseek-ai/dsh-client-ui-settings/client'
 import {
   CardForm, numberField, textField,
   type CardActions, type CardFieldState, type CardShell,
@@ -39,7 +43,7 @@ export interface WebSearchSettings {
 }
 
 /** What the credentials domain last reported, and for which reference. */
-interface CredentialState {
+interface CredentialState extends CredentialControlStatus {
   /** Reference this answer describes; a stale response for another one is dropped. */
   ref: string
   /** Whether any layer supplies a value for it. */
@@ -55,7 +59,11 @@ export interface WebSearchCardState extends CardShell {
   /** Searches allowed per request. */
   maxUses: CardFieldState
   /** The staged credential, which starts blank on every load. */
-  apiKey: CardFieldState
+  apiKey?: CardFieldState
+  /** Reference passed to the optional product-owned credential control. */
+  credentialRef: string
+  /** Successful value-free reads, used to refresh an already-mounted product control. */
+  credentialVersion: number
   /** Whether the Host reports a credential configured for the referenced key. */
   apiKeyConfigured: boolean
   /** Whether the credentials domain accepts a write for it; false disables the control. */
@@ -64,6 +72,10 @@ export interface WebSearchCardState extends CardShell {
 
 /** The registration-side face the web-search card's slot entry injects. */
 export interface WebSearchCardFace extends CardActions {
+  /** Optional product-owned credential renderer. */
+  credentialControl?: CredentialControlAdapter
+  /** Re-read the value-free credential state after a product control mutation. */
+  refreshCredential: () => Promise<void>
   hooks: {
     /** Card snapshot bound by the renderer as useWebSearchCard. */
     webSearchCard: SnapshotStore<WebSearchCardState>
@@ -75,6 +87,8 @@ export class WebSearchCardController {
   private readonly form: CardForm<WebSearchSettings>
   private readonly store: SnapshotStore<WebSearchCardState>
   private credential: CredentialState = { ref: '', configured: false, writable: true }
+  private credentialVersion = 0
+  private credentialReadGeneration = 0
 
   /**
    * @param scope - the bound settings scope for the `web-search-deepseek` namespace.
@@ -83,11 +97,14 @@ export class WebSearchCardController {
   constructor(
     private readonly scope: SettingsScope<WebSearchSettings>,
     private readonly api: Pick<IApiClient, 'credentials'>,
+    private readonly credentialControl?: CredentialControlAdapter,
   ) {
     this.form = new CardForm(
       scope,
       [textField('baseURL'), numberField('maxUses')],
-      [{ field: API_KEY_FIELD, write: text => this.writeKey(text) }],
+      credentialControl === undefined
+        ? [{ field: API_KEY_FIELD, write: text => this.writeKey(text) }]
+        : [],
     )
     this.store = this.form.bind(() => this.projection())
     scope.subscribe(() => { void this.readCredential() })
@@ -99,7 +116,11 @@ export class WebSearchCardController {
       ...this.form.shell(),
       baseURL: this.form.field('baseURL'),
       maxUses: this.form.field('maxUses'),
-      apiKey: this.form.field(API_KEY_FIELD),
+      ...this.credentialControl === undefined
+        ? { apiKey: this.form.field(API_KEY_FIELD) }
+        : {},
+      credentialRef: this.credential.ref,
+      credentialVersion: this.credentialVersion,
       apiKeyConfigured: this.credential.configured,
       apiKeyWritable: this.credential.writable,
     }
@@ -115,31 +136,49 @@ export class WebSearchCardController {
    */
   private async readCredential(): Promise<void> {
     const ref = refOf(this.scope.getSnapshot())
+    const generation = ++this.credentialReadGeneration
     if (ref !== this.credential.ref) {
       // A new reference knows nothing yet; keeping the old answer would claim
       // the key is configured under a name nobody has checked.
       this.credential = { ref, configured: false, writable: true }
       this.store.set(this.projection())
     }
-    let response: Awaited<ReturnType<IApiClient['credentials']['describe']>>
     try {
-      response = await this.api.credentials.describe({ refs: [ref] })
+      if (this.credentialControl !== undefined) {
+        const view = await this.credentialControl.describe(ref)
+        if (generation !== this.credentialReadGeneration
+          || ref !== refOf(this.scope.getSnapshot())) return
+        this.publishCredential({
+          ref,
+          configured: view.configured,
+          writable: view.writable,
+          ...view.source === undefined ? {} : { source: view.source },
+        })
+        return
+      }
+      const response = await this.api.credentials.describe({ refs: [ref] })
+      if (!response.result.ok
+        || generation !== this.credentialReadGeneration
+        || ref !== refOf(this.scope.getSnapshot())) return
+      const view = response.result.value.credentials[ref]
+      this.publishCredential({
+        ref,
+        configured: view?.configured ?? false,
+        // An unknown reference is treated as writable: the control stays usable
+        // and the Host is what refuses, rather than the card guessing a refusal.
+        writable: view?.writable ?? true,
+        ...view?.source === undefined ? {} : { source: view.source },
+      })
     } catch (_credentialReadFailure) {
       // The card stays usable without this: the key control simply reports the
       // last state it knew, and a write still reaches the Host.
       return
     }
-    if (!response.result.ok || ref !== refOf(this.scope.getSnapshot())) return
-    const view = response.result.value.credentials[ref]
-    const next: CredentialState = {
-      ref,
-      configured: view?.configured ?? false,
-      // An unknown reference is treated as writable: the control stays usable
-      // and the Host is what refuses, rather than the card guessing a refusal.
-      writable: view?.writable ?? true,
-    }
-    if (next.configured === this.credential.configured && next.writable === this.credential.writable) return
+  }
+
+  private publishCredential(next: CredentialState): void {
     this.credential = next
+    this.credentialVersion++
     this.store.set(this.projection())
   }
 
@@ -151,9 +190,9 @@ export class WebSearchCardController {
    * without this the badge keeps reporting a state the Host already replaced.
    * @param ref - the reference the Host reports as changed.
    */
-  refreshCredential(ref: string): void {
+  async refreshCredential(ref = this.credential.ref): Promise<void> {
     if (ref !== this.credential.ref) return
-    void this.readCredential()
+    await this.readCredential()
   }
 
   /**
@@ -161,7 +200,14 @@ export class WebSearchCardController {
    * @returns the card's snapshot and its form actions.
    */
   inject(): WebSearchCardFace {
-    return { hooks: { webSearchCard: this.store }, ...this.form.actions() }
+    return {
+      hooks: { webSearchCard: this.store },
+      ...this.form.actions(),
+      refreshCredential: () => this.refreshCredential(),
+      ...this.credentialControl === undefined
+        ? {}
+        : { credentialControl: this.credentialControl },
+    }
   }
 
   /**

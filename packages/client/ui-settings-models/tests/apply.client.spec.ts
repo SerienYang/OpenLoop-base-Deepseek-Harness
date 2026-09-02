@@ -5,6 +5,7 @@ import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
 import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { TestRemote, usePinnedBrowserLanguages } from '@deepseek-ai/dsh-client-test-runtime'
+import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { apply, inject, refreshIfLoaded } from '@deepseek-ai/dsh-client-ui-settings-models/client'
 import { ModelsSection } from '../src/client/ModelsSection.tsx'
 import { DeepSeekOnboardingDialog } from '../src/client/DeepSeekOnboardingDialog.tsx'
@@ -14,7 +15,7 @@ import { WelcomeNotice } from '../src/client/WelcomeNotice.tsx'
 // the shipped Chinese copy, so they state the browser they assume.
 usePinnedBrowserLanguages('zh-CN')
 
-async function bench(isLoopback = true) {
+async function bench(isLoopback = true, credentialControl?: CredentialControlAdapter) {
   const ctx = new Context()
   await ctx.plugin(SlotRegistry).await()
   const locale = new LocaleRuntime(ctx)
@@ -25,6 +26,12 @@ async function bench(isLoopback = true) {
   // The apply path only captures the wire face; no call leaves this fake
   // until a section actually loads.
   ctx.provide('connection', { api: {}, isLoopback } as never)
+  ctx.provide('settingsShellOwner', {
+    id: credentialControl === undefined
+      ? '@deepseek-ai/dsh-client-ui-settings-general'
+      : '@openloop/shell',
+    ...credentialControl === undefined ? {} : { credentialControl },
+  } as never)
   return { ctx, slots: ctx.get('slots') as SlotRegistry, locale }
 }
 
@@ -43,7 +50,7 @@ function declare(slots: SlotRegistry): () => void {
 
 describe('ui-settings-models apply', () => {
   it('declares the services it uses', () => {
-    expect(inject).toEqual(['slots', 'locale', 'connection', 'remote'])
+    expect(inject).toEqual(['slots', 'locale', 'connection', 'remote', 'settingsShellOwner'])
   })
 
   it('registers the models nav entry for declarations before or after apply', async () => {
@@ -54,9 +61,9 @@ describe('ui-settings-models apply', () => {
     expect(entry.component).toBe(ModelsSection)
     expect(entry.options).toMatchObject({ id: 'models', order: 10 })
     // The nav label is a locale-following thunk; owners resolve at read time.
-    expect(resolveSlotLabel(entry.options.label)).toBe('模型')
+    expect(resolveSlotLabel(entry.options.label)).toBe('模型与凭据')
     const injected = (entry.inject as unknown as () => import('../src/client/ModelsSection.tsx').ModelsSectionInjected)()
-    expect(injected.t('nav')).toBe('模型')
+    expect(injected.t('nav')).toBe('模型与凭据')
     expect(injected.t('deleteTitle')).toBe('删除 {provider}？')
     expect(typeof injected.controller.load).toBe('function')
     expect(typeof injected.useSnapshot).toBe('function')
@@ -88,16 +95,43 @@ describe('ui-settings-models apply', () => {
     expect(after.slots.entries('settings.section')).toHaveLength(1)
   })
 
+  it('injects the optional credential control into Models and onboarding', async () => {
+    const credentialControl: CredentialControlAdapter = {
+      describe: vi.fn(),
+      render: () => null,
+      materializeApiKeyEnv: true,
+      deleteCredentialWithProfile: false,
+    }
+    const b = await bench(true, credentialControl)
+    declare(b.slots)
+    await b.ctx.plugin({ inject: [...inject], apply }).await()
+
+    const models = b.slots.entries('settings.section')[0]!
+    const modelsFace = (
+      models.inject as unknown as
+      () => import('../src/client/ModelsSection.tsx').ModelsSectionInjected
+    )()
+    const onboarding = b.slots.entries('settings.onboarding')
+      .find(entry => entry.options.id === 'deepseek-official')!
+    const onboardingFace = (
+      onboarding.inject as unknown as
+      () => import('../src/client/DeepSeekOnboardingDialog.tsx').DeepSeekOnboardingInjected
+    )()
+    expect(modelsFace.credentialControl).toBe(credentialControl)
+    expect(onboardingFace.credentialControl).toBe(credentialControl)
+  })
+
   it('the label thunk follows the active locale without re-registration', async () => {
     const b = await bench()
     declare(b.slots)
     await b.ctx.plugin({ inject: [...inject], apply }).await()
     b.locale.setLocale('en')
-    expect(resolveSlotLabel(b.slots.entries('settings.section')[0]!.options.label)).toBe('Models')
+    expect(resolveSlotLabel(b.slots.entries('settings.section')[0]!.options.label))
+      .toBe('Models & Credentials')
     const injected = b.slots.entries('settings.section')[0]!.inject as unknown as () => import('../src/client/ModelsSection.tsx').ModelsSectionInjected
     expect(injected().t('deleteTitle')).toBe('Delete {provider}?')
     b.locale.setLocale('zh')
-    expect(resolveSlotLabel(b.slots.entries('settings.section')[0]!.options.label)).toBe('模型')
+    expect(resolveSlotLabel(b.slots.entries('settings.section')[0]!.options.label)).toBe('模型与凭据')
     expect(injected().t('deleteTitle')).toBe('删除 {provider}？')
   })
 
@@ -125,7 +159,8 @@ describe('ui-settings-models apply', () => {
     expect(b.slots.entries('settings.onboarding')).toHaveLength(2)
     // The locale path also recovers through the same ledger re-check.
     b.locale.setLocale('en')
-    expect(resolveSlotLabel(b.slots.entries('settings.section')[0]!.options.label)).toBe('Models')
+    expect(resolveSlotLabel(b.slots.entries('settings.section')[0]!.options.label))
+      .toBe('Models & Credentials')
     b.locale.setLocale('zh')
   })
 
@@ -134,7 +169,7 @@ describe('ui-settings-models apply', () => {
     declare(b.slots)
     const fiber = b.ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
-    expect(b.locale.bind('settings.models')('nav')).toBe('模型')
+    expect(b.locale.bind('settings.models')('nav')).toBe('模型与凭据')
     await fiber.dispose()
     expect(b.slots.entries('settings.section')).toHaveLength(0)
     expect(b.slots.entries('settings.onboarding')).toHaveLength(0)

@@ -17,6 +17,39 @@ Cordis 插件还需设置 `openloop.cordisPlugin`，并声明范围一致的
 Client 项目可以在自身项目图中引用 pure 包，但不能再把该 pure 包列入根 Client
 聚合。
 
+OpenLoop 业务包只能通过包根或已声明的公开子路径导出来使用 DSH，禁止访问私有
+`src`/`lib` 路径。受支持 DSH 版本之间的兼容逻辑归
+`@openloop/adapters` 所有；该包以带版本、无副作用的契约转换公开的 Shell、
+Workspace、设置与桌面数据，但不负责持久化或工作流状态。
+
+`@openloop/shell` 是 Openloop profile 唯一的 Client `root` owner。它声明现有的
+sidebar、conversation、details 和 overlay Slot，以及一个供可信 WorkbenchHost
+使用的 root-scoped `workbench` Slot；同时保留共享的 `ctx.layout` panel action
+与主题投影，且不会改变默认 DSH profile 的行为。
+
+`@openloop/credentials-keychain` 是 Openloop profile 的 Host 凭据 provider。
+它依次解析继承的进程环境变量、按发布通道隔离的 macOS Keychain item，以及可选的
+只读旧来源。它的 Host-only consumer registry 负责生成原生删除确认所需的展示信息；
+浏览器调用方既不能解析明文，也不能提供这些展示信息。
+
+`@openloop/workspace-authority` 负责 Host 侧 Workspace 授权、事务、generation
+冲突和恢复契约。其浏览器视图仅包含 DSH Workspace id、显示名称和公开状态；
+规范路径、文件系统 identity、descriptor 与待处理 grant id 均仅留在 Host。
+
+`@openloop/file-broker` 是 Host-only Workspace 文件边界。它只接受 Workspace id
+和规范化的相对路径；原生操作从已保留且验证过的根 descriptor 开始遍历，并返回
+仅在本次启动中有效的不透明 handle。
+
+`@openloop/fs-workspace` 是 Openloop profile 的 DSH `FileSystem` provider。
+它把已登记 Workspace 路径映射为进程内 capability key，并通过 file broker handle
+执行元数据查询、读取、列目录、写入和编辑。
+
+`@openloop/sandbox-workspace` 将本发布版的 Workspace 进程执行能力明确标记为
+`disabled`。Openloop 不注册 `ctx.subprocess`，不提供 path-string fallback，
+禁用本地进程 provider、模型工具、代码模式 worker 与 workflow worker，并且只开放
+应用同一组进程禁用补丁后的 `standard` 和 `code` 系统 preset。原生
+`spawnWorkspaceProcess` Bridge 方法继续以 `not_implemented` fail-closed。
+
 通过根命令创建包：
 
 ```sh
@@ -30,3 +63,22 @@ bundle 行，并且只添加一个编译聚合引用。
 OpenLoop 聚焦测试通过 `pnpm openloop:gate-test -- <mode>` 运行。
 获批的临时跳过项位于 `scripts/openloop/test-skip-allowlist.json`；每条记录都必须
 包含负责人、原因和未来的到期日期。
+
+## 凭据边界证据
+
+浏览器 E2E fixture 组合发布的 DSH base、Web bundle 与 Openloop patch，并继续以
+`runtime/openloop/package.json` 作为模块解析 anchor。测试通过正常 Cordis lifecycle
+运行生产 `runtime-bootstrap`、`desktop-bridge-host`、Keychain credential provider、
+API proxy、Connection、Typert gateway、desktop Remote 与 `bootstrap-host` 插件。
+测试只用一个经过认证的 Unix domain socket 假端点替代 macOS 原生 UDS/Keychain
+实现；它不覆盖 Tauri、Security framework 存储或原生 sheet 渲染。
+
+该场景验证 Openloop 浏览器不暴露 DSH 密码输入入口、凭据在假原生端点完成替换前
+不会被报告为已配置、页面 bootstrap exchange 与 health acknowledgement 能完成，
+并验证真实 Connection/WebServer route 和 Typert gateway 都会拒绝浏览器读取明文
+凭据。它还启动默认 DSH Web profile，检查 onboarding、Models、Plugins 与原凭据
+服务仍然可用。
+
+```sh
+DSH_SNAPSHOT=replay pnpm openloop:gate-test -- web-vitest --file apps/web/tests/openloop-credential-boundary.e2e.ts
+```

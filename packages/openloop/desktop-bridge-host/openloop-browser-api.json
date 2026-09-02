@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "default": "deny",
+  "legacyRpcMethods": [
+    "host.describe",
+    "session.attachment",
+    "session.cancel",
+    "session.create",
+    "session.fork",
+    "session.history",
+    "session.list",
+    "session.models",
+    "session.prompt",
+    "session.rename",
+    "session.search",
+    "session.selectModel",
+    "session.updateQueue",
+    "skill.list",
+    "subagent.history",
+    "subagent.interrupt",
+    "subagent.list",
+    "subagent.prompt"
+  ],
+  "typertRemoteEndpoints": [
+    "commands/execute",
+    "commands/list",
+    "goals/clear",
+    "goals/edit",
+    "goals/pause",
+    "goals/resume",
+    "messageFeedback/delete",
+    "messageFeedback/list",
+    "messageFeedback/put",
+    "openloopDesktop/authorizeWorkspace",
+    "openloopDesktop/checkForUpdate",
+    "openloopDesktop/describeCredential",
+    "openloopDesktop/getAppInfo",
+    "openloopDesktop/getCredentialMigrationStatus",
+    "openloopDesktop/getUpdateStatus",
+    "openloopDesktop/installUpdateAndRestart",
+    "openloopDesktop/listWorkspaceGrants",
+    "openloopDesktop/openCredentialReplacement",
+    "openloopDesktop/reauthorizeWorkspace",
+    "openloopDesktop/renameWorkspace",
+    "openloopDesktop/revealWorkspace",
+    "openloopDesktop/revokeWorkspace",
+    "openloopDesktop/unsetCredential"
+  ],
+  "payloadRules": {
+    "session.create": {
+      "required": [
+        "workspaceId"
+      ],
+      "optional": [
+        "agentPreset"
+      ]
+    }
+  },
+  "transportRoutes": [
+    {
+      "method": "GET",
+      "path": "/api/events.mux"
+    },
+    {
+      "method": "GET",
+      "path": "/api/events.host"
+    },
+    {
+      "method": "POST",
+      "path": "/api/respond"
+    }
+  ]
+}

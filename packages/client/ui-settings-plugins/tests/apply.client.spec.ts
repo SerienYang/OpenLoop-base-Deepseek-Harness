@@ -7,6 +7,7 @@ import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { TestRemote, usePinnedBrowserLanguages } from '@deepseek-ai/dsh-client-test-runtime'
 import { SettingsScopeBinder } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { apply, inject } from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import type {
   ConfigurablePluginsTabFace, PluginsSettingsSectionInjected,
@@ -20,7 +21,7 @@ usePinnedBrowserLanguages('zh-CN')
  * @param served - namespaces the Host describes; omitted answers a failed read,
  * which is what most of these specs want (no card has anything to render).
  */
-async function bench(served?: string[]) {
+async function bench(served?: string[], credentialControl?: CredentialControlAdapter) {
   const ctx = new Context()
   await ctx.plugin(SlotRegistry).await()
   const locale = new LocaleRuntime(ctx)
@@ -52,6 +53,12 @@ async function bench(served?: string[]) {
       credentials: { describe: describeCredentials },
     },
   } as never)
+  ctx.provide('settingsShellOwner', {
+    id: credentialControl === undefined
+      ? '@deepseek-ai/dsh-client-ui-settings-general'
+      : '@openloop/shell',
+    ...credentialControl === undefined ? {} : { credentialControl },
+  } as never)
   await ctx.plugin(SettingsScopeBinder).await()
   return { ctx, slots: ctx.get('slots') as SlotRegistry, describeCredentials, describeSettings }
 }
@@ -65,7 +72,14 @@ function declareRoot(slots: SlotRegistry): () => void {
 
 describe('ui-settings-plugins apply', () => {
   it('declares the services it uses', () => {
-    expect(inject).toEqual(['slots', 'locale', 'connection', 'remote', 'settingsScope'])
+    expect(inject).toEqual([
+      'slots',
+      'locale',
+      'connection',
+      'remote',
+      'settingsScope',
+      'settingsShellOwner',
+    ])
   })
 
   it('registers one Plugins section and declares the tab and card slots', async () => {
@@ -126,6 +140,31 @@ describe('ui-settings-plugins apply', () => {
 
     expect(slots.entries('settings.plugin.item').map(entry => entry.options.key))
       .toEqual(['shell', 'agent-loop', 'web-search-deepseek'])
+  })
+
+  it('injects the optional Host credential control into Web Search without legacy reads', async () => {
+    const describe = vi.fn(() => Promise.resolve({ configured: false, writable: true }))
+    const credentialControl: CredentialControlAdapter = {
+      describe,
+      render: () => null,
+      materializeApiKeyEnv: true,
+      deleteCredentialWithProfile: false,
+    }
+    const { ctx, slots, describeCredentials } = await bench(
+      ['web-search-deepseek'],
+      credentialControl,
+    )
+    declareRoot(slots)
+    await ctx.plugin({ inject: [...inject], apply }).await()
+
+    const webSearch = slots.entries('settings.plugin.item')
+      .find(entry => entry.options.key === 'web-search-deepseek')!
+    const face = (webSearch.inject as unknown as () => { credentialControl?: unknown })()
+    expect(face.credentialControl).toBe(credentialControl)
+    await vi.waitFor(() => {
+      expect(describe).toHaveBeenCalledWith('DEEPSEEK_API_KEY')
+    })
+    expect(describeCredentials).not.toHaveBeenCalled()
   })
 
   it('dispatches the served namespaces its cards claim, and no others', async () => {

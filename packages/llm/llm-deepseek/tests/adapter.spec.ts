@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import LlmRuntime, { createUserMessage,
   CONTEXT_WINDOW_EXCEEDED_CODE,
@@ -600,6 +601,98 @@ describe('DeepSeekAdapter against a mock server', () => {
   })
 })
 
+describe('Openloop credential consumer wiring', () => {
+  it('registers the exact DeepSeek model-route owner for its live credential reference', async () => {
+    const disposeConsumer = vi.fn()
+    const replaceConsumer = vi.fn()
+    const registerDeepSeekModel = vi.fn(() => ({
+      replace: replaceConsumer,
+      dispose: disposeConsumer,
+    }))
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.provide('credentialConsumers', { registerDeepSeekModel } as never)
+
+    const fiber = ctx.plugin(LlmDeepSeek, {
+      apiKeyEnv: 'DEEPSEEK_CUSTOM_KEY',
+      baseURL: 'http://127.0.0.1:1',
+    })
+    await fiber
+
+    expect(registerDeepSeekModel).toHaveBeenCalledWith(credentialRef('DEEPSEEK_CUSTOM_KEY'))
+    await fiber.dispose()
+    expect(disposeConsumer).toHaveBeenCalledTimes(1)
+  })
+
+  it('aborts activation before publishing the model provider when initial consumer registration fails', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.provide('credentialConsumers', {
+      registerDeepSeekModel: vi.fn(() => {
+        throw new Error('consumer registry refused DeepSeek')
+      }),
+    } as never)
+
+    const failure = await ctx.plugin(LlmDeepSeek, {
+      apiKeyEnv: 'DEEPSEEK_INITIAL_KEY',
+      baseURL: 'http://127.0.0.1:1',
+    }).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toMatch(/consumer registry refused DeepSeek/)
+    expect(ctx.llm.listProviders()).toEqual([])
+    expect(ctx.llm.listConfigurableProviders()).toEqual([])
+  })
+
+  it('moves its registration with a replaced optional consumer registry', async () => {
+    const firstDispose = vi.fn()
+    const secondDispose = vi.fn()
+    const firstRegister = vi.fn(() => ({ replace: vi.fn(), dispose: firstDispose }))
+    const secondRegister = vi.fn(() => ({ replace: vi.fn(), dispose: secondDispose }))
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const fiber = ctx.plugin(LlmDeepSeek, {
+      apiKeyEnv: 'DEEPSEEK_DYNAMIC_KEY',
+      baseURL: 'http://127.0.0.1:1',
+    })
+    await fiber
+
+    const firstProvider = ctx.plugin({
+      name: 'first-deepseek-consumer-registry',
+      apply(serviceCtx: Context) {
+        serviceCtx.provide('credentialConsumers', {
+          registerDeepSeekModel: firstRegister,
+        } as never)
+      },
+    })
+    await firstProvider
+    await vi.waitFor(() => {
+      expect(firstRegister).toHaveBeenCalledWith(credentialRef('DEEPSEEK_DYNAMIC_KEY'))
+    })
+    await firstProvider.dispose()
+    await vi.waitFor(() => {
+      expect(firstDispose).toHaveBeenCalledTimes(1)
+    })
+
+    const secondProvider = ctx.plugin({
+      name: 'second-deepseek-consumer-registry',
+      apply(serviceCtx: Context) {
+        serviceCtx.provide('credentialConsumers', {
+          registerDeepSeekModel: secondRegister,
+        } as never)
+      },
+    })
+    await secondProvider
+    await vi.waitFor(() => {
+      expect(secondRegister).toHaveBeenCalledWith(credentialRef('DEEPSEEK_DYNAMIC_KEY'))
+    })
+
+    await fiber.dispose()
+    expect(secondDispose).toHaveBeenCalledTimes(1)
+    await secondProvider.dispose()
+  })
+})
+
 describe('plugin registration and config', () => {
   it('keeps wire helpers off the package root', () => {
     for (const helper of [
@@ -913,10 +1006,14 @@ describe('plugin registration and config', () => {
   })
 
   it('loads keyless, keeps the catalog browsable, and fails the request actionably', async () => {
-    vi.stubEnv('DEEPSEEK_API_KEY', '')
+    const privateReference = 'PRIVATE_DEEPSEEK_REFERENCE'
+    vi.stubEnv(privateReference, '')
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
-    await ctx.plugin(LlmDeepSeek, { baseURL: 'http://127.0.0.1:1' })
+    await ctx.plugin(LlmDeepSeek, {
+      apiKeyEnv: privateReference,
+      baseURL: 'http://127.0.0.1:1',
+    })
     // First-boot onboarding: the route registers so models stay discoverable;
     // only the request itself needs a key.
     expect(ctx.llm.listProviders()).toEqual([{ id: 'deepseek-official', name: 'DeepSeek' }])
@@ -927,10 +1024,38 @@ describe('plugin registration and config', () => {
     const second = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
     expect(second.finish.kind).toBe('error')
     if (second.finish.kind !== 'error') throw new Error('expected an error finish')
-    // The guidance names both places a credential can come from, and nothing
-    // else: configuration carries the reference, never a literal key.
-    expect(second.finish.failure.message)
-      .toMatch(/store DEEPSEEK_API_KEY through the credentials service.*export DEEPSEEK_API_KEY/s)
+    expect(second.finish.failure.message).toBe(
+      'llm-deepseek: no API key is available for provider route "deepseek-official";'
+      + ' store it through the credentials service (the web Models page writes it)'
+      + ' or configure it in the launching environment',
+    )
+    expect(second.finish.failure.message).not.toContain(privateReference)
+  })
+
+  it('redacts credential resolver errors from serialized failures', async () => {
+    const privateReference = 'PRIVATE_DEEPSEEK_RESOLVER_REFERENCE'
+    const privateDetail = `${privateReference}: resolver exposed sk-private-deepseek`
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.provide('credentials', {
+      resolve: vi.fn(() => Promise.reject(new Error(privateDetail))),
+    } as never)
+    await ctx.plugin(LlmDeepSeek, {
+      apiKeyEnv: privateReference,
+      baseURL: 'http://127.0.0.1:1',
+    })
+
+    const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+
+    expect(result.finish).toEqual({
+      kind: 'error',
+      failure: {
+        code: 'CREDENTIAL_RESOLUTION_FAILED',
+        message: 'llm-deepseek: credential resolution failed for provider route "deepseek-official"',
+      },
+    })
+    expect(JSON.stringify(result.finish)).not.toContain(privateReference)
+    expect(JSON.stringify(result.finish)).not.toContain('sk-private-deepseek')
   })
 
   it('reads the ambient variable when no credentials seam is mounted', async () => {

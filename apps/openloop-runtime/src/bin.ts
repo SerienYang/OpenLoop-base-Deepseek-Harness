@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import {
   closeSync,
   constants,
@@ -46,12 +46,17 @@ import {
   type RuntimeLaunchSecrets,
 } from '@openloop/runtime-bootstrap'
 import { readLaunchSecretsFromFd, type LaunchSecrets } from './launch-secrets.ts'
+import {
+  assertOpenloopProfileSecurity,
+  OPENLOOP_AGENT_PRESET_PATCHES,
+  OPENLOOP_ALLOWED_AGENT_PRESET_IDS,
+  validateOpenloopUserPatches,
+} from './profile-policy.ts'
 
 const BIN_NAME = 'openloop-runtime'
 const PROFILE = 'openloop'
 const HOST = '127.0.0.1'
 const SHUTDOWN_TIMEOUT_MS = 5_000
-const REQUIRED_WEB_ROWS = ['web-startup', 'webserver', 'web-runtime'] as const
 const AGENT_PRESETS_ROW = 'agent-presets'
 const DSH_PACKAGE = '@deepseek-ai/dsh'
 const EMPTY_ROOT = '[]\n'
@@ -78,6 +83,10 @@ export interface RuntimeReadiness {
     path: '/'
     status: 200
   }
+  candidateHealth?: {
+    webAsset: true
+    bootstrapExchange: true
+  }
 }
 
 interface RuntimeProcess {
@@ -96,6 +105,11 @@ interface RuntimeProcess {
 interface HealthResponse {
   status: number
   contentType: string
+}
+
+interface CandidateHealthResponse {
+  webAsset: boolean
+  bootstrapExchange: boolean
 }
 
 type RuntimeProfile = Pick<Profile, 'name' | 'dir' | 'layers' | 'patchPath' | 'patches'>
@@ -140,6 +154,11 @@ export interface RuntimeDependencies {
     release?: () => Promise<void> | void,
   ) => () => void
   healthRequest(origin: string): Promise<HealthResponse>
+  candidateHealthRequest(
+    origin: string,
+    launchId: string,
+    bootstrapTokenHex: string,
+  ): Promise<CandidateHealthResponse>
   setTimeout(handler: () => void, timeout: number): ReturnType<typeof setTimeout>
   clearTimeout(timer: ReturnType<typeof setTimeout>): void
 }
@@ -161,6 +180,24 @@ export function readCoreManifest(path: string): LoadedCoreManifest {
     bytes,
     manifest: parseOpenloopBuildManifest(value),
     sha256: createHash('sha256').update(bytes).digest('hex'),
+  }
+}
+
+/** Validate the candidate Host bootstrap identity before marking health ready. */
+export function isOpenloopBootstrapResponse(value: unknown, launchId: string): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const response = value as Record<string, unknown>
+  if (Object.keys(response).length !== 3
+    || response.launchId !== launchId
+    || typeof response.coreManifestSha256 !== 'string'
+    || !/^[0-9a-f]{64}$/u.test(response.coreManifestSha256)) {
+    return false
+  }
+  try {
+    parseOpenloopBuildManifest(response.coreManifest)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -266,10 +303,10 @@ function parseRuntimeArgs(argv: readonly string[]): RuntimeOptions {
 }
 
 export function readLaunchSecretsForRuntime(
-  options: RuntimeOptions,
+  _options: RuntimeOptions,
   read: () => LaunchSecrets = readLaunchSecretsFromFd,
 ): LaunchSecrets | undefined {
-  return options.healthSmoke ? undefined : read()
+  return read()
 }
 
 function filterHostBootstrapPatches(
@@ -277,7 +314,12 @@ function filterHostBootstrapPatches(
   includeHostBootstrap: boolean,
 ): PatchOptions[] {
   if (includeHostBootstrap) return [...patches]
-  return patches.filter(patch => !patch.insert?.some(entry => entry.id === 'openloop-bootstrap'))
+  return patches.flatMap((patch) => {
+    if (patch.insert === undefined) return [patch]
+    const insert = patch.insert.filter(entry => entry.id !== 'openloop-bootstrap')
+    if (insert.length === 0) return []
+    return [{ ...patch, insert }]
+  })
 }
 
 /**
@@ -307,6 +349,10 @@ function withShippedAgentPresetRoot(
       id: AGENT_PRESETS_ROW,
       config: {
         ...(row.config ?? {}) as Record<string, unknown>,
+        default: 'standard',
+        allowedPresetIds: [...OPENLOOP_ALLOWED_AGENT_PRESET_IDS],
+        includeUserRoot: false,
+        patches: structuredClone(OPENLOOP_AGENT_PRESET_PATCHES),
         roots: [{ path: presetRoot, trust: 'system' }],
       },
     },
@@ -318,11 +364,13 @@ function zeroizeLaunchSecrets(secrets: RuntimeLaunchSecrets): void {
   secrets.bridgeSecret.fill(0)
 }
 
-function assertWebRows(rows: readonly EntryOptions[]): void {
-  const present = new Set(rows.map(row => row.id).filter((id): id is string => typeof id === 'string'))
-  const missing = REQUIRED_WEB_ROWS.filter(id => !present.has(id))
-  if (missing.length > 0) {
-    throw new Error(`${BIN_NAME}: Openloop profile is missing required Web rows: ${missing.join(', ')}`)
+function assertSignedProfileLayers(profile: RuntimeProfile): void {
+  const actual = profile.layers.map(layer => layer.packageName)
+  if (actual.length !== OPENLOOP_PROFILE_BUNDLES.length
+    || actual.some((name, index) => name !== OPENLOOP_PROFILE_BUNDLES[index])) {
+    throw new Error(
+      `${BIN_NAME}: Openloop profile bundle layers must match the signed bundle tuple`,
+    )
   }
 }
 
@@ -448,6 +496,12 @@ export async function runOpenloopRuntime(
   dependencies: RuntimeDependencies = defaultDependencies,
   launchSecrets?: RuntimeLaunchSecrets,
 ): Promise<RuntimeReadiness> {
+  const candidateLaunch = options.healthSmoke && launchSecrets !== undefined
+    ? {
+      launchId: launchSecrets.launchId,
+      bootstrapTokenHex: Buffer.from(launchSecrets.bootstrapToken).toString('hex'),
+    }
+    : undefined
   const core = dependencies.loadCoreManifest(dependencies.coreManifestPath)
   const profileDir = dependencies.ensureOpenloopProfile(options.home)
   const rootConfig = join(profileDir, 'cordis.yml')
@@ -462,18 +516,31 @@ export async function runOpenloopRuntime(
   if (profile.name !== PROFILE || profile.dir !== profileDir) {
     throw new Error(`${BIN_NAME}: resolved profile identity does not match ${PROFILE}`)
   }
+  assertSignedProfileLayers(profile)
   const includeHostBootstrap = launchSecrets !== undefined
-  const composeRuntimePatches = (userPatches: readonly PatchOptions[]): PatchOptions[] =>
-    withShippedAgentPresetRoot(
-      filterHostBootstrapPatches([
-        ...profile.layers.flatMap(layer => layer.patches),
-        ...userPatches,
-      ], includeHostBootstrap),
+  const signedLayerPatches = profile.layers.flatMap(layer => layer.patches)
+  const signedPatches = withShippedAgentPresetRoot(
+    filterHostBootstrapPatches(signedLayerPatches, includeHostBootstrap),
+    dependencies.installAnchor,
+    profile.dir,
+  )
+  const signedRows = dependencies.composeEntries([signedPatches])
+  assertOpenloopProfileSecurity(signedRows, signedRows, includeHostBootstrap)
+  const composeRuntimePatches = (userPatches: readonly PatchOptions[]): PatchOptions[] => {
+    const validated = validateOpenloopUserPatches(userPatches, signedRows)
+    const patches = withShippedAgentPresetRoot(
+      filterHostBootstrapPatches([...signedLayerPatches, ...validated], includeHostBootstrap),
       dependencies.installAnchor,
       profile.dir,
     )
+    assertOpenloopProfileSecurity(
+      signedRows,
+      dependencies.composeEntries([patches]),
+      includeHostBootstrap,
+    )
+    return patches
+  }
   const patches = composeRuntimePatches(profile.patches)
-  assertWebRows(dependencies.composeEntries([patches]))
   const environment = dependencies.loadLayeredEnv(BIN_NAME)
   const shutdown = new RuntimeShutdown(dependencies)
   const removeSignals = installSignals(shutdown, dependencies.process)
@@ -499,6 +566,21 @@ export async function runOpenloopRuntime(
           } finally {
             zeroizeLaunchSecrets(launchSecrets)
           }
+        } else if (options.healthSmoke) {
+          const smokeSecrets: RuntimeLaunchSecrets = {
+            launchId: randomUUID(),
+            bootstrapToken: randomBytes(32),
+            bridgeSecret: randomBytes(32),
+            socketPath: join(profile.dir, '.openloop-health-smoke-bridge.sock'),
+          }
+          try {
+            shutdown.setBootstrapDisposer(installRuntimeBootstrap(hostContext, smokeSecrets, {
+              manifest: core.manifest as unknown as Readonly<Record<string, unknown>>,
+              sha256: core.sha256,
+            }))
+          } finally {
+            zeroizeLaunchSecrets(smokeSecrets)
+          }
         }
         hostContext.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
         dependencies.provideCmdline(hostContext, {
@@ -513,7 +595,14 @@ export async function runOpenloopRuntime(
     const stopWatcher = await dependencies.watchUserPatches(context, {
       binName: BIN_NAME,
       filename: profile.patchPath,
-      compose: userPatches => structuredClone(composeRuntimePatches(userPatches)),
+      compose: (userPatches) => {
+        try {
+          return structuredClone(composeRuntimePatches(userPatches))
+        } catch (error) {
+          shutdown.request(1)
+          throw error
+        }
+      },
     })
     shutdown.setWatcher(stopWatcher)
 
@@ -527,6 +616,21 @@ export async function runOpenloopRuntime(
       throw new Error(
         `${BIN_NAME}: health GET ${origin}/ returned ${String(health.status)} ${health.contentType || '(no content-type)'}`,
       )
+    }
+    let candidateHealth: RuntimeReadiness['candidateHealth']
+    if (candidateLaunch !== undefined) {
+      const checked = await dependencies.candidateHealthRequest(
+        origin,
+        candidateLaunch.launchId,
+        candidateLaunch.bootstrapTokenHex,
+      )
+      if (!checked.webAsset || !checked.bootstrapExchange) {
+        throw new Error(`${BIN_NAME}: candidate Web asset or bootstrap exchange is unhealthy`)
+      }
+      candidateHealth = {
+        webAsset: true,
+        bootstrapExchange: true,
+      }
     }
     const readiness: RuntimeReadiness = {
       type: 'openloop.runtime.ready',
@@ -542,6 +646,7 @@ export async function runOpenloopRuntime(
         path: '/',
         status: 200,
       },
+      ...(candidateHealth === undefined ? {} : { candidateHealth }),
     }
     dependencies.process.stdout.write(`${JSON.stringify(readiness)}\n`)
 
@@ -593,6 +698,31 @@ const defaultDependencies: RuntimeDependencies = {
       contentType: response.headers.get('content-type') ?? '',
     }
   },
+  candidateHealthRequest: async (origin, launchId, bootstrapTokenHex) => {
+    const index = await fetch(`${origin}/`, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(5_000),
+    })
+    const html = await index.text()
+    const webAsset = index.status === 200
+      && /^text\/html(?:\s*;|$)/iu.test(index.headers.get('content-type') ?? '')
+      && html.includes('__DSH_PREBOOT__')
+      && html.includes('/api/openloop/bootstrap')
+    const bootstrap = await fetch(`${origin}/api/openloop/bootstrap`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify({ launchId, token: bootstrapTokenHex }),
+      signal: AbortSignal.timeout(5_000),
+    })
+    let bootstrapExchange = false
+    if (bootstrap.ok) {
+      const value: unknown = await bootstrap.json()
+      bootstrapExchange = isOpenloopBootstrapResponse(value, launchId)
+    }
+    return { webAsset, bootstrapExchange }
+  },
   setTimeout,
   clearTimeout,
 }
@@ -612,7 +742,3 @@ async function main(): Promise<void> {
 }
 
 if (process.env.VITEST === undefined) await main()
-
-// Keep the shipped tuple referenced by the launcher contract and visible to
-// static closure checks without reproducing it.
-void OPENLOOP_PROFILE_BUNDLES

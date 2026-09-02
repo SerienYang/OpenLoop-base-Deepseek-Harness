@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { inspect } from 'node:util'
 import { AttachmentId, AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type {
   ImageAttachmentLimits,
   ImageAttachmentRef,
@@ -453,6 +455,79 @@ describe('PiAiAdapter provider routing', () => {
   })
 })
 
+describe('Openloop credential consumer wiring', () => {
+  it('redacts malformed credential references at startup without retaining a cause', async () => {
+    const privateReference = 'sk-live-pi-startup-P1/secret'
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const logged: unknown[][] = []
+    ctx.logger.error = ((...args: unknown[]) => { logged.push(args) }) as typeof ctx.logger.error
+
+    const failure = await ctx.plugin(LlmPiAi, {
+      providers: {
+        openai: { apiKeyEnv: privateReference },
+      },
+    }).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(TypeError)
+    expect((failure as Error).message).toBe('llm-pi-ai: invalid credential reference')
+    expect(Object.hasOwn(failure as object, 'cause')).toBe(false)
+    const evidence = inspect([failure, logged], { depth: null, showHidden: true })
+    expect(evidence).not.toContain(privateReference)
+    expect(evidence).not.toContain('sk-live-pi-startup-P1')
+    expect(ctx.llm.listProviders()).toEqual([])
+    expect(ctx.llm.listConfigurableProviders()).toEqual([])
+    await ctx.fiber.dispose()
+  })
+
+  it('registers and releases each credential-bearing pi-ai model route', async () => {
+    const dispose = vi.fn()
+    const registerPiAiModels = vi.fn(() => ({
+      replace: vi.fn(),
+      dispose,
+    }))
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.provide('credentialConsumers', { registerPiAiModels } as never)
+
+    const fiber = ctx.plugin(LlmPiAi, {
+      providers: {
+        openai: { apiKeyEnv: 'OPENAI_API_KEY' },
+        deepseek: { apiKeyEnv: 'DEEPSEEK_API_KEY' },
+      },
+    })
+    await fiber
+
+    expect(registerPiAiModels).toHaveBeenCalledWith([
+      { routeId: 'deepseek', reference: credentialRef('DEEPSEEK_API_KEY') },
+      { routeId: 'openai', reference: credentialRef('OPENAI_API_KEY') },
+    ])
+    await fiber.dispose()
+    expect(dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('aborts activation before publishing routes when initial consumer registration fails', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.provide('credentialConsumers', {
+      registerPiAiModels: vi.fn(() => {
+        throw new Error('consumer registry refused pi-ai')
+      }),
+    } as never)
+
+    const failure = await ctx.plugin(LlmPiAi, {
+      providers: {
+        openai: { apiKeyEnv: 'OPENAI_API_KEY' },
+      },
+    }).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toMatch(/consumer registry refused pi-ai/)
+    expect(ctx.llm.listProviders()).toEqual([])
+    expect(ctx.llm.listConfigurableProviders()).toEqual([])
+  })
+})
+
 describe('provider profile lifecycle', () => {
   it('keeps adapter helpers off the package root', () => {
     for (const helper of [
@@ -792,8 +867,76 @@ describe('provider profile lifecycle', () => {
     const second = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
     expect(second.finish.kind).toBe('error')
     if (second.finish.kind !== 'error') throw new Error('expected an error finish')
-    expect(second.finish.failure.message).toMatch(/provider route "deepseek".*PI_CUSTOM_REF_KEY/s)
+    expect(second.finish.failure.message).toBe(
+      'llm-pi-ai: no credential is available for provider route "deepseek";'
+      + ' store it through the credentials service (the web Models page writes it),'
+      + ' configure it in the launching environment, or remove apiKeyEnv to use'
+      + ' provider-native credential discovery',
+    )
+    expect(second.finish.failure.message).not.toContain('PI_CUSTOM_REF_KEY')
     expect(server.requests).toHaveLength(0)
+  })
+
+  it('redacts credential resolver errors from serialized failures', async () => {
+    const privateReference = 'PRIVATE_PI_RESOLVER_REFERENCE'
+    const privateDetail = `${privateReference}: resolver exposed sk-private-pi`
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.provide('credentials', {
+      resolve: vi.fn(() => Promise.reject(new Error(privateDetail))),
+    } as never)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        deepseek: {
+          apiKeyEnv: privateReference,
+          baseURL: 'http://127.0.0.1:1',
+        },
+      },
+    })
+
+    const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+
+    expect(result.finish).toEqual({
+      kind: 'error',
+      failure: {
+        code: 'CREDENTIAL_RESOLUTION_FAILED',
+        message: 'llm-pi-ai: credential resolution failed for provider route "deepseek"',
+      },
+    })
+    expect(JSON.stringify(result.finish)).not.toContain(privateReference)
+    expect(JSON.stringify(result.finish)).not.toContain('sk-private-pi')
+  })
+
+  it('redacts credential references from invalid-credential failures', async () => {
+    const privateReference = 'PRIVATE_PI_INVALID_REFERENCE'
+    const privateSecret = 'sk-\u{1F600}private-pi'
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.provide('credentials', {
+      resolve: vi.fn(() => Promise.resolve({
+        value: privateSecret,
+        source: 'test',
+      })),
+    } as never)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        deepseek: {
+          apiKeyEnv: privateReference,
+          baseURL: 'http://127.0.0.1:1',
+        },
+      },
+    })
+
+    const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+    const serialized = JSON.stringify(result.finish)
+
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: { code: 'INVALID_CREDENTIAL' },
+    })
+    expect(serialized).not.toContain(privateReference)
+    expect(serialized).not.toContain(privateSecret)
+    expect(serialized).not.toContain('private-pi')
   })
 
   it('validates empty, underspecified, legacy-shaped, and explicitly blank profiles', () => {
@@ -809,7 +952,8 @@ describe('provider profile lifecycle', () => {
     expect(() => resolveProfiles([{ provider: 'openai' }] as never)).toThrow(/dict keyed by provider/)
     expect(() => resolveProfiles({ openai: { provider: 'openai' } as never })).toThrow(/moved to the providers dict key/)
     expect(() => resolveProfiles({ openai: { baseURL: '' } })).toThrow(/empty baseURL/)
-    expect(() => resolveProfiles({ openai: { apiKeyEnv: 'not-a-var!' } })).toThrow(/must match/)
+    expect(() => resolveProfiles({ openai: { apiKeyEnv: 'not-a-var!' } }))
+      .toThrow('llm-pi-ai: invalid credential reference')
   })
 
   it.each(['maxRetries', 'maxRetryDelayMs'] as const)(

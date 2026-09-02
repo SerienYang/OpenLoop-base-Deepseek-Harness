@@ -34,6 +34,14 @@ export interface ComposerBlocks {
    */
   set(sessionId: SessionId, block: ComposerBlock | undefined): void
   /**
+   * Raise or clear only one source's block. Other sources remain registered,
+   * so releasing one condition cannot accidentally unlock another.
+   * @param sessionId - the session whose composer is affected.
+   * @param owner - stable source key owned by the calling plugin.
+   * @param block - this owner's block, or undefined to clear only this owner.
+   */
+  setOwned(sessionId: SessionId, owner: string, block: ComposerBlock | undefined): void
+  /**
    * The store the composer subscribes to for one session. Created on first
    * read from either side, so a blocker may raise a block before the session's
    * composer mounts and the composer still sees it.
@@ -51,14 +59,31 @@ export interface ComposerBlocks {
 
 /** The per-session composer-block registry (one instance per plugin fiber). */
 export class ComposerBlockRegistry implements ComposerBlocks {
+  private static readonly LEGACY_OWNER = 'ui-conversation:legacy'
   private readonly stores = new Map<SessionId, SnapshotStore<ComposerBlock | undefined>>()
+  private readonly owned = new Map<SessionId, Map<string, ComposerBlock>>()
 
   /** @inheritdoc */
   set(sessionId: SessionId, block: ComposerBlock | undefined): void {
+    this.setOwned(sessionId, ComposerBlockRegistry.LEGACY_OWNER, block)
+  }
+
+  /** @inheritdoc */
+  setOwned(sessionId: SessionId, owner: string, block: ComposerBlock | undefined): void {
     const store = this.storeFor(sessionId)
+    let entries = this.owned.get(sessionId)
+    if (entries === undefined) {
+      entries = new Map()
+      this.owned.set(sessionId, entries)
+    }
     const current = store.getSnapshot()
-    if (current?.reason === block?.reason) return
-    store.set(block)
+    if (block === undefined) entries.delete(owner)
+    else entries.set(owner, block)
+    if (entries.size === 0) this.owned.delete(sessionId)
+    const next = entries.get(ComposerBlockRegistry.LEGACY_OWNER)
+      ?? entries.values().next().value
+    if (current?.reason === next?.reason) return
+    store.set(next)
   }
 
   /** @inheritdoc */
@@ -72,6 +97,7 @@ export class ComposerBlockRegistry implements ComposerBlocks {
 
   /** @inheritdoc */
   forget(sessionId: SessionId): void {
+    this.owned.delete(sessionId)
     this.stores.delete(sessionId)
   }
 }

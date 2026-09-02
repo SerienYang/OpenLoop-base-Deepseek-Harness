@@ -1,6 +1,68 @@
 /** Generic unary RPC contracts shared by the Host and Client Connection halves. */
 
-import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type {} from '@deepseek-ai/cordis'
+import type {
+  HostFrame,
+  MuxFrame,
+  RpcResult,
+} from '@deepseek-ai/dsh-host-apiproxy/api'
+
+/** One server-originated frame before a browser carrier serializes it. */
+export type BrowserApiStreamFrame = MuxFrame | HostFrame
+/** One legacy RPC business error before a browser carrier serializes it. */
+export type BrowserApiError = Extract<RpcResult<unknown>, { readonly ok: false }>['error']
+
+/**
+ * Versioned Host policy for browser-reachable API targets.
+ *
+ * Targets retain their transport's canonical spelling: legacy RPC uses
+ * `session.list`, Typert uses `commands/list`, and envelope-free routes use
+ * `GET /api/events.mux`.
+ */
+export interface BrowserApiPolicy {
+  readonly version: 1
+  /**
+   * Optional target-only preflight used before a carrier reads its request
+   * body. Returning true admits only the target; {@link allows} still decides
+   * the decoded payload.
+   */
+  allowsTarget?(method: string): boolean
+  allows(method: string, payload: unknown): boolean
+  /**
+   * Optional asynchronous admission scope around one validated business
+   * invocation. An allowed result must contain the value produced by invoking
+   * `operation` while the policy's admission remains active.
+   */
+  allowsInvocation?<T>(
+    method: string,
+    payload: unknown,
+    signal: AbortSignal,
+    operation: () => Promise<T>,
+  ): Promise<
+    | { readonly allowed: false }
+    | { readonly allowed: true; readonly value: T }
+  >
+  /**
+   * Project one successful legacy or Typert result before it reaches the
+   * browser. The caller remains responsible for validating the business
+   * result before this product-specific projection.
+   */
+  projectResult?(method: string, value: unknown): unknown
+  /** Project one failed legacy result without changing carrier status. */
+  projectError?(method: string, error: BrowserApiError): BrowserApiError
+  /**
+   * Project one server stream frame before serialization. Returning undefined
+   * drops the frame from the browser-visible stream.
+   */
+  projectStreamFrame?(frame: BrowserApiStreamFrame): BrowserApiStreamFrame | undefined
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    /** Optional product policy; base DSH intentionally provides none. */
+    browserApiPolicy: BrowserApiPolicy
+  }
+}
 
 /** Trust fence applied before a Host RPC channel reaches its handler. */
 export type ConnectionRpcAuthority = 'trusted-host' | 'loopback'

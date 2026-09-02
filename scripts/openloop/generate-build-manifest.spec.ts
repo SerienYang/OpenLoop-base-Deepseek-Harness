@@ -152,7 +152,23 @@ describe('OpenLoop build manifest generator', () => {
       pluginPackageSpecVersion: '0.1.0',
       openloopDataVersion: 0,
       dshDataVersion: 0,
+      brand: {
+        productName: 'Openloop',
+        documentSuffix: 'Openloop',
+        markAsset: result.manifest.brand.markAsset,
+        heroTitle: 'Openloop',
+        previewLabel: '预览版',
+        attribution: 'Built on DeepSeek Harness',
+      },
     })
+    expect(result.manifest.brand.markAsset).toMatch(/^data:image\/svg\+xml;base64,/u)
+    const encodedMark = result.manifest.brand.markAsset.replace(
+      /^data:image\/svg\+xml;base64,/u,
+      '',
+    )
+    expect(Buffer.from(encodedMark, 'base64')).toEqual(
+      readFileSync(new URL('../../assets/brand/openloop-icon.svg', import.meta.url)),
+    )
     expect(result.bytes).toBe(readFileSync(out, 'utf8'))
     expect(result.sha256).toBe(
       createHash('sha256').update(result.bytes).digest('hex'),

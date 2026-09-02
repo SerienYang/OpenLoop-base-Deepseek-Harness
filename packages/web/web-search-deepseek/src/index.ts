@@ -42,6 +42,22 @@ export const inject = ['web']
 
 const DEFAULT_API_KEY_ENV = 'DEEPSEEK_API_KEY'
 
+interface CredentialConsumerRegistry {
+  registerDeepSeekWebSearch(reference: ReturnType<typeof credentialRef>): {
+    replace(reference: ReturnType<typeof credentialRef>): void
+    dispose(): void
+  }
+}
+
+/** Validate an untrusted reference without retaining its value in the failure. */
+function safeCredentialRef(reference: string): ReturnType<typeof credentialRef> {
+  try {
+    return credentialRef(reference)
+  } catch {
+    throw new TypeError('web-search-deepseek: invalid credential reference')
+  }
+}
+
 /** Plugin config (all optional — `apply` fills env-var and constant defaults). */
 export interface Config {
   /** Literal DeepSeek API key; prefer {@link apiKeyEnv} so no secret enters configuration files. */
@@ -93,7 +109,7 @@ export const WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE = settingsNamespace('web-sea
  * @returns options for one search.
  */
 function resolveOptions(ctx: Context, config: Config): DeepSeekSearchProviderOptions {
-  const apiKeyEnv = credentialRef(config.apiKeyEnv ?? DEFAULT_API_KEY_ENV)
+  const apiKeyEnv = safeCredentialRef(config.apiKeyEnv ?? DEFAULT_API_KEY_ENV)
   const literalApiKey = config.apiKey !== undefined && config.apiKey.length > 0
     ? config.apiKey
     : undefined
@@ -126,13 +142,79 @@ function resolveOptions(ctx: Context, config: Config): DeepSeekSearchProviderOpt
 /** Register the DeepSeek search provider with `ctx.web`. */
 export function apply(ctx: Context, config: Config): void {
   let current: () => Config = () => config
+  let accepted = config
+  const credentialReference = (source: Config): ReturnType<typeof credentialRef> | undefined => {
+    const reference = safeCredentialRef(source.apiKeyEnv ?? DEFAULT_API_KEY_ENV)
+    return source.apiKey !== undefined && source.apiKey.length > 0
+      ? undefined
+      : reference
+  }
+  let consumerRegistry: CredentialConsumerRegistry | undefined
+  let consumerRegistration: ReturnType<CredentialConsumerRegistry['registerDeepSeekWebSearch']>
+    | undefined
+  let consumerReference: ReturnType<typeof credentialRef> | undefined
+  const bindCredentialConsumers = (consumers: CredentialConsumerRegistry): void => {
+    if (consumers === consumerRegistry) return
+    const reference = credentialReference(accepted)
+    const next = reference === undefined
+      ? undefined
+      : consumers.registerDeepSeekWebSearch(reference)
+    const previous = consumerRegistration
+    consumerRegistry = consumers
+    consumerRegistration = next
+    consumerReference = reference
+    previous?.dispose()
+  }
+  const stageCredentialConsumer = (candidate: Config): void => {
+    const reference = credentialReference(candidate)
+    if (consumerRegistry === undefined) return
+    if (reference === consumerReference) return
+    if (reference === undefined) {
+      consumerRegistration?.dispose()
+      consumerRegistration = undefined
+    } else if (consumerRegistration === undefined) {
+      consumerRegistration = consumerRegistry.registerDeepSeekWebSearch(reference)
+    } else {
+      consumerRegistration.replace(reference)
+    }
+    consumerReference = reference
+  }
+  const initialConsumers = ctx.get('credentialConsumers') as CredentialConsumerRegistry | undefined
+  if (initialConsumers !== undefined) bindCredentialConsumers(initialConsumers)
+  ctx.effect(() => () => {
+    consumerRegistration?.dispose()
+    consumerRegistration = undefined
+    consumerReference = undefined
+    consumerRegistry = undefined
+  }, 'web-search-deepseek: credential consumer')
+  ctx.inject(['credentialConsumers'], (consumerCtx) => {
+    const consumers = consumerCtx.get('credentialConsumers') as CredentialConsumerRegistry
+    bindCredentialConsumers(consumers)
+    return () => {
+      if (consumerRegistry !== consumers) return
+      consumerRegistration?.dispose()
+      consumerRegistration = undefined
+      consumerReference = undefined
+      consumerRegistry = undefined
+    }
+  })
   installSettingsSection(ctx, WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE, Config, config, {
     setSource: (source) => {
       current = source
     },
-    // The registration carries no resolved value: the provider projects the
-    // section per search, so a committed change needs no re-registration.
-    onChange: () => {},
+    // The provider projects the section per search. Registry ownership still
+    // follows the winning credential source as settings switch literal/ref.
+    onChange: () => {
+      const desired = current()
+      try {
+        stageCredentialConsumer(desired)
+        accepted = desired
+      } catch (error) {
+        ctx.logger.error('web-search-deepseek: keeping the previous serving generation after a refused update')
+        ctx.logger.error(error)
+      }
+    },
   })
-  ctx.web.registerSearchProvider(new DeepSeekSearchProvider(() => resolveOptions(ctx, current())))
+  stageCredentialConsumer(accepted)
+  ctx.web.registerSearchProvider(new DeepSeekSearchProvider(() => resolveOptions(ctx, accepted)))
 }

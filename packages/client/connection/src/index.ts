@@ -9,9 +9,13 @@ import { API_PATH, HOST_EVENTS_PATH, MUX_EVENTS_PATH } from './api-path.ts'
 import { bridge, DEFAULT_MAX_REQUEST_BODY_BYTES } from './http-bridge.ts'
 import { assertTrustedAuthority, isTrustedApiRequest } from './api-request-trust.ts'
 import { HostConnectionService } from './rpc-host.ts'
+import type { BrowserApiPolicy } from './rpc.ts'
 import { rejectWebSocketUpgrade, WebSocketDownlinks } from './websocket-downlink.ts'
 
 export type {
+  BrowserApiError,
+  BrowserApiPolicy,
+  BrowserApiStreamFrame,
   ConnectionRpcAuthority,
   ConnectionRpcEndpointMatcher,
   ConnectionRpcHandler,
@@ -118,6 +122,26 @@ const PRIVILEGED_METHODS = new Set([
   'llm.discoverModels',
 ])
 
+function allowsHttpTarget(
+  policy: BrowserApiPolicy,
+  method: string | undefined,
+  pathname: string,
+): boolean {
+  if (method === 'POST') {
+    if (pathname === `${API_PATH}/respond`) {
+      return policy.allows('POST /api/respond', undefined)
+    }
+    if (!pathname.startsWith(`${API_PATH}/`)) return false
+    const target = pathname.slice(API_PATH.length + 1)
+    return target !== ''
+      && (policy.allowsTarget === undefined || policy.allowsTarget(target))
+  }
+  if (method === 'GET' || method === 'HEAD') {
+    return policy.allows(`${method} ${pathname}`, undefined)
+  }
+  return false
+}
+
 /**
  * Mounts the API gateway under the browser transport prefix. Every request on
  * the prefix passes the browser-trust fence first (DNS-rebinding and
@@ -131,6 +155,7 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
   // The Loader resolves schema defaults; hand-built test contexts may pass none.
   const trustedHosts = config?.trustedHosts ?? []
   const maxRequestBodyBytes = config?.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES
+  const browserApiPolicyRequired = Object.hasOwn(ctx.fiber.inject, 'browserApiPolicy')
   // Config boundary: a malformed entry fails the load loudly here rather than
   // silently authorizing its hostname prefix at request time.
   for (const entry of trustedHosts) assertTrustedAuthority(entry)
@@ -155,7 +180,11 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
       }
       const apiProxy = ctx.get('apiProxy')
       if (apiProxy === undefined) return new Response('not found', { status: 404 })
-      return toFetchHandler(apiProxy).fetch(request)
+      const policy = ctx.get('browserApiPolicy')
+      if (policy === undefined && browserApiPolicyRequired) {
+        return new Response('forbidden', { status: 403 })
+      }
+      return toFetchHandler(apiProxy, policy).fetch(request)
     },
   })
   const route: WebRoute = {
@@ -167,13 +196,32 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
         res.end('forbidden')
         return
       }
+      const policy = ctx.get('browserApiPolicy')
+      if (policy === undefined && browserApiPolicyRequired) {
+        res.writeHead(403)
+        res.end('forbidden')
+        return
+      }
+      if (policy !== undefined
+        && !allowsHttpTarget(
+          policy,
+          req.method,
+          new URL(req.url ?? '/', 'http://dsh.internal').pathname,
+        )) {
+        res.writeHead(403)
+        res.end('forbidden')
+        return
+      }
       await bridge(req, res, fetchHandler, maxRequestBodyBytes)
     },
   }
   ctx.effect(() => ctx.webServer.register(route), 'client-connection: /api route')
   ctx.inject(['apiProxy'], (apiCtx) => {
     assertImageBodyCapacity(apiCtx, maxRequestBodyBytes)
-    const downlinks = new WebSocketDownlinks(apiCtx.apiProxy)
+    const downlinks = new WebSocketDownlinks(
+      apiCtx.apiProxy,
+      apiCtx.get('browserApiPolicy'),
+    )
     const registerDownlink = (
       path: string,
       handle: WebUpgradeRoute['handler'],
@@ -182,6 +230,12 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
         path,
         handler: (req, socket, head) => {
           if (!isTrustedApiRequest(req, trustedHosts)) {
+            rejectWebSocketUpgrade(socket)
+            return
+          }
+          const policy = apiCtx.get('browserApiPolicy')
+          if ((policy === undefined && browserApiPolicyRequired)
+            || (policy !== undefined && !policy.allows(`GET ${path}`, undefined))) {
             rejectWebSocketUpgrade(socket)
             return
           }

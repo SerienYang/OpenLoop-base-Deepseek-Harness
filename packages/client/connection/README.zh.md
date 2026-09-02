@@ -12,6 +12,16 @@ node 半侧在桥接或 upgrade 前守卫 `/api` 下的每个入口（`src/api-r
 
 `/api/events.mux` 与 `/api/events.host` 各接受一条 WebSocket upgrade，并只向浏览器发送对应的 `ServerRequest` 文本消息；客户端不会在这些 socket 上发送业务数据。任一 socket 结束都会使当前 connection generation 失败并重建两条流，连接就绪仍要求两条 socket 均已打开且 `host.describe` HTTP 调用成功。Host teardown 会终止两条 socket、中止各自的 source，并等待 source 清理完成后再返回。普通网络 GET 这些路径会返回 426，不保留 SSE（Server-Sent Events）回退；`toFetchHandler` 的 SSE 编解码只服务进程内同构载体。
 
+产品可以提供可选的版本 1 `ctx.browserApiPolicy` 服务。Host half 会在每次 API
+Proxy fallback 和每次 WebSocket upgrade 时实时读取该服务，因此替换 policy
+不会受启动时快照影响。policy 存在时，HTTP route 会在缓冲请求体前分类每个
+method/path：普通 POST RPC path 必须通过 `allowsTarget`，`POST /api/respond`
+与 GET/HEAD transport path 必须用完整的 `METHOD /api/path` key 通过 `allows`，
+其他 verb 或 path 全部拒绝。获准的 RPC path 解码后仍需通过原有的
+payload-aware `allows` 检查。必须依赖 policy 的组合应通过 Loader injection 明确声明；
+如果 required provider 已开始卸载，尚在清理的 HTTP 和 WebSocket 路由会保持
+fail-closed。默认 DSH 有意不提供该服务。
+
 ## 模型体验
 
 无。协议消费层只在浏览器与主机之间搬运已经组合好的消息；这里没有任何内容进入模型请求。

@@ -17,7 +17,7 @@
 import { isAbsolute } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
-import { Include } from '@deepseek-ai/cordis-plugin-include'
+import Include, { type PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import type { EntryTree } from '@deepseek-ai/cordis-plugin-loader'
 import { scopeOf, scopeParentOf, type ScopeKey } from '@deepseek-ai/dsh-scope'
 import { PresetMountError, type AgentPreset } from './preset.ts'
@@ -329,7 +329,11 @@ function mountDetail(error: unknown): string {
  * @throws when `agentCtx` carries no scope, a row is unusable, or a row
  * published a service into the root realm.
  */
-export async function mountPreset(agentCtx: Context, preset: AgentPreset): Promise<void> {
+export async function mountPreset(
+  agentCtx: Context,
+  preset: AgentPreset,
+  patches: readonly PatchOptions[] = [],
+): Promise<void> {
   const scope = scopeOf(agentCtx)
   if (scope === undefined) {
     throw new Error(
@@ -337,7 +341,10 @@ export async function mountPreset(agentCtx: Context, preset: AgentPreset): Promi
       + 'its registrations would apply to every agent in the process',
     )
   }
-  const config: Include.Config = { path: pathToFileURL(preset.path).href }
+  const config: Include.Config = {
+    path: pathToFileURL(preset.path).href,
+    patches: [...structuredClone(patches)],
+  }
   // The root Loader's explicit base names the installed package graph in a
   // closed runtime. Entry contexts inherit the profile config directory
   // instead, which is correct for relative files but cannot resolve in-box

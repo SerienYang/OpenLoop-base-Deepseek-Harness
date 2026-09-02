@@ -13,7 +13,7 @@ import * as RuntimeClient from '../src/client/index.ts'
 import type { ConversationNodeDefinition } from '../src/client/contract/conversation.ts'
 import { Session } from '../src/client/sessions/session.ts'
 import type { SessionRuntime } from '../src/client/sessions/service.ts'
-import type { WorkspaceRuntime } from '../src/client/workspaces/service.ts'
+import { WorkspaceRuntime } from '../src/client/workspaces/service.ts'
 import { FakeApiClient, fakeRemote, ok } from './fake-api.client.ts'
 
 interface Bench {
@@ -55,6 +55,106 @@ async function flushMicrotasks(): Promise<void> {
 }
 
 describe('runtime client apply', () => {
+  it('fails closed for a malformed browser boot graph', () => {
+    expect(() => {
+      RuntimeClient.requiresWorkspaceRuntimeAdapter({
+        __DSH_BOOT__: { rev: 'malformed' },
+      })
+    }).toThrow(/boot graph/iu)
+    expect(RuntimeClient.requiresWorkspaceRuntimeAdapter({
+      __DSH_BOOT__: { rev: 'default', entries: [] },
+    })).toBe(false)
+  })
+
+  it('waits for the signed Openloop Workspace adapter instead of falling back to legacy RPCs', async () => {
+    const previousBoot = (globalThis as { __DSH_BOOT__?: unknown }).__DSH_BOOT__
+    ;(globalThis as { __DSH_BOOT__?: unknown }).__DSH_BOOT__ = {
+      rev: 'openloop-test',
+      entries: [{
+        id: '@openloop/desktop-bridge-client',
+        url: '/plugins/openloop/client.js',
+        rev: 'adapter',
+      }],
+    }
+    try {
+      const ctx = new Context()
+      await ctx.plugin(TypertRegistry)
+      const api = new FakeApiClient()
+      const start = vi.fn(() => ({ stop: vi.fn() }))
+      const create = vi.fn(() => ({
+        startInitialSelection: () => () => {},
+        handleHostEnvelope: () => {},
+        handleConnected: () => {},
+      }))
+      ctx.reflect.provide('connection', {
+        api,
+        isLoopback: true,
+        hostDescription: {
+          getSnapshot: () => undefined,
+          subscribe: () => () => {},
+        },
+        rpc: {
+          call: () => Promise.reject(new Error('unexpected generic RPC call')),
+        },
+        start,
+      } satisfies ConnectionHandle)
+      ctx.reflect.provide('remote', {})
+      ctx.reflect.provide('remote.commands', fakeRemote().commands)
+
+      const fiber = ctx.plugin(RuntimeClient)
+      await Promise.resolve()
+      expect(start).not.toHaveBeenCalled()
+      expect(api.callsOf('workspace.list')).toEqual([])
+
+      ctx.reflect.provide('workspaceRuntimeAdapter', { create })
+      await fiber.await()
+
+      expect(create).toHaveBeenCalledOnce()
+      expect(start).toHaveBeenCalledOnce()
+      await ctx.fiber.dispose()
+    } finally {
+      if (previousBoot === undefined) {
+        delete (globalThis as { __DSH_BOOT__?: unknown }).__DSH_BOOT__
+      } else {
+        ;(globalThis as { __DSH_BOOT__?: unknown }).__DSH_BOOT__ = previousBoot
+      }
+    }
+  })
+
+  it('uses a profile-provided Workspace adapter', async () => {
+    const ctx = new Context()
+    await ctx.plugin(TypertRegistry)
+    const api = new FakeApiClient()
+    const start = vi.fn(() => ({ stop: vi.fn() }))
+    const create = vi.fn(() => ({
+      startInitialSelection: () => () => {},
+      handleHostEnvelope: () => {},
+      handleConnected: () => {},
+    }))
+    ctx.reflect.provide('connection', {
+      api,
+      isLoopback: true,
+      hostDescription: {
+        getSnapshot: () => undefined,
+        subscribe: () => () => {},
+      },
+      rpc: {
+        call: () => Promise.reject(new Error('unexpected generic RPC call')),
+      },
+      start,
+    } satisfies ConnectionHandle)
+    ctx.reflect.provide('remote', {})
+    ctx.reflect.provide('remote.commands', fakeRemote().commands)
+    ctx.reflect.provide('workspaceRuntimeAdapter', { create })
+
+    await ctx.plugin(RuntimeClient).await()
+
+    expect(ctx.get('slots')).toBeDefined()
+    expect(ctx.get('sessions')).toBeDefined()
+    expect(create).toHaveBeenCalledOnce()
+    expect(start).toHaveBeenCalledOnce()
+  })
+
   it('mounts slots, Sessions, and Workspaces and fans host frames into both managers', async () => {
     const bench = await mount()
     expect(bench.ctx.get('slots') !== undefined).toBe(true)
@@ -65,6 +165,10 @@ describe('runtime client apply', () => {
     const workspaces = bench.ctx.get('workspaces')
     expect(sessions !== undefined).toBe(true)
     expect(workspaces !== undefined).toBe(true)
+    expect(workspaces).toBeInstanceOf(WorkspaceRuntime)
+    expect(typeof workspaces?.create).toBe('function')
+    expect(typeof workspaces?.delete).toBe('function')
+    expect(typeof workspaces?.rename).toBe('function')
     // The bound the wire schema enforces, not a per-connection negotiation.
     expect((sessions as SessionRuntime).searchResultLimit).toBe(SESSION_SEARCH_RESULT_LIMIT)
     if (workspaces === undefined) throw new Error('WorkspaceRuntime missing after runtime apply')

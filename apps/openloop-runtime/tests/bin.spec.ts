@@ -3,9 +3,12 @@ import { EventEmitter } from 'node:events'
 import { linkSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { composeEntries } from '@deepseek-ai/dsh-app-boot'
+import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import { describe, expect, test, vi } from 'vitest'
 import {
   ensureEmptyRootConfig,
+  isOpenloopBootstrapResponse,
   readCoreManifest,
   readLaunchSecretsForRuntime,
   runOpenloopRuntime,
@@ -23,6 +26,14 @@ const manifest = {
   pluginPackageSpecVersion: '0.1.0',
   openloopDataVersion: 0,
   dshDataVersion: 0,
+  brand: {
+    productName: 'Openloop',
+    documentSuffix: 'Openloop',
+    markAsset: 'data:image/svg+xml;base64,PHN2Zy8+',
+    heroTitle: 'Openloop',
+    previewLabel: '预览版',
+    attribution: 'Built on DeepSeek Harness',
+  },
 } as const
 
 function temporaryDirectory(label: string): string {
@@ -32,7 +43,19 @@ function temporaryDirectory(label: string): string {
 function fakeDependencies(events: string[], output: string[]): RuntimeDependencies {
   const processEvents = new EventEmitter()
   const profileDir = join(temporaryDirectory('fake'), 'profiles/openloop')
+  const installation = temporaryDirectory('fake-installation')
+  const installAnchor = join(installation, 'node_modules/@openloop/runtime/package.json')
+  const presetRoot = join(
+    installation,
+    'node_modules/@deepseek-ai/dsh/config/agent-presets',
+  )
   mkdirSync(profileDir, { recursive: true })
+  mkdirSync(join(presetRoot, 'standard'), { recursive: true })
+  writeFileSync(join(presetRoot, 'standard/agent.cordis.yml'), '[]\n')
+  writeFileSync(
+    join(installation, 'node_modules/@deepseek-ai/dsh/package.json'),
+    '{"name":"@deepseek-ai/dsh"}\n',
+  )
   const services = new Map<string, unknown>()
   const loader = {
     create: async ({ name, config }: { name: string; config?: { base?: string; root?: string[] } }) => {
@@ -69,7 +92,7 @@ function fakeDependencies(events: string[], output: string[]): RuntimeDependenci
       stdout: { write: (line: string) => { output.push(line); return true } },
       stderr: { write: vi.fn(() => true) },
     }),
-    installAnchor: '/runtime/package.json',
+    installAnchor,
     moduleBaseUrl: 'file:///runtime/lib/bin.js',
     coreManifestPath: '/runtime/openloop-core.json',
     loadCoreManifest: () => ({
@@ -85,29 +108,144 @@ function fakeDependencies(events: string[], output: string[]): RuntimeDependenci
     loadProfile: () => ({
       name: 'openloop',
       dir: profileDir,
-      layers: [{
-        packageName: '@openloop/test-bundle',
-        packageDir: '/runtime/test-bundle',
-        patchPath: '/runtime/test-bundle/cordis.patch.yml',
-        patches: [
-          { insert: [{ id: 'bundle', name: 'bundle' }] },
-          {
-            insert: [{
-              id: 'openloop-bootstrap',
-              name: '@openloop/bundle/bootstrap-host',
-              inject: ['webServer', 'runtimeBootstrap'],
-            }],
-          },
-        ],
-      }],
+      layers: [
+        {
+          packageName: '@deepseek-ai/dsh-base',
+          packageDir: '/runtime/dsh-base',
+          patchPath: '/runtime/dsh-base/cordis.patch.yml',
+          patches: [{
+            insert: [
+              { id: 'bundle', name: 'bundle', config: { original: true } },
+              { id: 'web-startup', name: 'web-startup' },
+              { id: 'webserver', name: 'webserver' },
+              { id: 'web-runtime', name: 'web-runtime' },
+              {
+                id: 'connection',
+                name: '@deepseek-ai/dsh-client-connection',
+                inject: ['webRuntime', 'browserApiPolicy'],
+              },
+              {
+                id: 'typert-gateway',
+                name: '@deepseek-ai/dsh-api-gateway',
+                inject: ['browserApiPolicy'],
+              },
+              {
+                id: 'cordis-client-runner',
+                name: '@deepseek-ai/dsh-cordis-client-runner',
+                disabled: true,
+              },
+              {
+                id: 'ui-cordis',
+                name: '@deepseek-ai/dsh-client-ui-cordis',
+                disabled: true,
+              },
+              {
+                id: 'fs-sandbox',
+                name: '@deepseek-ai/dsh-fs-sandbox',
+                disabled: true,
+              },
+              {
+                id: 'subprocess',
+                name: '@deepseek-ai/dsh-subprocess-local',
+                disabled: true,
+              },
+              {
+                id: 'code-runtime',
+                name: '@deepseek-ai/dsh-code-runtime-worker-thread',
+                disabled: true,
+              },
+              {
+                id: 'bash-sandbox',
+                name: '@deepseek-ai/dsh-bash-sandbox',
+                disabled: true,
+              },
+              {
+                id: 'pwsh-sandbox',
+                name: '@deepseek-ai/dsh-pwsh-sandbox',
+                disabled: true,
+              },
+              {
+                id: 'tool-bash',
+                name: '@deepseek-ai/dsh-tool-bash',
+                disabled: true,
+              },
+              {
+                id: 'tool-pwsh',
+                name: '@deepseek-ai/dsh-tool-pwsh',
+                disabled: true,
+              },
+              {
+                id: 'tool-fs-search',
+                name: '@deepseek-ai/dsh-tool-fs-search',
+                disabled: true,
+              },
+              {
+                id: 'workflow-worker-thread',
+                name: '@deepseek-ai/dsh-workflow-worker-thread',
+                disabled: true,
+              },
+              {
+                id: 'tool-workflow',
+                name: '@deepseek-ai/dsh-tool-workflow',
+                disabled: true,
+              },
+              {
+                id: 'tool-ralph',
+                name: '@deepseek-ai/dsh-tool-ralph',
+                disabled: true,
+              },
+              {
+                id: 'agent-presets',
+                name: '@deepseek-ai/dsh-agent-presets',
+                config: {
+                  default: 'standard',
+                  allowedPresetIds: ['standard', 'code'],
+                  includeUserRoot: false,
+                  patches: [],
+                },
+              },
+            ],
+          }],
+        },
+        {
+          packageName: '@deepseek-ai/dsh-web-app',
+          packageDir: '/runtime/dsh-web-app',
+          patchPath: '/runtime/dsh-web-app/cordis.patch.yml',
+          patches: [],
+        },
+        {
+          packageName: '@openloop/bundle',
+          packageDir: '/runtime/openloop-bundle',
+          patchPath: '/runtime/openloop-bundle/cordis.patch.yml',
+          patches: [{
+            insert: [
+              {
+                id: 'desktop-bridge-host',
+                name: '@openloop/desktop-bridge-host',
+                inject: ['runtimeBootstrap'],
+              },
+              {
+                id: 'openloop-bootstrap',
+                name: '@openloop/bundle/bootstrap-host',
+                inject: ['webServer', 'runtimeBootstrap'],
+              },
+              {
+                id: 'fs-workspace',
+                name: '@openloop/fs-workspace',
+                inject: ['fileBroker', 'workspaceRegistry', 'sandboxPolicy'],
+              },
+              {
+                id: 'sandbox-workspace',
+                name: '@openloop/sandbox-workspace',
+              },
+            ],
+          }],
+        },
+      ],
       patchPath: join(profileDir, 'cordis.patch.yml'),
       patches: [],
     }),
-    composeEntries: () => [
-      { id: 'web-startup', name: 'web-startup' },
-      { id: 'webserver', name: 'webserver' },
-      { id: 'web-runtime', name: 'web-runtime' },
-    ],
+    composeEntries,
     loadLayeredEnv: () => {
       events.push('load-env')
       return { get: () => undefined, getFrom: () => undefined }
@@ -130,19 +268,53 @@ function fakeDependencies(events: string[], output: string[]): RuntimeDependenci
       events.push(`health:${origin}`)
       return { status: 200, contentType: 'text/html; charset=utf-8' }
     },
+    candidateHealthRequest: async (origin, launchId) => {
+      events.push(`candidate-health:${origin}:${launchId}`)
+      return {
+        webAsset: true,
+        bootstrapExchange: true,
+      }
+    },
     setTimeout: handler => setTimeout(handler, 0),
     clearTimeout,
   }
 }
 
-describe('Openloop runtime launcher', () => {
-  test('does not read inherited launch secrets for health smoke', () => {
-    const read = vi.fn(() => {
-      throw new Error('health smoke must not consume fd 3')
-    })
+const MALICIOUS_USER_PATCHES: ReadonlyArray<readonly [string, PatchOptions[]]> = [
+  ['disable the policy owner', [{ id: 'desktop-bridge-host', disabled: true }]],
+  ['remove the Connection policy injection', [{ id: 'connection', inject: [] }]],
+  ['rename a signed row', [{ id: 'web-runtime', name: '@attacker/replacement' }]],
+  ['insert a third-party Client row', [{
+    insert: [{ id: 'third-party-client', name: '@attacker/client' }],
+  }]],
+  ['re-enable the dynamic Client runner', [{ id: 'cordis-client-runner', disabled: false }]],
+  ['re-enable the code runtime', [{ id: 'code-runtime', disabled: false }]],
+  ['re-enable the subprocess provider', [{ id: 'subprocess', disabled: false }]],
+  ['replace the locked preset policy', [{
+    id: 'agent-presets',
+    config: {
+      default: 'cordis',
+      includeUserRoot: true,
+      patches: [],
+      roots: [{ path: '/tmp/attacker-presets', trust: 'user' }],
+    },
+  }]],
+  ['target an unknown row', [{ id: 'not-in-signed-profile', config: { enabled: true } }]],
+  ['change config on a protected row', [{ id: 'connection', config: { trustedHosts: ['attacker'] } }]],
+]
 
-    expect(readLaunchSecretsForRuntime({ healthSmoke: true }, read)).toBeUndefined()
-    expect(read).not.toHaveBeenCalled()
+describe('Openloop runtime launcher', () => {
+  test('requires inherited launch secrets for supervised health smoke', () => {
+    const secrets = {
+      launchId: '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
+      bootstrapToken: Uint8Array.from([1, 2, 3]),
+      bridgeSecret: Uint8Array.from([4, 5, 6]),
+      socketPath: '/tmp/openloop-runtime.sock',
+    }
+    const read = vi.fn(() => secrets)
+
+    expect(readLaunchSecretsForRuntime({ healthSmoke: true }, read)).toBe(secrets)
+    expect(read).toHaveBeenCalledOnce()
   })
 
   test('reads inherited launch secrets for a supervised runtime', () => {
@@ -169,6 +341,22 @@ describe('Openloop runtime launcher', () => {
       manifest,
       sha256: createHash('sha256').update(bytes).digest('hex'),
     })
+  })
+
+  test('accepts candidate bootstrap health only with the signed brand shape', () => {
+    expect(isOpenloopBootstrapResponse({
+      launchId: 'launch-id',
+      coreManifest: manifest,
+      coreManifestSha256: 'a'.repeat(64),
+    }, 'launch-id')).toBe(true)
+    expect(isOpenloopBootstrapResponse({
+      launchId: 'launch-id',
+      coreManifest: {
+        ...manifest,
+        brand: { ...manifest.brand, productName: 'Remote override' },
+      },
+      coreManifestSha256: 'a'.repeat(64),
+    }, 'launch-id')).toBe(false)
   })
 
   test('creates and validates only a regular launcher-owned empty root config', () => {
@@ -222,7 +410,12 @@ describe('Openloop runtime launcher', () => {
     const output: string[] = []
     const dependencies = fakeDependencies(events, output)
 
-    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies)
+    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies, {
+      launchId: '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
+      bootstrapToken: Uint8Array.from([1, 2, 3]),
+      bridgeSecret: Uint8Array.from([4, 5, 6]),
+      socketPath: '/tmp/openloop-runtime.sock',
+    })
 
     expect(events).toEqual([
       'ensure-profile',
@@ -230,6 +423,7 @@ describe('Openloop runtime launcher', () => {
       'load-env',
       'boot',
       'boot-base:file:///runtime/lib/bin.js',
+      'provide:runtimeBootstrap',
       'provide:launchEnvironment',
       'cmdline:--host 127.0.0.1 --port 0',
       'settled',
@@ -237,6 +431,7 @@ describe('Openloop runtime launcher', () => {
       'loader-create:hmr',
       'watch',
       'health:http://127.0.0.1:43123',
+      'candidate-health:http://127.0.0.1:43123:8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
       'stop-watch',
       'dispose',
     ])
@@ -244,6 +439,7 @@ describe('Openloop runtime launcher', () => {
     expect(JSON.parse(output[0] as string)).toEqual({
       type: 'openloop.runtime.ready',
       version: 1,
+      launchId: '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
       profile: 'openloop',
       host: '127.0.0.1',
       port: 43123,
@@ -253,6 +449,10 @@ describe('Openloop runtime launcher', () => {
         method: 'GET',
         path: '/',
         status: 200,
+      },
+      candidateHealth: {
+        webAsset: true,
+        bootstrapExchange: true,
       },
     })
   })
@@ -274,25 +474,6 @@ describe('Openloop runtime launcher', () => {
       '{"name":"@deepseek-ai/dsh"}\n',
     )
     dependencies.installAnchor = installAnchor
-    const loadProfile = dependencies.loadProfile.bind(dependencies)
-    dependencies.loadProfile = (...args) => {
-      const profile = loadProfile(...args)
-      return {
-        ...profile,
-        layers: [{
-          packageName: '@openloop/test-bundle',
-          packageDir: '/runtime/test-bundle',
-          patchPath: '/runtime/test-bundle/cordis.patch.yml',
-          patches: [{
-            insert: [{
-              id: 'agent-presets',
-              name: '@deepseek-ai/dsh-agent-presets',
-              config: { default: 'standard', includeUserRoot: true },
-            }],
-          }],
-        }],
-      }
-    }
 
     let bootPatches: unknown[] = []
     const boot = dependencies.boot.bind(dependencies)
@@ -302,52 +483,223 @@ describe('Openloop runtime launcher', () => {
     }
     let livePatches: unknown[] = []
     dependencies.watchUserPatches = async (_ctx, options) => {
-      livePatches = options.compose?.([{
-        id: 'agent-presets',
-        config: { default: 'minimal', includeUserRoot: false },
-      }]) ?? []
+      livePatches = options.compose?.([
+        { id: 'bundle', config: { hmr: true } },
+      ]) ?? []
       return async () => {}
     }
 
-    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies)
+    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies, {
+      launchId: '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
+      bootstrapToken: Uint8Array.from([1, 2, 3]),
+      bridgeSecret: Uint8Array.from([4, 5, 6]),
+      socketPath: '/tmp/openloop-runtime.sock',
+    })
 
     expect(bootPatches.at(-1)).toEqual({
       id: 'agent-presets',
       config: {
         default: 'standard',
-        includeUserRoot: true,
+        allowedPresetIds: ['standard', 'code'],
+        includeUserRoot: false,
+        patches: [
+          { id: 'tool-bash', disabled: true },
+          { id: 'tool-pwsh', disabled: true },
+          { id: 'tool-fs-search', disabled: true },
+          { id: 'pty', disabled: true },
+          { id: 'terminal-bash', disabled: true },
+          { id: 'persistent-bash', disabled: true },
+          { id: 'terminal', disabled: true },
+          { id: 'tool-terminal', disabled: true },
+          { id: 'lsp-stdio', disabled: true },
+          { id: 'tool-lsp', disabled: true },
+          { id: 'mcp-stdio', disabled: true },
+          { id: 'subagent-acp', disabled: true },
+          { id: 'subagent-codex', disabled: true },
+          { id: 'subagent-claude-code', disabled: true },
+          { id: 'subagent-dsh-sdk', disabled: true },
+          { id: 'tool-subagent-codex', disabled: true },
+          { id: 'tool-subagent-claude-code', disabled: true },
+          { id: 'tool-presentation', disabled: true },
+          { id: 'workflow-worker-thread', disabled: true },
+          { id: 'tool-workflow', disabled: true },
+          { id: 'tool-ralph', disabled: true },
+          { id: 'tool-cordis', disabled: true },
+          { id: 'filesystem', isolate: null },
+          { id: 'fs-local', disabled: true },
+        ],
         roots: [{ path: presetRoot, trust: 'system' }],
       },
     })
     expect(livePatches.at(-1)).toEqual({
       id: 'agent-presets',
       config: {
-        default: 'minimal',
+        default: 'standard',
+        allowedPresetIds: ['standard', 'code'],
         includeUserRoot: false,
+        patches: [
+          { id: 'tool-bash', disabled: true },
+          { id: 'tool-pwsh', disabled: true },
+          { id: 'tool-fs-search', disabled: true },
+          { id: 'pty', disabled: true },
+          { id: 'terminal-bash', disabled: true },
+          { id: 'persistent-bash', disabled: true },
+          { id: 'terminal', disabled: true },
+          { id: 'tool-terminal', disabled: true },
+          { id: 'lsp-stdio', disabled: true },
+          { id: 'tool-lsp', disabled: true },
+          { id: 'mcp-stdio', disabled: true },
+          { id: 'subagent-acp', disabled: true },
+          { id: 'subagent-codex', disabled: true },
+          { id: 'subagent-claude-code', disabled: true },
+          { id: 'subagent-dsh-sdk', disabled: true },
+          { id: 'tool-subagent-codex', disabled: true },
+          { id: 'tool-subagent-claude-code', disabled: true },
+          { id: 'tool-presentation', disabled: true },
+          { id: 'workflow-worker-thread', disabled: true },
+          { id: 'tool-workflow', disabled: true },
+          { id: 'tool-ralph', disabled: true },
+          { id: 'tool-cordis', disabled: true },
+          { id: 'filesystem', isolate: null },
+          { id: 'fs-local', disabled: true },
+        ],
         roots: [{ path: presetRoot, trust: 'system' }],
       },
     })
   })
 
-  test('omits Host-only bootstrap patch from health smoke', async () => {
+  test.each(MALICIOUS_USER_PATCHES)(
+    'rejects an initial user patch that attempts to %s',
+    async (_label, userPatches) => {
+      const events: string[] = []
+      const output: string[] = []
+      const dependencies = fakeDependencies(events, output)
+      const loadProfile = dependencies.loadProfile.bind(dependencies)
+      dependencies.loadProfile = (...args) => ({
+        ...loadProfile(...args),
+        patches: structuredClone(userPatches),
+      })
+
+      await expect(runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies))
+        .rejects.toThrow(/user patch|protected|signed|topology|unknown/iu)
+      expect(events).not.toContain('boot')
+      expect(output).toEqual([])
+    },
+  )
+
+  test('rejects user-selected bundle layers instead of trusting them as the signed baseline', async () => {
     const events: string[] = []
     const output: string[] = []
     const dependencies = fakeDependencies(events, output)
-    const composed: unknown[] = []
-    dependencies.composeEntries = (layers) => {
-      composed.push(...layers.flat())
-      return [
-        { id: 'web-startup', name: 'web-startup' },
-        { id: 'webserver', name: 'webserver' },
-        { id: 'web-runtime', name: 'web-runtime' },
-      ]
+    const loadProfile = dependencies.loadProfile.bind(dependencies)
+    dependencies.loadProfile = (...args) => {
+      const profile = loadProfile(...args)
+      return {
+        ...profile,
+        layers: [{
+          packageName: '@attacker/bundle',
+          packageDir: '/profile/node_modules/@attacker/bundle',
+          patchPath: '/profile/node_modules/@attacker/bundle/cordis.patch.yml',
+          patches: profile.layers.flatMap(layer => layer.patches),
+        }],
+      }
     }
 
-    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies)
+    await expect(runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies))
+      .rejects.toThrow(/signed bundle|bundle layers/iu)
+    expect(events).not.toContain('boot')
+  })
 
-    expect(composed).not.toContainEqual(expect.objectContaining({
-      insert: [expect.objectContaining({ id: 'openloop-bootstrap' })],
-    }))
+  test.each(MALICIOUS_USER_PATCHES)(
+    'fails the runtime closed when an HMR user patch attempts to %s',
+    async (_label, userPatches) => {
+      const events: string[] = []
+      const output: string[] = []
+      const dependencies = fakeDependencies(events, output)
+      dependencies.process.argv = ['runtime']
+      let compose: ((patches: PatchOptions[]) => PatchOptions[]) | undefined
+      dependencies.watchUserPatches = async (_ctx, options) => {
+        compose = options.compose
+        return async () => { events.push('stop-watch') }
+      }
+
+      const running = runOpenloopRuntime({ healthSmoke: false, home: '/home' }, dependencies)
+      await vi.waitFor(() => {
+        expect(output).toHaveLength(1)
+        expect(compose).toBeTypeOf('function')
+      })
+      let failure: unknown
+      try {
+        compose?.(structuredClone(userPatches))
+      } catch (error) {
+        failure = error
+      }
+      if (failure === undefined) dependencies.process.emit('SIGTERM')
+      await running
+
+      expect(failure).toBeInstanceOf(Error)
+      expect((failure as Error).message).toMatch(/user patch|protected|signed|topology|unknown/iu)
+      expect(events).toContain('stop-watch')
+      expect(events).toContain('dispose')
+      expect(events).toContain('exit:1')
+    },
+  )
+
+  test('allows initial and HMR config patches for an existing non-protected signed row', async () => {
+    const events: string[] = []
+    const output: string[] = []
+    const dependencies = fakeDependencies(events, output)
+    const loadProfile = dependencies.loadProfile.bind(dependencies)
+    dependencies.loadProfile = (...args) => ({
+      ...loadProfile(...args),
+      patches: [{ id: 'bundle', config: { initial: true } }],
+    })
+    let hmrRows: ReturnType<typeof composeEntries> = []
+    dependencies.watchUserPatches = async (_ctx, options) => {
+      hmrRows = composeEntries([options.compose?.([
+        { id: 'bundle', config: { hmr: true } },
+      ]) ?? []])
+      return async () => {}
+    }
+    let bootRows: ReturnType<typeof composeEntries> = []
+    const boot = dependencies.boot.bind(dependencies)
+    dependencies.boot = async (binName, rootConfig, patches, prepare, bareModuleBaseUrl) => {
+      bootRows = composeEntries([patches ?? []])
+      return await boot(binName, rootConfig, patches, prepare, bareModuleBaseUrl)
+    }
+
+    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies, {
+      launchId: '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
+      bootstrapToken: Uint8Array.from([1, 2, 3]),
+      bridgeSecret: Uint8Array.from([4, 5, 6]),
+      socketPath: '/tmp/openloop-runtime.sock',
+    })
+
+    expect(bootRows.find(row => row.id === 'bundle')?.config).toEqual({ initial: true })
+    expect(hmrRows.find(row => row.id === 'bundle')?.config).toEqual({ hmr: true })
+  })
+
+  test('includes the Host bootstrap patch in supervised health smoke', async () => {
+    const events: string[] = []
+    const output: string[] = []
+    const dependencies = fakeDependencies(events, output)
+    let bootPatches: PatchOptions[] = []
+    const boot = dependencies.boot.bind(dependencies)
+    dependencies.boot = async (binName, rootConfig, patches, prepare, bareModuleBaseUrl) => {
+      bootPatches = patches ?? []
+      return await boot(binName, rootConfig, patches, prepare, bareModuleBaseUrl)
+    }
+
+    await runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies, {
+      launchId: '8f5d7e17-9b2b-4b2c-9c2a-1f3e6b2a4d90',
+      bootstrapToken: Uint8Array.from([1, 2, 3]),
+      bridgeSecret: Uint8Array.from([4, 5, 6]),
+      socketPath: '/tmp/openloop-runtime.sock',
+    })
+
+    expect(bootPatches.some(patch =>
+      patch.insert?.some(entry => entry.id === 'openloop-bootstrap') === true,
+    )).toBe(true)
   })
 
   test('zeroizes parsed launch secret bytes after Host bootstrap installation', async () => {
@@ -431,7 +783,7 @@ describe('Openloop runtime launcher', () => {
     dependencies.composeEntries = () => [{ id: 'webserver', name: 'webserver' }]
 
     await expect(runOpenloopRuntime({ healthSmoke: true, home: '/home' }, dependencies))
-      .rejects.toThrow(/web-startup.*web-runtime/isu)
+      .rejects.toThrow(/missing required row.*web-startup/isu)
     expect(events).not.toContain('boot')
     expect(output).toEqual([])
   })

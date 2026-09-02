@@ -1,3 +1,5 @@
+import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
+
 /** Agent-preset vocabulary shared by discovery, mounting, and consumers. */
 
 /**
@@ -52,6 +54,8 @@ export interface PresetRoot {
 export interface Config {
   /** Preset id mounted when a caller names none. Missing at mount time fails loud. */
   default: string
+  /** Deployment-owned exact preset ids exposed by this roster; false or omitted exposes every discovered id. */
+  allowedPresetIds?: false | string[]
   /** Scanned roots in precedence order; an earlier root wins a duplicate id. */
   roots: PresetRoot[]
   /**
@@ -59,6 +63,8 @@ export interface Config {
    * configured root. False mounts a roster over `roots` alone.
    */
   includeUserRoot: boolean
+  /** Deployment-owned patches applied in memory whenever a preset mounts. */
+  patches?: PatchOptions[]
 }
 
 /**

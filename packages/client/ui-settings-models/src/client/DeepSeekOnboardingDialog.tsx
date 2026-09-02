@@ -10,6 +10,7 @@ import { useEffect } from 'react'
 import type { ReactNode } from 'react'
 import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ModelsSettingsState, ModelsSettingsStore } from './store.ts'
 import { onboardingReadiness } from './store.ts'
@@ -30,6 +31,8 @@ export interface DeepSeekOnboardingInjected {
   api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>
   /** Feature copy. */
   t: (key: keyof typeof en) => string
+  /** Optional product-owned, value-free credential control. */
+  credentialControl?: CredentialControlAdapter
 }
 
 /** Slot owner props plus the feature's injected dependencies. */
@@ -105,6 +108,12 @@ export function DeepSeekOnboardingDialog(props: DeepSeekOnboardingDialogProps): 
           api={api}
           t={t}
           readOnly={false}
+          {...props.credentialControl === undefined
+            ? {}
+            : { credentialControl: props.credentialControl }}
+          {...row.credential === undefined
+            ? {}
+            : { credentialRefreshToken: JSON.stringify(row.credential) }}
           hideTitle
           credentialOnly
           credentialRequired
@@ -112,6 +121,7 @@ export function DeepSeekOnboardingDialog(props: DeepSeekOnboardingDialogProps): 
           cancelLabel="onboardingLater"
           submitLabel="onboardingSave"
           submitBusyLabel="onboardingSaving"
+          onCredentialChanged={() => controller.load()}
           onClose={finishCredential}
         />
       </div>

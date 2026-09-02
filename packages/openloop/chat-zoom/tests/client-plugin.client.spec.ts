@@ -17,9 +17,23 @@ function ready(percent: ChatZoomSettings['percent']): SettingsScopeSnapshot<Chat
   }
 }
 
-function bench(percent: ChatZoomSettings['percent'] = 100) {
+function unavailable(): SettingsScopeSnapshot<ChatZoomSettings> {
+  return {
+    status: 'unavailable',
+    value: undefined,
+    base: undefined,
+    user: undefined,
+    revision: undefined,
+    writable: false,
+    mode: 'memory',
+  }
+}
+
+function bench(
+  initial: SettingsScopeSnapshot<ChatZoomSettings> = ready(100),
+) {
   const ctx = new Context()
-  let snapshot = ready(percent)
+  let snapshot = initial
   const subscribers = new Set<() => void>()
   const set = vi.fn<(field: string, value: unknown) => Promise<void>>(() => Promise.resolve())
   const scope = {
@@ -57,12 +71,14 @@ function shortcut(key: string, init: KeyboardEventInit = {}): KeyboardEvent {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+  localStorage.clear()
   document.documentElement.style.removeProperty('--openloop-chat-text-scale')
 })
 
 describe('chat zoom browser plugin', () => {
   it('publishes Host state and handles Command shortcuts without page zoom', async () => {
-    const b = bench(120)
+    const b = bench(ready(120))
     const fiber = b.ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
     expect(document.documentElement.style.getPropertyValue('--openloop-chat-text-scale')).toBe('1.2')
@@ -85,7 +101,7 @@ describe('chat zoom browser plugin', () => {
 
   it('adopts Host recovery state and restores the previous CSS value on disposal', async () => {
     document.documentElement.style.setProperty('--openloop-chat-text-scale', '')
-    const b = bench(130)
+    const b = bench(ready(130))
     const fiber = b.ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
     b.publish(ready(90))
@@ -98,7 +114,7 @@ describe('chat zoom browser plugin', () => {
   })
 
   it('does not let an intermediate Host response lose rapid shortcut increments', async () => {
-    const b = bench(100)
+    const b = bench(ready(100))
     let settleFirst!: () => void
     b.set.mockImplementationOnce(() => new Promise<void>((resolve) => { settleFirst = resolve }))
     const fiber = b.ctx.plugin({ inject: [...inject], apply })
@@ -112,6 +128,39 @@ describe('chat zoom browser plugin', () => {
     expect(document.documentElement.style.getPropertyValue('--openloop-chat-text-scale')).toBe('1.3')
     expect(b.set).toHaveBeenLastCalledWith('percent', 130)
     settleFirst()
+    await fiber.dispose()
+  })
+
+  it('persists process-local zoom when Host settings are unavailable', async () => {
+    const first = bench(unavailable())
+    const firstFiber = first.ctx.plugin({ inject: [...inject], apply })
+    await firstFiber.await()
+
+    shortcut('+', { shiftKey: true })
+    await vi.waitFor(() => {
+      expect(document.documentElement.style.getPropertyValue('--openloop-chat-text-scale'))
+        .toBe('1.1')
+    })
+    await firstFiber.dispose()
+
+    const second = bench(unavailable())
+    const secondFiber = second.ctx.plugin({ inject: [...inject], apply })
+    await secondFiber.await()
+    expect(document.documentElement.style.getPropertyValue('--openloop-chat-text-scale')).toBe('1.1')
+    await secondFiber.dispose()
+  })
+
+  it('keeps process-local zoom usable when storage access is denied', async () => {
+    vi.spyOn(globalThis, 'localStorage', 'get').mockImplementation(() => {
+      throw new DOMException('denied', 'SecurityError')
+    })
+    const b = bench(unavailable())
+    const fiber = b.ctx.plugin({ inject: [...inject], apply })
+    await expect(fiber.await()).resolves.toBeDefined()
+
+    expect(() => shortcut('+', { shiftKey: true })).not.toThrow()
+    await Promise.resolve()
+    expect(document.documentElement.style.getPropertyValue('--openloop-chat-text-scale')).toBe('1.1')
     await fiber.dispose()
   })
 

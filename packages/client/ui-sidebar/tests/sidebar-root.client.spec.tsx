@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { BrandWordmark, ProductBrandProvider } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { ProductBrand } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
   SidebarFooterActionOwnerProps, SidebarRootComponentProps, SidebarSectionOwnerProps,
   SidebarSettingsOwnerProps,
@@ -21,35 +23,53 @@ afterEach(() => {
 // props share; stub them as never-called functions.
 const neverHook = (() => { throw new Error('shell must not read global hooks') }) as never
 
-function mountShell({ collapsed = false, width = 300 }: { collapsed?: boolean; width?: number } = {}) {
+const openloopBrand: ProductBrand = {
+  productName: 'Openloop',
+  documentSuffix: 'Openloop',
+  markAsset: 'openloop-icon',
+  heroTitle: 'Openloop',
+  previewLabel: '预览版',
+  attribution: 'Built on DeepSeek Harness',
+}
+
+function mountShell({
+  collapsed = false,
+  width = 300,
+  brand,
+}: { collapsed?: boolean; width?: number; brand?: ProductBrand } = {}) {
   const startSession = vi.fn()
   const toggleSidebar = vi.fn()
   let regionOwner: SidebarSectionOwnerProps | undefined
   let settingsOwner: SidebarSettingsOwnerProps | undefined
   let footerActionOwner: SidebarFooterActionOwnerProps | undefined
   let current = { collapsed, width }
-  const root = () => (
-    <SidebarRoot
-      collapsed={current.collapsed} width={current.width}
-      useSessions={neverHook} useWorkspaces={neverHook}
-      startSession={startSession} toggleSidebar={toggleSidebar} t={t}
-      renderSlot={((
-        key: string,
-        owner: SidebarFooterActionOwnerProps | SidebarSectionOwnerProps | SidebarSettingsOwnerProps,
-      ) => {
-        if (key === 'sidebar.settings') {
-          settingsOwner = owner
-          return <div data-testid="settings-seat" data-wide={owner.wide} />
-        }
-        if (key === 'sidebar.footer.action') {
-          footerActionOwner = owner
-          return <div data-testid="footer-action-seat" data-wide={owner.wide} />
-        }
-        regionOwner = owner as SidebarSectionOwnerProps
-        return <div data-testid="region" data-wide={owner.wide} />
-      }) as SidebarRootComponentProps['renderSlot']}
-    />
-  )
+  const root = () => {
+    const shell = (
+      <SidebarRoot
+        collapsed={current.collapsed} width={current.width}
+        useSessions={neverHook} useWorkspaces={neverHook}
+        startSession={startSession} toggleSidebar={toggleSidebar} t={t}
+        renderSlot={((
+          key: string,
+          owner: SidebarFooterActionOwnerProps | SidebarSectionOwnerProps | SidebarSettingsOwnerProps,
+        ) => {
+          if (key === 'sidebar.settings') {
+            settingsOwner = owner
+            return <div data-testid="settings-seat" data-wide={owner.wide} />
+          }
+          if (key === 'sidebar.footer.action') {
+            footerActionOwner = owner
+            return <div data-testid="footer-action-seat" data-wide={owner.wide} />
+          }
+          regionOwner = owner as SidebarSectionOwnerProps
+          return <div data-testid="region" data-wide={owner.wide} />
+        }) as SidebarRootComponentProps['renderSlot']}
+      />
+    )
+    return brand === undefined
+      ? shell
+      : <ProductBrandProvider brand={brand}>{shell}</ProductBrandProvider>
+  }
   const view = render(root())
   return {
     startSession,
@@ -79,6 +99,8 @@ describe('SidebarRoot shell', () => {
     // Expanded, both the wordmark and the capsule start a session.
     const starters = screen.getAllByRole('button', { name: 'New session' })
     expect(starters).toHaveLength(2)
+    const reference = render(<BrandWordmark />)
+    expect(starters[0]?.innerHTML).toBe(reference.container.innerHTML)
     for (const button of starters) fireEvent.click(button)
     expect(b.startSession).toHaveBeenCalledTimes(2)
     fireEvent.click(screen.getByRole('button', { name: 'Collapse sidebar' }))
@@ -115,5 +137,15 @@ describe('SidebarRoot shell', () => {
     const b = mountShell({ collapsed: true })
     expect(b.regionOwner().wide).toBe(false)
     expect(screen.getByRole('button', { name: 'Open sidebar' })).toBeTruthy()
+  })
+
+  it('replaces the DeepSeek wordmark with the injected product identity', () => {
+    mountShell({ brand: openloopBrand })
+    const brandButton = screen.getAllByRole('button', { name: 'New session' })[0]
+    const mark = brandButton?.querySelector('img')
+    expect(mark?.getAttribute('src')).toBe('openloop-icon')
+    expect(mark?.getAttribute('width')).toBe('24')
+    expect(brandButton?.textContent).toBe('Openloop')
+    expect(brandButton?.querySelector('svg[viewBox="0 0 182 24"]')).toBeNull()
   })
 })

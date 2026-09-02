@@ -68,7 +68,7 @@ DeepSeek 返回的提供方生成答案均不被该提供方信任为 `content`�
 
 #### 模型看到的内容
 
-通过 [`dsh-tool-web`](../tool-web/README.md)，会话模型会看到结构化搜索块中去重后的 URL、标题、日期与引用 snippet；提供方文本不会作为答案受到信任。该提供方的具体错误消息包括带有处理指引的凭据缺失消息、`DeepSeek search credential resolution failed: <error>`、`DeepSeek search aborted`、`DeepSeek search request failed: <error>`、`DeepSeek returned no web_search_tool_result blocks; the request may not have triggered native web search` 和 `DeepSeek returned an unprocessable response body: <error>`；HTTP 失败保留提供方消息。错误包装属于消费方。
+通过 [`dsh-tool-web`](../tool-web/README.md)，会话模型会看到结构化搜索块中去重后的 URL、标题、日期与引用 snippet；提供方文本不会作为答案受到信任。该提供方的具体错误消息包括带有处理指引的凭据缺失消息、经过脱敏的 `DeepSeek search credential resolution failed`、`DeepSeek search aborted`、`DeepSeek search request failed: <error>`、`DeepSeek returned no web_search_tool_result blocks; the request may not have triggered native web search` 和 `DeepSeek returned an unprocessable response body: <error>`；HTTP 失败保留提供方消息。错误包装属于消费方。
 
 #### Token 影响
 

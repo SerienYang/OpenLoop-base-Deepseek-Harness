@@ -2,11 +2,15 @@
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
 import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
+import {
+  apply as applySettings,
+  inject as injectSettings,
+} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { apply, inject } from '../src/client/index.ts'
 import type { SettingsRootInjected } from '../src/client/shell-contract.ts'
 import { SettingsRoot } from '../src/client/SettingsRoot.tsx'
 
-async function bench() {
+async function bench(provideOwner = true) {
   const ctx = new Context()
   await ctx.plugin(SlotRegistry).await()
   // Copy machinery the shell only reads a revision from; the real locale
@@ -22,6 +26,11 @@ async function bench() {
     isLoopback: false,
   } as never)
   ctx.provide('remote', { $on: () => () => {} } as never)
+  if (provideOwner) {
+    ctx.provide('settingsShellOwner', {
+      id: '@deepseek-ai/dsh-client-ui-settings-general',
+    })
+  }
   return { ctx, slots: ctx.get('slots') as SlotRegistry }
 }
 
@@ -49,7 +58,7 @@ const CHILD_SPECS = {
 
 describe('ui-settings apply', () => {
   it('declares only the slot registry (a pure composition face, no locale)', () => {
-    expect(inject).toEqual(['slots', 'locale', 'connection'])
+    expect(inject).toEqual(['slots', 'locale', 'connection', 'settingsShellOwner'])
   })
 
   it('registers the shell and declares every child slot, before or after the declaration', async () => {
@@ -69,6 +78,24 @@ describe('ui-settings apply', () => {
     expect(after.slots.entries('sidebar.settings')[0]!.component).toBe(SettingsRoot)
     // The self-inflicted ledger notifications hit the duplicate guard.
     expect(after.slots.entries('sidebar.settings')).toHaveLength(1)
+  })
+
+  it('waits for ui-settings to provide the default DSH owner before activating', async () => {
+    const b = await bench(false)
+    declare(b.slots)
+    const generalFiber = b.ctx.plugin({ inject: [...inject], apply })
+    await Promise.resolve()
+    expect(b.slots.entries('sidebar.settings')).toEqual([])
+
+    const settingsFiber = b.ctx.plugin({ inject: [...injectSettings], apply: applySettings })
+    await settingsFiber.await()
+    await generalFiber.await()
+
+    expect(b.ctx.get('settingsShellOwner')).toEqual({
+      id: '@deepseek-ai/dsh-client-ui-settings-general',
+    })
+    expect(b.slots.entries('sidebar.settings')).toHaveLength(1)
+    expect(b.slots.entries('sidebar.settings')[0]?.component).toBe(SettingsRoot)
   })
 
   it('projects the section ledger into ordered nav rows with option defaults', async () => {

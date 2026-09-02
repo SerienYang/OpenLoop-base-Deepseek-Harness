@@ -159,6 +159,7 @@ pub struct RuntimeReadiness {
     pub origin: String,
     pub core_manifest_sha256: String,
     pub health_smoke: HealthSmoke,
+    pub candidate_health: Option<CandidateHealthSmoke>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -167,6 +168,13 @@ pub struct HealthSmoke {
     pub method: String,
     pub path: String,
     pub status: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CandidateHealthSmoke {
+    pub web_asset: bool,
+    pub bootstrap_exchange: bool,
 }
 
 pub fn parse_readiness_line(

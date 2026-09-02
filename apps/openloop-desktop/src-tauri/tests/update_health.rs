@@ -11,12 +11,15 @@ use std::{
 use openloop_desktop_lib::update::{
     coordinator::{parse_host_action, HostAction},
     health::{
-        ensure_channel_dsh_home, required_dsh_home, BundleHealthProbe, CandidateProcessHealth,
-        HEALTH_PROBE_ARGUMENT, TEST_PROBE_FAILURE_ENVIRONMENT,
+        ensure_channel_dsh_home, required_dsh_home, AppHealthReadiness, BundleHealthProbe,
+        CandidateProcessHealth, CredentialHealthPlan, CredentialHealthProof, HealthProbeReport,
+        MainWebviewHealthAcknowledgement, MainWebviewHealthExpectation, HEALTH_PROBE_ARGUMENT,
+        MIGRATION_TRANSACTION_ENVIRONMENT, TEST_PROBE_FAILURE_ENVIRONMENT,
     },
     recovery::{CandidateHealth, HealthStatus},
 };
 use tempfile::tempdir;
+use uuid::Uuid;
 
 const VERSION: &str = "1.2.3-test.4";
 const IDENTIFIER: &str = "ai.openloop.desktop.test";
@@ -78,14 +81,277 @@ fn app_bundle(main_script: &str, sidecar_script: &str) -> (tempfile::TempDir, Pa
 
 fn healthy_probe_report() -> String {
     format!(
-        "{{\"status\":\"healthy\",\"appVersion\":\"{VERSION}\",\"coreManifestSha256\":\"{CORE_SHA256}\"}}"
+        "{{\"status\":\"healthy\",\"appVersion\":\"{VERSION}\",\"coreManifestSha256\":\"{CORE_SHA256}\",\"credentialHealth\":{{\"migrationTransactionId\":null,\"ready\":true,\"checkedCount\":0}},\"readiness\":{{\"host\":true,\"sidecar\":true,\"bridge\":true,\"dataVersion\":true,\"mainWebview\":true}}}}"
     )
 }
 
-fn healthy_runtime_readiness() -> String {
-    format!(
-        "{{\"type\":\"openloop.runtime.ready\",\"version\":1,\"profile\":\"openloop\",\"host\":\"127.0.0.1\",\"port\":43123,\"origin\":\"http://127.0.0.1:43123\",\"coreManifestSha256\":\"{CORE_SHA256}\",\"healthSmoke\":{{\"method\":\"GET\",\"path\":\"/\",\"status\":200}}}}"
+fn healthy_runtime_sidecar() -> String {
+    r#"#!/usr/bin/python3
+import hashlib, hmac, json, os, socket, struct, sys, uuid
+
+assert sys.argv[1:] == []
+frame = b""
+while True:
+    chunk = os.read(3, 65536)
+    if not chunk:
+        break
+    frame += chunk
+assert frame[:4] == b"OLSP" and struct.unpack(">H", frame[4:6])[0] == 1
+offset = 10
+def field():
+    global offset
+    length = struct.unpack(">I", frame[offset:offset + 4])[0]
+    offset += 4
+    value = frame[offset:offset + length]
+    offset += length
+    return value
+launch_id = str(uuid.UUID(bytes=field()))
+bootstrap_token = field()
+secret = field()
+socket_path = field().decode()
+payload = {
+    "launchId": launch_id,
+    "coreManifestSha256": "__CORE__",
+    "openloopDataVersion": 0,
+    "dshDataVersion": 0,
+}
+request = {
+    "version": 1,
+    "requestId": "candidate-health",
+    "launchId": launch_id,
+    "method": "acknowledgeMainWebviewHealth",
+    "payload": payload,
+}
+nonce = (1).to_bytes(8, "big") + bytes(24)
+def sized(value):
+    return struct.pack(">I", len(value)) + value
+canonical_payload = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+canonical = (
+    b"openloop.bridge.request.v1\0"
+    + nonce
+    + struct.pack(">I", 1)
+    + sized(request["requestId"].encode())
+    + sized(launch_id.encode())
+    + sized(request["method"].encode())
+    + sized(canonical_payload)
+)
+envelope = {
+    "request": request,
+    "nonce": nonce.hex(),
+    "mac": hmac.new(secret, canonical, hashlib.sha256).hexdigest(),
+}
+body = json.dumps(envelope, separators=(",", ":")).encode()
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.connect(socket_path)
+client.sendall(struct.pack(">I", len(body)) + body)
+client.shutdown(socket.SHUT_WR)
+header = client.recv(4)
+length = struct.unpack(">I", header)[0]
+response = b""
+while len(response) < length:
+    response += client.recv(length - len(response))
+assert json.loads(response)["response"]["ok"] is True
+readiness = {
+    "type": "openloop.runtime.ready",
+    "version": 1,
+    "launchId": launch_id,
+    "profile": "openloop",
+    "host": "127.0.0.1",
+    "port": 43123,
+    "origin": "http://127.0.0.1:43123",
+    "coreManifestSha256": "__CORE__",
+    "healthSmoke": {"method": "GET", "path": "/", "status": 200},
+}
+print(json.dumps(readiness, separators=(",", ":")), flush=True)
+"#
+    .replace("__CORE__", CORE_SHA256)
+}
+
+fn credential_health_runtime_sidecar(transaction_id: Uuid) -> String {
+    r#"#!/usr/bin/python3
+import hashlib, hmac, json, os, socket, struct, sys, uuid
+
+assert sys.argv[1:] == []
+frame = b""
+while True:
+    chunk = os.read(3, 65536)
+    if not chunk:
+        break
+    frame += chunk
+assert frame[:4] == b"OLSP" and struct.unpack(">H", frame[4:6])[0] == 1
+offset = 10
+def field():
+    global offset
+    length = struct.unpack(">I", frame[offset:offset + 4])[0]
+    offset += 4
+    value = frame[offset:offset + length]
+    offset += length
+    return value
+launch_id = str(uuid.UUID(bytes=field()))
+field()
+secret = field()
+socket_path = field().decode()
+
+def sized(value):
+    return struct.pack(">I", len(value)) + value
+
+def bridge_call(method, payload, request_id, counter):
+    nonce = counter.to_bytes(8, "big") + bytes(24)
+    canonical_payload = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    canonical = (
+        b"openloop.bridge.request.v1\0"
+        + nonce
+        + struct.pack(">I", 1)
+        + sized(request_id.encode())
+        + sized(launch_id.encode())
+        + sized(method.encode())
+        + sized(canonical_payload)
     )
+    envelope = {
+        "request": {
+            "version": 1,
+            "requestId": request_id,
+            "launchId": launch_id,
+            "method": method,
+            "payload": payload,
+        },
+        "nonce": nonce.hex(),
+        "mac": hmac.new(secret, canonical, hashlib.sha256).hexdigest(),
+    }
+    body = json.dumps(envelope, separators=(",", ":")).encode()
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.connect(socket_path)
+    client.sendall(struct.pack(">I", len(body)) + body)
+    client.shutdown(socket.SHUT_WR)
+    header = client.recv(4)
+    length = struct.unpack(">I", header)[0]
+    response = b""
+    while len(response) < length:
+        response += client.recv(length - len(response))
+    parsed = json.loads(response)["response"]
+    assert parsed["ok"] is True
+    return parsed["result"]
+
+plan = bridge_call("getCandidateCredentialHealthPlan", None, "health-plan", 1)
+assert plan == {
+    "migrationTransactionId": "__TRANSACTION__",
+    "references": ["ALPHA_TOKEN", "ZETA_TOKEN"],
+}
+for index, reference in enumerate(plan["references"], start=2):
+    status = bridge_call(
+        "describeCredential",
+        {"ref": reference},
+        "credential-status-" + str(index),
+        index,
+    )
+    assert status["configured"] is True
+    assert status["source"] == "keychain"
+payload = {
+    "launchId": launch_id,
+    "coreManifestSha256": "__CORE__",
+    "openloopDataVersion": 0,
+    "dshDataVersion": 0,
+    "credentialHealth": {
+        "migrationTransactionId": "__TRANSACTION__",
+        "ready": True,
+        "checkedCount": len(plan["references"]),
+    },
+}
+bridge_call("acknowledgeMainWebviewHealth", payload, "candidate-health", 10)
+readiness = {
+    "type": "openloop.runtime.ready",
+    "version": 1,
+    "launchId": launch_id,
+    "profile": "openloop",
+    "host": "127.0.0.1",
+    "port": 43123,
+    "origin": "http://127.0.0.1:43123",
+    "coreManifestSha256": "__CORE__",
+    "healthSmoke": {"method": "GET", "path": "/", "status": 200},
+}
+print(json.dumps(readiness, separators=(",", ":")), flush=True)
+"#
+    .replace("__CORE__", CORE_SHA256)
+    .replace("__TRANSACTION__", &transaction_id.to_string())
+}
+
+fn runtime_sidecar_without_webview_callback() -> String {
+    r#"#!/usr/bin/python3
+import json, os, struct, uuid
+
+frame = b""
+while True:
+    chunk = os.read(3, 65536)
+    if not chunk:
+        break
+    frame += chunk
+offset = 10
+def field():
+    global offset
+    length = struct.unpack(">I", frame[offset:offset + 4])[0]
+    offset += 4
+    value = frame[offset:offset + length]
+    offset += length
+    return value
+launch_id = str(uuid.UUID(bytes=field()))
+field()
+field()
+field()
+readiness = {
+    "type": "openloop.runtime.ready",
+    "version": 1,
+    "launchId": launch_id,
+    "profile": "openloop",
+    "host": "127.0.0.1",
+    "port": 43123,
+    "origin": "http://127.0.0.1:43123",
+    "coreManifestSha256": "__CORE__",
+    "healthSmoke": {"method": "GET", "path": "/", "status": 200},
+}
+print(json.dumps(readiness, separators=(",", ":")), flush=True)
+"#
+    .replace("__CORE__", CORE_SHA256)
+}
+
+#[test]
+fn candidate_probe_routes_every_planned_reference_through_the_native_status_handler() {
+    let dsh_home_root = tempdir().expect("DSH_HOME root");
+    let dsh_home = dsh_home_root.path().join("Openloop-Test/dsh");
+    fs::create_dir_all(&dsh_home).expect("DSH_HOME");
+    let transaction_id = Uuid::new_v4();
+    let sidecar = credential_health_runtime_sidecar(transaction_id);
+    let (_root, app) = app_bundle("#!/bin/sh\nexit 0\n", &sidecar);
+    let probe = BundleHealthProbe::new(VERSION, IDENTIFIER, CORE_SHA256, 0, 0);
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let status_observed = observed.clone();
+
+    let session = probe
+        .begin_with_credential_health(
+            &app,
+            PROBE_TIMEOUT,
+            &dsh_home,
+            CredentialHealthPlan {
+                migration_transaction_id: Some(transaction_id),
+                references: vec!["ALPHA_TOKEN".to_owned(), "ZETA_TOKEN".to_owned()],
+            },
+            move |reference| {
+                status_observed
+                    .lock()
+                    .expect("status observations")
+                    .push(reference.to_owned());
+                Ok(true)
+            },
+        )
+        .expect("start candidate credential health");
+    let report = session.finish().expect("candidate credential health");
+
+    assert_eq!(
+        observed.lock().expect("status observations").as_slice(),
+        ["ALPHA_TOKEN", "ZETA_TOKEN"]
+    );
+    report
+        .validate_full_health(VERSION, Some(transaction_id), 2)
+        .expect("complete candidate credential health");
 }
 
 #[test]
@@ -130,24 +396,27 @@ fn accepts_only_exact_private_host_update_arguments() {
 }
 
 #[test]
-fn self_probe_validates_info_plist_and_bundled_sidecar_core_identity() {
+fn self_probe_requires_the_launch_bound_webview_callback() {
     let dsh_home_root = tempdir().expect("DSH_HOME root");
     let dsh_home = dsh_home_root.path().join("Openloop-Test/dsh");
     fs::create_dir_all(&dsh_home).expect("DSH_HOME");
-    let sidecar = format!(
-        "#!/bin/sh\n[ \"$#\" -eq 1 ] && [ \"$1\" = \"--health-smoke\" ] || exit 91\n[ \"$DSH_HOME\" = '{}' ] || exit 92\nprintf '%s\\n' '{}'\n",
-        dsh_home.display(),
-        healthy_runtime_readiness()
-    );
+    let sidecar = healthy_runtime_sidecar();
     let (_root, app) = app_bundle("#!/bin/sh\nexit 0\n", &sidecar);
-    let probe = BundleHealthProbe::new(VERSION, IDENTIFIER, CORE_SHA256);
+    let probe = BundleHealthProbe::new(VERSION, IDENTIFIER, CORE_SHA256, 0, 0);
 
-    let report = probe
-        .inspect(&app, PROBE_TIMEOUT, &dsh_home)
-        .expect("valid candidate bundle health");
+    let session = probe
+        .begin(&app, PROBE_TIMEOUT, &dsh_home)
+        .expect("start candidate bundle health");
+    assert!(session.bootstrap_url().contains("#bootstrap="));
+    let report = session
+        .finish()
+        .expect("launch-bound candidate WebView callback");
 
     assert_eq!(report.app_version, VERSION);
     assert_eq!(report.core_manifest_sha256, CORE_SHA256);
+    report
+        .validate_full_health(VERSION, None, 0)
+        .expect("bundle inspection must produce reachable full health");
 
     fs::write(
         app.join("Contents/Info.plist"),
@@ -155,7 +424,7 @@ fn self_probe_validates_info_plist_and_bundled_sidecar_core_identity() {
     )
     .expect("replace Info.plist");
     assert!(
-        probe.inspect(&app, PROBE_TIMEOUT, &dsh_home).is_err(),
+        probe.begin(&app, PROBE_TIMEOUT, &dsh_home).is_err(),
         "mismatched build version passed health"
     );
 
@@ -167,9 +436,28 @@ fn self_probe_validates_info_plist_and_bundled_sidecar_core_identity() {
     let wrong_core = sidecar.replace(CORE_SHA256, &"b".repeat(64));
     executable(&app.join("Contents/MacOS/openloop-runtime"), &wrong_core);
     assert!(
-        probe.inspect(&app, PROBE_TIMEOUT, &dsh_home).is_err(),
+        probe.begin(&app, PROBE_TIMEOUT, &dsh_home).is_err(),
         "mismatched sidecar core identity passed health"
     );
+}
+
+#[test]
+fn self_probe_rejects_readiness_without_the_webview_callback() {
+    let dsh_home_root = tempdir().expect("DSH_HOME root");
+    let dsh_home = dsh_home_root.path().join("Openloop-Test/dsh");
+    fs::create_dir_all(&dsh_home).expect("DSH_HOME");
+    let sidecar = runtime_sidecar_without_webview_callback();
+    let (_root, app) = app_bundle("#!/bin/sh\nexit 0\n", &sidecar);
+    let probe = BundleHealthProbe::new(VERSION, IDENTIFIER, CORE_SHA256, 0, 0);
+
+    let session = probe
+        .begin(&app, Duration::from_secs(3), &dsh_home)
+        .expect("runtime readiness without WebView callback");
+    let error = session
+        .finish()
+        .expect_err("missing WebView callback must fail health");
+
+    assert!(error.to_string().contains("callback") || error.to_string().contains("timed out"));
 }
 
 #[test]
@@ -230,6 +518,53 @@ fn candidate_process_health_reports_success_failure_and_timeout() {
         !marker.exists(),
         "timed-out Host probe left its descendant running"
     );
+}
+
+#[test]
+fn candidate_process_health_carries_and_verifies_migration_transaction_identity() {
+    let _guard = lock_process_health_tests();
+    let transaction_id = Uuid::new_v4();
+    let dsh_home_root = tempdir().expect("DSH_HOME root");
+    let dsh_home = dsh_home_root.path().join("Openloop-Test/dsh");
+    fs::create_dir_all(&dsh_home).expect("DSH_HOME");
+    let report = HealthProbeReport::new(
+        VERSION,
+        CORE_SHA256,
+        Some(transaction_id),
+        AppHealthReadiness {
+            host: true,
+            sidecar: true,
+            bridge: true,
+            data_version: true,
+            main_webview: true,
+        },
+    )
+    .with_credential_health(CredentialHealthProof {
+        migration_transaction_id: Some(transaction_id),
+        ready: true,
+        checked_count: 2,
+    })
+    .to_json_line()
+    .expect("health report");
+    let script = format!(
+        "#!/bin/sh\n[ \"$1\" = \"{HEALTH_PROBE_ARGUMENT}\" ] || exit 91\n[ \"${{{MIGRATION_TRANSACTION_ENVIRONMENT}}}\" = '{transaction_id}' ] || exit 92\nprintf '%s\\n' '{}'\n",
+        report.trim_end()
+    );
+    let (_root, app) = app_bundle(&script, "#!/bin/sh\nexit 0\n");
+    let mut health = CandidateProcessHealth::new(VERSION, &dsh_home)
+        .with_migration_expectation(Some(transaction_id), 2);
+
+    assert_eq!(
+        health.await_health(&app, PROBE_TIMEOUT),
+        HealthStatus::Healthy
+    );
+
+    let mut mismatched = CandidateProcessHealth::new(VERSION, &dsh_home)
+        .with_migration_expectation(Some(Uuid::new_v4()), 2);
+    assert!(matches!(
+        mismatched.await_health(&app, PROBE_TIMEOUT),
+        HealthStatus::Failed(_)
+    ));
 }
 
 #[test]
@@ -372,20 +707,15 @@ fn candidate_health_rejects_an_app_reached_through_a_symlink_ancestor() {
     let dsh_home_root = tempdir().expect("DSH_HOME root");
     let dsh_home = dsh_home_root.path().join("Openloop-Test/dsh");
     fs::create_dir_all(&dsh_home).expect("DSH_HOME");
-    let sidecar = format!(
-        "#!/bin/sh\nprintf '%s\\n' '{}'\n",
-        healthy_runtime_readiness()
-    );
+    let sidecar = healthy_runtime_sidecar();
     let (app_root, app) = app_bundle("#!/bin/sh\nexit 0\n", &sidecar);
     let alias = dsh_home_root.path().join("candidate-alias");
     symlink(app_root.path(), &alias).expect("candidate ancestor symlink");
     let aliased_app = alias.join(app.file_name().expect("app name"));
-    let probe = BundleHealthProbe::new(VERSION, IDENTIFIER, CORE_SHA256);
+    let probe = BundleHealthProbe::new(VERSION, IDENTIFIER, CORE_SHA256, 0, 0);
 
     assert!(
-        probe
-            .inspect(&aliased_app, PROBE_TIMEOUT, &dsh_home)
-            .is_err(),
+        probe.begin(&aliased_app, PROBE_TIMEOUT, &dsh_home).is_err(),
         "candidate path with a symlink ancestor passed bundle health"
     );
 
@@ -401,7 +731,7 @@ fn candidate_health_rejects_an_app_reached_through_a_symlink_ancestor() {
 
 #[test]
 fn probe_failure_injection_is_test_channel_private_mode_only() {
-    let probe = BundleHealthProbe::new(VERSION, IDENTIFIER, CORE_SHA256);
+    let probe = BundleHealthProbe::new(VERSION, IDENTIFIER, CORE_SHA256, 0, 0);
 
     assert!(probe
         .test_failure_injection("test", Some("1"))
@@ -423,4 +753,169 @@ fn probe_failure_injection_is_test_channel_private_mode_only() {
         TEST_PROBE_FAILURE_ENVIRONMENT,
         "OPENLOOP_UPDATE_SPIKE_PROBE_FAILURE"
     );
+}
+
+#[test]
+fn candidate_full_health_requires_every_component_and_matching_migration_transaction() {
+    let transaction_id = Uuid::new_v4();
+    let expected = Some(transaction_id);
+    let healthy = AppHealthReadiness {
+        host: true,
+        sidecar: true,
+        bridge: true,
+        data_version: true,
+        main_webview: true,
+    };
+    let report = HealthProbeReport::new(VERSION, CORE_SHA256, expected, healthy);
+    let report = report.with_credential_health(CredentialHealthProof {
+        migration_transaction_id: expected,
+        ready: true,
+        checked_count: 2,
+    });
+    assert!(report.validate_full_health(VERSION, expected, 2).is_ok());
+
+    for failed_component in ["host", "sidecar", "bridge", "dataVersion", "mainWebview"] {
+        let mut readiness = healthy;
+        match failed_component {
+            "host" => readiness.host = false,
+            "sidecar" => readiness.sidecar = false,
+            "bridge" => readiness.bridge = false,
+            "dataVersion" => readiness.data_version = false,
+            "mainWebview" => readiness.main_webview = false,
+            _ => unreachable!(),
+        }
+        let report = HealthProbeReport::new(VERSION, CORE_SHA256, expected, readiness)
+            .with_credential_health(CredentialHealthProof {
+                migration_transaction_id: expected,
+                ready: true,
+                checked_count: 2,
+            });
+        let error = report
+            .validate_full_health(VERSION, expected, 2)
+            .expect_err("one failed component must reject full health");
+        assert!(
+            error.to_string().contains(failed_component),
+            "failure did not identify {failed_component}: {error}"
+        );
+    }
+
+    assert!(report
+        .validate_full_health(VERSION, Some(Uuid::new_v4()), 2)
+        .is_err());
+    assert!(report.validate_full_health(VERSION, expected, 0).is_err());
+    assert!(
+        HealthProbeReport::new(VERSION, CORE_SHA256, expected, healthy)
+            .with_credential_health(CredentialHealthProof {
+                migration_transaction_id: expected,
+                ready: false,
+                checked_count: 2,
+            })
+            .validate_full_health(VERSION, expected, 2)
+            .is_err()
+    );
+}
+
+#[test]
+fn navigation_without_main_webview_ack_is_not_full_health() {
+    let report = HealthProbeReport::new(
+        VERSION,
+        CORE_SHA256,
+        None,
+        AppHealthReadiness {
+            host: true,
+            sidecar: true,
+            bridge: true,
+            data_version: true,
+            main_webview: false,
+        },
+    );
+
+    let error = report
+        .validate_full_health(VERSION, None, 0)
+        .expect_err("navigation alone must not commit health");
+    assert!(error.to_string().contains("mainWebview"));
+}
+
+#[test]
+fn main_webview_health_ack_requires_exact_launch_core_and_data_identity() {
+    let launch_id = Uuid::new_v4();
+    let expectation = MainWebviewHealthExpectation::new(launch_id, CORE_SHA256, 3, 7);
+    let acknowledgement = MainWebviewHealthAcknowledgement {
+        launch_id,
+        core_manifest_sha256: CORE_SHA256.to_owned(),
+        openloop_data_version: 3,
+        dsh_data_version: 7,
+        credential_health: None,
+    };
+
+    assert!(expectation.validate(&acknowledgement).is_ok());
+
+    for mismatch in [
+        MainWebviewHealthAcknowledgement {
+            launch_id: Uuid::new_v4(),
+            ..acknowledgement.clone()
+        },
+        MainWebviewHealthAcknowledgement {
+            core_manifest_sha256: "b".repeat(64),
+            ..acknowledgement.clone()
+        },
+        MainWebviewHealthAcknowledgement {
+            openloop_data_version: 4,
+            ..acknowledgement.clone()
+        },
+        MainWebviewHealthAcknowledgement {
+            dsh_data_version: 8,
+            ..acknowledgement.clone()
+        },
+    ] {
+        assert!(
+            expectation.validate(&mismatch).is_err(),
+            "mismatched WebView health identity was accepted: {mismatch:?}"
+        );
+    }
+}
+
+#[test]
+fn candidate_webview_ack_requires_the_journal_bound_credential_aggregate() {
+    let transaction_id = Uuid::new_v4();
+    let launch_id = Uuid::new_v4();
+    let expectation = MainWebviewHealthExpectation::new(launch_id, CORE_SHA256, 3, 7)
+        .with_credential_health_plan(CredentialHealthPlan {
+            migration_transaction_id: Some(transaction_id),
+            references: vec!["ALPHA_TOKEN".to_owned(), "ZETA_TOKEN".to_owned()],
+        });
+    let acknowledgement = MainWebviewHealthAcknowledgement {
+        launch_id,
+        core_manifest_sha256: CORE_SHA256.to_owned(),
+        openloop_data_version: 3,
+        dsh_data_version: 7,
+        credential_health: Some(CredentialHealthProof {
+            migration_transaction_id: Some(transaction_id),
+            ready: true,
+            checked_count: 2,
+        }),
+    };
+
+    assert!(expectation.validate(&acknowledgement).is_ok());
+    for credential_health in [
+        CredentialHealthProof {
+            migration_transaction_id: Some(Uuid::new_v4()),
+            ..acknowledgement.credential_health.clone().expect("proof")
+        },
+        CredentialHealthProof {
+            ready: false,
+            ..acknowledgement.credential_health.clone().expect("proof")
+        },
+        CredentialHealthProof {
+            checked_count: 0,
+            ..acknowledgement.credential_health.clone().expect("proof")
+        },
+    ] {
+        assert!(expectation
+            .validate(&MainWebviewHealthAcknowledgement {
+                credential_health: Some(credential_health),
+                ..acknowledgement.clone()
+            })
+            .is_err());
+    }
 }

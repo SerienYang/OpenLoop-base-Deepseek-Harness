@@ -32,6 +32,9 @@ const NS = settingsNamespace(SETTINGS_NAMESPACE)
  */
 async function harness(
   extraRoots: readonly { path: string; trust: 'system' | 'user' }[] = [],
+  overrides: {
+    readonly allowedPresetIds?: false | string[]
+  } = {},
 ): Promise<{ ctx: Context; settingsFile: string; settingsFiber: { dispose: () => unknown } }> {
   const home = await mkdtemp(join(tmpdir(), 'dsh-preset-settings-'))
   const settingsFile = join(home, 'settings.yaml')
@@ -49,7 +52,12 @@ async function harness(
   await ctx.plugin(AgentLoop, { agents: [] })
   const settingsFiber = ctx.plugin(FileSettingsProvider, { path: settingsFile, watch: false })
   await settingsFiber
-  await ctx.plugin(AgentPresets, { default: 'standard', roots: [...ROOTS, ...extraRoots], includeUserRoot: false })
+  await ctx.plugin(AgentPresets, {
+    default: 'standard',
+    roots: [...ROOTS, ...extraRoots],
+    includeUserRoot: false,
+    ...overrides,
+  })
   return { ctx, settingsFile, settingsFiber }
 }
 
@@ -69,6 +77,15 @@ describe('the default preset as a user setting', () => {
     await ctx.settings.update(NS, { default: 'minimal' })
 
     expect(ctx.agentPresets.defaultId).toBe('minimal')
+  })
+
+  it('falls back to the deployment default when a stored default is not allowed', async () => {
+    const { ctx } = await harness([], { allowedPresetIds: ['standard'] })
+    await ctx.settings.update(NS, { default: 'minimal' })
+
+    expect(ctx.agentPresets.defaultId).toBe('standard')
+    await expect(ctx.agentPresets.resolve()).resolves.toMatchObject({ id: 'standard' })
+    await expect(ctx.agentPresets.resolve('minimal')).rejects.toThrow(/not found.*standard/iu)
   })
 
   it('composes a new session from the user default', async () => {
