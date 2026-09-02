@@ -200,6 +200,107 @@ describe('PiAiAdapter provider routing', () => {
     expect(server.paths).toEqual(['/v1/responses'])
   })
 
+  it('sends bearer credentials for a hand-declared Anthropic Messages route', async () => {
+    const server = await mockServer([{ status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'volcengine-agent-plan': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          credentialMode: 'bearer',
+          api: 'anthropic-messages',
+          baseURL: `${server.url}/api/plan`,
+          models: [{ id: 'ark-code-latest' }],
+          headers: {
+            authorization: 'Bearer configured-wrong',
+            'X-Api-Key': 'configured-wrong',
+            'Api-Key': 'configured-wrong',
+          },
+        },
+      },
+    })
+
+    const result = await assemble(ctx, {
+      provider: 'volcengine-agent-plan',
+      model: 'ark-code-latest',
+      messages: [],
+    })
+
+    expect(result.finish.kind).toBe('error')
+    expect(server.paths).toEqual(['/api/plan/v1/messages'])
+    expect(server.headers[0]?.authorization).toBe('Bearer test-key')
+    expect(server.headers[0]?.['x-api-key']).toBeUndefined()
+    expect(server.headers[0]?.['api-key']).toBeUndefined()
+  })
+
+  it.each([
+    ['openai-completions', '/v1/chat/completions'],
+    ['openai-responses', '/v1/responses'],
+  ] as const)('sends bearer credentials for a hand-declared %s route', async (api, path) => {
+    const server = await mockServer([{ status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'acme-gateway': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          credentialMode: 'bearer',
+          api,
+          baseURL: `${server.url}/v1`,
+          models: [{ id: 'acme-model' }],
+          headers: {
+            Authorization: 'Bearer configured-wrong',
+            'x-api-key': 'configured-wrong',
+            'api-key': 'configured-wrong',
+          },
+        },
+      },
+    })
+
+    const result = await assemble(ctx, {
+      provider: 'acme-gateway',
+      model: 'acme-model',
+      messages: [],
+    })
+
+    expect(result.finish.kind).toBe('error')
+    expect(server.paths).toEqual([path])
+    expect(server.headers[0]?.authorization).toBe('Bearer test-key')
+    expect(server.headers[0]?.['x-api-key']).toBeUndefined()
+    expect(server.headers[0]?.['api-key']).toBeUndefined()
+  })
+
+  it('ignores native ambient Anthropic credentials for a bearer catalog route', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'poison-anthropic-api-key')
+    vi.stubEnv('ANTHROPIC_AUTH_TOKEN', 'poison-anthropic-auth-token')
+    vi.stubEnv('ANTHROPIC_OAUTH_TOKEN', 'poison-anthropic-oauth-token')
+    const server = await mockServer([{ status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        anthropic: {
+          apiKeyEnv: 'PI_TEST_KEY',
+          credentialMode: 'bearer',
+          baseURL: `${server.url}/api/plan`,
+          models: [{ id: 'claude-sonnet-4' }],
+        },
+      },
+    })
+
+    const result = await assemble(ctx, {
+      provider: 'anthropic',
+      model: 'claude-sonnet-4',
+      messages: [],
+    })
+
+    expect(result.finish.kind).toBe('error')
+    expect(server.paths).toEqual(['/api/plan/v1/messages'])
+    expect(server.headers[0]?.authorization).toBe('Bearer test-key')
+    expect(server.headers[0]?.['x-api-key']).toBeUndefined()
+  })
+
   it('resolves an attachment service mounted after the adapter when dispatching an image', async () => {
     const server = await mockServer([{ status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }])
     const attachmentId = AttachmentId(`sha256:${'a'.repeat(64)}`)

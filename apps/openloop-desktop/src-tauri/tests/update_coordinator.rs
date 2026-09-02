@@ -5,7 +5,7 @@ use std::{
     net::{Shutdown, TcpListener, TcpStream},
     panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{mpsc, Arc, Mutex, MutexGuard},
     thread,
     time::{Duration, Instant},
 };
@@ -60,6 +60,7 @@ struct Response {
 struct TestServer<'fixture> {
     base_url: String,
     thread: Option<thread::JoinHandle<Result<(), String>>>,
+    headers_read: mpsc::Receiver<()>,
     _guard: &'fixture UpdateFixtureGuard,
 }
 
@@ -76,13 +77,14 @@ impl<'fixture> TestServer<'fixture> {
         let address = listener.local_addr().expect("fixture server address");
         let base_url = format!("http://{address}");
         let routes = Arc::new(routes(&base_url));
+        let (headers_read_tx, headers_read) = mpsc::channel();
         let thread = thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(5);
             let mut served = 0;
             while served < expected_requests && Instant::now() < deadline {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        serve(&mut stream, &routes)?;
+                        serve(&mut stream, &routes, &headers_read_tx)?;
                         served += 1;
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -101,6 +103,7 @@ impl<'fixture> TestServer<'fixture> {
         Self {
             base_url,
             thread: Some(thread),
+            headers_read,
             _guard: guard,
         }
     }
@@ -109,6 +112,12 @@ impl<'fixture> TestServer<'fixture> {
         format!("{}{path}", self.base_url)
             .parse()
             .expect("fixture URL")
+    }
+
+    fn wait_for_request_headers(&self) {
+        self.headers_read
+            .recv_timeout(Duration::from_secs(2))
+            .expect("fixture server did not read request headers");
     }
 }
 
@@ -126,7 +135,14 @@ impl Drop for TestServer<'_> {
     }
 }
 
-fn serve(stream: &mut TcpStream, routes: &HashMap<&str, Response>) -> Result<(), String> {
+fn serve(
+    stream: &mut TcpStream,
+    routes: &HashMap<&str, Response>,
+    headers_read: &mpsc::Sender<()>,
+) -> Result<(), String> {
+    stream
+        .set_nonblocking(false)
+        .map_err(|error| error.to_string())?;
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .map_err(|error| error.to_string())?;
@@ -141,8 +157,15 @@ fn serve(stream: &mut TcpStream, routes: &HashMap<&str, Response>) -> Result<(),
         }
         request.extend_from_slice(&chunk[..count]);
     }
-    let line = std::str::from_utf8(&request)
+    let header_end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+        .ok_or_else(|| "incomplete HTTP request headers".to_owned())?;
+    let headers = std::str::from_utf8(&request[..header_end])
         .map_err(|error| error.to_string())?
+        .to_owned();
+    let line = headers
         .lines()
         .next()
         .ok_or_else(|| "empty HTTP request".to_owned())?;
@@ -150,6 +173,33 @@ fn serve(stream: &mut TcpStream, routes: &HashMap<&str, Response>) -> Result<(),
         .split_whitespace()
         .nth(1)
         .ok_or_else(|| format!("invalid HTTP request line {line:?}"))?;
+    let mut content_length = 0;
+    for header in headers.lines().skip(1) {
+        let Some((name, value)) = header.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            content_length = value
+                .trim()
+                .parse::<usize>()
+                .map_err(|error| format!("invalid Content-Length {value:?}: {error}"))?;
+        }
+    }
+    headers_read
+        .send(())
+        .map_err(|error| format!("report parsed update request headers: {error}"))?;
+    let mut remaining_body = content_length.saturating_sub(request.len() - header_end);
+    let mut body_chunk = [0_u8; 1024];
+    while remaining_body > 0 {
+        let chunk_size = remaining_body.min(body_chunk.len());
+        let count = stream
+            .read(&mut body_chunk[..chunk_size])
+            .map_err(|error| format!("read update request body: {error}"))?;
+        if count == 0 {
+            return Err("incomplete update request body".to_owned());
+        }
+        remaining_body -= count;
+    }
     let response = routes
         .get(path)
         .ok_or_else(|| format!("unexpected update request path {path:?}"))?;
@@ -191,7 +241,7 @@ fn serve(stream: &mut TcpStream, routes: &HashMap<&str, Response>) -> Result<(),
 }
 
 #[test]
-fn fixture_server_finishes_its_response_before_closing_the_socket() {
+fn fixture_server_waits_for_the_complete_request_before_responding() {
     let fixture = update_fixture_guard();
     let server = TestServer::new(&fixture, 1, |_| {
         HashMap::from([(
@@ -218,9 +268,33 @@ fn fixture_server_finishes_its_response_before_closing_the_socket() {
     )
     .expect("write fixture request headers");
     stream
-        .write_all(&trailing_request)
-        .expect("write trailing fixture request bytes");
+        .write_all(&trailing_request[..4096])
+        .expect("write partial fixture request body");
+    stream.flush().expect("flush partial fixture request");
+    server.wait_for_request_headers();
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("set fixture response probe timeout");
+
+    let mut probe = [0_u8; 1];
+    let probe_error = stream
+        .read(&mut probe)
+        .expect_err("fixture server responded before receiving the complete request");
+    assert!(
+        matches!(
+            probe_error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ),
+        "unexpected response probe error: {probe_error}"
+    );
+
+    stream
+        .write_all(&trailing_request[4096..])
+        .expect("write remaining fixture request body");
     stream.flush().expect("flush fixture request");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("restore fixture response timeout");
 
     let mut response = Vec::new();
     stream

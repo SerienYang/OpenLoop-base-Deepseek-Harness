@@ -13,6 +13,7 @@ use tauri::{AppHandle, Manager, RunEvent, Url};
 #[cfg(all(target_os = "macos", not(feature = "openloop-e2e")))]
 use tauri_plugin_updater::Update;
 use tauri_plugin_updater::UpdaterExt;
+use tauri_plugin_window_state::StateFlags;
 
 #[cfg(not(target_os = "macos"))]
 use crate::bridge::BridgeDispatchTables;
@@ -1248,11 +1249,16 @@ pub fn run() -> i32 {
             return 1;
         }
     };
+    let window_state_plugin = tauri_plugin_window_state::Builder::default()
+        .with_state_flags(StateFlags::POSITION | StateFlags::SIZE | StateFlags::MAXIMIZED)
+        .with_filter(|label| label == "main")
+        .build();
     let updater_plugin = tauri_plugin_updater::Builder::new()
         .target("darwin-aarch64")
         .pubkey(updater_config.public_key())
         .build();
     let builder = tauri::Builder::default()
+        .plugin(window_state_plugin)
         .plugin(updater_plugin)
         .manage(updater_config)
         .invoke_handler(tauri::generate_handler![build_manifest]);

@@ -36,6 +36,28 @@
    centered on the same axis as the input box (which caps at chat + 16px); the
    scroller itself stays full-bleed. */
 .column {
+  --dsh-chat-text-scale: var(--openloop-chat-text-scale, 1);
+  --dsw-font-markdown-h1: 700 calc(24px * var(--dsh-chat-text-scale, 1)) /
+    calc(34px * var(--dsh-chat-text-scale, 1)) var(--dsw-font-family);
+  --dsw-font-markdown-h2: 700 calc(22px * var(--dsh-chat-text-scale, 1)) /
+    calc(32px * var(--dsh-chat-text-scale, 1)) var(--dsw-font-family);
+  --dsw-font-markdown-h3: 700 calc(20px * var(--dsh-chat-text-scale, 1)) /
+    calc(30px * var(--dsh-chat-text-scale, 1)) var(--dsw-font-family);
+  --dsw-font-markdown-h4: 600 calc(16px * var(--dsh-chat-text-scale, 1)) /
+    calc(28px * var(--dsh-chat-text-scale, 1)) var(--dsw-font-family);
+  --dsw-font-markdown-base: calc(16px * var(--dsh-chat-text-scale, 1)) /
+    calc(28px * var(--dsh-chat-text-scale, 1)) var(--dsw-font-family);
+  --dsw-font-markdown-base-strong: 600 calc(16px * var(--dsh-chat-text-scale, 1)) /
+    calc(28px * var(--dsh-chat-text-scale, 1)) var(--dsw-font-family);
+  --dsw-font-markdown-table: calc(15px * var(--dsh-chat-text-scale, 1)) /
+    calc(25px * var(--dsh-chat-text-scale, 1)) var(--dsw-font-family);
+  --dsw-font-markdown-table-head: 500 calc(15px * var(--dsh-chat-text-scale, 1)) /
+    calc(25px * var(--dsh-chat-text-scale, 1)) var(--dsw-font-family);
+  --dsw-font-markdown-code: calc(14px * var(--dsh-chat-text-scale, 1)) /
+    calc(22px * var(--dsh-chat-text-scale, 1)) var(--ds-font-family-code);
+  --dsw-font-markdown-code-block: calc(13px * var(--dsh-chat-text-scale, 1)) /
+    calc(22px * var(--dsh-chat-text-scale, 1)) var(--ds-font-family-code);
+
   max-width: var(--dsh-chat-content-width);
   width: 100%;
   margin: 0 auto;
@@ -73,6 +95,8 @@
   align-items: center;
   height: 26px;
   font: var(--dsw-font-s-strong-14);
+  font-size: calc(14px * var(--dsh-chat-text-scale, 1));
+  line-height: calc(20px * var(--dsh-chat-text-scale, 1));
   white-space: nowrap;
   background: linear-gradient(
     90deg,
@@ -94,6 +118,8 @@
 .turnStatusClock {
   margin-left: 8px;
   font: var(--dsw-font-xs-13);
+  font-size: calc(13px * var(--dsh-chat-text-scale, 1));
+  line-height: calc(18px * var(--dsh-chat-text-scale, 1));
   font-weight: 400;
   font-variant-numeric: tabular-nums;
   color: var(--dsw-alias-label-caption);
@@ -116,14 +142,14 @@
 
 .hint {
   color: var(--dsw-alias-label-tertiary);
-  font-size: 12px;
-  line-height: 18px;
+  font-size: calc(12px * var(--dsh-chat-text-scale, 1));
+  line-height: calc(18px * var(--dsh-chat-text-scale, 1));
 }
 
 .openError {
   color: var(--dsw-alias-state-error-primary);
-  font-size: 12px;
-  line-height: 18px;
+  font-size: calc(12px * var(--dsh-chat-text-scale, 1));
+  line-height: calc(18px * var(--dsh-chat-text-scale, 1));
 }
 
 .older {

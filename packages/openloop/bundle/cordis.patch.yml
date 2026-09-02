@@ -33,6 +33,18 @@
   inject: [llm, credentialConsumers]
 - id: llm-pi-ai
   inject: [llm, credentialConsumers]
+  config:
+    providers:
+      volcengine-agent-plan:
+        displayName: 火山方舟 Agent Plan
+        apiKeyEnv: VOLCENGINE_ARK_AGENT_PLAN_API_KEY
+        credentialMode: bearer
+        api: anthropic-messages
+        baseURL: https://ark.cn-beijing.volces.com/api/plan
+        models:
+          - id: ark-code-latest
+            name: Ark Code Latest
+            input: [text, image]
 - id: web-search-deepseek
   inject: [web, credentialConsumers]
 - id: cordis-client-runner
@@ -151,3 +163,6 @@
 - insert:
     - id: shell
       name: '@openloop/shell'
+- insert:
+    - id: chat-zoom
+      name: '@openloop/chat-zoom'

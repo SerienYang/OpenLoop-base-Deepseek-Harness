@@ -25,6 +25,20 @@ facade 替代前，这些界面不会加载。Openloop Desktop Bridge client 会
 profile 选择的 runtime adapter，因此共享 client runtime 不会构造 legacy
 Workspace runtime，也不会调用任何 `workspace.*` 方法。
 
+## 内置提供方
+
+该补丁还会添加以下 `llm-pi-ai` 提供方预设：
+
+- 提供方 ID：`volcengine-agent-plan`
+- 显示名称：`火山方舟 Agent Plan`
+- 端点：`https://ark.cn-beijing.volces.com/api/plan`
+- 凭据引用：`VOLCENGINE_ARK_AGENT_PLAN_API_KEY`
+- 凭据模式：`bearer`
+- 模型：`ark-code-latest`
+
+Agent Plan 密钥与普通方舟密钥、Coding Plan 密钥互不通用；请将 Agent Plan
+密钥存入上述凭据引用。
+
 `ensureOpenloopProfile()` 仅在 `package.json` 不存在时创建 `openloop` profile。
 该清单一旦存在，profile 和所有同级文件即归用户所有，本包不会再改动其字节。
 但 Openloop runtime 只接受精确的 shipped bundle 元组；profile patch 文件只能

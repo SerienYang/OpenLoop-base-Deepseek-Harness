@@ -144,6 +144,37 @@ describe('OpenLoop profile', () => {
     })
   })
 
+  it('composes the Volcengine Agent Plan provider preset', () => {
+    const require = createRequire(import.meta.url)
+    const layers = OPENLOOP_PROFILE_BUNDLES.map((packageName) => {
+      const manifestPath = require.resolve(`${packageName}/package.json`)
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as BundleManifest
+      const patchPath = join(manifestPath, '..', manifest.dsh!.bundle!.patch!)
+      return yaml.load(readFileSync(patchPath, 'utf8'), {
+        schema: entryListSchema,
+      }) as PatchOptions[]
+    })
+
+    const llmPiAi = composeEntries(layers).find(entry => entry.id === 'llm-pi-ai')
+
+    expect(llmPiAi?.config).toEqual({
+      providers: {
+        'volcengine-agent-plan': {
+          displayName: '火山方舟 Agent Plan',
+          apiKeyEnv: 'VOLCENGINE_ARK_AGENT_PLAN_API_KEY',
+          credentialMode: 'bearer',
+          api: 'anthropic-messages',
+          baseURL: 'https://ark.cn-beijing.volces.com/api/plan',
+          models: [{
+            id: 'ark-code-latest',
+            name: 'Ark Code Latest',
+            input: ['text', 'image'],
+          }],
+        },
+      },
+    })
+  })
+
   it('inserts the Host bootstrap entry into the composed runtime profile', () => {
     const require = createRequire(import.meta.url)
     const manifestPath = require.resolve('@openloop/bundle/package.json')

@@ -807,6 +807,7 @@
       "ignoreDependencies": [
         "@deepseek-ai/dsh-base",
         "@deepseek-ai/dsh-web-app",
+        "@openloop/chat-zoom",
         "@openloop/file-broker",
         "@openloop/fs-workspace",
         "@openloop/sandbox-workspace",

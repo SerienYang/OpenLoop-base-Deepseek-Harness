@@ -5646,6 +5646,9 @@ importers:
       '@deepseek-ai/dsh-web-app':
         specifier: workspace:^
         version: link:../../bundle/web-app
+      '@openloop/chat-zoom':
+        specifier: workspace:*
+        version: link:../chat-zoom
       '@openloop/credentials-keychain':
         specifier: workspace:*
         version: link:../credentials-keychain
@@ -5698,6 +5701,34 @@ importers:
       zod:
         specifier: ^4.4.3
         version: 4.4.3
+
+  packages/openloop/chat-zoom:
+    dependencies:
+      '@deepseek-ai/dsh-settings':
+        specifier: workspace:^
+        version: link:../../settings/settings
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../vendor/schemastery
+        version: link:../../../vendor/schemastery
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-api-remotes':
+        specifier: workspace:^
+        version: link:../../api/remotes
+      '@deepseek-ai/dsh-client-connection':
+        specifier: workspace:^
+        version: link:../../client/connection
+      '@deepseek-ai/dsh-client-runtime':
+        specifier: workspace:^
+        version: link:../../client/runtime
+      '@deepseek-ai/dsh-client-ui-settings':
+        specifier: workspace:^
+        version: link:../../client/ui-settings
+      '@deepseek-ai/dsh-invariants':
+        specifier: workspace:^
+        version: link:../../runtime-diagnostics/invariants
 
   packages/openloop/credentials-keychain:
     devDependencies:
@@ -9713,6 +9744,9 @@ importers:
       '@openloop/bundle':
         specifier: workspace:^
         version: link:../../packages/openloop/bundle
+      '@openloop/chat-zoom':
+        specifier: workspace:^
+        version: link:../../packages/openloop/chat-zoom
       '@openloop/credentials-keychain':
         specifier: workspace:^
         version: link:../../packages/openloop/credentials-keychain
