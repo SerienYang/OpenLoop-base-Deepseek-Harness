@@ -61,6 +61,11 @@ interface ListingEntry {
   max_output_tokens?: unknown
 }
 
+/** Effective catalog of a route the active adapter configuration already owns. */
+export type ConfiguredCatalog = (
+  request: LlmModelDiscoveryRequest,
+) => readonly LlmDiscoveredModel[] | undefined | Promise<readonly LlmDiscoveredModel[] | undefined>
+
 /** A positive integer field of a listing entry, or `undefined` when absent or unusable. */
 function capacity(...candidates: readonly unknown[]): number | undefined {
   for (const candidate of candidates) {
@@ -195,10 +200,15 @@ function usableProbeKey(raw: string): string {
 export async function discoverModels(
   request: LlmModelDiscoveryRequest,
   storedApiKey?: () => Promise<string | undefined>,
+  configuredCatalog?: ConfiguredCatalog,
 ): Promise<readonly LlmDiscoveredModel[]> {
-  // A catalog route already has its answer, and a better one: the installed
-  // entries carry context windows and output caps no listing endpoint reports.
+  // An active configured route is the first authority: it carries effective
+  // narrowing, overrides, and hand-declared models after all defaults resolve.
   if (request.provider !== undefined) {
+    const configured = await configuredCatalog?.(request)
+    if (configured !== undefined) return configured
+    // A dormant installed route still has a better answer than its endpoint:
+    // the registry carries context windows and output caps listings omit.
     const installed = catalogModels(request.provider)
     if (installed.size > 0) {
       return [...installed.values()].map(model => ({

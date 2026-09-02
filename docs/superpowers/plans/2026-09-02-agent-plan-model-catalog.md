@@ -294,8 +294,8 @@ Change `discoverModels` to accept an optional callback:
 
 ```ts
 type ConfiguredCatalog = (
-  provider: string,
-) => Promise<readonly LlmDiscoveredModel[] | undefined>
+  request: LlmModelDiscoveryRequest,
+) => readonly LlmDiscoveredModel[] | undefined | Promise<readonly LlmDiscoveredModel[] | undefined>
 ```
 
 Resolution order:
@@ -304,18 +304,22 @@ Resolution order:
 2. installed pi-ai catalog;
 3. endpoint probe.
 
-`undefined` means the route is not configured. An empty array means the route
-is configured and intentionally advertises no models; do not fall through to
-the network.
+`undefined` means the route is not configured. Configured custom routes cannot
+materialize an empty model catalog, so the resolver only returns non-empty
+arrays for routes it owns.
 
 In `packages/llm/llm-pi-ai/src/index.ts`, implement the callback from the
 resolved profile's materialized pi-ai models:
 
 ```ts
-const listConfigured = async (provider: string) => {
+const listConfigured = (request: LlmModelDiscoveryRequest) => {
+  const provider = request.provider
+  if (provider === undefined || request.apiKey !== undefined) return undefined
   const profile = profiles().get(provider)
   if (profile === undefined) return undefined
-  return profile.piProvider.models.map(model => ({
+  if (request.baseURL !== undefined && request.baseURL !== profile.baseURL) return undefined
+  if (request.api !== undefined && request.api !== profile.api) return undefined
+  return profile.piProvider.getModels().map(model => ({
     id: model.id,
     name: model.name,
     contextWindow: model.contextWindow,
@@ -330,13 +334,15 @@ const listConfigured = async (provider: string) => {
 and is intentionally absent when a model inherited its capacity.
 
 Pass the callback into the discovery registration. Do not resolve a credential
-on the local path.
+on the local path. A typed replacement key or a draft endpoint/protocol that
+differs from the active profile must bypass the local result and probe the
+draft, preserving the settings page's existing "test what the form shows"
+behavior.
 
 - [ ] **Step 4: Add edge-case tests**
 
 Cover:
 
-- a configured empty catalog returns `[]` without network access;
 - an unknown route still uses OpenAI-compatible `/models`;
 - a configured route performs no credential lookup;
 - a configured pi-ai catalog provider returns its effective narrowed/overridden
