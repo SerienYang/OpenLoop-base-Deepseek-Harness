@@ -43,6 +43,11 @@ export { BlockAssembler } from './assembler.ts'
 export { callConfigEquals, deepFreeze, isAgentLoopRequest, markAgentLoopRequest } from './call-config.ts'
 export type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
 
+const MODEL_MODALITY_GATE: Record<ModelModality, true> = {
+  text: true,
+  image: true,
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     llm: LlmRuntime
@@ -548,11 +553,25 @@ export class LlmRuntime extends Service {
     for (const model of discovered) {
       if (typeof model.id !== 'string' || model.id.length === 0 || seen.has(model.id)) continue
       seen.add(model.id)
+      const rawModalities: unknown = model.inputModalities
+      if (rawModalities !== undefined && (
+        !Array.isArray(rawModalities)
+        || rawModalities.some(modality =>
+          typeof modality !== 'string' || !Object.hasOwn(MODEL_MODALITY_GATE, modality))
+        || new Set(rawModalities).size !== rawModalities.length
+      )) {
+        throw new LlmError(
+          `model discovery returned invalid input modalities for model "${model.id}"`,
+          'INVALID_DISCOVERY',
+        )
+      }
+      const inputModalities = rawModalities as ModelModality[] | undefined
       models.push({
         id: model.id,
         ...model.name === undefined ? {} : { name: model.name },
         ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
         ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
+        ...inputModalities === undefined ? {} : { inputModalities: [...inputModalities] },
       })
     }
     return models

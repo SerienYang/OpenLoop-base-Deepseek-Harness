@@ -36,10 +36,16 @@ The patch also adds this `llm-pi-ai` provider preset:
 
 - Provider ID: `volcengine-agent-plan`
 - Display name: `火山方舟 Agent Plan`
-- Endpoint: `https://ark.cn-beijing.volces.com/api/plan`
+- Endpoint: `https://ark.cn-beijing.volces.com/api/plan/v3`
+- Protocol: OpenAI Responses
 - Credential reference: `VOLCENGINE_ARK_AGENT_PLAN_API_KEY`
 - Credential mode: `bearer`
-- Model: `ark-code-latest`
+- Models: the 13 text-generation model IDs published in the
+  [official Agent Plan OpenCode configuration](https://docs.volcengine.com/docs/82379/2373741?lang=zh)
+
+The model selector switches by exact model ID and uses each catalog entry's
+declared context, output, and image-input capabilities. `ark-code-latest`
+remains available as the console-managed alias.
 
 Agent Plan keys are distinct from ordinary Ark keys and Coding Plan keys; store
 an Agent Plan key under the credential reference above.

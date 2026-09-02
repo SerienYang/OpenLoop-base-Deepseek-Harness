@@ -200,7 +200,7 @@ describe('PiAiAdapter provider routing', () => {
     expect(server.paths).toEqual(['/v1/responses'])
   })
 
-  it('sends bearer credentials for a hand-declared Anthropic Messages route', async () => {
+  it('routes an Agent Plan model through OpenAI Responses with bearer credentials', async () => {
     const server = await mockServer([{ status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }])
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
@@ -209,9 +209,9 @@ describe('PiAiAdapter provider routing', () => {
         'volcengine-agent-plan': {
           apiKeyEnv: 'PI_TEST_KEY',
           credentialMode: 'bearer',
-          api: 'anthropic-messages',
-          baseURL: `${server.url}/api/plan`,
-          models: [{ id: 'ark-code-latest' }],
+          api: 'openai-responses',
+          baseURL: `${server.url}/api/plan/v3`,
+          models: [{ id: 'glm-5.3-flash' }],
           headers: {
             authorization: 'Bearer configured-wrong',
             'X-Api-Key': 'configured-wrong',
@@ -223,12 +223,13 @@ describe('PiAiAdapter provider routing', () => {
 
     const result = await assemble(ctx, {
       provider: 'volcengine-agent-plan',
-      model: 'ark-code-latest',
+      model: 'glm-5.3-flash',
       messages: [],
     })
 
     expect(result.finish.kind).toBe('error')
-    expect(server.paths).toEqual(['/api/plan/v1/messages'])
+    expect(server.paths).toEqual(['/api/plan/v3/responses'])
+    expect(server.requests[0]).toMatchObject({ model: 'glm-5.3-flash' })
     expect(server.headers[0]?.authorization).toBe('Bearer test-key')
     expect(server.headers[0]?.['x-api-key']).toBeUndefined()
     expect(server.headers[0]?.['api-key']).toBeUndefined()

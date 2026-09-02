@@ -147,10 +147,9 @@ describe('draft-provider model discovery', () => {
   })
 
   it('authenticates a configured route the draft cannot supply a key for', async () => {
-    // What the Models page actually sends after a key is saved: the form holds
-    // the redacted descriptor, so the draft names the route and the endpoint
-    // and no credential at all. Interrogating unauthenticated would answer 401
-    // and read as a wrong key.
+    // When the form changes a configured route's endpoint, discovery must test
+    // that draft rather than echo the active local catalog. The form cannot
+    // supply the stored key, so the adapter resolves it for this probe.
     const server = await listingServer({ body: JSON.stringify({ data: [{ id: 'm' }] }) })
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
@@ -161,7 +160,7 @@ describe('draft-provider model discovery', () => {
         'acme-gateway': {
           apiKeyEnv: 'ACME_GATEWAY_KEY',
           api: 'openai-completions',
-          baseURL: server.url,
+          baseURL: `${server.url}/configured`,
           models: [{ id: 'acme-large' }],
         },
       },
@@ -176,6 +175,100 @@ describe('draft-provider model discovery', () => {
 
     expect(server.headers.map(headers => headers.authorization))
       .toEqual(['Bearer stored-key', 'Bearer typed', undefined])
+  })
+
+  it('answers a configured custom route from its effective local catalog', async () => {
+    const fetch_ = vi.fn(() => Promise.reject(new Error('network must not be called')))
+    vi.stubGlobal('fetch', fetch_)
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    Reflect.deleteProperty(process.env, 'ABSENT_AGENT_PLAN_KEY')
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'volcengine-agent-plan': {
+          apiKeyEnv: 'ABSENT_AGENT_PLAN_KEY',
+          credentialMode: 'bearer',
+          api: 'openai-responses',
+          baseURL: 'https://unreachable.invalid/api/plan/v3',
+          models: [{
+            id: 'glm-5.3-flash',
+            name: 'glm-5.3-flash',
+            contextWindow: 1_024_000,
+            maxTokens: 65_536,
+            input: ['text', 'image'],
+          }],
+        },
+      },
+    })
+
+    await expect(ctx.llm.discoverModels('llm-pi-ai', {
+      provider: 'volcengine-agent-plan',
+      baseURL: 'https://unreachable.invalid/api/plan/v3',
+      api: 'openai-responses',
+    })).resolves.toEqual([{
+      id: 'glm-5.3-flash',
+      name: 'glm-5.3-flash',
+      contextWindow: 1_024_000,
+      maxTokens: 65_536,
+      inputModalities: ['text', 'image'],
+    }])
+    expect(fetch_).not.toHaveBeenCalled()
+  })
+
+  it('prefers a configured catalog-provider route over the installed catalog', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        deepseek: {
+          models: [{
+            id: 'deepseek-chat',
+            name: 'Narrowed Chat',
+            input: ['text'],
+          }],
+        },
+      },
+    })
+
+    await expect(ctx.llm.discoverModels('llm-pi-ai', {
+      provider: 'deepseek',
+    })).resolves.toEqual([expect.objectContaining({
+      id: 'deepseek-chat',
+      name: 'Narrowed Chat',
+      inputModalities: ['text'],
+    })])
+  })
+
+  it.each([
+    ['base URL', 'base-url'],
+    ['protocol', 'protocol'],
+    ['API key', 'api-key'],
+  ] as const)('probes an edited built-in route when its %s changes', async (_label, changed) => {
+    const server = await listingServer({ body: JSON.stringify({ data: [{ id: `from-${changed}` }] }) })
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    process.env['EDITED_BUILTIN_KEY'] = 'stored-key'
+    touchedEnv.push('EDITED_BUILTIN_KEY')
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        deepseek: {
+          apiKeyEnv: 'EDITED_BUILTIN_KEY',
+          baseURL: changed === 'base-url' ? `${server.url}/configured` : server.url,
+        },
+      },
+    })
+    const request = {
+      provider: 'deepseek',
+      baseURL: server.url,
+      ...changed === 'protocol' ? { api: 'openai-responses' } : {},
+      ...changed === 'api-key' ? { apiKey: 'typed-key' } : {},
+    }
+
+    await expect(ctx.llm.discoverModels('llm-pi-ai', request))
+      .resolves.toEqual([{ id: `from-${changed}` }])
+    expect(server.paths).toEqual(['/models'])
+    expect(server.headers[0]?.authorization)
+      .toBe(changed === 'api-key' ? 'Bearer typed-key' : 'Bearer stored-key')
   })
 
   it('leaves a catalog route\'s credential unresolved, having never reached the network', async () => {

@@ -31,10 +31,15 @@ Workspace runtime，也不会调用任何 `workspace.*` 方法。
 
 - 提供方 ID：`volcengine-agent-plan`
 - 显示名称：`火山方舟 Agent Plan`
-- 端点：`https://ark.cn-beijing.volces.com/api/plan`
+- 端点：`https://ark.cn-beijing.volces.com/api/plan/v3`
+- 协议：OpenAI Responses
 - 凭据引用：`VOLCENGINE_ARK_AGENT_PLAN_API_KEY`
 - 凭据模式：`bearer`
-- 模型：`ark-code-latest`
+- 模型：[Agent Plan 官方 OpenCode 配置](https://docs.volcengine.com/docs/82379/2373741?lang=zh)
+  发布的 13 个文本生成模型 ID
+
+模型选择器按精确模型 ID 切换，并使用各目录条目声明的上下文、输出及图片输入能力。
+`ark-code-latest` 仍作为控制台托管别名提供。
 
 Agent Plan 密钥与普通方舟密钥、Coding Plan 密钥互不通用；请将 Agent Plan
 密钥存入上述凭据引用。

@@ -2,5 +2,5 @@
 # last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write packages/openloop/bundle/README.md
-README.md: d6de6ca486c9285b25fac074eb70b8a87d958f11
-README.zh.md: 762d30aade8ba066c101241c703a68a47408002e
+README.md: aac612eabc693a97e69beccb94f25f385d123604
+README.zh.md: a47d17ffc9bd778128f4e7aaf48b6f59858ad44c
