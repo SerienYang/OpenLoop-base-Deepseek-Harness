@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -12,9 +13,12 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
+import { PassThrough, Writable } from 'node:stream'
 import { afterEach } from 'vitest'
 import { describe, expect, it } from 'vitest'
+import { decodeLaunchSecretsFrame } from '../../apps/openloop-runtime/src/launch-secrets.ts'
+import { DesktopBridgeClient } from '../../packages/openloop/desktop-bridge-host/src/client.ts'
 
 const modulePath = './build-desktop.mjs'
 const artifactGeneratorPath: string = './generate-artifact-manifest.mjs'
@@ -584,6 +588,92 @@ describe('Openloop desktop build orchestrator', () => {
     ]])
   })
 
+  it('writes optional input to fd3 without changing argv or environment', async () => {
+    const { createProcessRunner } = await import(modulePath) as DesktopModule
+    const calls: unknown[][] = []
+    const received: Buffer[] = []
+    const input = Buffer.from('fd3-only-secret')
+    const spawn = (...args: unknown[]) => {
+      calls.push(args)
+      const child = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter
+        stderr: EventEmitter
+        stdio: Array<null | PassThrough>
+      }
+      child.stdout = new EventEmitter()
+      child.stderr = new EventEmitter()
+      const fd3 = new PassThrough()
+      fd3.on('data', (chunk: Buffer) => received.push(Buffer.from(chunk)))
+      child.stdio = [null, null, null, fd3]
+      setImmediate(() => child.emit('exit', 0, null))
+      return child
+    }
+    const runner = createProcessRunner(spawn)
+
+    await expect(runner.run({
+      command: 'tool',
+      args: ['--health-smoke'],
+      capture: true,
+      fd3Input: input,
+      timeoutMs: 1_000,
+    })).resolves.toEqual({ stdout: '', stderr: '' })
+
+    expect(Buffer.concat(received).toString('utf8')).toBe('fd3-only-secret')
+    expect(input.equals(Buffer.alloc(input.length))).toBe(true)
+    expect(calls).toEqual([[
+      'tool',
+      ['--health-smoke'],
+      expect.objectContaining({
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+      }),
+    ]])
+    const spawnOptions = calls[0]?.[2] as { env?: Record<string, string> }
+    expect(JSON.stringify(spawnOptions.env)).not.toContain('fd3-only-secret')
+  })
+
+  it('rejects a failed fd3 write, terminates the child, and clears the input', async () => {
+    const { createProcessRunner } = await import(modulePath) as DesktopModule
+    const input = Buffer.from('fd3-write-failure-secret')
+    let killed = false
+    const spawn = () => {
+      const child = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter
+        stderr: EventEmitter
+        stdio: Array<null | Writable>
+        kill: () => boolean
+      }
+      child.stdout = new EventEmitter()
+      child.stderr = new EventEmitter()
+      child.stdio = [
+        null,
+        null,
+        null,
+        new Writable({
+          write(_chunk, _encoding, callback) {
+            callback(new Error('injected fd3 write failure'))
+          },
+        }),
+      ]
+      child.kill = () => {
+        killed = true
+        return true
+      }
+      return child
+    }
+    const runner = createProcessRunner(spawn)
+
+    await expect(runner.run({
+      command: 'tool',
+      args: ['--health-smoke'],
+      capture: true,
+      fd3Input: input,
+      timeoutMs: 1_000,
+    })).rejects.toThrow(/fd3.*write|write.*fd3/iu)
+    expect(killed).toBe(true)
+    expect(input.equals(Buffer.alloc(input.length))).toBe(true)
+  })
+
   it('verifies final hashes, embedded base identity, App binaries, signatures, and health', async () => {
     const { verifyDesktopBuild } = await import(modulePath) as DesktopModule
     const { generateArtifactManifest } = await import(
@@ -661,26 +751,45 @@ describe('Openloop desktop build orchestrator', () => {
       { trustedRoot: root },
     )
     const coreSha256 = createHash('sha256').update(readFileSync(core)).digest('hex')
-    const validReadiness = {
+    const validReadiness = (launchId: string): Record<string, unknown> => ({
       type: 'openloop.runtime.ready',
       version: 1,
+      launchId,
       profile: 'openloop',
       host: '127.0.0.1',
       port: 49152,
       origin: 'http://127.0.0.1:49152',
       coreManifestSha256: coreSha256,
       healthSmoke: { method: 'GET', path: '/', status: 200 },
-    }
-    let readinessPayload: Record<string, unknown> = validReadiness
+      candidateHealth: { webAsset: true, bootstrapExchange: true },
+    })
+    let readinessTransform = (
+      readiness: Record<string, unknown>,
+    ): Record<string, unknown> => readiness
     let healthSmokeStderr = ''
     const plistValues: Record<string, string> = {
       CFBundleIdentifier: 'ai.openloop.desktop.test',
       CFBundleShortVersionString: '1.2.3',
       CFBundleVersion: '1.2.3',
     }
-    const commands: Array<{ command: string; args: string[] }> = []
+    const commands: Array<{
+      command: string
+      args: string[]
+      capture?: boolean
+      env?: Record<string, string>
+      fd3Input?: Uint8Array
+      timeoutMs?: number
+    }> = []
+    const healthLaunches: Array<ReturnType<typeof decodeLaunchSecretsFrame>> = []
     const runner = {
-      run: async (command: { command: string; args: string[] }) => {
+      run: async (command: {
+        command: string
+        args: string[]
+        capture?: boolean
+        env?: Record<string, string>
+        fd3Input?: Uint8Array
+        timeoutMs?: number
+      }) => {
         commands.push(command)
         if (command.command === 'lipo') return { stdout: 'arm64\n', stderr: '' }
         if (command.command === 'plutil') {
@@ -693,8 +802,35 @@ describe('Openloop desktop build orchestrator', () => {
           }
         }
         if (command.command === bundledSidecar) {
+          if (command.fd3Input === undefined) throw new Error('test: fd3 input is missing')
+          const launch = decodeLaunchSecretsFrame(command.fd3Input)
+          healthLaunches.push(launch)
+          expect(launch.launchId).toMatch(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+          )
+          expect(launch.bootstrapToken).toHaveLength(32)
+          expect(launch.bridgeSecret).toHaveLength(32)
+          expect(isAbsolute(launch.socketPath)).toBe(true)
+          expect(statSync(dirname(launch.socketPath)).mode & 0o777).toBe(0o700)
+          expect(statSync(launch.socketPath).mode & 0o777).toBe(0o600)
+          const exposed = JSON.stringify({
+            args: command.args,
+            env: command.env,
+          })
+          expect(exposed).not.toContain(Buffer.from(launch.bootstrapToken).toString('hex'))
+          expect(exposed).not.toContain(Buffer.from(launch.bridgeSecret).toString('hex'))
+          const bridge = new DesktopBridgeClient({
+            launchId: launch.launchId,
+            secret: launch.bridgeSecret,
+            socketPath: launch.socketPath,
+          })
+          try {
+            await expect(bridge.call('readWorkspaceTransaction', null)).resolves.toBeNull()
+          } finally {
+            bridge.close()
+          }
           return {
-            stdout: `${JSON.stringify(readinessPayload)}\n`,
+            stdout: `${JSON.stringify(readinessTransform(validReadiness(launch.launchId)))}\n`,
             stderr: healthSmokeStderr,
           }
         }
@@ -730,11 +866,21 @@ describe('Openloop desktop build orchestrator', () => {
       args: ['--verify', '--deep', '--strict', app],
       capture: true,
     })
-    expect(commands).toContainEqual({
-      command: bundledSidecar,
-      args: ['--health-smoke'],
-      capture: true,
-    })
+    const healthCommand = commands.find(command => command.command === bundledSidecar)
+    expect(healthCommand?.args).toEqual(['--health-smoke'])
+    expect(healthCommand?.capture).toBe(true)
+    expect(Buffer.isBuffer(healthCommand?.fd3Input)).toBe(true)
+    expect(healthCommand?.timeoutMs).toBeGreaterThan(0)
+    expect(healthLaunches).toHaveLength(1)
+    expect(existsSync(dirname(healthLaunches[0]?.socketPath ?? ''))).toBe(false)
+
+    await expect(verifyDesktopBuild(context, runner)).resolves.toBeUndefined()
+    expect(healthLaunches).toHaveLength(2)
+    expect(healthLaunches[1]?.launchId).not.toBe(healthLaunches[0]?.launchId)
+    expect(Buffer.from(healthLaunches[1]?.bootstrapToken ?? []))
+      .not.toEqual(Buffer.from(healthLaunches[0]?.bootstrapToken ?? []))
+    expect(Buffer.from(healthLaunches[1]?.bridgeSecret ?? []))
+      .not.toEqual(Buffer.from(healthLaunches[0]?.bridgeSecret ?? []))
 
     healthSmokeStderr = 'unexpected diagnostic\n'
     await expect(verifyDesktopBuild(context, runner))
@@ -796,37 +942,95 @@ describe('Openloop desktop build orchestrator', () => {
       { trustedRoot: root },
     )
 
-    const invalidReadinessCases: Array<[string, Record<string, unknown>]> = [
-      ['missing type', Object.fromEntries(
-        Object.entries(validReadiness).filter(([key]) => key !== 'type'),
-      )],
-      ['extra field', { ...validReadiness, extra: true }],
-      ['wrong version', { ...validReadiness, version: 2 }],
-      ['wrong profile', { ...validReadiness, profile: 'dsh' }],
-      ['wrong host', { ...validReadiness, host: 'localhost' }],
-      ['port zero', { ...validReadiness, port: 0 }],
-      ['port unsafe', { ...validReadiness, port: Number.MAX_SAFE_INTEGER + 1 }],
-      ['port fractional', { ...validReadiness, port: 49152.5 }],
-      ['origin mismatch', { ...validReadiness, origin: 'http://127.0.0.1:49153' }],
-      ['hash mismatch', { ...validReadiness, coreManifestSha256: 'b'.repeat(64) }],
-      ['missing health smoke', Object.fromEntries(
-        Object.entries(validReadiness).filter(([key]) => key !== 'healthSmoke'),
-      )],
-      ['extra health smoke field', {
-        ...validReadiness,
-        healthSmoke: { ...validReadiness.healthSmoke as Record<string, unknown>, extra: true },
-      }],
-      ['wrong health smoke', {
-        ...validReadiness,
+    const without = (
+      readiness: Record<string, unknown>,
+      omitted: string,
+    ): Record<string, unknown> => Object.fromEntries(
+      Object.entries(readiness).filter(([key]) => key !== omitted),
+    )
+    const invalidReadinessCases: Array<[
+      string,
+      (readiness: Record<string, unknown>) => Record<string, unknown>,
+    ]> = [
+      ['missing type', readiness => without(readiness, 'type')],
+      ['extra field', readiness => ({ ...readiness, extra: true })],
+      ['wrong version', readiness => ({ ...readiness, version: 2 })],
+      ['missing launch id', readiness => without(readiness, 'launchId')],
+      ['wrong launch id', readiness => ({
+        ...readiness,
+        launchId: '00000000-0000-4000-8000-000000000000',
+      })],
+      ['wrong profile', readiness => ({ ...readiness, profile: 'dsh' })],
+      ['wrong host', readiness => ({ ...readiness, host: 'localhost' })],
+      ['port zero', readiness => ({ ...readiness, port: 0 })],
+      ['port unsafe', readiness => ({
+        ...readiness,
+        port: Number.MAX_SAFE_INTEGER + 1,
+      })],
+      ['port fractional', readiness => ({ ...readiness, port: 49152.5 })],
+      ['origin mismatch', readiness => ({
+        ...readiness,
+        origin: 'http://127.0.0.1:49153',
+      })],
+      ['hash mismatch', readiness => ({
+        ...readiness,
+        coreManifestSha256: 'b'.repeat(64),
+      })],
+      ['missing health smoke', readiness => without(readiness, 'healthSmoke')],
+      ['extra health smoke field', readiness => ({
+        ...readiness,
+        healthSmoke: {
+          ...(readiness.healthSmoke as Record<string, unknown>),
+          extra: true,
+        },
+      })],
+      ['wrong health smoke', readiness => ({
+        ...readiness,
         healthSmoke: { method: 'POST', path: '/', status: 200 },
-      }],
+      })],
+      ['missing candidate health', readiness => without(readiness, 'candidateHealth')],
+      ['extra candidate health field', readiness => ({
+        ...readiness,
+        candidateHealth: {
+          ...(readiness.candidateHealth as Record<string, unknown>),
+          extra: true,
+        },
+      })],
+      ['unhealthy Web asset', readiness => ({
+        ...readiness,
+        candidateHealth: { webAsset: false, bootstrapExchange: true },
+      })],
+      ['unhealthy bootstrap exchange', readiness => ({
+        ...readiness,
+        candidateHealth: { webAsset: true, bootstrapExchange: false },
+      })],
     ]
-    for (const [label, payload] of invalidReadinessCases) {
-      readinessPayload = payload
+    for (const [label, transform] of invalidReadinessCases) {
+      readinessTransform = transform
       await expect(verifyDesktopBuild(context, runner), label)
         .rejects.toThrow(/readiness.*contract|port|origin|stderr/iu)
     }
-    readinessPayload = validReadiness
+    readinessTransform = readiness => readiness
+
+    let failedSocketDirectory = ''
+    const fd3FailureRunner = {
+      run: async (command: {
+        command: string
+        args: string[]
+        fd3Input?: Uint8Array
+      }) => {
+        if (command.command !== bundledSidecar) return await runner.run(command)
+        if (command.fd3Input === undefined) throw new Error('test: fd3 input is missing')
+        failedSocketDirectory = dirname(
+          decodeLaunchSecretsFrame(command.fd3Input).socketPath,
+        )
+        throw new Error('build-desktop: failed to write fd3 input')
+      },
+    }
+    await expect(verifyDesktopBuild(context, fd3FailureRunner))
+      .rejects.toThrow(/fd3.*write|write.*fd3/iu)
+    expect(failedSocketDirectory).not.toBe('')
+    expect(existsSync(failedSocketDirectory)).toBe(false)
 
     writeFileSync(runtimeSbom, '{"version":2}\n')
     await expect(verifyDesktopBuild(context, runner))
