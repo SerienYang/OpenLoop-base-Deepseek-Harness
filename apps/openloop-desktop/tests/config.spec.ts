@@ -668,7 +668,7 @@ describe('Openloop desktop foundation configuration', () => {
     expect(record(e2eConfig.bundle, 'E2E bundle').active).toBe(true)
     expect(rootScripts['e2e:build']).toBe('node scripts/openloop/build-e2e.mjs')
     expect(rootScripts['e2e:build:web']).toBe(
-      'pnpm run build:lib && pnpm run build:web && tsc -p tsconfig.playwright.json --noEmit',
+      'pnpm run build:lib && pnpm run build:web && tsc -p apps/web/tsconfig.playwright.json --noEmit',
     )
     expect(wdioConfig).toContain('.artifacts/openloop-e2e-target')
     expect(wdioConfig).not.toContain('src-tauri/target')

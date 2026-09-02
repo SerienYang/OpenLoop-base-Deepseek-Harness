@@ -565,7 +565,11 @@ export async function runGateTests(args, dependencies = {}) {
       runCommand,
       root,
       'pnpm',
-      ['exec', 'playwright', 'test', file.relative, '--reporter=json'],
+      [
+        'exec', 'playwright', 'test', file.relative,
+        '--config', 'apps/web/playwright.config.ts',
+        '--reporter=json',
+      ],
     )
     assertPlaywrightResult(result)
     return

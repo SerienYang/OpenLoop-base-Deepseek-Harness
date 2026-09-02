@@ -1,5 +1,5 @@
 {
-  "extends": "./tsconfig.base.json",
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "allowImportingTsExtensions": true,
     "composite": false,
@@ -17,7 +17,7 @@
     ]
   },
   "include": [
-    "apps/web/tests/openloop-fixture-process.ts",
-    "apps/web/tests/openloop-minimum-shell.e2e.ts"
+    "tests/openloop-fixture-process.ts",
+    "tests/openloop-minimum-shell.e2e.ts"
   ]
 }

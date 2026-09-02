@@ -227,7 +227,11 @@ describe('OpenLoop focused test gate', () => {
       },
       {
         command: 'pnpm',
-        args: ['exec', 'playwright', 'test', 'tests/app.spec.ts', '--reporter=json'],
+        args: [
+          'exec', 'playwright', 'test', 'tests/app.spec.ts',
+          '--config', 'apps/web/playwright.config.ts',
+          '--reporter=json',
+        ],
       },
     ])
   })
