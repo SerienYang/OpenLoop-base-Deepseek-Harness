@@ -22,6 +22,8 @@
   - Validate and detach discovered modality arrays.
 - Modify `packages/llm/llm/tests/service.spec.ts`
   - Pin valid and invalid discovery metadata.
+- Modify (generated): `packages/extensions/tool-cordis/src/api-catalog.ts`
+  - Refresh the public Cordis catalog after the LLM type changes.
 - Modify `packages/host/apiproxy/src/api/llm.ts`
   - Expose modalities in `DiscoveredModelView`.
 - Modify `packages/host/apiproxy/src/api/llm.schema.ts`
@@ -72,6 +74,7 @@
 - Modify: `packages/host/apiproxy/src/api/llm.schema.ts`
 - Modify: `packages/host/apiproxy/tests/api-proxy-config.spec.ts`
 - Modify: `packages/host/apiproxy/tests/client-handler.spec.ts`
+- Modify (generated): `packages/extensions/tool-cordis/src/api-catalog.ts`
 
 - [ ] **Step 1: Write the failing core discovery test**
 
@@ -197,11 +200,19 @@ Expected: all tests pass.
 
 - [ ] **Step 9: Commit Task 1**
 
+Regenerate and verify the public Cordis API catalog before committing:
+
+```bash
+pnpm run gen-cordis-inspect-catalog
+pnpm run verify-cordis-inspect-catalog
+```
+
 ```bash
 git add \
   packages/llm/llm/src/types.ts \
   packages/llm/llm/src/index.ts \
   packages/llm/llm/tests/service.spec.ts \
+  packages/extensions/tool-cordis/src/api-catalog.ts \
   packages/host/apiproxy/src/api/llm.ts \
   packages/host/apiproxy/src/api/llm.schema.ts \
   packages/host/apiproxy/tests/api-proxy-config.spec.ts \
@@ -301,7 +312,7 @@ In `packages/llm/llm-pi-ai/src/index.ts`, implement the callback from the
 resolved profile's materialized pi-ai models:
 
 ```ts
-const listConfigured = (provider: string) => {
+const listConfigured = async (provider: string) => {
   const profile = profiles().get(provider)
   if (profile === undefined) return undefined
   return profile.piProvider.models.map(model => ({
