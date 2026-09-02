@@ -389,6 +389,9 @@ importers:
       vite:
         specifier: 8.0.16
         version: 8.0.16(@types/node@26.1.2)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
+      webdriverio:
+        specifier: 9.29.1
+        version: 9.29.1
 
   apps/openloop-runtime:
     dependencies:
@@ -5895,18 +5898,33 @@ importers:
       '@deepseek-ai/cordis':
         specifier: workspace:^
         version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-api-remotes':
+        specifier: workspace:^
+        version: link:../../api/remotes
       '@deepseek-ai/dsh-client-runtime':
         specifier: workspace:^
         version: link:../../client/runtime
+      '@deepseek-ai/dsh-client-test-runtime':
+        specifier: workspace:^
+        version: link:../../test-support/client-runtime
+      '@deepseek-ai/dsh-client-ui-settings':
+        specifier: workspace:^
+        version: link:../../client/ui-settings
       '@deepseek-ai/dsh-invariants':
         specifier: workspace:^
         version: link:../../runtime-diagnostics/invariants
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../vendor/schemastery
+        version: link:../../../vendor/schemastery
 
   packages/openloop/shell:
     dependencies:
       '@deepseek-ai/dsh-client-ui-sidebar':
         specifier: workspace:^
         version: link:../../client/ui-sidebar
+      '@openloop/settings-foundation':
+        specifier: workspace:*
+        version: link:../settings-foundation
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: workspace:^

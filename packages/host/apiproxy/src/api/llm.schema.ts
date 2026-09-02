@@ -16,6 +16,8 @@ export const configurableProviderViewSchema = z.object({
   settingsNs: z.string(),
   settingsPath: z.array(z.string()),
   active: z.boolean(),
+  builtIn: z.boolean().optional(),
+  credentialRef: z.string().min(1).optional(),
   declared: z.boolean().optional(),
 }) satisfies z.ZodType<Wire<ConfigurableProviderView>>
 

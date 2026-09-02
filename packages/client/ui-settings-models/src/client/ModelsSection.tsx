@@ -14,13 +14,14 @@
 
 import { useState } from 'react'
 import type { ReactNode } from 'react'
-import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
 import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { Button, IconPlusOutline16, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-web-react'
 import { CustomProviderCard } from './CustomProviderCard.tsx'
 import { deriveKeyRef, messageOf, protocolChoices, providerUsable } from './store.ts'
-import type { ModelsSettingsState, ModelsSettingsStore, ProviderRow } from './store.ts'
+import type {
+  ModelsSettingsApi, ModelsSettingsState, ModelsSettingsStore, ProviderRow,
+} from './store.ts'
 import { ProviderEditor, type ProviderEditorProps } from './ProviderEditor.tsx'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
@@ -32,11 +33,13 @@ export interface ModelsSectionInjected {
   /** uSES subscription hook bound to the store. */
   useSnapshot: SnapshotSelectorHook<ModelsSettingsState>
   /** Wire faces the editor writes through. */
-  api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>
+  api: ModelsSettingsApi
   /** Section copy. */
   t: (key: keyof typeof en) => string
   /** Optional product-owned credential rendering and lifecycle policy. */
   credentialControl?: CredentialControlAdapter
+  /** Optional product mutation policy used to omit controls the Host rejects. */
+  canMutate?: (namespace: string, path: readonly string[]) => boolean
 }
 
 /**
@@ -57,6 +60,7 @@ export interface ProviderIdentity {
 interface EditorTarget extends ProviderIdentity {
   settingsNs: string
   settingsPath: readonly string[]
+  expectedRevision?: number
   /** Writable credential identified under this page's conventional reference. */
   credentialRef?: string
   /** Value-free credential snapshot marker for an open product control. */
@@ -68,7 +72,7 @@ interface EditorTarget extends ProviderIdentity {
 /** Values that vary around the shared provider-editor rendering. */
 interface ProviderEditorRenderProps extends Pick<
   ProviderEditorProps,
-  'namespace' | 'api' | 't' | 'readOnly' | 'credentialControl' | 'onCredentialChanged' | 'onClose'
+  'namespace' | 'api' | 't' | 'readOnly' | 'credentialControl' | 'canMutate' | 'onCredentialChanged' | 'onClose'
 > {
   target: EditorTarget
 }
@@ -83,6 +87,7 @@ function renderProviderEditor({ target, ...props }: ProviderEditorRenderProps): 
       {...target.credentialRefreshToken === undefined
         ? {}
         : { credentialRefreshToken: target.credentialRefreshToken }}
+      {...target.credentialRef === undefined ? {} : { credentialRef: target.credentialRef }}
       {...target.declared === true ? { declared: true } : {}}
       {...props}
     />
@@ -101,9 +106,14 @@ function renderProviderEditor({ target, ...props }: ProviderEditorRenderProps): 
  * @returns the failure message, or undefined once the write and reload landed.
  */
 export async function removeProviderProfile(
-  api: Pick<IApiClient, 'settings' | 'credentials'>,
+  api: Pick<ModelsSettingsApi, 'settings' | 'credentials'>,
   controller: ModelsSettingsStore,
-  target: { settingsNs: string; settingsPath: readonly string[]; credentialRef?: string },
+  target: {
+    settingsNs: string
+    settingsPath: readonly string[]
+    credentialRef?: string
+    expectedRevision?: number
+  },
   deleteCredentialWithProfile = true,
 ): Promise<string | undefined> {
   try {
@@ -114,6 +124,7 @@ export async function removeProviderProfile(
     const response = await api.settings.mutate({
       ns: target.settingsNs,
       ops: [{ op: 'unset', path: [...target.settingsPath] }],
+      ...target.expectedRevision === undefined ? {} : { expectedRevision: target.expectedRevision },
     })
     if (!response.result.ok) return response.result.error.message
   } catch (error) {
@@ -140,18 +151,20 @@ export function needsSetup(row: ProviderRow, anyUsable: boolean): boolean {
   return row.credential?.configured !== true
 }
 
-function targetOf(row: ProviderRow): EditorTarget {
+function targetOf(row: ProviderRow, expectedRevision?: number): EditorTarget {
   const managedRef = deriveKeyRef(row.entry.provider)
-  const credentialRef = row.apiKeyEnv === managedRef
-    && row.credential?.configured === true
-    && row.credential.writable
-    ? managedRef
-    : undefined
+  const credentialRef = row.entry.credentialRef
+    ?? (row.apiKeyEnv === managedRef
+      && row.credential?.configured === true
+      && row.credential.writable
+      ? managedRef
+      : undefined)
   return {
     provider: row.entry.provider,
     displayName: row.entry.displayName,
     settingsNs: row.entry.settingsNs,
     settingsPath: row.entry.settingsPath,
+    ...expectedRevision === undefined ? {} : { expectedRevision },
     ...row.credential === undefined
       ? {}
       : { credentialRefreshToken: JSON.stringify(row.credential) },
@@ -181,7 +194,7 @@ export function providerCopy(template: string, target: ProviderIdentity): string
  * @returns the section, or null while the shell has not injected yet.
  */
 export function ModelsSection(props: ModelsSectionProps): ReactNode {
-  const { controller, useSnapshot, api, t, credentialControl } = props
+  const { controller, useSnapshot, api, t, credentialControl, canMutate } = props
   if (controller === undefined || useSnapshot === undefined || api === undefined || t === undefined) return null
   return <Loaded injected={{
     controller,
@@ -189,11 +202,12 @@ export function ModelsSection(props: ModelsSectionProps): ReactNode {
     api,
     t,
     ...credentialControl === undefined ? {} : { credentialControl },
+    ...canMutate === undefined ? {} : { canMutate },
   }} />
 }
 
 function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
-  const { controller, api, t } = injected
+  const { controller, api, t, canMutate } = injected
   const state = injected.useSnapshot(snapshot => snapshot)
   const [editing, setEditing] = useState<EditorTarget | undefined>(undefined)
   const [adding, setAdding] = useState(false)
@@ -309,8 +323,8 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
         )}
       <ul className={styles['rows']}>
         {configured.map((row) => {
-          const target = targetOf(row)
-          const namespace = state.namespaces.get(target.settingsNs)
+          const namespace = state.namespaces.get(row.entry.settingsNs)
+          const target = targetOf(row, namespace?.revision)
           /* v8 ignore next -- the join marks a row configured only when its namespace resolved */
           if (namespace === undefined) return null
           if (needsSetup(row, anyUsable) && !dismissedSetup.has(row.entry.provider)) {
@@ -327,6 +341,7 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
                   ...injected.credentialControl === undefined
                     ? {}
                     : { credentialControl: injected.credentialControl },
+                  ...canMutate === undefined ? {} : { canMutate },
                   onCredentialChanged: refreshCredential,
                   onClose: (changed) => { closeSetup(changed, target) },
                 })}
@@ -387,6 +402,7 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
                     {t('edit')}
                   </button>
                   {row.removable
+                    && (canMutate?.(target.settingsNs, target.settingsPath) ?? true)
                     ? (
                       <button
                         type="button"
@@ -415,6 +431,7 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
                   ...injected.credentialControl === undefined
                     ? {}
                     : { credentialControl: injected.credentialControl },
+                  ...canMutate === undefined ? {} : { canMutate },
                   onCredentialChanged: refreshCredential,
                   onClose: (changed) => { closeEditor(changed, target) },
                 })
@@ -437,7 +454,10 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
                     const row = addable.find(candidate => candidate.entry.provider === event.target.value)
                     /* v8 ignore next -- the select only lists addable rows */
                     if (row === undefined) return
-                    setEditing(targetOf(row))
+                    setEditing(targetOf(
+                      row,
+                      state.namespaces.get(row.entry.settingsNs)?.revision,
+                    ))
                   }}
                 >
                   {addable.map(row => (
@@ -458,6 +478,7 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
                 {...injected.credentialControl === undefined
                   ? {}
                   : { credentialControl: injected.credentialControl }}
+                {...canMutate === undefined ? {} : { canMutate }}
                 onCredentialChanged={refreshCredential}
                 onClose={(changed) => { closeEditor(changed, addTarget) }}
               />
@@ -501,27 +522,35 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
                     setSavedTarget(undefined)
                     setDeclaring(false)
                     setAdding(true)
-                    setEditing(targetOf(first))
+                    setEditing(targetOf(
+                      first,
+                      state.namespaces.get(first.entry.settingsNs)?.revision,
+                    ))
                   }}
                 >
                   {/* Same glyph as the composer's attach button. */}
                   <IconPlusOutline16 size={14} />
                   {t('add')}
                 </button>
-                <button
-                  type="button"
-                  className={styles['addButton']}
-                  disabled={protocols.length === 0 || !state.writable}
-                  onClick={() => {
-                    setSavedTarget(undefined)
-                    setAdding(false)
-                    setEditing(undefined)
-                    setDeclaring(true)
-                  }}
-                >
-                  <IconPlusOutline16 size={14} />
-                  {t('customAdd')}
-                </button>
+                {canMutate !== undefined
+                  && !canMutate('llm-pi-ai', ['providers', '\u0000custom', 'models'])
+                  ? null
+                  : (
+                    <button
+                      type="button"
+                      className={styles['addButton']}
+                      disabled={protocols.length === 0 || !state.writable}
+                      onClick={() => {
+                        setSavedTarget(undefined)
+                        setAdding(false)
+                        setEditing(undefined)
+                        setDeclaring(true)
+                      }}
+                    >
+                      <IconPlusOutline16 size={14} />
+                      {t('customAdd')}
+                    </button>
+                  )}
               </div>
             )}
       </div>

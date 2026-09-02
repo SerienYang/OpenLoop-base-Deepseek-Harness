@@ -26,7 +26,6 @@ import type {
 import {
   apply as applyWorkspace,
   inject as injectWorkspace,
-  WorkspaceSettings,
 } from '@openloop/workspace-client/client'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
@@ -80,14 +79,12 @@ const LABELS = {
   en: {
     general: 'General',
     models: 'Models & Credentials',
-    workspace: 'Workspace',
     plugins: 'Plugins',
     'about-update': 'About & Updates',
   },
   zh: {
     general: '通用',
     models: '模型与凭据',
-    workspace: '工作区',
     plugins: '插件',
     'about-update': '关于与更新',
   },
@@ -126,7 +123,6 @@ function mountSettings({
   const sectionRows = rows ?? [
     { id: 'plugins', order: 30, label: LABELS[locale].plugins },
     { id: 'unknown', order: -100, label: 'Unknown' },
-    { id: 'workspace', order: 20, label: LABELS[locale].workspace },
     { id: 'general', order: 50, label: LABELS[locale].general },
     { id: 'about-update', order: 0, label: LABELS[locale]['about-update'] },
     { id: 'models', order: 10, label: LABELS[locale].models },
@@ -213,14 +209,13 @@ function DynamicSection() {
 }
 
 describe('Openloop Settings navigation', () => {
-  it.each(['zh', 'en'] as const)('shows exactly five %s sections in fixed order', (locale) => {
+  it.each(['zh', 'en'] as const)('shows exactly four %s sections in fixed order', (locale) => {
     mountSettings({ locale })
     openSettings(locale)
 
     expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual([
       LABELS[locale].general,
       LABELS[locale].models,
-      LABELS[locale].workspace,
       LABELS[locale].plugins,
       LABELS[locale]['about-update'],
     ])
@@ -240,7 +235,7 @@ describe('Openloop Settings navigation', () => {
 
     fireEvent.click(tabs[2]!)
     expect(tabs[2]?.getAttribute('aria-selected')).toBe('true')
-    expect(screen.getByTestId('section-workspace')).toBeTruthy()
+    expect(screen.getByTestId('section-plugins')).toBeTruthy()
 
     fireEvent.keyDown(tabs[2]!, { key: 'ArrowDown' })
     expect(tabs[3]).toBe(document.activeElement)
@@ -248,11 +243,11 @@ describe('Openloop Settings navigation', () => {
     fireEvent.keyDown(tabs[3]!, { key: 'ArrowLeft' })
     expect(tabs[2]).toBe(document.activeElement)
     fireEvent.keyDown(tabs[2]!, { key: 'End' })
-    expect(tabs[4]).toBe(document.activeElement)
-    fireEvent.keyDown(tabs[4]!, { key: 'Home' })
+    expect(tabs[3]).toBe(document.activeElement)
+    fireEvent.keyDown(tabs[3]!, { key: 'Home' })
     expect(tabs[0]).toBe(document.activeElement)
     fireEvent.keyDown(tabs[0]!, { key: 'ArrowUp' })
-    expect(tabs[4]).toBe(document.activeElement)
+    expect(tabs[3]).toBe(document.activeElement)
   })
 
   it('moves focus to the active tab when the dialog opens', () => {
@@ -330,60 +325,6 @@ describe('Openloop Settings navigation', () => {
     view.unmount()
     expect(appRoot.inert).toBe(true)
     appRoot.remove()
-  })
-
-  it('lets the Workspace inline subview consume Escape without closing Settings', () => {
-    const workspaceGrant = {
-      workspaceId: 'alpha',
-      name: 'Alpha',
-      displayPath: '~/Projects/alpha',
-      state: 'ready',
-      sessionIds: [],
-    }
-    const workspaceSessions: SessionListState = {
-      ids: [],
-      byId: {},
-      current: undefined,
-      phase: 'ready',
-      subagentsByParent: {},
-      jobsBySession: {},
-      currentAddress: undefined,
-    }
-    mountSettings({
-      section: (owner, only) => only === 'workspace'
-        ? (
-          <WorkspaceSettings
-            close={owner.close as () => void}
-            useGrants={((select: (state: unknown) => unknown) => select({
-              items: [workspaceGrant],
-              state: 'idle',
-              error: null,
-            })) as never}
-            useSessions={((select: (state: SessionListState) => unknown) =>
-              select(workspaceSessions)) as never}
-            actions={{
-              authorize: vi.fn(),
-              reauthorize: vi.fn(),
-              rename: vi.fn(),
-              remove: vi.fn(),
-              reveal: vi.fn(),
-              startSession: vi.fn(),
-              openSession: vi.fn(),
-            }}
-          />
-        )
-        : <div data-testid={`section-${only ?? 'all'}`}>{only}</div>,
-    })
-    openSettings()
-    fireEvent.click(screen.getByRole('tab', { name: 'Workspace' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Workspace actions for Alpha' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
-
-    const rename = screen.getByRole('textbox', { name: 'Rename' })
-    fireEvent.keyDown(rename, { key: 'Escape' })
-
-    expect(screen.getByRole('dialog', { name: 'Settings' })).toBeTruthy()
-    expect(screen.getByRole('region', { name: 'Workspace settings' })).toBeTruthy()
   })
 
   it('uses icon-only rail affordance with an accessible tooltip label', () => {
@@ -610,6 +551,11 @@ describe('Openloop Settings slot owner', () => {
     }
     ctx.provide('remote', { openloopDesktop } as never)
     ctx.provide('remote.openloopDesktop', openloopDesktop)
+    const settingsApi = {
+      settings: { describe: vi.fn(), mutate: vi.fn() },
+      llm: { providers: vi.fn(), discoverModels: vi.fn() },
+    }
+    ctx.provide('openloopSettingsApi', settingsApi as never)
     provideUpdates(ctx)
 
     const fiber = ctx.plugin({ inject: [...inject], apply })
@@ -626,6 +572,7 @@ describe('Openloop Settings slot owner', () => {
     const owner = ctx.get('settingsShellOwner') as SettingsShellOwner
     expect(owner.id).toBe('@openloop/shell')
     expect(owner.credentialControl).toBeDefined()
+    expect(owner.settingsApi).toBe(settingsApi)
     expect(slots.entries('sidebar.settings')[0]?.component).toBe(OpenloopSettings)
     expect(slots.spec('settings.action')).toEqual({ kind: 'list', scope: 'root' })
     expect(slots.spec('settings.section')).toEqual({ kind: 'list', scope: 'root' })
@@ -637,9 +584,6 @@ describe('Openloop Settings slot owner', () => {
       .map(entry => entry.options.id)
       .sort()).toEqual([
       'about-update',
-      'general',
-      'models',
-      'plugins',
     ])
     const about = slots.entriesOfSlot('settings.section')
       .find(entry => entry.options.id === 'about-update')
@@ -671,6 +615,7 @@ describe('Openloop Settings slot owner', () => {
     }
     ctx.provide('remote', { openloopDesktop } as never)
     ctx.provide('remote.openloopDesktop', openloopDesktop)
+    ctx.provide('openloopSettingsApi', {} as never)
     provideUpdates(ctx)
 
     const fiber = ctx.plugin({ inject: [...inject], apply })
@@ -742,6 +687,7 @@ describe('Openloop Settings slot owner', () => {
     }
     ctx.provide('remote', { openloopDesktop } as never)
     ctx.provide('remote.openloopDesktop', openloopDesktop)
+    ctx.provide('openloopSettingsApi', {} as never)
     provideUpdates(ctx)
 
     const fiber = ctx.plugin({ inject: [...inject], apply })
@@ -839,6 +785,7 @@ describe('Openloop Settings slot owner', () => {
       unset: () => Promise.resolve(),
     }
     ctx.provide('settingsScope', { bind: () => unavailableScope } as never)
+    ctx.provide('openloopSettingsApi', {} as never)
     const sessions = createSnapshotStore<SessionListState>({
       ids: [],
       byId: {},
@@ -880,7 +827,7 @@ describe('Openloop Settings slot owner', () => {
 
     await vi.waitFor(() => {
       expect(slots.entries('sidebar.settings')).toHaveLength(1)
-      expect(slots.entriesOfSlot('settings.section')).toHaveLength(5)
+      expect(slots.entriesOfSlot('settings.section')).toHaveLength(4)
     })
     const owner = ctx.get('settingsShellOwner') as SettingsShellOwner
     expect(owner.id).toBe('@openloop/shell')
@@ -890,7 +837,6 @@ describe('Openloop Settings slot owner', () => {
       'general',
       'models',
       'plugins',
-      'workspace',
       'about-update',
     ])
 
@@ -915,7 +861,7 @@ describe('Openloop Settings slot owner', () => {
     } as never, () => null)
     await vi.waitFor(() => {
       expect(slots.entries('sidebar.settings')).toHaveLength(1)
-      expect(slots.entriesOfSlot('settings.section')).toHaveLength(5)
+      expect(slots.entriesOfSlot('settings.section')).toHaveLength(4)
     })
 
     disposeReplacementSidebar()
@@ -933,7 +879,7 @@ describe('Openloop Settings slot owner', () => {
     } as never, () => null)
     await vi.waitFor(() => {
       expect(slots.entries('sidebar.settings')).toHaveLength(1)
-      expect(slots.entriesOfSlot('settings.section')).toHaveLength(5)
+      expect(slots.entriesOfSlot('settings.section')).toHaveLength(4)
     })
     expect((ctx.get('settingsShellOwner') as SettingsShellOwner).id).toBe('@openloop/shell')
 

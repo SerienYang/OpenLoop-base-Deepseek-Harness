@@ -82,7 +82,11 @@ export interface ModelListEditorProps {
    */
   probeBlocked?: keyof typeof en | undefined
   /** Wire face the fetch action calls. */
-  api: Pick<IApiClient, 'llm'>
+  api: {
+    readonly llm: {
+      readonly discoverModels?: IApiClient['llm']['discoverModels']
+    }
+  }
   /** Section copy. */
   t: (key: keyof typeof en) => string
   /** Disable every control (read-only deployment or a pending write). */
@@ -229,10 +233,12 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
   }
 
   const fetchModels = async (): Promise<void> => {
+    const discoverModels = api.llm.discoverModels
+    if (discoverModels === undefined) return
     setBusy(true)
     setFailure(undefined)
     try {
-      const response = await api.llm.discoverModels({
+      const response = await discoverModels({
         settingsNs: probe.settingsNs,
         ...probe.provider === undefined ? {} : { provider: probe.provider },
         ...probe.baseURL === undefined || probe.baseURL.length === 0 ? {} : { baseURL: probe.baseURL },
@@ -319,17 +325,21 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
             </button>
           )
           : null}
-        <button
-          type="button"
-          className={styles['linkButton']}
-          disabled={disabled || busy || !askable || props.probeBlocked !== undefined}
-          title={props.probeBlocked !== undefined
-            ? t(props.probeBlocked)
-            : askable ? undefined : t('fetchNeedsBaseUrl')}
-          onClick={() => { void fetchModels() }}
-        >
-          {busy ? t('fetching') : t('fetchModels')}
-        </button>
+        {api.llm.discoverModels === undefined
+          ? null
+          : (
+            <button
+              type="button"
+              className={styles['linkButton']}
+              disabled={disabled || busy || !askable || props.probeBlocked !== undefined}
+              title={props.probeBlocked !== undefined
+                ? t(props.probeBlocked)
+                : askable ? undefined : t('fetchNeedsBaseUrl')}
+              onClick={() => { void fetchModels() }}
+            >
+              {busy ? t('fetching') : t('fetchModels')}
+            </button>
+          )}
       </div>
       {models.length === 0 ? <p className={styles['modelEmpty']}>{t('modelsEmpty')}</p> : null}
       {models.map((model, index) => (

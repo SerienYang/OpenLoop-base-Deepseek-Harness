@@ -811,7 +811,6 @@
         "@openloop/file-broker",
         "@openloop/fs-workspace",
         "@openloop/sandbox-workspace",
-        "@openloop/settings-foundation",
         "@openloop/workspace-client",
         "@openloop/workspace-authority"
       ]

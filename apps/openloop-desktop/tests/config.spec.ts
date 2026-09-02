@@ -295,6 +295,7 @@ describe('Openloop desktop foundation configuration', () => {
       '@wdio/spec-reporter': '9.29.1',
       '@wdio/tauri-service': '1.3.0',
       '@wdio/types': '9.29.1',
+      webdriverio: '9.29.1',
       typescript: '6.0.3',
       vite: '8.0.16',
     })
@@ -703,6 +704,9 @@ describe('Openloop desktop foundation configuration', () => {
       'node scripts/openloop/build-e2e.mjs --web-only',
     )
     expect(wdioConfig).toContain('.artifacts/openloop-e2e-target')
+    expect(wdioConfig).toContain(
+      "appArgs: ['-ApplePersistenceIgnoreState', 'YES']",
+    )
     expect(wdioConfig).not.toContain('src-tauri/target')
     expect(wdioConfig).not.toContain('pgrep')
     expect(features['openloop-e2e']).toEqual([
@@ -1065,7 +1069,6 @@ describe('Openloop desktop foundation configuration', () => {
       '@openloop/file-broker',
       '@openloop/fs-workspace',
       '@openloop/sandbox-workspace',
-      '@openloop/settings-foundation',
       '@openloop/workspace-client',
       '@openloop/workspace-authority',
     ])

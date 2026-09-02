@@ -21,7 +21,11 @@ usePinnedBrowserLanguages('zh-CN')
  * @param served - namespaces the Host describes; omitted answers a failed read,
  * which is what most of these specs want (no card has anything to render).
  */
-async function bench(served?: string[], credentialControl?: CredentialControlAdapter) {
+async function bench(
+  served?: string[],
+  credentialControl?: CredentialControlAdapter,
+  productSettings?: unknown,
+) {
   const ctx = new Context()
   await ctx.plugin(SlotRegistry).await()
   const locale = new LocaleRuntime(ctx)
@@ -58,8 +62,13 @@ async function bench(served?: string[], credentialControl?: CredentialControlAda
       ? '@deepseek-ai/dsh-client-ui-settings-general'
       : '@openloop/shell',
     ...credentialControl === undefined ? {} : { credentialControl },
+    ...productSettings === undefined ? {} : { settingsApi: productSettings },
   } as never)
-  await ctx.plugin(SettingsScopeBinder).await()
+  if (productSettings === undefined) {
+    await ctx.plugin(SettingsScopeBinder).await()
+  } else {
+    new SettingsScopeBinder(ctx, productSettings as never)
+  }
   return { ctx, slots: ctx.get('slots') as SlotRegistry, describeCredentials, describeSettings }
 }
 
@@ -165,6 +174,36 @@ describe('ui-settings-plugins apply', () => {
       expect(describe).toHaveBeenCalledWith('DEEPSEEK_API_KEY')
     })
     expect(describeCredentials).not.toHaveBeenCalled()
+  })
+
+  it('uses the product settings API for the configurable namespace directory', async () => {
+    const canMutate = vi.fn(() => false)
+    const productDescribe = vi.fn(() => Promise.resolve({
+      rpcId: 'product',
+      result: {
+        ok: true,
+        value: {
+          writable: true,
+          hasDocument: false,
+          namespaces: [],
+        },
+      },
+    }))
+    const { ctx, slots, describeSettings } = await bench(
+      undefined,
+      undefined,
+      {
+        settings: { describe: productDescribe, mutate: vi.fn() },
+        llm: { providers: vi.fn() },
+        canMutate,
+      },
+    )
+    declareRoot(slots)
+    await ctx.plugin({ inject: [...inject], apply }).await()
+
+    await vi.waitFor(() => { expect(productDescribe).toHaveBeenCalled() })
+    expect(describeSettings).not.toHaveBeenCalled()
+    expect(canMutate).toHaveBeenCalledWith('web-search-deepseek', ['baseURL'])
   })
 
   it('dispatches the served namespaces its cards claim, and no others', async () => {

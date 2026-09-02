@@ -171,7 +171,7 @@ describe('SettingsScopeController', () => {
       .mockReturnValueOnce(first.promise)
       .mockResolvedValueOnce(ok(view({ preference: 'light' }, 6)))
     const scope = new SettingsScopeController<UiTestSettings>(
-      { settings: { describe: describeCall, mutate } } as never,
+      { settings: { describe: describeCall, mutate } },
       { namespace: 'ui-test' },
     )
     const published = trackValues(scope)
@@ -203,7 +203,7 @@ describe('SettingsScopeController', () => {
       .mockResolvedValueOnce(rejected())
       .mockRejectedValueOnce(new Error('offline'))
     const scope = new SettingsScopeController<UiTestSettings>(
-      { settings: { describe: describeCall, mutate } } as never,
+      { settings: { describe: describeCall, mutate } },
       { namespace: 'ui-test' },
     )
     const published = trackValues(scope)
@@ -219,7 +219,7 @@ describe('SettingsScopeController', () => {
       .mockRejectedValueOnce(new Error('offline'))
       .mockResolvedValueOnce(ok(view({ preference: 'light' }, 3)))
     const scope = new SettingsScopeController<UiTestSettings>(
-      { settings: { describe: describeCall, mutate } } as never,
+      { settings: { describe: describeCall, mutate } },
       { namespace: 'ui-test' },
     )
     const published = trackValues(scope)
@@ -256,7 +256,7 @@ describe('SettingsScopeController', () => {
     const mutate = vi.fn().mockReturnValue(first.promise)
     const describeCall = vi.fn()
     const scope = new SettingsScopeController<UiTestSettings>(
-      { settings: { describe: describeCall, mutate } } as never,
+      { settings: { describe: describeCall, mutate } },
       { namespace: 'ui-test' },
     )
     const published = trackValues(scope)
@@ -280,7 +280,7 @@ describe('SettingsScopeController', () => {
     const describeCall = vi.fn()
     const mutate = vi.fn()
     const scope = new SettingsScopeController<UiTestSettings>(
-      { settings: { describe: describeCall, mutate } } as never,
+      { settings: { describe: describeCall, mutate } },
       { namespace: 'ui-test' },
       'memory',
     )
@@ -334,7 +334,7 @@ describe('SettingsScopeController', () => {
     const mutate = vi.fn().mockResolvedValueOnce(ok(view({ preference: 'system' }, 4)))
     const describeCall = vi.fn().mockResolvedValueOnce(described({ preference: 'dark' }, 3))
     const scope = new SettingsScopeController<UiTestSettings>(
-      { settings: { describe: describeCall, mutate } } as never,
+      { settings: { describe: describeCall, mutate } },
       { namespace: 'ui-test' },
     )
     await scope.load()
@@ -355,7 +355,7 @@ describe('SettingsScopeController', () => {
       .mockResolvedValueOnce(described({ preference: 'dark' }, 3))
       .mockResolvedValueOnce(described({ preference: 'light' }, 5))
     const scope = new SettingsScopeController<UiTestSettings>(
-      { settings: { describe: describeCall, mutate } } as never,
+      { settings: { describe: describeCall, mutate } },
       { namespace: 'ui-test' },
     )
     await scope.load()
@@ -366,6 +366,38 @@ describe('SettingsScopeController', () => {
   })
 })
 describe('SettingsScopeBinder.bind', () => {
+  it('uses a product settings API override instead of the connection API', async () => {
+    const connectionDescribe = vi.fn()
+    const productDescribe = vi.fn()
+      .mockResolvedValueOnce(described({ preference: 'dark' }, 4))
+    const ctx = new Context()
+    ctx.provide('connection', {
+      api: { settings: { describe: connectionDescribe } },
+      isLoopback: true,
+    } as never)
+    let scope!: SettingsScope<UiTestSettings>
+    new TestRemote(ctx)
+    new SettingsScopeBinder(ctx, { settings: { describe: productDescribe } } as never)
+    const fiber = ctx.plugin({
+      inject: ['connection', 'remote', 'settingsScope'],
+      apply: (plugin: Context) => {
+        scope = plugin.settingsScope.bind<UiTestSettings>({ namespace: 'ui-test' })
+      },
+    })
+
+    await fiber.await()
+    await vi.waitFor(() => {
+      expect(scope.getSnapshot()).toMatchObject({
+        status: 'ready',
+        value: { preference: 'dark' },
+        revision: 4,
+      })
+    })
+    expect(productDescribe).toHaveBeenCalledOnce()
+    expect(connectionDescribe).not.toHaveBeenCalled()
+    await fiber.dispose()
+  })
+
   it('subscribes before the initial read and converges to the latest queued invalidation', async () => {
     const initial = deferred<ReturnType<typeof described>>()
     const describeCall = vi.fn()

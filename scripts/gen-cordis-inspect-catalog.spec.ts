@@ -65,6 +65,16 @@ describe('Cordis inspect catalog generator', () => {
     expect(clientSource).not.toContain("key: 'browserApiPolicy'")
   })
 
+  it('keeps the product settings facade out of model-visible catalogs', () => {
+    const hostSource = readFileSync(new URL(`../${catalogs[0]}`, import.meta.url), 'utf8')
+    const clientSource = readFileSync(new URL(`../${catalogs[1]}`, import.meta.url), 'utf8')
+
+    expect(CORDIS_CONTEXT_SCAN_EXEMPTIONS.openloopSettingsApi)
+      .toMatch(/client settings facade/iu)
+    expect(hostSource).not.toContain("key: 'openloopSettingsApi'")
+    expect(clientSource).not.toContain("key: 'openloopSettingsApi'")
+  })
+
   it('rejects a Context declaration that the Typert projection cannot see', () => {
     const probe = new URL('../packages/util/brand/src/cordis-inspect-probe.ts', import.meta.url)
     writeFileSync(probe, `

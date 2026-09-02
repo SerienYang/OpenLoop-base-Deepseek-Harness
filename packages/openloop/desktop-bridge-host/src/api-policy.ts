@@ -36,7 +36,7 @@ const PAYLOAD_RULE_FIELDS = ['required', 'optional'] as const
 const TRANSPORT_ROUTE_FIELDS = ['method', 'path'] as const
 const LEGACY_METHOD = /^[A-Za-z0-9_$-]+\.[A-Za-z0-9_$-]+$/u
 const TYPERT_ENDPOINT = /^[A-Za-z0-9_$.-]+\/[A-Za-z0-9_$.-]+$/u
-const TRANSPORT_PATH = /^\/api\/[A-Za-z0-9_$-]+(?:\.[A-Za-z0-9_$-]+)*$/u
+const TRANSPORT_PATH = /^\/api\/[A-Za-z0-9_$-]+(?:[./][A-Za-z0-9_$-]+)*$/u
 const TRANSPORT_METHODS = new Set(['GET', 'HEAD', 'POST'])
 const DROPPED_HOST_FRAMES = new Set([
   'host/workspace-changed',

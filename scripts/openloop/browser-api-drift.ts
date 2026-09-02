@@ -85,9 +85,30 @@ const TRANSPORT_CALLS: ReadonlyArray<readonly [string, string]> = [
   ['connection', 'GET /api/events.mux'],
   ['connection', 'GET /api/events.host'],
   ['connection', 'POST /api/respond'],
+  ['openloop-settings-foundation', 'POST /api/openloop/settings/describe'],
+  ['openloop-settings-foundation', 'POST /api/openloop/settings/mutate'],
+  ['openloop-settings-foundation', 'POST /api/openloop/settings/providers'],
   ['session-log-download', 'GET /api/session.export'],
   ['session-log-download', 'HEAD /api/session.export'],
 ]
+
+const PRODUCT_SETTINGS_REPLACEMENTS: Readonly<Record<string, readonly string[]>> = {
+  'ui-settings-general': ['settings.describe', 'settings.openDocument'],
+  'ui-settings-models': [
+    'credentials.describe',
+    'credentials.set',
+    'credentials.unset',
+    'llm.discoverModels',
+    'llm.providers',
+    'settings.describe',
+    'settings.mutate',
+  ],
+  'ui-settings-plugins': [
+    'credentials.describe',
+    'credentials.set',
+    'settings.describe',
+  ],
+}
 
 // These signed Host packages intentionally expose a TypeScript `./client`
 // subpath without participating in the browser plugin roster. Every other
@@ -1004,12 +1025,13 @@ export async function collectOpenloopBrowserApiSurface(
 ): Promise<OpenloopBrowserApiSurface> {
   const manifests = workspacePackageManifests(root)
   const profileAnchor = resolve(root, 'packages/openloop/bundle/package.json')
+  const assembled = assembledEntries(openloopEntries(manifests))
   const rows: AssembledClientRow[] = []
   const roots = new Map<string, ClientPackageRoot>()
   const cataloguedClientPackages = new Set<string>()
   const enabledIds = new Set<string>()
 
-  for (const { entry, id, disabled } of assembledEntries(openloopEntries(manifests))) {
+  for (const { entry, id, disabled } of assembled) {
     if (typeof entry.name !== 'string' || disabled) continue
     const packageName = canonicalPackageName(entry.name)
     if (packageName === undefined) continue
@@ -1299,6 +1321,31 @@ export async function collectOpenloopBrowserApiSurface(
       'browser-api-drift: computed browser API reference is not cataloguable at:\n'
       + dynamicReferenceLocations.join('\n'),
     )
+  }
+
+  const settingsFoundationEnabled = rows.some(row =>
+    row.id === 'openloop-settings-foundation'
+    && row.packageName === '@openloop/settings-foundation')
+  const shellManifest = manifests.get('@openloop/shell')?.value
+  const shellDsh = shellManifest?.dsh
+  const shellClient = typeof shellDsh === 'object' && shellDsh !== null
+    ? (shellDsh as Record<string, unknown>).client
+    : undefined
+  const shellClientInject = typeof shellClient === 'object' && shellClient !== null
+    ? (shellClient as Record<string, unknown>).inject
+    : undefined
+  const shellUsesSettingsFacade = rows.some(row =>
+    row.id === 'shell' && row.packageName === '@openloop/shell')
+    && Array.isArray(shellClientInject)
+    && shellClientInject.includes('@openloop/settings-foundation')
+  if (settingsFoundationEnabled && shellUsesSettingsFacade) {
+    for (const [owner, methods] of Object.entries(PRODUCT_SETTINGS_REPLACEMENTS)) {
+      for (const method of methods) {
+        const owners = legacyRpcMethods.get(method)
+        owners?.delete(owner)
+        if (owners?.size === 0) legacyRpcMethods.delete(method)
+      }
+    }
   }
 
   const transportRoutes = new Map<string, Set<string>>()

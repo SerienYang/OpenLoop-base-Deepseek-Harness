@@ -14,6 +14,7 @@ import { pathOps } from '../src/client/ProviderEditor.tsx'
 import {
   DeepSeekModelsEditor, formatCapacity, modelDrafts, parseCapacity, validateDeepSeekModels,
 } from '../src/client/DeepSeekModelsEditor.tsx'
+import { ModelListEditor } from '../src/client/ModelListEditor.tsx'
 import { apiKeyFailure } from '../src/client/apiKey.ts'
 import { deriveKeyRef, ModelsSettingsStore } from '../src/client/store.ts'
 import type { ProviderRow } from '../src/client/store.ts'
@@ -187,6 +188,7 @@ type WireFace = ConstructorParameters<typeof ModelsSettingsStore>[0]
 async function mountFace(
   scripted: ReturnType<typeof scriptedFace>,
   credentialControl?: CredentialControlAdapter,
+  canMutate?: (namespace: string, path: readonly string[]) => boolean,
 ) {
   const { face, update, replace, mutate, set, unset } = scripted
   const controller = new ModelsSettingsStore(face as unknown as WireFace, credentialControl)
@@ -197,6 +199,7 @@ async function mountFace(
     api: face as never,
     t,
     ...credentialControl === undefined ? {} : { credentialControl },
+    ...canMutate === undefined ? {} : { canMutate },
   }
   const view = render(<ModelsSection {...injected} />)
   return { view, face, update, replace, mutate, set, unset, controller }
@@ -247,6 +250,76 @@ async function mountDeepSeekCard(overrides: Parameters<typeof scriptedFace>[0] =
 }
 
 describe('ModelsSection', () => {
+  it('passes the Host-projected credential reference to the product control', async () => {
+    const scripted = scriptedFace()
+    const directory = await scripted.face.llm.providers()
+    if (!directory.result.ok) throw new Error('provider fixture failed')
+    scripted.face.llm.providers.mockResolvedValue(ok({
+      providers: directory.result.value.providers.map(provider =>
+        provider.provider === 'deepseek-official'
+          ? { ...provider, credentialRef: 'DEEPSEEK_API_KEY' }
+          : provider),
+    }))
+    scripted.face.settings.describe.mockResolvedValue(ok({
+      writable: true,
+      hasDocument: false,
+      namespaces: wireNamespaces().map(namespace =>
+        namespace.ns === 'llm-deepseek'
+          ? {
+            ...namespace,
+            value: {
+              ...(namespace.value as Record<string, unknown>),
+              apiKeyEnv: undefined,
+            },
+          }
+          : namespace),
+    }))
+    const renderCredential = vi.fn(({ label }) =>
+      <div data-testid="host-credential-control">{label}</div>)
+
+    await mountFace(
+      scripted,
+      hostCredentialControl({
+        describe: vi.fn(() => Promise.resolve({ configured: false, writable: true })),
+        render: renderCredential,
+      }),
+    )
+
+    expect(renderCredential).toHaveBeenCalledWith(expect.objectContaining({
+      reference: 'DEEPSEEK_API_KEY',
+    }))
+  })
+
+  it('hides model discovery when the product API does not provide it', () => {
+    render(
+      <ModelListEditor
+        models={[]}
+        onChange={vi.fn()}
+        probe={{ settingsNs: 'llm-pi-ai', provider: 'openai' }}
+        api={{ llm: {} }}
+        t={t}
+        disabled={false}
+      />,
+    )
+
+    expect(screen.queryByRole('button', { name: en.fetchModels })).toBeNull()
+  })
+
+  it('hides endpoint and custom-provider controls outside the product mutation policy', async () => {
+    await mountFace(
+      scriptedFace(),
+      hostCredentialControl(),
+      (namespace, path) => namespace === 'llm-deepseek'
+        && !path.includes('baseURL')
+        && !path.includes('api'),
+    )
+
+    expect(screen.queryByRole('button', { name: en.customAdd })).toBeNull()
+    expect(screen.queryByRole('button', { name: openaiCopy(en.removeProvider) })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: deepSeekCopy(en.editProvider) }))
+    expect(screen.queryByLabelText(en.baseUrl)).toBeNull()
+  })
+
   it('renders nothing before the slot injects its dependencies', () => {
     const uninjected = {} as ModelsSectionProps
     render(<ModelsSection {...uninjected} />)
@@ -1074,6 +1147,21 @@ describe('ModelsSection', () => {
     expect(set).not.toHaveBeenCalled()
   })
 
+  it('does not submit a whole-provider create when the product policy denies it', async () => {
+    const scripted = scriptedFace()
+    const { mutate } = await mountFace(
+      scripted,
+      hostCredentialControl({ materializeApiKeyEnv: false }),
+      (_namespace, path) => path.length === 3,
+    )
+    fireEvent.click(screen.getByText(en.add))
+    await screen.findByLabelText(en.provider)
+
+    expect(screen.getByText<HTMLButtonElement>(en.apply).disabled).toBe(true)
+    fireEvent.click(screen.getByText(en.apply))
+    expect(mutate).not.toHaveBeenCalled()
+  })
+
   it('retries only the credential after refreshed settings already committed', async () => {
     const committed = wireNamespaces()[2]!
     const afterSettings: SettingsNamespaceView = {
@@ -1164,17 +1252,69 @@ describe('ModelsSection', () => {
     }
   })
 
-  it('tells the user to reopen when another writer moved the namespace first', async () => {
-    // The stale-draft overwrite: two tabs open the same card, the other saves,
-    // and this one must be refused rather than replay its opening snapshot.
-    const { set } = await mountDeepSeekCard({
-      mutate: vi.fn(() => Promise.resolve(fail('changed since it was read', 'settings-conflict'))),
-    })
+  it('refreshes the Host baseline after conflict and retries only on an explicit second Apply', async () => {
+    const refreshed: SettingsNamespaceView = {
+      ...wireNamespaces()[0]!,
+      value: {
+        ...(wireNamespaces()[0]!.value as object),
+        baseURL: 'https://theirs',
+        maxTokens: 64_000,
+      },
+      user: { baseURL: 'https://theirs', maxTokens: 64_000 },
+      revision: 7,
+    }
+    const mutate = vi.fn()
+      .mockResolvedValueOnce(fail('changed since it was read', 'settings-conflict'))
+      .mockResolvedValueOnce(ok({
+        ...refreshed,
+        value: { ...(refreshed.value as object), baseURL: 'https://mine' },
+        user: { baseURL: 'https://mine' },
+        revision: 8,
+      }))
+    const { face, set } = await mountDeepSeekCard({ mutate })
+    face.settings.describe.mockResolvedValue(ok({
+      writable: true,
+      hasDocument: false,
+      namespaces: wireNamespaces().map(namespace =>
+        namespace.ns === 'llm-deepseek' ? refreshed : namespace),
+    }))
     fireEvent.click(screen.getByText(en.customized))
-    fireEvent.change(screen.getByLabelText<HTMLInputElement>(en.baseUrl), { target: { value: 'https://mine' } })
+    const input = screen.getByLabelText<HTMLInputElement>(en.baseUrl)
+    fireEvent.change(input, { target: { value: 'https://mine' } })
     fireEvent.click(screen.getByText(en.apply))
     await screen.findByText(en.conflict)
+    expect(input.value).toBe('https://mine')
+    expect(mutate).toHaveBeenCalledOnce()
+    await waitFor(() => { expect(face.settings.describe).toHaveBeenCalledTimes(2) })
+
+    fireEvent.click(screen.getByText(en.apply))
+
+    await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(2) })
+    expect(mutate.mock.calls[1]?.[0]).toEqual({
+      ns: 'llm-deepseek',
+      ops: [{ op: 'set', path: ['baseURL'], value: 'https://mine' }],
+      expectedRevision: 7,
+    })
     expect(set).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['policy denied', 'policy-denied'],
+    ['validation failed', 'settings-rejected'],
+    ['unavailable', 'settings-unavailable'],
+  ])('preserves the draft when settings are %s', async (message, code) => {
+    const mutate = vi.fn(() => Promise.resolve(fail(message, code)))
+    await mountDeepSeekCard({ mutate })
+    fireEvent.click(screen.getByText(en.customized))
+    const input = screen.getByLabelText<HTMLInputElement>(en.baseUrl)
+    fireEvent.change(input, { target: { value: 'https://draft.example' } })
+
+    fireEvent.click(screen.getByText(en.apply))
+
+    await screen.findByText(message)
+    expect(input.value).toBe('https://draft.example')
+    expect(mutate).toHaveBeenCalledOnce()
+    expect(screen.getByText(en.apply)).toBeTruthy()
   })
 
   it('keeps the card usable when the write rejects instead of answering', async () => {
@@ -1254,7 +1394,26 @@ describe('ModelsSection', () => {
     expect(mutate.mock.calls[0]?.[0]).toEqual({
       ns: 'llm-pi-ai',
       ops: [{ op: 'unset', path: ['providers', 'openai'] }],
+      expectedRevision: 0,
     })
+  })
+
+  it('deletes against the revision shown when confirmation opened', async () => {
+    const { face, controller, mutate } = await mountSection()
+    fireEvent.click(screen.getByRole('button', { name: openaiCopy(en.removeProvider) }))
+    const dialog = screen.getByRole('dialog', { name: openaiCopy(en.deleteTitle) })
+
+    face.settings.describe.mockResolvedValueOnce(ok({
+      writable: true,
+      hasDocument: false,
+      namespaces: wireNamespaces().map(view =>
+        view.ns === 'llm-pi-ai' ? { ...view, revision: 7 } : view),
+    }))
+    await act(async () => { await controller.load() })
+    fireEvent.click(within(dialog).getByRole('button', { name: openaiCopy(en.deleteConfirm) }))
+
+    await waitFor(() => { expect(mutate).toHaveBeenCalledOnce() })
+    expect(mutate.mock.calls[0]?.[0]).toMatchObject({ expectedRevision: 0 })
   })
 
   it('removes only the Openloop provider profile and leaves shared credential deletion to its control', async () => {
@@ -1398,11 +1557,12 @@ describe('ModelsSection', () => {
     await removeProviderProfile(
       face as unknown as Parameters<typeof removeProviderProfile>[0],
       controller,
-      { settingsNs: 'llm-plain', settingsPath: ['ghost-profile'] },
+      { settingsNs: 'llm-plain', settingsPath: ['ghost-profile'], expectedRevision: 0 },
     )
     expect(mutate.mock.calls[0]?.[0]).toEqual({
       ns: 'llm-plain',
       ops: [{ op: 'unset', path: ['ghost-profile'] }],
+      expectedRevision: 0,
     })
     expect(replace).not.toHaveBeenCalled()
   })
@@ -1455,6 +1615,7 @@ describe('ModelsSection', () => {
     expect(mutate.mock.calls[0]?.[0]).toEqual({
       ns: 'llm-pi-ai',
       ops: [{ op: 'unset', path: ['providers', 'zombie'] }],
+      expectedRevision: 0,
     })
   })
 

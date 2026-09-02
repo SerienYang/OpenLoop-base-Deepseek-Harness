@@ -7,7 +7,10 @@ import type { ILayout } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { ThemeSnapshot } from '@deepseek-ai/dsh-client-ui-theme/client'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-import type { SettingsShellOwner } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type {
+  ProductSettingsApi,
+  SettingsShellOwner,
+} from '@deepseek-ai/dsh-client-ui-settings/client'
 import {
   parseBootstrapAppView,
 } from './AboutUpdateSection.tsx'
@@ -20,7 +23,6 @@ import { en, zh, type ShellKey } from './locales.ts'
 import { createOpenloopShellStore, OpenloopFrame } from './OpenloopFrame.tsx'
 import {
   OpenloopSettings,
-  OpenloopUnavailableSettingsSection,
   type OpenloopSettingsInjected,
   type OpenloopSettingsOnboardingStep,
   type OpenloopSettingsSection,
@@ -46,14 +48,12 @@ export { OpenloopFrame } from './OpenloopFrame.tsx'
 export {
   OPENLOOP_SETTINGS_SECTION_IDS,
   OpenloopSettings,
-  OpenloopUnavailableSettingsSection,
 } from './OpenloopSettings.tsx'
 export type {
   OpenloopSettingsInjected,
   OpenloopSettingsOnboardingStep,
   OpenloopSettingsProps,
   OpenloopSettingsSection,
-  OpenloopUnavailableSettingsSectionProps,
 } from './OpenloopSettings.tsx'
 export { parseOpenloopBrand } from './brand.ts'
 export type { OpenloopBrand } from './brand.ts'
@@ -143,11 +143,18 @@ export const inject = [
   'locale',
   'remote',
   'remote.openloopDesktop',
+  'openloopSettingsApi',
   'openloopUpdates',
 ]
 
 /** Dictionary namespace owned by the Openloop shell. */
 const NS = 'openloop.shell'
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    openloopSettingsApi: ProductSettingsApi
+  }
+}
 
 interface OpenloopBootstrapGlobal {
   readonly __OPENLOOP_BOOTSTRAP__?: unknown
@@ -160,9 +167,11 @@ export function apply(ctx: ClientContext): void {
   const desktop = (
     ctx.remote as unknown as { openloopDesktop: OpenloopCredentialRemote }
   ).openloopDesktop
+  const settingsApi = ctx.openloopSettingsApi
   const settingsShellOwner: SettingsShellOwner = Object.freeze({
     id: '@openloop/shell',
     credentialControl: createOpenloopCredentialControlAdapter(desktop, t),
+    settingsApi,
   })
   ctx.effect(
     () => ctx.reflect.provide('settingsShellOwner', settingsShellOwner),
@@ -260,28 +269,6 @@ export function apply(ctx: ClientContext): void {
     },
     inject: settingsInjected,
   }, OpenloopSettings))
-
-  const unavailableSections = [
-    { id: 'general', order: 0, label: 'generalNav' },
-    { id: 'models', order: 10, label: 'modelsNav' },
-    { id: 'plugins', order: 30, label: 'pluginsNav' },
-  ] as const
-  ctx.slots.inject('settings.section', function* () {
-    for (const section of unavailableSections) {
-      yield ctx.slots.register({
-        name: 'settings.section',
-        id: section.id,
-        order: section.order,
-        priority: 1_000,
-        label: () => t(section.label),
-        locale: NS,
-        inject: () => ({
-          title: t(section.label),
-          message: t('settingsSectionUnavailable'),
-        }),
-      }, OpenloopUnavailableSettingsSection)
-    }
-  })
 
   const bootstrap = globalThis as typeof globalThis & OpenloopBootstrapGlobal
   const app = parseBootstrapAppView(bootstrap.__OPENLOOP_BOOTSTRAP__)

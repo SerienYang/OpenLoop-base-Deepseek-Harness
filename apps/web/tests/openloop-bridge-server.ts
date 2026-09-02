@@ -120,6 +120,7 @@ export class AuthenticatedUnixBridgeServer {
   readonly #callRequestIds: string[] = []
   readonly #updateChecks: Array<FixtureUpdateStatus | Error> = []
   readonly #updateInstalls: Array<'cancelled' | 'restarting' | Error> = []
+  #credentialBytes: Uint8Array | undefined
   readonly #replacementOpened: Promise<void>
   #resolveReplacementOpened!: () => void
   #resolveReplacement: ((result: 'saved' | 'cancelled') => void) | undefined
@@ -276,13 +277,21 @@ export class AuthenticatedUnixBridgeServer {
     })
   }
 
-  completeCredentialReplacement(): void {
+  completeCredentialReplacement(secret?: string): void {
     if (this.#resolveReplacement === undefined) {
       throw new Error('credential replacement sheet is not pending')
     }
+    this.#credentialBytes?.fill(0)
+    this.#credentialBytes = secret === undefined
+      ? undefined
+      : new TextEncoder().encode(secret)
     this.configured = true
     this.#resolveReplacement('saved')
     this.#resolveReplacement = undefined
+  }
+
+  storedCredentialByteLength(): number {
+    return this.#credentialBytes?.byteLength ?? 0
   }
 
   async close(): Promise<void> {
@@ -298,6 +307,8 @@ export class AuthenticatedUnixBridgeServer {
     this.#callWaiters.clear()
     for (const socket of this.#sockets) socket.destroy()
     this.#secret.fill(0)
+    this.#credentialBytes?.fill(0)
+    this.#credentialBytes = undefined
     await new Promise<void>((resolve, reject) => {
       this.#server.close((error) => {
         if (error === undefined) resolve()
@@ -404,7 +415,9 @@ export class AuthenticatedUnixBridgeServer {
           this.#pendingRequestCancels.delete(request.requestId)
         })
       case 'resolveCredential':
-        return null
+        return this.#credentialBytes === undefined
+          ? null
+          : { bytes: [...this.#credentialBytes], source: 'keychain' }
       case 'getAppInfo':
         return { appVersion: '0.1.0', channel: 'test' }
       case 'getUpdateStatus':

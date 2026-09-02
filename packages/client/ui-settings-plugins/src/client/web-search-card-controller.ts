@@ -55,7 +55,7 @@ interface CredentialState extends CredentialControlStatus {
 /** What the web-search card renders. */
 export interface WebSearchCardState extends CardShell {
   /** Provider endpoint. */
-  baseURL: CardFieldState
+  baseURL?: CardFieldState
   /** Searches allowed per request. */
   maxUses: CardFieldState
   /** The staged credential, which starts blank on every load. */
@@ -98,10 +98,15 @@ export class WebSearchCardController {
     private readonly scope: SettingsScope<WebSearchSettings>,
     private readonly api: Pick<IApiClient, 'credentials'>,
     private readonly credentialControl?: CredentialControlAdapter,
+    private readonly canMutate?: (namespace: string, path: readonly string[]) => boolean,
   ) {
+    const endpointWritable = canMutate?.(WEB_SEARCH_NS, ['baseURL']) ?? true
     this.form = new CardForm(
       scope,
-      [textField('baseURL'), numberField('maxUses')],
+      [
+        ...endpointWritable ? [textField('baseURL')] : [],
+        numberField('maxUses'),
+      ],
       credentialControl === undefined
         ? [{ field: API_KEY_FIELD, write: text => this.writeKey(text) }]
         : [],
@@ -114,7 +119,9 @@ export class WebSearchCardController {
   private projection(): WebSearchCardState {
     return {
       ...this.form.shell(),
-      baseURL: this.form.field('baseURL'),
+      ...this.canMutate?.(WEB_SEARCH_NS, ['baseURL']) === false
+        ? {}
+        : { baseURL: this.form.field('baseURL') },
       maxUses: this.form.field('maxUses'),
       ...this.credentialControl === undefined
         ? { apiKey: this.form.field(API_KEY_FIELD) }

@@ -15,6 +15,12 @@
       "path": "../../client/runtime"
     },
     {
+      "path": "../../api/remotes/tsconfig.client.json"
+    },
+    {
+      "path": "../../client/ui-settings"
+    },
+    {
       "path": "../../runtime-diagnostics/invariants"
     }
   ]

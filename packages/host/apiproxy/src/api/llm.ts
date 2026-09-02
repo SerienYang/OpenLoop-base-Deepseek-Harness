@@ -23,6 +23,10 @@ export interface ConfigurableProviderView {
   settingsPath: string[]
   /** Whether the route is currently registered (its models are requestable). */
   active: boolean
+  /** Whether the product facade identifies this as a built-in route. */
+  builtIn?: boolean
+  /** Value-free credential reference registered for this route, when exposed. */
+  credentialRef?: string
   /**
    * Whether the owning adapter knows this route only because configuration
    * declared it. Absent when the adapter draws no such distinction, so a

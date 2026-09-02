@@ -11,6 +11,7 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { CredentialControlAdapter } from './credential-control.ts'
 import { SettingsScopeBinder } from './settings-scope.ts'
+import type { ProductSettingsApi } from './settings-scope.ts'
 
 /** Browser service selecting the Settings shell and its optional product controls. */
 export interface SettingsShellOwner {
@@ -18,6 +19,8 @@ export interface SettingsShellOwner {
   readonly id: string
   /** Product-owned credential UI; absent in the default DSH profile. */
   readonly credentialControl?: CredentialControlAdapter
+  /** Product-scoped settings API; absent in the default DSH profile. */
+  readonly settingsApi?: ProductSettingsApi
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -36,6 +39,7 @@ export type {
   SettingsPluginsTabOwnerProps, SettingsSectionOwnerProps, SettingsTriggerOwnerProps,
 } from './contract/slots.ts'
 export { SettingsScopeController, SettingsScopeBinder } from './settings-scope.ts'
+export type { ProductSettingsApi } from './settings-scope.ts'
 
 /**
  * Required services: none. This plugin provides both settingsScope and the

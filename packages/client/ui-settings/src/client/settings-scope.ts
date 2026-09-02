@@ -31,7 +31,19 @@ import type {} from '@deepseek-ai/dsh-api-remotes/types'
 // never — the owning package's client-safe, type-only subpath supplies the
 // cordis `Events` entry (and with it the branded `SettingsNamespace`).
 import type {} from '@deepseek-ai/dsh-settings/types'
-type SettingsFace = Pick<IApiClient, 'settings'>
+type SettingsFace = {
+  readonly settings: Pick<IApiClient['settings'], 'describe' | 'mutate'>
+}
+
+/** Product-filtered settings and provider directory used by a custom Settings shell. */
+export interface ProductSettingsApi extends SettingsFace {
+  readonly llm: {
+    readonly providers: IApiClient['llm']['providers']
+    readonly discoverModels?: IApiClient['llm']['discoverModels']
+  }
+  /** Whether the product facade accepts one settings path. */
+  readonly canMutate?: (namespace: string, path: readonly string[]) => boolean
+}
 
 /**
  * Serializes one namespace's Host reads and writes behind a snapshot store.
@@ -225,11 +237,15 @@ declare module '@deepseek-ai/cordis' {
  * (`packages/client/tsdown.client.ts`).
  */
 export class SettingsScopeBinder extends Service {
+  private readonly settingsApi: SettingsFace | undefined
+
   /**
    * @param ctx - the providing plugin's context.
+   * @param settingsApi - optional product-scoped settings transport.
    */
-  constructor(ctx: Context) {
+  constructor(ctx: Context, settingsApi?: SettingsFace) {
     super(ctx, 'settingsScope')
+    this.settingsApi = settingsApi
   }
 
   /**
@@ -246,9 +262,9 @@ export class SettingsScopeBinder extends Service {
     const ctx = this.ctx
     const connection = ctx.get('connection') as ConnectionHandle
     const controller = new SettingsScopeController<T>(
-      connection.api,
+      this.settingsApi ?? connection.api,
       spec,
-      connection.isLoopback ? 'host' : 'memory',
+      this.settingsApi !== undefined || connection.isLoopback ? 'host' : 'memory',
     )
     ctx.effect(() => {
       const refresh = (namespace?: string): void => {

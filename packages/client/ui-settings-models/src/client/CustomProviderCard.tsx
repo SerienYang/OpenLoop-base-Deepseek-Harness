@@ -23,7 +23,6 @@
 
 import { useState } from 'react'
 import type { ReactNode } from 'react'
-import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
 import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { apiKeyFailure } from './apiKey.ts'
 import { EditorFooter } from './EditorFooter.tsx'
@@ -31,6 +30,7 @@ import { validateDeepSeekModels } from './DeepSeekModelsEditor.tsx'
 import { ModelListEditor } from './ModelListEditor.tsx'
 import type { ModelDraft } from './ModelListEditor.tsx'
 import { deriveKeyRef, messageOf } from './store.ts'
+import type { ModelsSettingsApi } from './store.ts'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
 
@@ -60,7 +60,7 @@ export interface CustomProviderCardProps {
    */
   revision: number
   /** Wire faces for the write and for interrogating the endpoint. */
-  api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>
+  api: ModelsSettingsApi
   /** Section copy. */
   t: (key: keyof typeof en) => string
   /** Disable writes (read-only settings provider). */

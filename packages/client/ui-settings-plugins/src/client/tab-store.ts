@@ -56,7 +56,9 @@ export class ConfigurablePluginsTabController {
    * @param entries - reads the cards currently registered into the section's slot.
    */
   constructor(
-    private readonly api: Pick<IApiClient, 'settings'>,
+    private readonly api: {
+      readonly settings: Pick<IApiClient['settings'], 'describe'>
+    },
     private readonly entries: () => readonly StoredEntry[],
   ) {}
 

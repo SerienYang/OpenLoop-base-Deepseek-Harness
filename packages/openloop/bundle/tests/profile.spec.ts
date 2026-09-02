@@ -203,6 +203,17 @@ describe('OpenLoop profile', () => {
     })
   })
 
+  it('mounts the authenticated Openloop settings Host after bootstrap', () => {
+    const entries = openloopEntries()
+    expect(entries.find(entry => entry.id === 'openloop-settings-host')).toEqual({
+      id: 'openloop-settings-host',
+      name: '@openloop/bundle/settings-host',
+      inject: ['webServer', 'runtimeBootstrap', 'settings', 'llm', 'credentialConsumers'],
+    })
+    expect(entries.findIndex(entry => entry.id === 'openloop-settings-host'))
+      .toBeGreaterThan(entries.findIndex(entry => entry.id === 'openloop-bootstrap'))
+  })
+
   it('mounts one policy owner and makes both browser API dispatchers require it', () => {
     const entries = openloopEntries()
     expect(entries.find(entry => entry.id === 'desktop-bridge-host')).toEqual({
@@ -357,6 +368,8 @@ describe('OpenLoop profile', () => {
       .toContain('credentialConsumers')
     expect(entries.find(entry => entry.id === 'web-search-deepseek')?.inject)
       .toContain('credentialConsumers')
+    expect(entries.find(entry => entry.id === 'openloop-settings-host')?.inject)
+      .toContain('credentialConsumers')
   })
 
   it('disables legacy Client rows whose calls are intentionally absent from the first policy', () => {
@@ -383,7 +396,7 @@ describe('OpenLoop profile', () => {
     }
   })
 
-  it('keeps unsafe legacy settings contributors disabled until a reviewed facade exists', () => {
+  it('enables reviewed settings contributors behind the filtered facade', () => {
     const entries = openloopEntries()
     for (const id of [
       'ui-settings-general',
@@ -391,7 +404,7 @@ describe('OpenLoop profile', () => {
       'ui-settings-plugins',
     ]) {
       expect(entries.find(entry => entry.id === id)).toMatchObject({
-        disabled: true,
+        disabled: false,
       })
     }
     expect(entries.find(entry => entry.id === 'ui-settings-general')?.inject).toBeUndefined()
@@ -405,7 +418,7 @@ describe('OpenLoop profile', () => {
       .toBeUndefined()
   })
 
-  it('uses Shell placeholders plus the Host Workspace contributor for the five-section IA', () => {
+  it('uses the filtered foundation with four settings contributors and no Workbench package', () => {
     const entries = openloopEntries()
 
     expect(entries.find(entry => entry.id === 'openloop-settings-scope')).toBeUndefined()
@@ -423,15 +436,39 @@ describe('OpenLoop profile', () => {
     for (const id of [
       'ui-workspace',
       'ui-settings',
-      'ui-settings-general',
-      'ui-settings-models',
       'ui-settings-plugin-inventory',
-      'ui-settings-plugins',
       'ui-permission',
       'ui-agent-preset',
     ]) {
       expect(entries.find(entry => entry.id === id)?.disabled).toBe(true)
     }
+    for (const id of [
+      'ui-settings-general',
+      'ui-settings-models',
+      'ui-settings-plugins',
+    ]) {
+      expect(entries.find(entry => entry.id === id)?.disabled).toBe(false)
+    }
+    expect(entries.some(entry =>
+      entry.id.includes('workbench')
+      || (typeof entry.name === 'string' && entry.name.includes('workbench')),
+    )).toBe(false)
+  })
+
+  it('has no Workbench slot contributor or enabled Workbench client package', () => {
+    const workbenchSlotContributors = openloopEntries().filter(entry =>
+      entry.disabled !== true
+      && (
+        entry.id === 'workbench'
+        || entry.id === 'ui-workbench'
+        || entry.id.includes('workbench')
+        || (typeof entry.name === 'string' && entry.name.includes('workbench'))
+      ))
+    const workbenchPackages = [...enabledClientPackages()]
+      .filter(packageName => packageName.includes('workbench'))
+
+    expect(workbenchSlotContributors).toEqual([])
+    expect(workbenchPackages).toEqual([])
   })
 
   it('replaces the DSH root owner with exactly one Openloop shell in this profile', () => {
@@ -763,6 +800,10 @@ describe('OpenLoop profile', () => {
           types: './lib/types/bootstrap-host.d.ts',
           default: './lib/bootstrap-host.js',
         },
+        './settings-host': {
+          types: './lib/types/settings-host.d.ts',
+          default: './lib/settings-host.js',
+        },
         './cordis.patch.yml': './cordis.patch.yml',
         './package.json': './package.json',
       },
@@ -771,6 +812,7 @@ describe('OpenLoop profile', () => {
       'lib/index.js',
       'lib/invariant.js',
       'lib/bootstrap-host.js',
+      'lib/settings-host.js',
       'cordis.patch.yml',
       'lib/types/**/*.d.ts',
     ])

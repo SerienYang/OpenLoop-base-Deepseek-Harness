@@ -23,7 +23,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { CredentialView, IApiClient, SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
+import type { CredentialView, SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
 import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import {
   deletePath, getPath, hasPath, nodeAtPath, rehydrateSchema, setPath, validateDraft,
@@ -35,6 +35,7 @@ import { apiKeyFailure } from './apiKey.ts'
 import { EditorFooter } from './EditorFooter.tsx'
 import { ModelListEditor } from './ModelListEditor.tsx'
 import { deriveKeyRef, messageOf, protocolChoices } from './store.ts'
+import type { ModelsSettingsApi } from './store.ts'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
 
@@ -65,13 +66,17 @@ export interface ProviderEditorProps {
   /** Path from the section root to this provider's profile. */
   settingsPath: readonly string[]
   /** Wire faces for writes and for interrogating a provider endpoint. */
-  api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>
+  api: ModelsSettingsApi
   /** Section copy. */
   t: (key: keyof typeof en) => string
   /** Disable writes (read-only settings provider). */
   readOnly: boolean
   /** Optional product-owned, value-free credential control. */
   credentialControl?: CredentialControlAdapter
+  /** Host-approved credential reference for product-scoped controls. */
+  credentialRef?: string
+  /** Optional product policy used to omit fields its Host facade rejects. */
+  canMutate?: (namespace: string, path: readonly string[]) => boolean
   /** Value-free row snapshot marker for external credential invalidations. */
   credentialRefreshToken?: string
   /** Refresh the owning snapshot after the Host confirms a credential mutation. */
@@ -169,7 +174,7 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
   const fallback = getPath(namespace.value, settingsPath)
   const disabled = props.readOnly || busy
   const layout = layoutOf(namespace.ns)
-  const keyRef = refFor(namespace, settingsPath, props.provider)
+  const keyRef = props.credentialRef ?? refFor(namespace, settingsPath, props.provider)
   // The same schema read the create card makes, so the choices offered here
   // and there cannot drift apart: both come from the adapter's own `Config`.
   // Only the pi-ai layout has a per-route protocol for the read to find, and
@@ -226,6 +231,11 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
     ? 'keyRequired' as const
     : undefined
   const shownKeyFailure = credentialRequiredFailure ?? keyFailure
+  const blockedEmptyProfile = layout === 'pi-ai'
+    && fallback === undefined
+    && committedOriginal === undefined
+    && Object.keys(draft).length === 0
+    && props.canMutate?.(namespace.ns, settingsPath) === false
   // What the form currently shows, which is what an interrogation must ask:
   // an edited-but-unsaved endpoint, and a key typed but not yet stored.
   const probeApi = stringAt(draft, 'api') ?? stringAt(fallback, 'api')
@@ -274,6 +284,7 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
       && fallback === undefined
       && committedOriginal === undefined
       && Object.keys(next).length === 0
+      && !blockedEmptyProfile
     const ops: SettingsPathOpView[] = props.credentialOnly === true
       ? []
       : materializesNativeProfile
@@ -282,9 +293,36 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
     if (ops.length > 0) {
       const response = await api.settings.mutate({ ns, ops, expectedRevision })
       if (!response.result.ok) {
-        return response.result.error.code === 'settings-conflict'
-          ? t('conflict')
-          : response.result.error.message
+        if (response.result.error.code === 'settings-conflict') {
+          const described = await api.settings.describe({})
+          if (described.result.ok) {
+            const refreshed = described.result.value.namespaces.find(candidate => candidate.ns === ns)
+            if (refreshed !== undefined) {
+              const refreshedOriginal = getPath(refreshed.user, settingsPath)
+              let rebased = draftAt(refreshed, settingsPath)
+              for (const op of ops) {
+                const relativePath = op.path.slice(settingsPath.length)
+                if (relativePath.length === 0) {
+                  rebased = op.op === 'set'
+                    && typeof op.value === 'object'
+                    && op.value !== null
+                    && !Array.isArray(op.value)
+                    ? structuredClone(op.value) as Record<string, unknown>
+                    : {}
+                } else {
+                  rebased = op.op === 'set'
+                    ? setPath(rebased, relativePath, op.value)
+                    : deletePath(rebased, relativePath)
+                }
+              }
+              setCommittedOriginal(refreshedOriginal)
+              setDraft(rebased)
+              setExpectedRevision(refreshed.revision)
+            }
+          }
+          return t('conflict')
+        }
+        return response.result.error.message
       }
       setCommittedOriginal(getPath(response.result.value.user, settingsPath))
       setExpectedRevision(response.result.value.revision)
@@ -350,6 +388,8 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
     // A whole-section `llm-deepseek` profile is a composition fact with no
     // per-route identity for its schema to carry, hence the family test.
     const ownsIdentity = family === 'pi-ai' && props.declared === true
+    const canEdit = (field: string): boolean =>
+      props.canMutate?.(namespace.ns, [...settingsPath, field]) ?? true
     const customModels = getPath(draft, ['models'])
     const modelsOverridden = hasPath(draft, ['models'])
     const models = modelDrafts(modelsOverridden ? customModels : inheritedModels())
@@ -410,7 +450,7 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
             {/* The name and the protocol are the create card's two remaining
                 profile fields; a route the adapter ships defaults both from
                 its catalog entry and neither belongs on its card. */}
-            {ownsIdentity
+            {ownsIdentity && canEdit('displayName')
               ? (
                 <div className={styles['field']}>
                   <span className={styles['fieldLabel']}>{t('customDisplayName')}</span>
@@ -434,25 +474,29 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
                 </div>
               )
               : null}
-            <div className={styles['field']}>
-              <span className={styles['fieldLabel']}>{t('baseUrl')}</span>
-              <input
-                className={styles['input']}
-                type="text"
-                value={stringAt(draft, 'baseURL') ?? ''}
-                placeholder={family === 'deepseek'
-                  ? DEEPSEEK_PUBLIC_BASE_URL
-                  : stringAt(fallback, 'baseURL') ?? t('baseUrlDefault')}
-                aria-label={t('baseUrl')}
-                disabled={disabled}
-                onChange={(event) => {
-                  setField('baseURL', event.target.value === '' ? undefined : event.target.value)
-                }}
-              />
-            </div>
+            {canEdit('baseURL')
+              ? (
+                <div className={styles['field']}>
+                  <span className={styles['fieldLabel']}>{t('baseUrl')}</span>
+                  <input
+                    className={styles['input']}
+                    type="text"
+                    value={stringAt(draft, 'baseURL') ?? ''}
+                    placeholder={family === 'deepseek'
+                      ? DEEPSEEK_PUBLIC_BASE_URL
+                      : stringAt(fallback, 'baseURL') ?? t('baseUrlDefault')}
+                    aria-label={t('baseUrl')}
+                    disabled={disabled}
+                    onChange={(event) => {
+                      setField('baseURL', event.target.value === '' ? undefined : event.target.value)
+                    }}
+                  />
+                </div>
+              )
+              : null}
             {/* The protocol sits beside the endpoint it describes, as it does
                 on the create card. */}
-            {ownsIdentity
+            {ownsIdentity && canEdit('api')
               ? (
                 <div className={styles['field']}>
                   <span className={styles['fieldLabel']}>{t('customApi')}</span>
@@ -525,6 +569,7 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
         submitDisabled={disabled || layout === 'unknown'
           || (props.credentialOnly !== true && modelFailure !== undefined)
           || shownKeyFailure !== undefined
+          || blockedEmptyProfile
           || (props.credentialRequired === true && keyValue.length === 0)}
         submitLabel={props.submitLabel ?? 'apply'}
         submitBusyLabel={props.submitBusyLabel ?? 'applying'}

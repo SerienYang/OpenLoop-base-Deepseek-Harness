@@ -60,6 +60,16 @@ const CORE_MANIFEST = {
   dshDataVersion: 0,
 } as const
 
+async function dismissEnglishOnboarding(page: Page): Promise<void> {
+  const welcome = page.getByRole('dialog', { name: 'Internal Testing Notice' })
+  await welcome.waitFor({ timeout: 10_000 })
+  await welcome.getByRole('button', { name: 'Continue' }).click()
+  const credential = page.getByRole('dialog', { name: 'Add an API key to get started' })
+  if (await credential.count() > 0) {
+    await credential.getByRole('button', { name: 'Configure later' }).click()
+  }
+}
+
 async function closeAll(
   resources: ReadonlyArray<() => Promise<void> | undefined>,
 ): Promise<void> {
@@ -239,18 +249,8 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
       .waitFor({ timeout: 10_000 })
   }
 
-  async function openWorkspaceSettings(): Promise<void> {
-    await page.getByRole('button', { name: 'Settings', exact: true }).click()
-    const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
-    await settings.waitFor({ timeout: 10_000 })
-    await settings.getByRole('tab', { name: 'Workspace', exact: true }).click()
-    await settings.getByRole('region', { name: 'Workspace settings' })
-      .waitFor({ timeout: 10_000 })
-  }
-
   async function openWorkspaceActions(name: string): Promise<void> {
-    const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
-    await settings.getByRole('button', { name: `Workspace actions for ${name}` }).click()
+    await page.getByRole('button', { name: `Workspace actions for ${name}` }).click()
   }
 
   async function expectComposerBlocked(blocked: boolean): Promise<void> {
@@ -383,6 +383,7 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
       undefined,
       { timeout: 30_000 },
     )
+    await dismissEnglishOnboarding(page)
   }, 120_000)
 
   afterAll(async () => {
@@ -491,14 +492,12 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
       timeout: 10_000,
     }).toBe('true')
 
-    await openWorkspaceSettings()
     await openWorkspaceActions('authority-project')
     await page.getByRole('menuitem', { name: 'Rename' }).click()
-    const rename = page.getByRole('region', { name: 'Rename Workspace' })
+    const rename = page.getByRole('dialog', { name: 'Rename Workspace' })
     await rename.getByRole('textbox', { name: 'Rename' }).fill('Workspace Alpha')
     await rename.getByRole('button', { name: 'Rename' }).click()
-    await page.getByRole('region', { name: 'Workspace settings' })
-      .getByText('Workspace Alpha', { exact: true })
+    await page.getByRole('button', { name: 'Switch to Workspace Alpha' })
       .waitFor({ timeout: 10_000 })
     expect(scaffold.ctx.workspaceRegistry.get(workspace.id)?.title).toBe('Workspace Alpha')
 
@@ -510,8 +509,6 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
       method: 'revealWorkspace',
       payload: { workspaceId: workspace.id },
     })
-    await page.getByRole('dialog', { name: 'Settings', exact: true })
-      .getByRole('button', { name: 'Close Settings' }).click()
 
     bridge.setWorkspaceGrantState(workspace.id, 'missing')
     const missingRefreshes = browserApiRequests.filter(
@@ -604,10 +601,9 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     expect(scaffold.ctx.sessions.get(initialSessionId)).toBeDefined()
 
     bridge.enqueueWorkspaceRevoke('cancelled')
-    await openWorkspaceSettings()
     await openWorkspaceActions('Workspace Alpha')
     await page.getByRole('menuitem', { name: 'Remove' }).click()
-    const remove = page.getByRole('region', { name: 'Remove Workspace' })
+    const remove = page.getByRole('dialog', { name: 'Remove Workspace' })
     expect(await remove.textContent()).toContain(
       'Only the authorization and list item are removed. Files and session history are kept.',
     )
@@ -622,7 +618,7 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
       .filter(call => call.method === 'completeWorkspaceTransaction').length
     await openWorkspaceActions('Workspace Alpha')
     await page.getByRole('menuitem', { name: 'Remove' }).click()
-    await page.getByRole('region', { name: 'Remove Workspace' })
+    await page.getByRole('dialog', { name: 'Remove Workspace' })
       .getByRole('button', { name: 'Remove' }).click()
     await expect.poll(() => scaffold.ctx.workspaceRegistry.get(workspace.id), {
       timeout: 10_000,
@@ -897,6 +893,7 @@ describe('web e2e: Workspace authorization cancellation lifecycle', () => {
         undefined,
         { timeout: 30_000 },
       )
+      await dismissEnglishOnboarding(page)
       await page.getByRole('textbox', { name: /choose workspace/iu }).click()
       await page.getByRole('menuitem', { name: 'Add Workspace' }).click()
       await bridge.whenCalled('beginWorkspaceAuthorization')

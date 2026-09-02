@@ -10,7 +10,6 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@openloop/desktop-bridge-client/client'
 import { WorkspaceHero } from './WorkspaceHero.tsx'
-import { WorkspaceSettings } from './WorkspaceSettings.tsx'
 import { WorkspaceSidebar } from './WorkspaceSidebar.tsx'
 import { en, zh, type WorkspaceClientKey } from './locales.ts'
 import type { WorkspaceClientActions } from './shared.tsx'
@@ -120,14 +119,6 @@ export function apply(ctx: ClientContext): void {
     inject: injected,
     locale: NS,
   }, WorkspaceSidebar))
-  ctx.slots.inject('settings.section', () => ctx.slots.register({
-    name: 'settings.section',
-    id: 'workspace',
-    order: 20,
-    label: () => t('settingsNav'),
-    inject: injected,
-    locale: NS,
-  }, WorkspaceSettings))
   ctx.slots.inject('conversation.hero.workspace', () => ctx.slots.register({
     name: 'conversation.hero.workspace',
     inject: injected,
