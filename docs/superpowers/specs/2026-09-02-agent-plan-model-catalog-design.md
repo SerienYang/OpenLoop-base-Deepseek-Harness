@@ -104,8 +104,11 @@ The existing `llm.discoverModels` contract distinguishes two cases.
 ### Registered route
 
 When `provider` names a route currently owned by `llm-pi-ai`, discovery returns
-that adapter's effective model catalog without a network request. For every
-model it returns:
+that route's materialized `ResolvedPiAiProviderProfile.piProvider.models`
+catalog without a network request. This source carries the effective values
+after configuration, route defaults, and installed-catalog inheritance have
+been applied. It therefore wins over the unconfigured installed pi-ai catalog.
+For every model it returns:
 
 - model ID;
 - display name;
@@ -120,6 +123,7 @@ Agent Plan even though the provider has no `/models` endpoint.
 
 When the provider is not registered, discovery keeps the existing behavior:
 
+- a provider in pi-ai's installed catalog returns that static catalog;
 - OpenAI-compatible protocols query `{baseURL}/models`;
 - unsupported protocols fail with `DISCOVERY_UNSUPPORTED`;
 - manual entry remains available.

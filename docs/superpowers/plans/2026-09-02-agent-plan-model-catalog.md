@@ -57,6 +57,8 @@
   - Document the Responses route and selectable model IDs.
 - Modify `packages/openloop/bundle/README.zh.md`
   - Keep the paired Chinese documentation structurally identical.
+- Modify `packages/openloop/bundle/README.i18n.yaml`
+  - Record the reviewed bilingual pair after both READMEs change.
 
 ---
 
@@ -287,36 +289,36 @@ type ConfiguredCatalog = (
 
 Resolution order:
 
-1. installed pi-ai catalog;
-2. configured route catalog;
+1. configured route catalog;
+2. installed pi-ai catalog;
 3. endpoint probe.
 
 `undefined` means the route is not configured. An empty array means the route
 is configured and intentionally advertises no models; do not fall through to
 the network.
 
-In `packages/llm/llm-pi-ai/src/index.ts`, implement the callback using the
-already-created `PiAiAdapter`:
+In `packages/llm/llm-pi-ai/src/index.ts`, implement the callback from the
+resolved profile's materialized pi-ai models:
 
 ```ts
-const listConfigured = async (provider: string) => {
-  if (!profiles().has(provider)) return undefined
-  const models = await adapter.listModels(provider)
-  return Promise.all(models.map(async (model) => {
-    const resolved = await adapter.resolveModel(provider, model.id)
-    return {
-      id: model.id,
-      name: model.name,
-      inputModalities: model.inputModalities,
-      contextWindow: resolved.context?.contextWindow,
-      maxTokens: resolved.defaultMaxTokens,
-    }
+const listConfigured = (provider: string) => {
+  const profile = profiles().get(provider)
+  if (profile === undefined) return undefined
+  return profile.piProvider.models.map(model => ({
+    id: model.id,
+    name: model.name,
+    contextWindow: model.contextWindow,
+    maxTokens: model.maxTokens,
+    inputModalities: [...model.input],
   }))
 }
 ```
 
-Build each object conditionally so `undefined` optional fields are omitted.
-Pass this callback into the discovery registration. Do not resolve a credential
+`Model.maxTokens` is the effective model output capacity. Do not project
+`LlmResolvedModelInfo.defaultMaxTokens`: that field is a per-request default
+and is intentionally absent when a model inherited its capacity.
+
+Pass the callback into the discovery registration. Do not resolve a credential
 on the local path.
 
 - [ ] **Step 4: Add edge-case tests**
@@ -326,7 +328,9 @@ Cover:
 - a configured empty catalog returns `[]` without network access;
 - an unknown route still uses OpenAI-compatible `/models`;
 - a configured route performs no credential lookup;
-- installed pi-ai providers retain their installed-catalog precedence.
+- a configured pi-ai catalog provider returns its effective narrowed/overridden
+  route rather than the untouched installed catalog;
+- an unconfigured pi-ai catalog provider still returns the installed catalog.
 
 - [ ] **Step 5: Run discovery tests and verify GREEN**
 
@@ -439,6 +443,7 @@ git commit -m "fix(settings): retain discovered model capabilities"
 - Modify: `packages/openloop/bundle/tests/profile.spec.ts`
 - Modify: `packages/openloop/bundle/README.md`
 - Modify: `packages/openloop/bundle/README.zh.md`
+- Modify: `packages/openloop/bundle/README.i18n.yaml`
 
 - [ ] **Step 1: Rewrite the failing profile expectation first**
 
@@ -559,7 +564,15 @@ Document:
 - that Coding Plan keys remain distinct and are not configured here.
 
 Keep English and Chinese heading/list/table structures paired so
-`verify-translation-pairing` remains green.
+`verify-translation-pairing` remains green. After both files are complete,
+record the reviewed pair:
+
+```bash
+pnpm run verify-translation-pairing --write packages/openloop/bundle/README.md
+```
+
+This updates `packages/openloop/bundle/README.i18n.yaml`; include it in the
+same commit.
 
 - [ ] **Step 5: Run profile and documentation checks**
 
@@ -567,6 +580,7 @@ Run:
 
 ```bash
 pnpm vitest run packages/openloop/bundle/tests/profile.spec.ts
+pnpm run verify-translation-pairing --write packages/openloop/bundle/README.md
 pnpm verify-translation-pairing
 ```
 
@@ -608,6 +622,7 @@ git add \
   packages/openloop/bundle/tests/profile.spec.ts \
   packages/openloop/bundle/README.md \
   packages/openloop/bundle/README.zh.md \
+  packages/openloop/bundle/README.i18n.yaml \
   packages/llm/llm-pi-ai/tests/adapter.spec.ts
 git commit -m "feat(openloop): add Agent Plan model catalog"
 ```
@@ -657,8 +672,12 @@ failure as flaky without a clean isolated rerun.
 
 - [ ] **Step 4: Run Openloop gates**
 
+Run the changed Openloop test through the focused gate and scan the repository
+for forbidden focused/skipped tests:
+
 ```bash
-pnpm openloop:gate-test
+pnpm openloop:gate-test -- vitest --files packages/openloop/bundle/tests/profile.spec.ts
+pnpm openloop:gate-test -- scan-repo
 ```
 
 Expected: all Openloop release gates pass.
