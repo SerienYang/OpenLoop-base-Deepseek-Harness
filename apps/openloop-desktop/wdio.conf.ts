@@ -1,14 +1,19 @@
 import type { Options } from '@wdio/types'
-import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { appendFileSync, mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 const binary = process.env.OPENLOOP_WDIO_BINARY
-  ?? './src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Openloop.app/Contents/MacOS/openloop-desktop'
-const ownsE2eRoot = process.env.OPENLOOP_E2E_ROOT === undefined
+  ?? resolve(
+    import.meta.dirname,
+    '../../.artifacts/openloop-e2e-target/aarch64-apple-darwin/release/bundle/macos/Openloop E2E.app/Contents/MacOS/openloop-desktop',
+  )
 const e2eRoot = process.env.OPENLOOP_E2E_ROOT ?? mkdtempSync(join(tmpdir(), 'openloop-wdio-'))
 process.env.OPENLOOP_E2E_ROOT = e2eRoot
+process.env.OPENLOOP_E2E_RUN_ID ??= randomUUID()
+process.env.OPENLOOP_E2E_RUNTIME_AUDIT ??= join(e2eRoot, 'runtime-process.json')
+process.env.OPENLOOP_WDIO_RESULT_AUDIT ??= join(e2eRoot, 'wdio-results.jsonl')
 const dshHome = join(e2eRoot, 'Openloop-Test', 'dsh')
 mkdirSync(dshHome, { recursive: true, mode: 0o700 })
 process.env.DSH_HOME = dshHome
@@ -46,17 +51,12 @@ export const config: Options.Testrunner = {
     ui: 'bdd',
     timeout: 120_000,
   },
-  onComplete: () => {
-    try {
-      const runtime = join(dirname(binary), 'openloop-runtime')
-      const pids = execFileSync('pgrep', ['-f', runtime], { encoding: 'utf8' })
-        .trim()
-        .split('\n')
-        .filter(Boolean)
-      for (const pid of pids) process.kill(Number(pid), 'SIGTERM')
-    } catch {
-      // No matching sidecar remains.
-    }
-    if (ownsE2eRoot) rmSync(e2eRoot, { recursive: true, force: true })
+  afterTest: (test, _context, result) => {
+    const audit = process.env.OPENLOOP_WDIO_RESULT_AUDIT
+    if (audit === undefined) throw new Error('OPENLOOP_WDIO_RESULT_AUDIT is required')
+    appendFileSync(audit, `${JSON.stringify({
+      state: result.error === undefined ? 'passed' : 'failed',
+      title: test.title,
+    })}\n`)
   },
 }

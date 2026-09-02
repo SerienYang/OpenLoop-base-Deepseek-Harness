@@ -12,6 +12,7 @@ interface DesktopElement {
 
 interface DesktopBrowser {
   $(selector: string): Promise<DesktopElement>
+  closeWindow(): Promise<void>
   getTitle(): Promise<string>
   getWindowHandle(): Promise<string>
   getWindowHandles(): Promise<string[]>
@@ -111,5 +112,6 @@ describe('Openloop desktop shell', () => {
       'update-install:main',
       'workspace-picker:main',
     ])
+    await desktop.closeWindow()
   })
 })

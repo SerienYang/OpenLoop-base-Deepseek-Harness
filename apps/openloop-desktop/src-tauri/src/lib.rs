@@ -1,3 +1,5 @@
+#[cfg(all(target_os = "macos", feature = "openloop-e2e"))]
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "macos")]
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
@@ -7,7 +9,6 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-
 use tauri::{AppHandle, Manager, RunEvent, Url};
 #[cfg(all(target_os = "macos", not(feature = "openloop-e2e")))]
 use tauri_plugin_updater::Update;
@@ -236,6 +237,41 @@ struct RuntimeProcessState {
     #[cfg(target_os = "macos")]
     _health: Arc<Mutex<RuntimeHealthState>>,
     child: Mutex<SupervisedChild>,
+}
+
+#[cfg(all(target_os = "macos", feature = "openloop-e2e"))]
+static E2E_TERMINATION_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(all(target_os = "macos", feature = "openloop-e2e"))]
+extern "C" fn request_e2e_termination(_signal: libc::c_int) {
+    E2E_TERMINATION_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+#[cfg(all(target_os = "macos", feature = "openloop-e2e"))]
+fn install_e2e_termination_handler(app: AppHandle) -> Result<(), String> {
+    let previous = unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            request_e2e_termination as *const () as libc::sighandler_t,
+        )
+    };
+    if previous == libc::SIG_ERR {
+        return Err(format!(
+            "Openloop E2E SIGTERM handler failed: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    std::thread::Builder::new()
+        .name("openloop-e2e-termination".to_owned())
+        .spawn(move || loop {
+            if E2E_TERMINATION_REQUESTED.swap(false, Ordering::SeqCst) {
+                app.exit(0);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        })
+        .map(|_| ())
+        .map_err(|error| format!("Openloop E2E termination watcher failed: {error}"))
 }
 
 #[cfg(all(target_os = "macos", not(feature = "openloop-e2e")))]
@@ -590,6 +626,8 @@ fn start_runtime(
     };
     let mut child = SupervisedChild::spawn_with_dsh_home(&executable, &secrets, &dsh_home)
         .map_err(|error| error.to_string())?;
+    #[cfg(all(target_os = "macos", feature = "openloop-e2e"))]
+    e2e::record_runtime_process(child.identity().pid)?;
     #[cfg(target_os = "macos")]
     let health = Arc::new(Mutex::new(RuntimeHealthState {
         acknowledged: false,
@@ -1240,6 +1278,11 @@ pub fn run() -> i32 {
         })
         .build(tauri::generate_context!())
         .expect("failed to build Openloop desktop application");
+    #[cfg(all(target_os = "macos", feature = "openloop-e2e"))]
+    if let Err(error) = install_e2e_termination_handler(app.handle().clone()) {
+        write_failure_json(&error);
+        return 1;
+    }
     if action == HostAction::HealthProbe {
         return app.run_return(|_, _| {});
     }
@@ -1263,6 +1306,22 @@ pub fn run() -> i32 {
         };
     }
     app.run(|app, event| {
+        #[cfg(feature = "openloop-e2e")]
+        if matches!(
+            &event,
+            RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Destroyed,
+                ..
+            } if label == "main"
+        ) {
+            if let Some(state) = app.try_state::<RuntimeProcessState>() {
+                if let Ok(mut child) = state.child.lock() {
+                    let _ = child.terminate_if_verified();
+                }
+            }
+            app.exit(0);
+        }
         if matches!(event, RunEvent::Exit) {
             if let Some(state) = app.try_state::<RuntimeProcessState>() {
                 if let Ok(mut child) = state.child.lock() {

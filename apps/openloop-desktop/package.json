@@ -9,6 +9,7 @@
     "frontend:build": "tsc && vite build",
     "dev": "pnpm manifest:test && tauri dev",
     "build": "pnpm --dir ../.. openloop:build-desktop -- --channel test --target aarch64-apple-darwin --bundle app",
+    "e2e:build": "pnpm --dir ../.. run e2e:build",
     "tauri": "tauri",
     "icon": "tauri icon ../../assets/brand/openloop-icon.svg --output src-tauri/icons"
   },

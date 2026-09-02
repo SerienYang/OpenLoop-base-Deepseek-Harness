@@ -1,4 +1,11 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -213,10 +220,16 @@ describe('OpenLoop focused test gate', () => {
       },
     })
 
-    expect(commands).toEqual([{
-      command: 'pnpm',
-      args: ['exec', 'playwright', 'test', 'tests/app.spec.ts', '--reporter=json'],
-    }])
+    expect(commands).toEqual([
+      {
+        command: 'pnpm',
+        args: ['run', 'e2e:build:web'],
+      },
+      {
+        command: 'pnpm',
+        args: ['exec', 'playwright', 'test', 'tests/app.spec.ts', '--reporter=json'],
+      },
+    ])
   })
 
   it('lists a Cargo target before running it', async () => {
@@ -317,25 +330,12 @@ describe('OpenLoop focused test gate', () => {
     expect(invocation).toBe(2)
   })
 
-  it('passes the exact binary to WDIO and rejects a missing binary', async () => {
+  it('builds and passes the exact isolated binary to WDIO', async () => {
     const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     write(root, 'wdio.conf.ts', 'export const config = {}\n')
     write(root, 'tests/window.e2e.ts', "describe('window', () => {})\n")
 
-    await expect(runGateTests([
-      'wdio',
-      '--config', 'wdio.conf.ts',
-      '--binary', 'target/openloop',
-      '--file', 'tests/window.e2e.ts',
-    ], {
-      root,
-      runCommand: () => {
-        throw new Error('must not execute')
-      },
-    })).rejects.toThrow('WDIO binary does not exist: target/openloop')
-
-    write(root, 'target/openloop', 'binary')
     const calls: Array<{ args: string[]; env?: NodeJS.ProcessEnv }> = []
     await runGateTests([
       'wdio',
@@ -349,17 +349,36 @@ describe('OpenLoop focused test gate', () => {
           args,
           ...(options?.env === undefined ? {} : { env: options.env }),
         })
-        return { status: 0, stdout: '1 passed, 0 failed, 0 skipped\n', stderr: '' }
+        if (args.join(' ') === 'run e2e:build') {
+          write(root, 'target/openloop', 'binary')
+          return { status: 0, stdout: '', stderr: '' }
+        }
+        const resultAudit = options?.env?.OPENLOOP_WDIO_RESULT_AUDIT
+        const runtimeAudit = options?.env?.OPENLOOP_E2E_RUNTIME_AUDIT
+        const runId = options?.env?.OPENLOOP_E2E_RUN_ID
+        if (resultAudit === undefined) throw new Error('missing WDIO result audit')
+        if (runtimeAudit === undefined || runId === undefined) {
+          throw new Error('missing WDIO runtime audit')
+        }
+        appendFileSync(resultAudit, '{"state":"passed","title":"window"}\n')
+        writeFileSync(runtimeAudit, JSON.stringify({ runId, pid: 999_999 }))
+        return { status: 0, stdout: 'Spec Files: 1 passed, 1 total\n', stderr: '' }
       },
     })
 
-    expect(calls).toHaveLength(1)
-    expect(calls[0]?.args).toEqual([
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.args).toEqual(['run', 'e2e:build'])
+    expect(calls[1]?.args).toEqual([
       '--dir', '.',
       'exec', 'wdio', 'run', join(root, 'wdio.conf.ts'),
       '--spec', join(root, 'tests/window.e2e.ts'),
     ])
-    expect(calls[0]?.env?.OPENLOOP_WDIO_BINARY).toBe(join(root, 'target/openloop'))
+    expect(calls[1]?.env?.OPENLOOP_WDIO_BINARY).toBe(join(root, 'target/openloop'))
+    expect(calls[1]?.env?.OPENLOOP_E2E_ROOT).toMatch(/openloop-wdio-/u)
+    expect(calls[1]?.env?.OPENLOOP_E2E_RUNTIME_AUDIT)
+      .toBe(join(calls[1]?.env?.OPENLOOP_E2E_ROOT ?? '', 'runtime-process.json'))
+    expect(calls[1]?.env?.OPENLOOP_WDIO_RESULT_AUDIT)
+      .toBe(join(calls[1]?.env?.OPENLOOP_E2E_ROOT ?? '', 'wdio-results.jsonl'))
   })
 
   it('rejects a nonexistent exact Vitest file before invoking the runner', async () => {
@@ -959,7 +978,43 @@ describe('OpenLoop focused test gate', () => {
     })).rejects.toThrow('WDIO all discovered tests were skipped')
   })
 
-  it('accepts the WDIO spec reporter passing summary', async () => {
+  it('accepts a structured WDIO test audit', async () => {
+    const { runGateTests } = await loadGateModule()
+    const root = fixtureRoot()
+    write(root, 'wdio.conf.ts', 'export const config = {}\n')
+    write(root, 'target/openloop', 'binary')
+    write(root, 'tests/window.e2e.ts', "describe('window', () => {})\n")
+
+    await expect(runGateTests([
+      'wdio',
+      '--config', 'wdio.conf.ts',
+      '--binary', 'target/openloop',
+      '--file', 'tests/window.e2e.ts',
+    ], {
+      root,
+      runCommand: (_command, args, options) => {
+        if (args.join(' ') === 'run e2e:build') {
+          return { status: 0, stdout: '', stderr: '' }
+        }
+        const resultAudit = options?.env?.OPENLOOP_WDIO_RESULT_AUDIT
+        const runtimeAudit = options?.env?.OPENLOOP_E2E_RUNTIME_AUDIT
+        const runId = options?.env?.OPENLOOP_E2E_RUN_ID
+        if (resultAudit === undefined) throw new Error('missing WDIO result audit')
+        if (runtimeAudit === undefined || runId === undefined) {
+          throw new Error('missing WDIO runtime audit')
+        }
+        appendFileSync(resultAudit, '{"state":"passed","title":"window"}\n')
+        writeFileSync(runtimeAudit, JSON.stringify({ runId, pid: 999_999 }))
+        return {
+          status: 0,
+          stdout: 'Spec Files: 1 passed, 1 total\n',
+          stderr: '',
+        }
+      },
+    })).resolves.toBeUndefined()
+  })
+
+  it('rejects Tauri output that spoofs a Mocha passing line', async () => {
     const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()
     write(root, 'wdio.conf.ts', 'export const config = {}\n')
@@ -975,10 +1030,10 @@ describe('OpenLoop focused test gate', () => {
       root,
       runCommand: () => ({
         status: 0,
-        stdout: '1 passing (619ms)\n',
+        stdout: '[tauri stdout] 1 passing (1ms)\nSpec Files: 0 passed, 0 total\n',
         stderr: '',
       }),
-    })).resolves.toBeUndefined()
+    })).rejects.toThrow('WDIO executed zero tests')
   })
 
   it('validates both browser Vitest and WDIO zero-execution summaries', async () => {

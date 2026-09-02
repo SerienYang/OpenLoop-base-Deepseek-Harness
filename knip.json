@@ -8,7 +8,6 @@
     "icacls",
     "mkfifo",
     "musl-gcc",
-    "pgrep",
     "plutil",
     "python3",
     "sandbox-exec",

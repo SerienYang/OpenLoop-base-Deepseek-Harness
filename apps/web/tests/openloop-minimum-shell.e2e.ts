@@ -1,89 +1,17 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
-import { createInterface } from 'node:readline'
 import { expect, test, type Page } from '@playwright/test'
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import {
+  FixtureProcess,
+  type FixtureReady,
+} from './openloop-fixture-process.ts'
 
 const SNAPSHOT_DIR = fileURLToPath(new URL(
   './snapshots/openloop-minimum-shell',
   import.meta.url,
 ))
 const UI_EXPECTED = join(SNAPSHOT_DIR, 'ui.expected.md')
-
-interface FixtureReady {
-  readonly ready: true
-  readonly url: string
-  readonly workspaceCwd: string
-  readonly activeRows: string[]
-}
-
-interface FixtureResponse {
-  readonly id: number
-  readonly ok: boolean
-  readonly value?: unknown
-  readonly error?: string
-}
-
-class FixtureProcess {
-  readonly child: ChildProcessWithoutNullStreams
-  readonly ready: Promise<FixtureReady>
-  readonly #pending = new Map<number, {
-    readonly resolve: (value: unknown) => void
-    readonly reject: (reason: unknown) => void
-  }>()
-  #sequence = 0
-
-  constructor() {
-    this.child = spawn(
-      'pnpm',
-      ['exec', 'tsx', 'apps/web/tests/openloop-minimum-shell-server.ts'],
-      {
-        cwd: fileURLToPath(new URL('../../..', import.meta.url)),
-        env: { ...process.env, DSH_SNAPSHOT: 'replay' },
-        stdio: ['pipe', 'pipe', 'pipe'],
-      },
-    )
-    this.ready = new Promise<FixtureReady>((resolve, reject) => {
-      this.child.once('error', reject)
-      this.child.once('exit', (code) => {
-        reject(new Error(`Openloop fixture exited before ready (${String(code)})`))
-      })
-      createInterface({ input: this.child.stdout }).on('line', (line) => {
-        if (!line.startsWith('OPENLOOP_FIXTURE:')) return
-        const message = JSON.parse(line.slice('OPENLOOP_FIXTURE:'.length)) as
-          FixtureReady | FixtureResponse
-        if ('ready' in message) {
-          resolve(message)
-          return
-        }
-        const pending = this.#pending.get(message.id)
-        if (pending === undefined) return
-        this.#pending.delete(message.id)
-        if (message.ok) pending.resolve(message.value)
-        else pending.reject(new Error(message.error ?? 'fixture command failed'))
-      })
-    })
-  }
-
-  command(command: string, value?: unknown): Promise<unknown> {
-    const id = ++this.#sequence
-    const result = new Promise<unknown>((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject })
-    })
-    this.child.stdin.write(`${JSON.stringify({ id, command, value })}\n`)
-    return result
-  }
-
-  async close(): Promise<void> {
-    if (this.child.exitCode !== null) return
-    const exited = new Promise<void>((resolve) => {
-      this.child.once('exit', () => { resolve() })
-    })
-    this.child.kill('SIGTERM')
-    await exited
-  }
-}
 
 async function stableAria(page: Page, selector: string): Promise<string> {
   const region = page.locator(selector).first()

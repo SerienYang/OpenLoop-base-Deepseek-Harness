@@ -58,9 +58,11 @@ The native test boundary is explicit:
 Build and run:
 
 ```sh
-pnpm --dir apps/openloop-desktop tauri build --config tauri.e2e.conf.json --target aarch64-apple-darwin --features openloop-e2e
-pnpm openloop:gate-test -- wdio --config apps/openloop-desktop/wdio.conf.ts --binary apps/openloop-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Openloop.app/Contents/MacOS/openloop-desktop --file apps/openloop-desktop/tests/openloop-shell.e2e.ts
+pnpm openloop:gate-test -- wdio --config apps/openloop-desktop/wdio.conf.ts --binary ".artifacts/openloop-e2e-target/aarch64-apple-darwin/release/bundle/macos/Openloop E2E.app/Contents/MacOS/openloop-desktop" --file apps/openloop-desktop/tests/openloop-shell.e2e.ts
 ```
 
-The release build is separately checked with the default Cargo feature set and
-the production Tauri configuration.
+The gate first rebuilds all host/client libraries, the Web bundle, runtime
+sidecar, and manifests, then builds the E2E app under the ignored
+`.artifacts/openloop-e2e-target` Cargo target. The release target is never
+written. Release builds remain separately checked with the default Cargo
+feature set and production Tauri configuration.

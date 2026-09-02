@@ -259,6 +259,7 @@ describe('Openloop desktop foundation configuration', () => {
     expect(Object.keys(scripts).sort()).toEqual([
       'build',
       'dev',
+      'e2e:build',
       'frontend:build',
       'frontend:dev',
       'icon',
@@ -315,6 +316,13 @@ describe('Openloop desktop foundation configuration', () => {
       'aarch64-apple-darwin',
       '--bundle',
       'app',
+    ])
+    expect(scriptArguments(requiredValue(scripts['e2e:build'], 'e2e:build script'))).toEqual([
+      'pnpm',
+      '--dir',
+      '../..',
+      'run',
+      'e2e:build',
     ])
     expect(scriptArguments(requiredValue(scripts.icon, 'icon script'))).toEqual([
       'tauri',
@@ -639,17 +647,31 @@ describe('Openloop desktop foundation configuration', () => {
     )
     const features = record(cargo.features, 'Cargo features')
     const dependencies = record(cargo.dependencies, 'Cargo dependencies')
+    const rootScripts = stringRecord(
+      readJson('package.json').scripts,
+      'root package.json scripts',
+    )
+    const wdioConfig = readText('apps/openloop-desktop/wdio.conf.ts')
 
     expect(releaseSecurity.capabilities).toEqual(['main'])
     expect(JSON.stringify([releaseConfig, releaseCapability])).not.toContain('wdio')
     expect(releaseStyles).not.toContain('.e2e-controls')
     expect(e2eSecurity.capabilities).toEqual([inlineE2eCapability])
+    expect(e2eConfig.identifier).toBe('ai.openloop.desktop.e2e')
+    expect(e2eConfig.productName).toBe('Openloop E2E')
     expect(stringArray(e2eCapability.permissions, 'E2E permissions')).toEqual([
       'allow-build-manifest',
       'wdio:default',
       'wdio-webdriver:default',
     ])
     expect(record(e2eConfig.bundle, 'E2E bundle').active).toBe(true)
+    expect(rootScripts['e2e:build']).toBe('node scripts/openloop/build-e2e.mjs')
+    expect(rootScripts['e2e:build:web']).toBe(
+      'pnpm run build:lib && pnpm run build:web && tsc -p tsconfig.playwright.json --noEmit',
+    )
+    expect(wdioConfig).toContain('.artifacts/openloop-e2e-target')
+    expect(wdioConfig).not.toContain('src-tauri/target')
+    expect(wdioConfig).not.toContain('pgrep')
     expect(features['openloop-e2e']).toEqual([
       'dep:tauri-plugin-wdio',
       'dep:tauri-plugin-wdio-webdriver',
@@ -962,7 +984,6 @@ describe('Openloop desktop foundation configuration', () => {
       'icacls',
       'mkfifo',
       'musl-gcc',
-      'pgrep',
       'plutil',
       'python3',
       'sandbox-exec',

@@ -24,6 +24,8 @@ use crate::{
 pub const APPKIT_AUDIT_ENVIRONMENT: &str = "OPENLOOP_E2E_APPKIT_AUDIT";
 pub const AUTO_CANCEL_APPKIT_ENVIRONMENT: &str = "OPENLOOP_E2E_AUTO_CANCEL_APPKIT";
 pub const CREDENTIAL_PROBE_ENVIRONMENT: &str = "OPENLOOP_E2E_CREDENTIAL_PROBE";
+pub const RUN_ID_ENVIRONMENT: &str = "OPENLOOP_E2E_RUN_ID";
+pub const RUNTIME_AUDIT_ENVIRONMENT: &str = "OPENLOOP_E2E_RUNTIME_AUDIT";
 
 #[derive(Debug)]
 pub struct FixtureUpdate;
@@ -74,6 +76,25 @@ pub fn record_appkit_sheet(kind: &str, window_label: &str) -> std::io::Result<()
     audit.sync_data()
 }
 
+pub fn record_runtime_process(pid: u32) -> Result<(), String> {
+    let path = std::env::var_os(RUNTIME_AUDIT_ENVIRONMENT)
+        .map(PathBuf::from)
+        .ok_or_else(|| "Openloop E2E runtime audit path is required".to_owned())?;
+    let run_id = std::env::var(RUN_ID_ENVIRONMENT)
+        .map_err(|_| "Openloop E2E run ID is required".to_owned())?;
+    write_runtime_process_audit(&path, &run_id, pid)
+        .map_err(|error| format!("Openloop E2E runtime audit failed: {error}"))
+}
+
+fn write_runtime_process_audit(path: &Path, run_id: &str, pid: u32) -> std::io::Result<()> {
+    require_audit_path(path)?;
+    let payload = serde_json::json!({ "runId": run_id, "pid": pid });
+    let mut audit = OpenOptions::new().write(true).create_new(true).open(path)?;
+    serde_json::to_writer(&mut audit, &payload)?;
+    writeln!(audit)?;
+    audit.sync_all()
+}
+
 pub fn run_credential_probe(app: AppHandle) -> Result<(), String> {
     if std::env::var(CREDENTIAL_PROBE_ENVIRONMENT).as_deref() != Ok("1") {
         return Ok(());
@@ -101,4 +122,22 @@ fn require_audit_path(path: &Path) -> std::io::Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writes_one_run_scoped_runtime_process_audit() {
+        let fixture = tempfile::tempdir().expect("runtime audit fixture");
+        let audit = fixture.path().join("runtime-process.json");
+
+        write_runtime_process_audit(&audit, "run-123", 4321).expect("runtime process audit");
+
+        assert_eq!(
+            std::fs::read_to_string(audit).expect("runtime process audit bytes"),
+            "{\"pid\":4321,\"runId\":\"run-123\"}\n"
+        );
+    }
 }

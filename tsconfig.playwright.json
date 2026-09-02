@@ -1,10 +1,14 @@
 {
+  "extends": "./tsconfig.base.json",
   "compilerOptions": {
     "allowImportingTsExtensions": true,
+    "composite": false,
     "esModuleInterop": true,
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "noEmit": true,
     "resolveJsonModule": true,
+    "rewriteRelativeImportExtensions": false,
     "skipLibCheck": true,
     "target": "ES2024",
     "types": [
@@ -13,6 +17,7 @@
     ]
   },
   "include": [
-    "apps/web/tests/**/*.ts"
+    "apps/web/tests/openloop-fixture-process.ts",
+    "apps/web/tests/openloop-minimum-shell.e2e.ts"
   ]
 }

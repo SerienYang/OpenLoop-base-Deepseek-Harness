@@ -1,5 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Openloop E2E",
   "identifier": "ai.openloop.desktop.e2e",
   "build": {
     "beforeBuildCommand": "pnpm frontend:build --mode e2e"

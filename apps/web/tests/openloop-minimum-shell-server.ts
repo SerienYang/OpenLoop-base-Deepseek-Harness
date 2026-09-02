@@ -7,6 +7,10 @@ import {
   AuthenticatedUnixBridgeServer,
   type FixtureUpdateStatus,
 } from './openloop-bridge-server.ts'
+import {
+  cleanupFixtureWorld,
+  startFixtureWorld,
+} from './openloop-fixture-lifecycle.ts'
 
 const LAUNCH_ID = '8df91e3f-5a18-4ef5-b96c-59ecbde7f3f2'
 const BOOTSTRAP_TOKEN = Uint8Array.from({ length: 32 }, (_, index) => index + 17)
@@ -44,7 +48,7 @@ interface FixtureCommand {
 
 let scaffold: WebScaffold | undefined
 let bridge: AuthenticatedUnixBridgeServer | undefined
-let closing = false
+let closePromise: Promise<0 | 1> | undefined
 
 function write(value: unknown): void {
   process.stdout.write(`OPENLOOP_FIXTURE:${JSON.stringify(value)}\n`)
@@ -57,31 +61,33 @@ function updateStatus(value: unknown): FixtureUpdateStatus {
   return value as FixtureUpdateStatus
 }
 
-async function close(): Promise<void> {
-  if (closing) return
-  closing = true
-  const failures: unknown[] = []
-  await scaffold?.close().catch((error: unknown) => failures.push(error))
-  await bridge?.close().catch((error: unknown) => failures.push(error))
-  if (failures.length > 0) throw new AggregateError(failures, 'fixture cleanup failed')
+function close(): Promise<0 | 1> {
+  closePromise ??= cleanupFixtureWorld({ scaffold, bridge })
+  return closePromise
 }
 
 async function main(): Promise<void> {
-  bridge = await AuthenticatedUnixBridgeServer.start({
-    launchId: LAUNCH_ID,
-    secret: BRIDGE_SECRET,
-  })
-  bridge.setUpdateStatus({ state: 'idle' })
-  scaffold = await launchWebScaffold({
-    openloop: {
+  const world = await startFixtureWorld({
+    startBridge: async () => await AuthenticatedUnixBridgeServer.start({
       launchId: LAUNCH_ID,
-      bootstrapToken: BOOTSTRAP_TOKEN,
-      bridgeSecret: BRIDGE_SECRET,
-      socketPath: bridge.socketPath,
-      coreManifest: CORE_MANIFEST,
-      coreManifestSha256: CORE_MANIFEST_SHA256,
+      secret: BRIDGE_SECRET,
+    }),
+    launchScaffold: async (startedBridge) => {
+      startedBridge.setUpdateStatus({ state: 'idle' })
+      return await launchWebScaffold({
+        openloop: {
+          launchId: LAUNCH_ID,
+          bootstrapToken: BOOTSTRAP_TOKEN,
+          bridgeSecret: BRIDGE_SECRET,
+          socketPath: startedBridge.socketPath,
+          coreManifest: CORE_MANIFEST,
+          coreManifestSha256: CORE_MANIFEST_SHA256,
+        },
+      })
     },
   })
+  bridge = world.bridge
+  scaffold = world.scaffold
   const activeRows = [...scaffold.ctx.loader.entries()]
     .filter(entry => entry.fiber !== undefined && !entry.disabled)
     .map(entry => entry.options.id)
@@ -128,14 +134,15 @@ async function main(): Promise<void> {
   })
 }
 
-process.once('SIGTERM', () => {
-  void close().finally(() => process.exit())
-})
-process.once('SIGINT', () => {
-  void close().finally(() => process.exit())
-})
+async function exitAfterCleanup(): Promise<void> {
+  process.exit(await close())
+}
 
-main().catch((error: unknown) => {
+process.once('SIGTERM', () => { void exitAfterCleanup() })
+process.once('SIGINT', () => { void exitAfterCleanup() })
+
+main().catch(async (error: unknown) => {
   console.error(error)
-  process.exitCode = 1
+  await close()
+  process.exit(1)
 })
