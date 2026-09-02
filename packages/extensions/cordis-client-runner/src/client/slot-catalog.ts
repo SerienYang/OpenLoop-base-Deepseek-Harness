@@ -1393,7 +1393,7 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
       'client-ui-settings-models ModelsSection id \'models\'',
       'client-ui-settings-plugins PluginsSettingsSection id \'plugins\'',
       '@openloop/shell OpenloopUnavailableSettingsSection',
-      '@openloop/shell AboutUpdateSection id \'about-update\'',
+      '@openloop/shell ConnectedAboutUpdateSection id \'about-update\'',
       '@openloop/workspace-client WorkspaceSettings id \'workspace\'',
     ],
     replaceRisk: 'none',
