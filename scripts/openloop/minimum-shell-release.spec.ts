@@ -57,6 +57,33 @@ describe('minimum Openloop shell release gates', () => {
     expect(buildHost).toBeLessThan(installPlaywright)
   })
 
+  it('prepares deterministic manifests before the native release gates', () => {
+    const steps = publishSteps()
+    const webGate = steps.indexOf(namedStep(
+      steps,
+      'Verify the assembled minimum Openloop shell',
+    ))
+    const prepare = namedStep(steps, 'Prepare native test manifests')
+    const prepareIndex = steps.indexOf(prepare)
+    const firstNativeGate = steps.indexOf(namedStep(
+      steps,
+      'Verify native credential migration',
+    ))
+
+    expect(prepare['timeout-minutes']).toBe(10)
+    expect(prepare.run).toContain(
+      'pnpm --filter @openloop/desktop manifest:test',
+    )
+    expect(prepare.run).toContain(
+      'node scripts/openloop/generate-artifact-manifest.mjs',
+    )
+    expect(prepare.run).toContain(
+      '--out dist-openloop/openloop-artifacts.json',
+    )
+    expect(prepareIndex).toBeGreaterThan(webGate)
+    expect(prepareIndex).toBeLessThan(firstNativeGate)
+  })
+
   it('runs every exact minimum-shell gate in an auditable order', () => {
     const steps = publishSteps()
     const expected = [
