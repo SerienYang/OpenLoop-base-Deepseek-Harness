@@ -64,6 +64,14 @@ interface DesktopModule {
       readonly stderr: string
     }>
   }
+  readonly createVerifierBridge: (
+    options: {
+      readonly launchId: string
+      readonly bridgeSecret: Uint8Array
+      readonly socketPath: string
+    },
+    dependencies?: Record<string, unknown>,
+  ) => Promise<() => Promise<void>>
   readonly verifyDesktopBuild: (
     context: Record<string, unknown>,
     runner: Record<string, unknown>,
@@ -661,7 +669,10 @@ describe('Openloop desktop build orchestrator', () => {
       }
       return child
     }
-    const runner = createProcessRunner(spawn)
+    const runner = createProcessRunner(spawn, {
+      terminateWaitMs: 1,
+      killWaitMs: 1,
+    })
 
     await expect(runner.run({
       command: 'tool',
@@ -672,6 +683,76 @@ describe('Openloop desktop build orchestrator', () => {
     })).rejects.toThrow(/fd3.*write|write.*fd3/iu)
     expect(killed).toBe(true)
     expect(input.equals(Buffer.alloc(input.length))).toBe(true)
+  })
+
+  it('reaps a timed-out fd3 child with bounded TERM then KILL waits', async () => {
+    const { createProcessRunner } = await import(modulePath) as DesktopModule
+    const signals: NodeJS.Signals[] = []
+    let reaped = false
+    const spawn = () => {
+      const child = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter
+        stderr: EventEmitter
+        stdio: Array<null | PassThrough>
+        kill: (signal?: NodeJS.Signals) => boolean
+      }
+      child.stdout = new EventEmitter()
+      child.stderr = new EventEmitter()
+      child.stdio = [null, null, null, new PassThrough()]
+      child.kill = (signal = 'SIGTERM') => {
+        signals.push(signal)
+        if (signal === 'SIGKILL') {
+          setTimeout(() => {
+            reaped = true
+            child.emit('exit', null, 'SIGKILL')
+          }, 5)
+        }
+        return true
+      }
+      return child
+    }
+    const runner = createProcessRunner(spawn, {
+      terminateWaitMs: 5,
+      killWaitMs: 25,
+    })
+
+    await expect(runner.run({
+      command: 'tool',
+      args: ['--health-smoke'],
+      capture: true,
+      fd3Input: Buffer.from('secret'),
+      timeoutMs: 5,
+    })).rejects.toThrow(/timed out/iu)
+    expect(signals).toEqual(['SIGTERM', 'SIGKILL'])
+    expect(reaped).toBe(true)
+  })
+
+  it('closes the verifier bridge when socket chmod fails after listen', async () => {
+    const { createVerifierBridge } = await import(modulePath) as DesktopModule
+    let closed = false
+    const server = new EventEmitter() as EventEmitter & {
+      listen: (_path: string, callback: () => void) => void
+      close: (callback: (error?: Error) => void) => void
+    }
+    server.listen = (_path, callback) => {
+      callback()
+    }
+    server.close = (callback) => {
+      closed = true
+      callback()
+    }
+
+    await expect(createVerifierBridge({
+      launchId: '00000000-0000-4000-8000-000000000000',
+      bridgeSecret: new Uint8Array(32),
+      socketPath: '/tmp/openloop-verifier-test.sock',
+    }, {
+      createServer: () => server,
+      chmod: async () => {
+        throw new Error('injected chmod failure')
+      },
+    })).rejects.toThrow('injected chmod failure')
+    expect(closed).toBe(true)
   })
 
   it('verifies final hashes, embedded base identity, App binaries, signatures, and health', async () => {

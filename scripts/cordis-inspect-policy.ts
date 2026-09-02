@@ -41,6 +41,7 @@ export const CORDIS_CONTEXT_SCAN_EXEMPTIONS: Readonly<Record<string, string>> = 
   modules: 'Client module service.',
   openloopCredentialOperations:
     'Host credential-operation implementation reached only through the reviewed desktopBridge facade.',
+  openloopUpdates: 'OpenLoop Client update state service, absent from the Host catalog.',
   openloopWorkspaces: 'OpenLoop Client Workspace state service, absent from the Host catalog.',
   remote: 'Client gateway accessor.',
   sessionLogDownload: 'Client session export controller.',
@@ -405,7 +406,12 @@ export const CORDIS_INSPECT_POLICY: CordisCatalogPolicy = {
     ...RUNTIME_TYPE_EXEMPTIONS,
     ...OPENLOOP_HOST_TYPE_EXEMPTIONS,
   },
-  runtimeServiceExclusions: new Set(['cordisInspect', 'dynamicCordisRunner', 'runtimeBootstrap']),
+  runtimeServiceExclusions: new Set([
+    'cordisInspect',
+    'dynamicCordisRunner',
+    'openloopUpdates',
+    'runtimeBootstrap',
+  ]),
   runtimeServices: [{
     key: 'timer',
     type: 'TimerService',

@@ -13,6 +13,7 @@ interface WorkflowStep {
   readonly name?: string
   readonly env?: Record<string, unknown>
   readonly run?: string
+  readonly 'timeout-minutes'?: number
 }
 
 function publishSteps(): WorkflowStep[] {
@@ -92,6 +93,42 @@ describe('minimum Openloop shell release gates', () => {
     for (const step of steps.slice(0, finalGate + 1)) {
       expect(step.env ?? {}).not.toHaveProperty('TAURI_SIGNING_PRIVATE_KEY')
       expect(step.env ?? {}).not.toHaveProperty('TAURI_SIGNING_PRIVATE_KEY_PASSWORD')
+    }
+  })
+
+  it('runs fixed-version contracts before mutating the workspace version', () => {
+    const steps = publishSteps()
+    const finalGate = steps.indexOf(namedStep(
+      steps,
+      'Verify release defaults exclude WDIO',
+    ))
+    const setVersion = steps.indexOf(namedStep(
+      steps,
+      'Set the workspace-local desktop version',
+    ))
+    const signedBuild = steps.indexOf(namedStep(
+      steps,
+      'Build and verify the signed test desktop',
+    ))
+
+    expect(setVersion).toBeGreaterThan(finalGate)
+    expect(setVersion).toBeLessThan(signedBuild)
+  })
+
+  it('bounds every minimum-shell release gate', () => {
+    const steps = publishSteps()
+    const expectedTimeouts = new Map([
+      ['Install Playwright Chromium', 10],
+      ['Verify the assembled minimum Openloop shell', 15],
+      ['Verify native credential migration', 20],
+      ['Verify native Workspace authority', 20],
+      ['Verify native update rollback and cleanup', 30],
+      ['Verify the real Tauri shell', 30],
+      ['Verify release defaults exclude WDIO', 10],
+    ])
+
+    for (const [name, timeout] of expectedTimeouts) {
+      expect(namedStep(steps, name)['timeout-minutes']).toBe(timeout)
     }
   })
 

@@ -93,35 +93,38 @@ jobs:
       - name: Install immutable dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Set the workspace-local desktop version
-        run: pnpm --dir apps/openloop-desktop pkg set version="$APP_VERSION"
-
       - name: Install Playwright Chromium
+        timeout-minutes: 10
         run: pnpm exec playwright install chromium
 
       - name: Verify the assembled minimum Openloop shell
+        timeout-minutes: 15
         run: >-
           DSH_SNAPSHOT=replay pnpm openloop:gate-test -- playwright
           --file apps/web/tests/openloop-minimum-shell.e2e.ts
 
       - name: Verify native credential migration
+        timeout-minutes: 20
         run: >-
           pnpm openloop:gate-test -- cargo
           --manifest apps/openloop-desktop/src-tauri/Cargo.toml
           --test credential_migration
 
       - name: Verify native Workspace authority
+        timeout-minutes: 20
         run: >-
           pnpm openloop:gate-test -- cargo
           --manifest apps/openloop-desktop/src-tauri/Cargo.toml
           --test workspace_authority
 
       - name: Verify native update rollback and cleanup
+        timeout-minutes: 30
         run: |-
           pnpm openloop:gate-test -- cargo --manifest apps/openloop-desktop/src-tauri/Cargo.toml --test update
           pnpm openloop:gate-test -- cargo --manifest apps/openloop-desktop/src-tauri/Cargo.toml --test update_coordinator
 
       - name: Verify the real Tauri shell
+        timeout-minutes: 30
         run: >-
           pnpm openloop:gate-test -- wdio
           --config apps/openloop-desktop/wdio.conf.ts
@@ -129,10 +132,14 @@ jobs:
           --file apps/openloop-desktop/tests/openloop-shell.e2e.ts
 
       - name: Verify release defaults exclude WDIO
+        timeout-minutes: 10
         run: >-
           pnpm openloop:gate-test -- vitest --files
           apps/openloop-desktop/tests/config.spec.ts
           scripts/openloop/build-desktop.spec.ts
+
+      - name: Set the workspace-local desktop version
+        run: pnpm --dir apps/openloop-desktop pkg set version="$APP_VERSION"
 
       - name: Build and verify the signed test desktop
         env:

@@ -129,6 +129,7 @@ export class OpenloopUpdateService {
 
   constructor(private readonly remoteSource: OpenloopUpdateRemoteSource) {}
 
+  /** Refresh the browser-safe view from the native update coordinator. */
   async refresh(): Promise<void> {
     this.requireOpen()
     if (this.inFlightInstall !== undefined) {
@@ -141,6 +142,7 @@ export class OpenloopUpdateService {
     if (status?.state === 'checking') await this.checkForUpdate()
   }
 
+  /** Start or join the current update check. */
   async checkForUpdate(): Promise<void> {
     this.requireOpen()
     if (this.inFlightInstall !== undefined) {
@@ -173,6 +175,10 @@ export class OpenloopUpdateService {
     await check
   }
 
+  /**
+   * Install the current update.
+   * @returns Whether restart was accepted or the native confirmation was cancelled.
+   */
   installUpdateAndRestart(): Promise<'restarting' | 'cancelled'> {
     this.requireOpen()
     if (this.inFlightInstall !== undefined) return this.inFlightInstall
@@ -234,6 +240,7 @@ export class OpenloopUpdateService {
     }
   }
 
+  /** Dispose this service and suppress all later state publication. */
   close(): void {
     if (this.closed !== undefined) return
     this.closed = new Error('Openloop update service was disposed')

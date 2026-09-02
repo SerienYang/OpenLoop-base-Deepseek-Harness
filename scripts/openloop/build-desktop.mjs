@@ -60,6 +60,8 @@ const supportedTargets = new Set(['aarch64-apple-darwin'])
 const supportedBundles = new Set(['none', 'app', 'dmg', 'all'])
 const DESKTOP_BUILD_LOCK = 'openloop-desktop-build.lock'
 const HEALTH_SMOKE_TIMEOUT_MS = 30_000
+const PROCESS_TERMINATE_WAIT_MS = 2_000
+const PROCESS_KILL_WAIT_MS = 2_000
 const LAUNCH_SECRETS_MAGIC = Buffer.from('OLSP')
 const LAUNCH_SECRETS_PROTOCOL_VERSION = 1
 const LAUNCH_SECRETS_HEADER_BYTES = 10
@@ -266,7 +268,13 @@ function tauriBundleArguments(bundle) {
   return ['--bundles', bundle]
 }
 
-export function createProcessRunner(spawn = nodeSpawn) {
+export function createProcessRunner(
+  spawn = nodeSpawn,
+  {
+    terminateWaitMs = PROCESS_TERMINATE_WAIT_MS,
+    killWaitMs = PROCESS_KILL_WAIT_MS,
+  } = {},
+) {
   return {
     run: async ({ command, args, cwd, capture = false, env, fd3Input, timeoutMs }) => {
       if (fd3Input !== undefined
@@ -278,6 +286,32 @@ export function createProcessRunner(spawn = nodeSpawn) {
       const input = fd3Input === undefined ? undefined : Buffer.from(fd3Input)
       let child
       let timeout
+      let childSettled = false
+      let markChildSettled
+      const childSettlement = new Promise(resolvePromise => {
+        markChildSettled = resolvePromise
+      })
+      const waitForChild = async (waitMs) => {
+        if (childSettled) return true
+        let waitTimeout
+        try {
+          return await Promise.race([
+            childSettlement.then(() => true),
+            new Promise(resolvePromise => {
+              waitTimeout = setTimeout(() => resolvePromise(false), waitMs)
+            }),
+          ])
+        } finally {
+          if (waitTimeout !== undefined) clearTimeout(waitTimeout)
+        }
+      }
+      const terminateAndReap = async () => {
+        if (child === undefined || childSettled) return
+        try { child.kill('SIGTERM') } catch {}
+        if (await waitForChild(terminateWaitMs)) return
+        try { child.kill('SIGKILL') } catch {}
+        await waitForChild(killWaitMs)
+      }
       try {
         child = spawn(command, args, {
           cwd,
@@ -294,10 +328,16 @@ export function createProcessRunner(spawn = nodeSpawn) {
           child.stderr.on('data', chunk => stderr.push(Buffer.from(chunk)))
         }
         const exited = new Promise((resolvePromise, reject) => {
-          child.once('error', error => reject(new Error(
-            `build-desktop: failed to spawn ${command}: ${error.message}`,
-          )))
+          child.once('error', error => {
+            childSettled = true
+            markChildSettled()
+            reject(new Error(
+              `build-desktop: failed to spawn ${command}: ${error.message}`,
+            ))
+          })
           child.once('exit', (code, signal) => {
+            childSettled = true
+            markChildSettled()
             if (code === 0) {
               resolvePromise({
                 stdout: Buffer.concat(stdout).toString('utf8'),
@@ -339,7 +379,7 @@ export function createProcessRunner(spawn = nodeSpawn) {
           timedOut,
         ])
       } catch (error) {
-        try { child?.kill() } catch {}
+        await terminateAndReap()
         throw error
       } finally {
         if (timeout !== undefined) clearTimeout(timeout)
@@ -607,11 +647,17 @@ function encodeVerifierLaunchSecretsFrame({
   return frame
 }
 
-async function createVerifierBridge({ launchId, bridgeSecret, socketPath }) {
+export async function createVerifierBridge(
+  { launchId, bridgeSecret, socketPath },
+  {
+    createServer: createBridgeServer = createServer,
+    chmod: chmodSocket = chmod,
+  } = {},
+) {
   const secret = Uint8Array.from(bridgeSecret)
   const nonces = new NonceReplayGuard()
   const sockets = new Set()
-  const server = createServer({ allowHalfOpen: true }, async (socket) => {
+  const server = createBridgeServer({ allowHalfOpen: true }, async (socket) => {
     sockets.add(socket)
     socket.once('close', () => sockets.delete(socket))
     socket.setTimeout(HEALTH_SMOKE_TIMEOUT_MS, () => socket.destroy())
@@ -658,29 +704,42 @@ async function createVerifierBridge({ launchId, bridgeSecret, socketPath }) {
       for (const chunk of chunks) chunk.fill(0)
     }
   })
+  let listening = false
+  const closeServer = async () => {
+    for (const socket of sockets) socket.destroy()
+    if (!listening) return
+    await new Promise((resolvePromise, reject) => {
+      server.close(error => {
+        listening = false
+        if (error === undefined) resolvePromise()
+        else reject(error)
+      })
+    })
+  }
   try {
     await new Promise((resolvePromise, reject) => {
       const onError = error => reject(error)
       server.once('error', onError)
       server.listen(socketPath, () => {
+        listening = true
         server.off('error', onError)
         resolvePromise()
       })
     })
-    await chmod(socketPath, 0o600)
+    await chmodSocket(socketPath, 0o600)
   } catch (error) {
-    secret.fill(0)
+    try {
+      await closeServer()
+    } catch {
+      // Preserve the initialization error that made the bridge unusable.
+    } finally {
+      secret.fill(0)
+    }
     throw error
   }
   return async () => {
-    for (const socket of sockets) socket.destroy()
     try {
-      await new Promise((resolvePromise, reject) => {
-        server.close(error => {
-          if (error === undefined) resolvePromise()
-          else reject(error)
-        })
-      })
+      await closeServer()
     } finally {
       secret.fill(0)
     }
