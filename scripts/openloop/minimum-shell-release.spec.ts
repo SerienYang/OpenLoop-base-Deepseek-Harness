@@ -32,6 +32,31 @@ function namedStep(steps: readonly WorkflowStep[], name: string): WorkflowStep {
 }
 
 describe('minimum Openloop shell release gates', () => {
+  it('builds host workspace prerequisites before loading gate scripts', () => {
+    const steps = publishSteps()
+    const install = steps.indexOf(namedStep(
+      steps,
+      'Install immutable dependencies',
+    ))
+    const buildHost = steps.indexOf(namedStep(
+      steps,
+      'Build host workspace prerequisites',
+    ))
+    const installPlaywright = steps.indexOf(namedStep(
+      steps,
+      'Install Playwright Chromium',
+    ))
+
+    const buildHostStep = namedStep(
+      steps,
+      'Build host workspace prerequisites',
+    )
+    expect(buildHostStep.run).toBe('pnpm run build:lib:host')
+    expect(buildHostStep['timeout-minutes']).toBe(15)
+    expect(buildHost).toBeGreaterThan(install)
+    expect(buildHost).toBeLessThan(installPlaywright)
+  })
+
   it('runs every exact minimum-shell gate in an auditable order', () => {
     const steps = publishSteps()
     const expected = [

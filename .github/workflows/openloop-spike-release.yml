@@ -93,6 +93,10 @@ jobs:
       - name: Install immutable dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build host workspace prerequisites
+        timeout-minutes: 15
+        run: pnpm run build:lib:host
+
       - name: Install Playwright Chromium
         timeout-minutes: 10
         run: pnpm exec playwright install chromium
