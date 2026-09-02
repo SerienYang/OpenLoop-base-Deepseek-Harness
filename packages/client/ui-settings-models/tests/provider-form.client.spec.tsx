@@ -465,7 +465,17 @@ describe('endpoint interrogation', () => {
 
   it('adopts only the picked candidates, keeping a row the user already tuned', async () => {
     const discover = vi.fn(() => Promise.resolve(ok({
-      models: [{ id: 'kept', contextWindow: 999 }, { id: 'fresh', contextWindow: 4096, name: 'Fresh' }],
+      models: [
+        { id: 'kept', contextWindow: 999, inputModalities: ['text', 'image'] },
+        {
+          id: 'fresh',
+          contextWindow: 4096,
+          name: 'Fresh',
+          inputModalities: ['text', 'image'],
+        },
+        { id: 'text-only', inputModalities: ['text'] },
+        { id: 'unknown' },
+      ],
     })))
     const { mutate } = await mountSection({
       discover,
@@ -477,14 +487,16 @@ describe('endpoint interrogation', () => {
     await screen.findByText(en.fetchTitle)
     // The already-configured row starts unchecked; the new one starts checked.
     const boxes = [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
-    expect(boxes.map(box => box.checked)).toEqual([false, true])
+    expect(boxes.map(box => box.checked)).toEqual([false, true, true, true])
     fireEvent.click(screen.getByText(en.fetchAdopt))
 
     fireEvent.click(screen.getByText(en.apply))
     await waitFor(() => { expect(mutate).toHaveBeenCalled() })
     expect(firstMutate(mutate).ops[0]?.value).toEqual([
       { id: 'kept', contextWindow: 111 },
-      { id: 'fresh', contextWindow: 4096, name: 'Fresh' },
+      { id: 'fresh', contextWindow: 4096, name: 'Fresh', input: ['text', 'image'] },
+      { id: 'text-only', input: ['text'] },
+      { id: 'unknown' },
     ])
   })
 
