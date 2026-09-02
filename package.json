@@ -60,7 +60,7 @@
     "resolve-translation-pairing-conflicts": "tsx scripts/merge-translation-pairing.ts --resolve",
     "verify-runtime-closure": "tsx scripts/verify-runtime-closure.ts",
     "verify:openloop-runtime-manifest": "tsx scripts/openloop/build-runtime-exe.ts --check-manifest",
-    "openloop:build-desktop": "pnpm run build:lib:host && node scripts/openloop/build-desktop.mjs",
+    "openloop:build-desktop": "node scripts/openloop/build-desktop.mjs",
     "verify-vendored-links": "tsx scripts/verify-vendored-links.ts",
     "verify-cordis-config": "tsx scripts/verify-cordis-config.ts",
     "verify-client-domain-graph": "tsx scripts/verify-client-domain-graph.ts",

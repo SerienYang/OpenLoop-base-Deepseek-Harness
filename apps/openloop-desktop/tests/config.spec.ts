@@ -1055,13 +1055,13 @@ describe('Openloop desktop foundation configuration', () => {
     const desktopScripts = stringRecord(desktopPackage.scripts, 'desktop package scripts')
 
     expect(rootScripts['openloop:build-desktop']).toBe(
-      'pnpm run build:lib:host && node scripts/openloop/build-desktop.mjs',
+      'node scripts/openloop/build-desktop.mjs',
     )
     expect(desktopScripts.build).toContain('openloop:build-desktop')
     expect(desktopScripts.build).not.toContain('tauri build')
     expect(Object.values(rootScripts).filter(script =>
       script.includes('build-desktop.mjs'))).toEqual([
-      'pnpm run build:lib:host && node scripts/openloop/build-desktop.mjs',
+      'node scripts/openloop/build-desktop.mjs',
     ])
   })
 
