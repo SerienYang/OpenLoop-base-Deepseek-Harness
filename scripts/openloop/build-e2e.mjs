@@ -52,14 +52,32 @@ export class E2eBuilder {
     )
   }
 
+  async buildWeb() {
+    return await this.dependencies.withBuildLock(
+      this.dependencies.root,
+      async () => {
+        await this.buildProject()
+        await this.dependencies.runner.run({
+          command: 'pnpm',
+          args: ['exec', 'tsc', '-p', 'apps/web/tsconfig.playwright.json', '--noEmit'],
+          cwd: this.dependencies.root,
+        })
+      },
+    )
+  }
+
+  async buildProject() {
+    await this.dependencies.runner.run({
+      command: 'pnpm',
+      args: ['run', 'build'],
+      cwd: this.dependencies.root,
+    })
+  }
+
   async buildLocked() {
     const { root, runner, files, generateArtifactManifest: generate } = this.dependencies
     const paths = e2eBuildPaths(root)
-    await runner.run({
-      command: 'pnpm',
-      args: ['run', 'build'],
-      cwd: paths.root,
-    })
+    await this.buildProject()
     await runner.run({
       command: 'pnpm',
       args: ['--dir', 'apps/openloop-desktop', 'run', 'manifest:test'],
@@ -133,8 +151,17 @@ const isMain = process.argv[1] !== undefined
 
 if (isMain) {
   try {
-    const paths = await createE2eBuilder().build()
-    process.stdout.write(`build-e2e: produced ${paths.binary}\n`)
+    const args = process.argv.slice(2)
+    const builder = createE2eBuilder()
+    if (args.length === 1 && args[0] === '--web-only') {
+      await builder.buildWeb()
+      process.stdout.write('build-e2e: prepared Playwright web inputs\n')
+    } else if (args.length === 0) {
+      const paths = await builder.build()
+      process.stdout.write(`build-e2e: produced ${paths.binary}\n`)
+    } else {
+      throw new Error(`build-e2e: unsupported arguments: ${args.join(' ')}`)
+    }
   } catch (error) {
     process.stderr.write(
       `build-e2e: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`,

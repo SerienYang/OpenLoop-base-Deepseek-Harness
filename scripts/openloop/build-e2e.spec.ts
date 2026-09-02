@@ -37,6 +37,7 @@ interface E2eBuildDependencies {
 interface E2eModule {
   readonly E2eBuilder: new (dependencies: E2eBuildDependencies) => {
     build(): Promise<E2ePaths>
+    buildWeb(): Promise<void>
   }
   readonly e2eBuildPaths: (root: string) => E2ePaths
 }
@@ -185,6 +186,28 @@ describe('Openloop E2E build', () => {
       `graph:${join(root, 'apps/web/dist')}:${join(root, 'dist-openloop/openloop-web-bundle-graph.json')}`,
       `manifest:${join(root, 'dist-openloop/openloop-artifacts.json')}`,
     ])
+    expect(fixture.lockEvents).toEqual(['acquire', 'release'])
+  })
+
+  it('builds the Playwright web inputs under the shared desktop build lock', async () => {
+    const { E2eBuilder } = await loadE2eModule()
+    const fixture = dependencies()
+
+    await new E2eBuilder(fixture.value).buildWeb()
+
+    expect(fixture.calls).toEqual([
+      {
+        command: 'pnpm',
+        args: ['run', 'build'],
+        cwd: root,
+      },
+      {
+        command: 'pnpm',
+        args: ['exec', 'tsc', '-p', 'apps/web/tsconfig.playwright.json', '--noEmit'],
+        cwd: root,
+      },
+    ])
+    expect(fixture.generated).toEqual([])
     expect(fixture.lockEvents).toEqual(['acquire', 'release'])
   })
 
