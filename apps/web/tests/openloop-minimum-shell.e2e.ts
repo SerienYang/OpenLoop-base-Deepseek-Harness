@@ -120,16 +120,18 @@ test.describe.serial('assembled minimum Openloop shell', () => {
     await expect(page.getByRole('button', { name: 'Settings', exact: true })).toBeVisible()
 
     const activeRows = new Set(ready.activeRows)
+    expect(activeRows.has('ui-trajectory'), 'ui-trajectory must remain active').toBe(true)
+    expect(activeRows.has('ui-conversation'), 'the details shell owner must remain active')
+      .toBe(true)
+    expect(activeRows.has('ui-tool'), 'the tool details renderer must remain active').toBe(true)
     for (const id of [
       'approval',
       'desktop-bridge-client',
       'openloop-settings-foundation',
       'openloop-workspace-client',
       'shell',
-      'ui-conversation',
       'ui-model-selection',
       'ui-plan',
-      'ui-tool',
       'ui-user-questions',
     ]) {
       expect(activeRows.has(id), `${id} must remain active`).toBe(true)

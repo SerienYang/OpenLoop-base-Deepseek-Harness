@@ -212,8 +212,11 @@ impl SupervisedChild {
         command
             .args(args)
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdout(Stdio::piped());
+        #[cfg(feature = "openloop-e2e")]
+        command.stderr(Stdio::inherit());
+        #[cfg(not(feature = "openloop-e2e"))]
+        command.stderr(Stdio::piped());
         if let Some(dsh_home) = dsh_home {
             command.env("DSH_HOME", dsh_home);
         }

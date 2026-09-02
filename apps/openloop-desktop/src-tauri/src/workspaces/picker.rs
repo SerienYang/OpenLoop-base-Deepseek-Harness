@@ -233,6 +233,16 @@ fn begin_directory_sheet(
         drop(retained_panel.clone());
     });
     panel.beginSheetModalForWindow_completionHandler(parent, &completion);
+    #[cfg(feature = "openloop-e2e")]
+    {
+        if crate::e2e::record_appkit_sheet("workspace-picker", window.label()).is_err() {
+            cancel_directory_sheet(&session);
+            return Err(WorkspaceGrantError::PromptUnavailable);
+        }
+        if crate::e2e::auto_cancel_appkit() {
+            cancel_directory_sheet(&session);
+        }
+    }
     Ok(())
 }
 

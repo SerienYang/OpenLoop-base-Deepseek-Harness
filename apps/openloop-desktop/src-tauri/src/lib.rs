@@ -1,5 +1,3 @@
-#![cfg_attr(feature = "openloop-e2e", allow(dead_code))]
-
 #[cfg(target_os = "macos")]
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
@@ -11,7 +9,7 @@ use std::{
 };
 
 use tauri::{AppHandle, Manager, RunEvent, Url};
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(feature = "openloop-e2e")))]
 use tauri_plugin_updater::Update;
 use tauri_plugin_updater::UpdaterExt;
 
@@ -59,14 +57,19 @@ use crate::update::{
         PublicationOutcome, RecoveryTransaction,
     },
 };
+#[cfg(all(target_os = "macos", any(test, not(feature = "openloop-e2e"))))]
+use crate::update::{coordinator::CoordinatorError, state::UpdateFailure};
+#[cfg(all(target_os = "macos", not(feature = "openloop-e2e")))]
+use crate::update::{
+    coordinator::{check_update, install_checked_update_with_observer},
+    state::{AvailableUpdate, UpdateInstallObserver, UpdateInstallResult},
+};
 #[cfg(target_os = "macos")]
 use crate::update::{
-    coordinator::{check_update, install_checked_update_with_observer, CoordinatorError},
     schedule::{ScheduledUpdateWorker, UpdateCheckSchedule, UpdateCheckTimestampStore},
     state::{
-        install_update_bridge_handlers, AppKitUpdateInstallConfirmation, AvailableUpdate,
-        UpdateChecker, UpdateFailure, UpdateInstallObserver, UpdateInstallResult, UpdateInstaller,
-        UpdateRestartRequester, UpdateState,
+        install_update_bridge_handlers, AppKitUpdateInstallConfirmation, UpdateChecker,
+        UpdateInstaller, UpdateRestartRequester, UpdateState,
     },
 };
 #[cfg(target_os = "macos")]
@@ -82,6 +85,8 @@ pub mod bridge;
 pub mod browser;
 #[cfg(target_os = "macos")]
 pub mod credentials;
+#[cfg(all(target_os = "macos", feature = "openloop-e2e"))]
+mod e2e;
 #[cfg(target_os = "macos")]
 pub mod files;
 pub mod launcher;
@@ -217,35 +222,6 @@ fn build_manifest() -> Result<OpenloopBuildManifest, String> {
     embedded_build_manifest()
 }
 
-#[cfg(feature = "openloop-e2e")]
-#[tauri::command]
-fn openloop_e2e_action(
-    window: tauri::WebviewWindow,
-    action: String,
-) -> Result<serde_json::Value, String> {
-    let window_label = window.label();
-    match action.as_str() {
-        "check-update" => Ok(serde_json::json!({
-            "state": "available",
-            "version": "0.2.0",
-        })),
-        "install-update" => Ok(serde_json::json!({
-            "state": "cancelled",
-            "windowLabel": window_label,
-        })),
-        "replace-credential" => Ok(serde_json::json!({
-            "state": "presented",
-            "windowLabel": window_label,
-        })),
-        "add-workspace" => Ok(serde_json::json!({
-            "state": "ready",
-            "name": "Fixture Workspace",
-            "windowLabel": window_label,
-        })),
-        _ => Err("unsupported Openloop E2E action".to_owned()),
-    }
-}
-
 fn embedded_build_manifest() -> Result<OpenloopBuildManifest, String> {
     serde_json::from_slice(EMBEDDED_BUILD_MANIFEST)
         .map_err(|error| format!("embedded build manifest is invalid: {error}"))
@@ -262,7 +238,7 @@ struct RuntimeProcessState {
     child: Mutex<SupervisedChild>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(feature = "openloop-e2e")))]
 struct TauriUpdateChecker {
     app: AppHandle,
     current_version: String,
@@ -284,7 +260,7 @@ fn build_channel_updater(
         .build()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(feature = "openloop-e2e")))]
 impl UpdateChecker<Update> for TauriUpdateChecker {
     fn check(&self) -> Result<Option<AvailableUpdate<Update>>, UpdateFailure> {
         let checked_at = update_time();
@@ -309,7 +285,7 @@ impl UpdateChecker<Update> for TauriUpdateChecker {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(feature = "openloop-e2e")))]
 struct TauriUpdateInstaller {
     installed_app: PathBuf,
     channel_root: PathBuf,
@@ -318,7 +294,7 @@ struct TauriUpdateInstaller {
     policy: DownloadUrlPolicy,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(feature = "openloop-e2e")))]
 impl UpdateInstaller<Update> for TauriUpdateInstaller {
     fn install(
         &self,
@@ -362,7 +338,7 @@ impl UpdateRestartRequester for TauriUpdateRestart {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", any(test, not(feature = "openloop-e2e"))))]
 fn update_failure(error: &CoordinatorError) -> UpdateFailure {
     match error {
         CoordinatorError::Check(_) => UpdateFailure::Check,
@@ -693,6 +669,7 @@ fn start_runtime(
         let update_schedule = Arc::new(Mutex::new(UpdateCheckSchedule::new(
             update_timestamp_store.load(),
         )));
+        #[cfg(not(feature = "openloop-e2e"))]
         let update_checker: Arc<dyn UpdateChecker<Update>> = Arc::new(TauriUpdateChecker {
             app: app.clone(),
             current_version: manifest.app_version.clone(),
@@ -701,7 +678,12 @@ fn start_runtime(
             schedule: update_schedule.clone(),
             timestamp_store: update_timestamp_store,
         });
+        #[cfg(feature = "openloop-e2e")]
+        let update_checker: Arc<dyn UpdateChecker<e2e::FixtureUpdate>> =
+            Arc::new(e2e::FixtureUpdateChecker);
+        #[cfg(not(feature = "openloop-e2e"))]
         let installed_app = current_app_bundle()?;
+        #[cfg(not(feature = "openloop-e2e"))]
         let update_installer: Arc<dyn UpdateInstaller<Update>> = Arc::new(TauriUpdateInstaller {
             installed_app,
             channel_root: channel_root.to_owned(),
@@ -709,6 +691,9 @@ fn start_runtime(
             dsh_home: dsh_home.clone(),
             policy: DownloadUrlPolicy::production(updater_config.channel()),
         });
+        #[cfg(feature = "openloop-e2e")]
+        let update_installer: Arc<dyn UpdateInstaller<e2e::FixtureUpdate>> =
+            Arc::new(e2e::FixtureUpdateInstaller);
         install_update_bridge_handlers(
             &mut tables,
             update_state.clone(),
@@ -739,6 +724,8 @@ fn start_runtime(
             .map_err(|error| format!("credential health bridge setup failed: {error}"))?;
         let health_state = health.clone();
         let completed_migration_status = migration_status.clone();
+        #[cfg(feature = "openloop-e2e")]
+        let credential_probe_app = app.clone();
         let mut expectation = MainWebviewHealthExpectation::new(
             secrets.launch_id,
             CORE_MANIFEST_SHA256,
@@ -758,6 +745,9 @@ fn start_runtime(
                 .lock()
                 .map_err(|_| BridgeHandlerError::credential_failure())?;
             health.acknowledge(&completed_migration_status)?;
+            #[cfg(feature = "openloop-e2e")]
+            e2e::run_credential_probe(credential_probe_app.clone())
+                .map_err(|_| BridgeHandlerError::credential_failure())?;
             Ok(serde_json::Value::Null)
         });
         tables
@@ -847,6 +837,10 @@ fn channel_dsh_home(
     app: &AppHandle,
     updater_config: &update::channel::UpdateChannelConfig,
 ) -> Result<PathBuf, String> {
+    #[cfg(feature = "openloop-e2e")]
+    if let Some(path) = e2e::configured_dsh_home(updater_config.data_root_name())? {
+        return Ok(path);
+    }
     let app_data = app
         .path()
         .app_data_dir()
@@ -1222,17 +1216,12 @@ pub fn run() -> i32 {
         .build();
     let builder = tauri::Builder::default()
         .plugin(updater_plugin)
-        .manage(updater_config);
+        .manage(updater_config)
+        .invoke_handler(tauri::generate_handler![build_manifest]);
     #[cfg(feature = "openloop-e2e")]
     let builder = builder
         .plugin(tauri_plugin_wdio::init())
-        .plugin(tauri_plugin_wdio_webdriver::init())
-        .invoke_handler(tauri::generate_handler![
-            build_manifest,
-            openloop_e2e_action
-        ]);
-    #[cfg(not(feature = "openloop-e2e"))]
-    let builder = builder.invoke_handler(tauri::generate_handler![build_manifest]);
+        .plugin(tauri_plugin_wdio_webdriver::init());
     let runtime_manifest = manifest.clone();
     let app = builder
         .setup(move |app| {
@@ -1244,20 +1233,10 @@ pub fn run() -> i32 {
             if action != HostAction::Normal {
                 return Ok(());
             }
-            #[cfg(feature = "openloop-e2e")]
-            {
-                let _ = (&updater_config, &runtime_manifest);
-                Ok(())
+            if let Some(state) = start_runtime(app.handle(), &updater_config, &runtime_manifest)? {
+                app.manage(state);
             }
-            #[cfg(not(feature = "openloop-e2e"))]
-            {
-                if let Some(state) =
-                    start_runtime(app.handle(), &updater_config, &runtime_manifest)?
-                {
-                    app.manage(state);
-                }
-                Ok(())
-            }
+            Ok(())
         })
         .build(tauri::generate_context!())
         .expect("failed to build Openloop desktop application");

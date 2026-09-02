@@ -291,7 +291,6 @@ describe('Openloop desktop foundation configuration', () => {
       '@wdio/local-runner': '9.29.1',
       '@wdio/mocha-framework': '9.29.1',
       '@wdio/spec-reporter': '9.29.1',
-      '@wdio/tauri-plugin': '1.3.0',
       '@wdio/tauri-service': '1.3.0',
       '@wdio/types': '9.29.1',
       typescript: '6.0.3',
@@ -582,25 +581,21 @@ describe('Openloop desktop foundation configuration', () => {
 
     const buildScript = readText('apps/openloop-desktop/src-tauri/build.rs')
     expect(buildScript).toContain('&["build_manifest"]')
-    expect(buildScript).toContain('&["build_manifest", "openloop_e2e_action"]')
+    expect(buildScript).not.toContain('openloop_e2e_action')
     expect([...buildScript.matchAll(/\.commands\s*\(/gu)]).toHaveLength(1)
 
     const library = readText('apps/openloop-desktop/src-tauri/src/lib.rs')
-    expect(tauriCommandNames(library)).toEqual([
-      'build_manifest',
-      'openloop_e2e_action',
-    ])
-    expect([...invokeHandlerCommands(library)].sort()).toEqual([
-      'build_manifest',
-      'openloop_e2e_action',
-    ])
-    expect([...library.matchAll(/tauri::generate_handler!\s*\[/gu)]).toHaveLength(2)
+    expect(tauriCommandNames(library)).toEqual(['build_manifest'])
+    expect([...invokeHandlerCommands(library)]).toEqual(['build_manifest'])
+    expect([...library.matchAll(/tauri::generate_handler!\s*\[/gu)]).toHaveLength(1)
     expect(library).toContain(
       '.invoke_handler(tauri::generate_handler![build_manifest])',
     )
-    expect(library).toMatch(
-      /#\[cfg\(feature = "openloop-e2e"\)\][\s\S]+fn openloop_e2e_action/u,
+    expect(library).not.toContain('openloop_e2e_action')
+    expect(library).not.toMatch(
+      /#\[cfg\(feature = "openloop-e2e"\)\]\s*\{\s*let _ = \(&updater_config, &runtime_manifest\);\s*Ok\(\(\)\)\s*\}/u,
     )
+    expect([...library.matchAll(/start_runtime\s*\(\s*app\.handle\(\)/gu)]).toHaveLength(1)
     expect(library).not.toMatch(/SecurePromptState|credentials_(?:set|unset|status)/u)
     expect(serialized).not.toMatch(/resolve|spike|open_secure_prompt/u)
     expect(invokeHandlerCommands(library)).not.toContain('resolve')
@@ -651,10 +646,10 @@ describe('Openloop desktop foundation configuration', () => {
     expect(e2eSecurity.capabilities).toEqual([inlineE2eCapability])
     expect(stringArray(e2eCapability.permissions, 'E2E permissions')).toEqual([
       'allow-build-manifest',
-      'allow-openloop-e2e-action',
       'wdio:default',
       'wdio-webdriver:default',
     ])
+    expect(record(e2eConfig.bundle, 'E2E bundle').active).toBe(true)
     expect(features['openloop-e2e']).toEqual([
       'dep:tauri-plugin-wdio',
       'dep:tauri-plugin-wdio-webdriver',
@@ -665,6 +660,15 @@ describe('Openloop desktop foundation configuration', () => {
         optional: true,
       })
     }
+
+    const mainSource = readText('apps/openloop-desktop/src/main.ts')
+    expect(mainSource).not.toContain('openloop_e2e_action')
+    expect(mainSource).not.toContain('data-e2e')
+    expect(mainSource).not.toContain("import('./e2e.css')")
+    expect(fs.existsSync(path.join(
+      repositoryRoot,
+      'apps/openloop-desktop/src/e2e.css',
+    ))).toBe(false)
   })
 
   test('keeps the Rust and TypeScript build-manifest contracts identical', () => {
@@ -958,6 +962,7 @@ describe('Openloop desktop foundation configuration', () => {
       'icacls',
       'mkfifo',
       'musl-gcc',
+      'pgrep',
       'plutil',
       'python3',
       'sandbox-exec',

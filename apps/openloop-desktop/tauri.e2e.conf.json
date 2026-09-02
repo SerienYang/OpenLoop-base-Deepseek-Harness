@@ -20,7 +20,6 @@
           ],
           "permissions": [
             "allow-build-manifest",
-            "allow-openloop-e2e-action",
             "wdio:default",
             "wdio-webdriver:default"
           ]
@@ -29,6 +28,6 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true
   }
 }

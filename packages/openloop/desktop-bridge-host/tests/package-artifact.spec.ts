@@ -18,6 +18,18 @@ function isIncludedInPackage(target: string): boolean {
 }
 
 describe('desktop bridge Host package artifact', () => {
+  it('ships every relative JavaScript chunk imported by its runtime entries', () => {
+    for (const entry of ['lib/index.js', 'lib/typert.host.js', 'lib/typert.remote-client.js']) {
+      const source = readFileSync(new URL(`../${entry}`, import.meta.url), 'utf8')
+      const imports = [...source.matchAll(/from\s+["'](\.\/[^"']+\.js)["']/gu)]
+        .map(match => `lib/${match[1]?.slice(2)}`)
+      for (const imported of imports) {
+        expect(isIncludedInPackage(imported), `${entry} imports omitted package file ${imported}`)
+          .toBe(true)
+      }
+    }
+  })
+
   it('publishes the types-only subpath without advertising a runtime module', () => {
     const typesExport = manifest.exports['./types']
     const appInfo = {

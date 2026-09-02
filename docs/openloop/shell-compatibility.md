@@ -15,8 +15,8 @@ protocol over a Unix socket.
 The fixture is deterministic and keyless. It proves:
 
 - Openloop document title, sidebar, hero, Settings, and About identity.
-- Required DSH conversation, tool, approval, question, Plan, model selection,
-  and details contributors remain active.
+- Required DSH conversation, tool/details, trajectory, approval, question,
+  Plan, and model-selection contributors remain active.
 - The shell refreshes update state on mount, performs a manual check, displays
   an available version, renders release notes as text, restores availability
   after a cancelled install, and presents bridge failures.
@@ -31,11 +31,14 @@ DSH_SNAPSHOT=replay pnpm openloop:gate-test -- playwright --file apps/web/tests/
 ## Native desktop
 
 `apps/openloop-desktop/tests/openloop-shell.e2e.ts` drives the compiled macOS
-binary through the embedded WDIO WebDriver. It checks the embedded version,
-manual update availability, cancelled install, a credential sheet attached to
-the main window, Workspace entry, resize, and maximize.
+app through the embedded WDIO WebDriver. The E2E app uses the production
+`start_runtime` path, bundled `openloop-runtime`, one-time bootstrap exchange,
+authenticated Unix Desktop Bridge, Openloop Client plugins, and update and
+Workspace stores. It checks manual update availability, cancelled install,
+credential and Workspace AppKit sheets attached to the main window, and
+resize/maximize behavior.
 
-The test-only boundary is explicit:
+The native test boundary is explicit:
 
 - Cargo dependencies `tauri-plugin-wdio` and
   `tauri-plugin-wdio-webdriver` are optional.
@@ -43,14 +46,20 @@ The test-only boundary is explicit:
 - `tauri.e2e.conf.json` selects only capability `e2e`.
 - Release `tauri.conf.json` selects only capability `main`.
 - Release capability `main.json` contains no WDIO permission.
-- The E2E feature does not start the production sidecar or contact an updater
-  endpoint; its native action command returns fixed fixture outcomes.
+- `DSH_HOME` is a fresh private temporary directory for every run.
+- A feature-gated native `UpdateChecker` returns version `0.2.0`, so the real
+  bridge and update state are deterministic without contacting an updater.
+- Feature-and-environment-gated AppKit automation records only after the real
+  `beginSheet`/`beginSheetModalForWindow` call, then cancels the sheet. The
+  test requires exactly the credential, update-install, and Workspace audit
+  records, all attached to window `main`.
+- No E2E-only DOM, CSS, or Tauri action command is present.
 
 Build and run:
 
 ```sh
-pnpm --dir apps/openloop-desktop tauri build --config tauri.e2e.conf.json --target aarch64-apple-darwin --no-bundle --features openloop-e2e
-pnpm openloop:gate-test -- wdio --config apps/openloop-desktop/wdio.conf.ts --binary apps/openloop-desktop/src-tauri/target/aarch64-apple-darwin/release/openloop-desktop --file apps/openloop-desktop/tests/openloop-shell.e2e.ts
+pnpm --dir apps/openloop-desktop tauri build --config tauri.e2e.conf.json --target aarch64-apple-darwin --features openloop-e2e
+pnpm openloop:gate-test -- wdio --config apps/openloop-desktop/wdio.conf.ts --binary apps/openloop-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Openloop.app/Contents/MacOS/openloop-desktop --file apps/openloop-desktop/tests/openloop-shell.e2e.ts
 ```
 
 The release build is separately checked with the default Cargo feature set and

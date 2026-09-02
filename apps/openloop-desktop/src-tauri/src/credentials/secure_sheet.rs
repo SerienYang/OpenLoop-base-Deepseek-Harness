@@ -553,6 +553,16 @@ fn begin_replacement_sheet(
     });
 
     parent.beginSheet_completionHandler(&sheet, Some(&completion));
+    #[cfg(feature = "openloop-e2e")]
+    {
+        if crate::e2e::record_appkit_sheet("credential-replacement", window.label()).is_err() {
+            cancel_replacement_sheet(window, &session);
+            return Err(CredentialError::prompt_unavailable());
+        }
+        if crate::e2e::auto_cancel_appkit() {
+            cancel_replacement_sheet(window, &session);
+        }
+    }
     Ok(())
 }
 

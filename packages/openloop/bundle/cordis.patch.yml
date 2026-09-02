@@ -57,6 +57,8 @@
   disabled: true
 - id: ui-agent-preset
   disabled: true
+- id: permission
+  disabled: true
 - id: fs-sandbox
   disabled: true
 - id: tool-fs-search
@@ -149,4 +151,3 @@
 - insert:
     - id: shell
       name: '@openloop/shell'
-      inject: [locale, remote, remote.openloopDesktop, openloopUpdates]

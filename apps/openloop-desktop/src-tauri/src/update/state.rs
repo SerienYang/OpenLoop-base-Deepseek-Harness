@@ -1109,6 +1109,16 @@ mod appkit {
             drop(retained_alert.clone());
         });
         parent.beginSheet_completionHandler(&sheet, Some(&completion));
+        #[cfg(feature = "openloop-e2e")]
+        {
+            if crate::e2e::record_appkit_sheet("update-install", window.label()).is_err() {
+                cancel_update_sheet(window, &session);
+                return Err(UpdateStateError::PromptUnavailable);
+            }
+            if crate::e2e::auto_cancel_appkit() {
+                cancel_update_sheet(window, &session);
+            }
+        }
         Ok(())
     }
 

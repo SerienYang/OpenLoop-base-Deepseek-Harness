@@ -355,10 +355,11 @@ describe('OpenLoop profile', () => {
     expect(entries.find(entry => entry.id === 'ui-settings-models')?.inject).toBeUndefined()
     expect(entries.find(entry => entry.id === 'ui-settings-plugins')?.inject).toBeUndefined()
     expect(entries.find(entry => entry.id === 'ui-settings')?.disabled).toBe(true)
+    expect(entries.find(entry => entry.id === 'permission')?.disabled).toBe(true)
     expect(entries.find(entry => entry.id === 'openloop-workspace-client')?.inject)
       .toBeUndefined()
     expect(entries.find(entry => entry.id === 'shell')?.inject)
-      .toEqual(['locale', 'remote', 'remote.openloopDesktop'])
+      .toBeUndefined()
   })
 
   it('uses Shell placeholders plus the Host Workspace contributor for the five-section IA', () => {
@@ -400,7 +401,6 @@ describe('OpenLoop profile', () => {
     expect(entries.filter(entry => entry.name === '@openloop/shell')).toEqual([{
       id: 'shell',
       name: '@openloop/shell',
-      inject: ['locale', 'remote', 'remote.openloopDesktop'],
     }])
     const require = createRequire(import.meta.url)
     const shellManifest = JSON.parse(readFileSync(

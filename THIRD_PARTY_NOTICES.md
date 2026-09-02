@@ -145,7 +145,6 @@ External packages **directly declared** only by repository tooling, test infrast
 | [`@wdio/local-runner`](https://github.com/webdriverio/webdriverio) | MIT |
 | [`@wdio/mocha-framework`](https://github.com/webdriverio/webdriverio) | MIT |
 | [`@wdio/spec-reporter`](https://github.com/webdriverio/webdriverio) | MIT |
-| [`@wdio/tauri-plugin`](https://github.com/webdriverio/desktop-mobile) | MIT |
 | [`@wdio/tauri-service`](https://github.com/webdriverio/desktop-mobile) | MIT |
 | [`@wdio/types`](https://github.com/webdriverio/webdriverio) | MIT |
 | [`@yao-pkg/pkg`](https://github.com/yao-pkg/pkg) | MIT |
