@@ -20,7 +20,7 @@
   - Add optional input modalities to `LlmDiscoveredModel`.
 - Modify `packages/llm/llm/src/index.ts`
   - Validate and detach discovered modality arrays.
-- Modify `packages/llm/llm/tests/service.spec.ts`
+- Modify `packages/llm/llm/tests/topology.spec.ts`
   - Pin valid and invalid discovery metadata.
 - Modify (generated): `packages/extensions/tool-cordis/src/api-catalog.ts`
   - Refresh the public Cordis catalog after the LLM type changes.
@@ -69,7 +69,7 @@
 **Files:**
 - Modify: `packages/llm/llm/src/types.ts`
 - Modify: `packages/llm/llm/src/index.ts`
-- Modify: `packages/llm/llm/tests/service.spec.ts`
+- Modify: `packages/llm/llm/tests/topology.spec.ts`
 - Modify: `packages/host/apiproxy/src/api/llm.ts`
 - Modify: `packages/host/apiproxy/src/api/llm.schema.ts`
 - Modify: `packages/host/apiproxy/tests/api-proxy-config.spec.ts`
@@ -78,7 +78,7 @@
 
 - [ ] **Step 1: Write the failing core discovery test**
 
-Add a `packages/llm/llm/tests/service.spec.ts` case whose registered discovery returns:
+Add a `packages/llm/llm/tests/topology.spec.ts` case whose registered discovery returns:
 
 ```ts
 {
@@ -108,7 +108,7 @@ letting them reach the RPC schema.
 Run:
 
 ```bash
-pnpm vitest run packages/llm/llm/tests/service.spec.ts
+pnpm vitest run packages/llm/llm/tests/topology.spec.ts
 ```
 
 Expected: the valid case loses `inputModalities`, and invalid modality values
@@ -139,7 +139,7 @@ Do not infer modalities when the field is absent.
 Run:
 
 ```bash
-pnpm vitest run packages/llm/llm/tests/service.spec.ts
+pnpm vitest run packages/llm/llm/tests/topology.spec.ts
 ```
 
 Expected: all tests pass.
@@ -211,7 +211,7 @@ pnpm run verify-cordis-inspect-catalog
 git add \
   packages/llm/llm/src/types.ts \
   packages/llm/llm/src/index.ts \
-  packages/llm/llm/tests/service.spec.ts \
+  packages/llm/llm/tests/topology.spec.ts \
   packages/extensions/tool-cordis/src/api-catalog.ts \
   packages/host/apiproxy/src/api/llm.ts \
   packages/host/apiproxy/src/api/llm.schema.ts \
@@ -651,7 +651,7 @@ git commit -m "feat(openloop): add Agent Plan model catalog"
 
 ```bash
 pnpm vitest run \
-  packages/llm/llm/tests/service.spec.ts \
+  packages/llm/llm/tests/topology.spec.ts \
   packages/llm/llm-pi-ai/tests/discovery.spec.ts \
   packages/llm/llm-pi-ai/tests/adapter.spec.ts \
   packages/host/apiproxy/tests/api-proxy-config.spec.ts \
