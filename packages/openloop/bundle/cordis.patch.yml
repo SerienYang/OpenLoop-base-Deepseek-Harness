@@ -207,6 +207,9 @@
     - id: openloop-bootstrap
       name: '@openloop/bundle/bootstrap-host'
       inject: [credentials, desktopBridge, webServer, runtimeBootstrap]
+    - id: openloop-settings-host
+      name: '@openloop/bundle/settings-host'
+      inject: [webServer, runtimeBootstrap, settings, llm]
 - insert:
     - id: workspace-authority
       name: '@openloop/workspace-authority'

@@ -203,6 +203,17 @@ describe('OpenLoop profile', () => {
     })
   })
 
+  it('mounts the authenticated Openloop settings Host after bootstrap', () => {
+    const entries = openloopEntries()
+    expect(entries.find(entry => entry.id === 'openloop-settings-host')).toEqual({
+      id: 'openloop-settings-host',
+      name: '@openloop/bundle/settings-host',
+      inject: ['webServer', 'runtimeBootstrap', 'settings', 'llm'],
+    })
+    expect(entries.findIndex(entry => entry.id === 'openloop-settings-host'))
+      .toBeGreaterThan(entries.findIndex(entry => entry.id === 'openloop-bootstrap'))
+  })
+
   it('mounts one policy owner and makes both browser API dispatchers require it', () => {
     const entries = openloopEntries()
     expect(entries.find(entry => entry.id === 'desktop-bridge-host')).toEqual({
@@ -763,6 +774,10 @@ describe('OpenLoop profile', () => {
           types: './lib/types/bootstrap-host.d.ts',
           default: './lib/bootstrap-host.js',
         },
+        './settings-host': {
+          types: './lib/types/settings-host.d.ts',
+          default: './lib/settings-host.js',
+        },
         './cordis.patch.yml': './cordis.patch.yml',
         './package.json': './package.json',
       },
@@ -771,6 +786,7 @@ describe('OpenLoop profile', () => {
       'lib/index.js',
       'lib/invariant.js',
       'lib/bootstrap-host.js',
+      'lib/settings-host.js',
       'cordis.patch.yml',
       'lib/types/**/*.d.ts',
     ])
