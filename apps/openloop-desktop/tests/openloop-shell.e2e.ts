@@ -80,6 +80,10 @@ describe('Openloop desktop shell', () => {
     await (await element('[aria-haspopup="dialog"]')).click()
     await expectAppKitEvent('credential-replacement:main')
     await (await element('#openloop-settings-tab-about-update')).click()
+    await expectText(
+      '//*[@role="tabpanel"]//*[normalize-space()="0.1.0"]',
+      '0.1.0',
+    )
     await (await element(
       '//*[@role="tabpanel"]//button[contains(., "Check for updates") or contains(., "检查更新")]',
     )).click()
@@ -91,6 +95,10 @@ describe('Openloop desktop shell', () => {
       '//*[@role="tabpanel"]//button[contains(., "Install and restart") or contains(., "安装并重启")]',
     )).click()
     await expectAppKitEvent('update-install:main')
+    await desktop.waitUntil(async () => {
+      const status = await (await element('//*[@role="tabpanel"]//*[@role="status"]')).getText()
+      return status === 'Update available' || status === '有可用更新'
+    }, { timeout: 15_000 })
 
     await (await element('#openloop-settings-tab-workspace')).click()
     await (await element(
