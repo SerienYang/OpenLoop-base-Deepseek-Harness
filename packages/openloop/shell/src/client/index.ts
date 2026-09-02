@@ -7,7 +7,10 @@ import type { ILayout } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { ThemeSnapshot } from '@deepseek-ai/dsh-client-ui-theme/client'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-import type { SettingsShellOwner } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type {
+  ProductSettingsApi,
+  SettingsShellOwner,
+} from '@deepseek-ai/dsh-client-ui-settings/client'
 import {
   parseBootstrapAppView,
 } from './AboutUpdateSection.tsx'
@@ -149,6 +152,12 @@ export const inject = [
 /** Dictionary namespace owned by the Openloop shell. */
 const NS = 'openloop.shell'
 
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    openloopSettingsApi: ProductSettingsApi
+  }
+}
+
 interface OpenloopBootstrapGlobal {
   readonly __OPENLOOP_BOOTSTRAP__?: unknown
 }
@@ -160,9 +169,11 @@ export function apply(ctx: ClientContext): void {
   const desktop = (
     ctx.remote as unknown as { openloopDesktop: OpenloopCredentialRemote }
   ).openloopDesktop
+  const settingsApi = ctx.get('openloopSettingsApi') as ProductSettingsApi | undefined
   const settingsShellOwner: SettingsShellOwner = Object.freeze({
     id: '@openloop/shell',
     credentialControl: createOpenloopCredentialControlAdapter(desktop, t),
+    ...settingsApi === undefined ? {} : { settingsApi },
   })
   ctx.effect(
     () => ctx.reflect.provide('settingsShellOwner', settingsShellOwner),

@@ -1,43 +1,27 @@
-/** Openloop-only settings scope that never crosses the browser/Host boundary. */
+/** Authenticated Settings foundation for the Openloop main WebView. */
 
-import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
-import type {
-  SettingsScope,
-  SettingsScopeSnapshot,
-  SettingsScopeSpec,
-} from '@deepseek-ai/dsh-client-runtime/client'
+import {
+  SettingsScopeBinder,
+  type ProductSettingsApi,
+} from '@deepseek-ai/dsh-client-ui-settings/client'
+import { OpenloopSettingsApi } from './settings-api.ts'
 
-export const inject: string[] = []
+export { OpenloopSettingsApi } from './settings-api.ts'
 
-/**
- * Supplies the settingsScope contract required by shared DSH clients while
- * Openloop keeps the legacy Host settings API outside its browser policy.
- */
-export class OpenloopSettingsScopeBinder extends Service {
-  constructor(ctx: Context) {
-    super(ctx, 'settingsScope')
-  }
-
-  bind<T>(_spec: SettingsScopeSpec<T>): SettingsScope<T> {
-    const snapshot: SettingsScopeSnapshot<T> = {
-      status: 'unavailable',
-      value: undefined,
-      base: undefined,
-      user: undefined,
-      revision: undefined,
-      writable: false,
-      mode: 'memory',
-    }
-    return {
-      getSnapshot: () => snapshot,
-      subscribe: () => () => {},
-      set: () => Promise.resolve(),
-      unset: () => Promise.resolve(),
-    }
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    openloopSettingsApi: ProductSettingsApi
   }
 }
 
-export function apply(ctx: Context): void {
-  new OpenloopSettingsScopeBinder(ctx)
+export const inject = ['connection', 'remote']
+
+export function apply(
+  ctx: Context,
+  api: ProductSettingsApi = new OpenloopSettingsApi(),
+): () => void {
+  new SettingsScopeBinder(ctx, api)
+  const removeApi = ctx.reflect.provide('openloopSettingsApi', api)
+  return () => { void removeApi() }
 }

@@ -81,7 +81,10 @@ describes, replaces, and removes credentials through the macOS Keychain bridge.
 The facade contract is:
 
 - `describeSettings({ namespaces })` requires a non-empty deduplicated list
-  drawn from the matrix and returns only those filtered descriptors.
+  drawn from the matrix and returns only those filtered descriptors. The shared
+  Settings scope adapter requests the complete reviewed list because the legacy
+  `settings.describe({})` call carries no namespace argument; no namespace
+  outside that list crosses the route.
 - `mutateSettings({ namespace, ops, expectedRevision })` requires a current
   revision, rejects empty paths, validates every path and value against the
   matrix, delegates schema validation to the owning settings registration, and

@@ -610,6 +610,11 @@ describe('Openloop Settings slot owner', () => {
     }
     ctx.provide('remote', { openloopDesktop } as never)
     ctx.provide('remote.openloopDesktop', openloopDesktop)
+    const settingsApi = {
+      settings: { describe: vi.fn(), mutate: vi.fn() },
+      llm: { providers: vi.fn(), discoverModels: vi.fn() },
+    }
+    ctx.provide('openloopSettingsApi', settingsApi as never)
     provideUpdates(ctx)
 
     const fiber = ctx.plugin({ inject: [...inject], apply })
@@ -626,6 +631,7 @@ describe('Openloop Settings slot owner', () => {
     const owner = ctx.get('settingsShellOwner') as SettingsShellOwner
     expect(owner.id).toBe('@openloop/shell')
     expect(owner.credentialControl).toBeDefined()
+    expect(owner.settingsApi).toBe(settingsApi)
     expect(slots.entries('sidebar.settings')[0]?.component).toBe(OpenloopSettings)
     expect(slots.spec('settings.action')).toEqual({ kind: 'list', scope: 'root' })
     expect(slots.spec('settings.section')).toEqual({ kind: 'list', scope: 'root' })
