@@ -3,10 +3,9 @@ import { Context } from '@deepseek-ai/cordis'
 import { createSnapshotStore, SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
 import type { SessionId, SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
-import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
 import type { WorkspaceGrantView } from '@openloop/desktop-bridge-host/types'
 import { describe, expect, it, vi } from 'vitest'
-import { WorkspaceHero, WorkspaceSettings, WorkspaceSidebar } from '../src/client/index.ts'
+import { WorkspaceHero, WorkspaceSidebar } from '../src/client/index.ts'
 import { apply, inject, WORKSPACE_BLOCK_OWNER } from '../src/client/index.ts'
 
 const sid = (value: string): SessionId => value as SessionId
@@ -94,12 +93,7 @@ describe('Openloop Workspace client plugin', () => {
 
     expect(b.slots.entries('sidebar.workspaces')[0]?.component).toBe(WorkspaceSidebar)
     expect(b.slots.entries('sidebar.settings')).toHaveLength(0)
-    const settings = b.slots.entries('settings.section')[0]
-    expect(settings?.component).toBe(WorkspaceSettings)
-    expect(settings?.options).toMatchObject({ id: 'workspace', order: 20 })
-    expect(resolveSlotLabel(settings?.options.label)).toBe('Workspace')
-    ;(b.ctx.get('locale') as LocaleRuntime).setLocale('zh')
-    expect(resolveSlotLabel(settings?.options.label)).toBe('工作区')
+    expect(b.slots.entries('settings.section')).toHaveLength(0)
     expect(b.slots.entries('conversation.hero.workspace')[0]?.component).toBe(WorkspaceHero)
 
     await fiber.dispose()

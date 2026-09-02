@@ -394,7 +394,7 @@ describe('OpenLoop profile', () => {
     }
   })
 
-  it('keeps unsafe legacy settings contributors disabled until a reviewed facade exists', () => {
+  it('enables reviewed settings contributors behind the filtered facade', () => {
     const entries = openloopEntries()
     for (const id of [
       'ui-settings-general',
@@ -402,7 +402,7 @@ describe('OpenLoop profile', () => {
       'ui-settings-plugins',
     ]) {
       expect(entries.find(entry => entry.id === id)).toMatchObject({
-        disabled: true,
+        disabled: false,
       })
     }
     expect(entries.find(entry => entry.id === 'ui-settings-general')?.inject).toBeUndefined()
@@ -416,7 +416,7 @@ describe('OpenLoop profile', () => {
       .toBeUndefined()
   })
 
-  it('uses Shell placeholders plus the Host Workspace contributor for the five-section IA', () => {
+  it('uses the filtered foundation with four settings contributors and no Workbench package', () => {
     const entries = openloopEntries()
 
     expect(entries.find(entry => entry.id === 'openloop-settings-scope')).toBeUndefined()
@@ -434,15 +434,23 @@ describe('OpenLoop profile', () => {
     for (const id of [
       'ui-workspace',
       'ui-settings',
-      'ui-settings-general',
-      'ui-settings-models',
       'ui-settings-plugin-inventory',
-      'ui-settings-plugins',
       'ui-permission',
       'ui-agent-preset',
     ]) {
       expect(entries.find(entry => entry.id === id)?.disabled).toBe(true)
     }
+    for (const id of [
+      'ui-settings-general',
+      'ui-settings-models',
+      'ui-settings-plugins',
+    ]) {
+      expect(entries.find(entry => entry.id === id)?.disabled).toBe(false)
+    }
+    expect(entries.some(entry =>
+      entry.id.includes('workbench')
+      || (typeof entry.name === 'string' && entry.name.includes('workbench')),
+    )).toBe(false)
   })
 
   it('replaces the DSH root owner with exactly one Openloop shell in this profile', () => {

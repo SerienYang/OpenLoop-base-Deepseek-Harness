@@ -19,7 +19,6 @@ import css from './OpenloopSettings.module.css'
 export const OPENLOOP_SETTINGS_SECTION_IDS = [
   'general',
   'models',
-  'workspace',
   'plugins',
   'about-update',
 ] as const
@@ -37,11 +36,6 @@ export interface OpenloopSettingsOnboardingStep {
   readonly order: number
 }
 
-export interface OpenloopUnavailableSettingsSectionProps {
-  readonly title: string
-  readonly message: string
-}
-
 export interface OpenloopSettingsInjected {
   readonly hooks: {
     readonly sections: HostObservable<readonly OpenloopSettingsSection[]>
@@ -54,19 +48,6 @@ export type OpenloopSettingsProps =
   & PropsRenderSlots<'settings.action' | 'settings.section' | 'settings.onboarding'>
   & InjectFace<OpenloopSettingsInjected>
   & PropsLocale<'openloop.shell'>
-
-/** Honest placeholder used until a reviewed Host settings facade replaces it. */
-export function OpenloopUnavailableSettingsSection({
-  title,
-  message,
-}: OpenloopUnavailableSettingsSectionProps) {
-  return (
-    <section className={css.unavailableSection}>
-      <h2>{title}</h2>
-      <p role="status">{message}</p>
-    </section>
-  )
-}
 
 function fixedSections(
   rows: readonly OpenloopSettingsSection[],

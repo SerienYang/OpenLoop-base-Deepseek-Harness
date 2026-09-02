@@ -120,13 +120,13 @@
 - id: ui-settings
   disabled: true
 - id: ui-settings-general
-  disabled: true
+  disabled: false
 - id: ui-settings-models
-  disabled: true
+  disabled: false
 - id: ui-settings-plugin-inventory
   disabled: true
 - id: ui-settings-plugins
-  disabled: true
+  disabled: false
 - id: ui-permission
   disabled: true
 - id: ui-agent-preset
