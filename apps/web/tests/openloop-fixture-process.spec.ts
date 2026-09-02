@@ -1,10 +1,14 @@
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   FixtureProcess,
   type FixtureChild,
 } from './openloop-fixture-process.ts'
+
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 class FakeChild extends EventEmitter implements FixtureChild {
   readonly stdin = new PassThrough()
@@ -66,6 +70,7 @@ describe('Openloop Web fixture process', () => {
   })
 
   it('fails explicitly and force-terminates when close times out', async () => {
+    vi.useFakeTimers()
     const child = new FakeChild()
     const fixture = new FixtureProcess({
       spawnFixture: () => child,
@@ -73,10 +78,18 @@ describe('Openloop Web fixture process', () => {
     })
     child.stdout.write('OPENLOOP_FIXTURE:{"ready":true,"url":"http://fixture","workspaceCwd":"/tmp/work","activeRows":[]}\n')
     await fixture.ready
-
-    await expect(fixture.close()).rejects.toThrow(
-      'Openloop fixture did not exit within 5ms',
+    const closing = fixture.close()
+    let settled = false
+    void closing.then(
+      () => { settled = true },
+      () => { settled = true },
     )
+
+    await vi.advanceTimersByTimeAsync(5)
     expect(child.signals).toEqual(['SIGTERM', 'SIGKILL'])
+    expect(settled).toBe(false)
+
+    child.exit(null, 'SIGKILL')
+    await expect(closing).rejects.toThrow('Openloop fixture did not exit within 5ms')
   })
 })

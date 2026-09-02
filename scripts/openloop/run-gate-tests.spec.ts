@@ -978,6 +978,36 @@ describe('OpenLoop focused test gate', () => {
     })).rejects.toThrow('WDIO all discovered tests were skipped')
   })
 
+  it('rejects dynamically skipped WDIO tests recorded by the result audit', async () => {
+    const { runGateTests } = await loadGateModule()
+    const root = fixtureRoot()
+    write(root, 'wdio.conf.ts', 'export const config = {}\n')
+    write(root, 'target/openloop', 'binary')
+    write(root, 'tests/window.e2e.ts', "describe('window', () => {})\n")
+
+    await expect(runGateTests([
+      'wdio',
+      '--config', 'wdio.conf.ts',
+      '--binary', 'target/openloop',
+      '--file', 'tests/window.e2e.ts',
+    ], {
+      root,
+      runCommand: (_command, args, options) => {
+        if (args.join(' ') === 'run e2e:build') {
+          return { status: 0, stdout: '', stderr: '' }
+        }
+        const resultAudit = options?.env?.OPENLOOP_WDIO_RESULT_AUDIT
+        if (resultAudit === undefined) throw new Error('missing WDIO result audit')
+        appendFileSync(resultAudit, '{"state":"skipped","title":"window"}\n')
+        return {
+          status: 0,
+          stdout: 'Spec Files: 1 passed, 1 total\n',
+          stderr: '',
+        }
+      },
+    })).rejects.toThrow('WDIO all discovered tests were skipped')
+  })
+
   it('accepts a structured WDIO test audit', async () => {
     const { runGateTests } = await loadGateModule()
     const root = fixtureRoot()

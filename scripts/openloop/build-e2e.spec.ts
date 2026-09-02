@@ -20,6 +20,10 @@ interface BuildCommand {
 
 interface E2eBuildDependencies {
   readonly root: string
+  readonly withBuildLock: (
+    root: string,
+    operation: () => Promise<E2ePaths>,
+  ) => Promise<E2ePaths>
   readonly runner: {
     run(command: BuildCommand): Promise<void>
   }
@@ -50,6 +54,7 @@ function dependencies(binaryExists = true): {
     readonly env?: NodeJS.ProcessEnv
   }>
   readonly generated: string[]
+  readonly lockEvents: string[]
 } {
   const calls: Array<{
     command: string
@@ -58,21 +63,37 @@ function dependencies(binaryExists = true): {
     env?: NodeJS.ProcessEnv
   }> = []
   const generated: string[] = []
+  const lockEvents: string[] = []
+  let lockHeld = false
   return {
     calls,
     generated,
+    lockEvents,
     value: {
       root,
+      async withBuildLock(_root, operation) {
+        lockEvents.push('acquire')
+        lockHeld = true
+        try {
+          return await operation()
+        } finally {
+          lockHeld = false
+          lockEvents.push('release')
+        }
+      },
       runner: {
         async run(command) {
+          expect(lockHeld).toBe(true)
           calls.push(command)
         },
       },
       files: {
         async generateBundleGraph(_root, web, graph) {
+          expect(lockHeld).toBe(true)
           generated.push(`graph:${web}:${graph}`)
         },
         exists(path) {
+          expect(lockHeld).toBe(true)
           return binaryExists && path === join(
             root,
             '.artifacts/openloop-e2e-target/aarch64-apple-darwin/release/bundle/macos/Openloop E2E.app/Contents/MacOS/openloop-desktop',
@@ -80,6 +101,7 @@ function dependencies(binaryExists = true): {
         },
       },
       generateArtifactManifest(options) {
+        expect(lockHeld).toBe(true)
         generated.push(`manifest:${options.out}`)
       },
     },
@@ -163,6 +185,7 @@ describe('Openloop E2E build', () => {
       `graph:${join(root, 'apps/web/dist')}:${join(root, 'dist-openloop/openloop-web-bundle-graph.json')}`,
       `manifest:${join(root, 'dist-openloop/openloop-artifacts.json')}`,
     ])
+    expect(fixture.lockEvents).toEqual(['acquire', 'release'])
   })
 
   it('fails when Tauri does not produce the isolated binary', async () => {
@@ -172,5 +195,6 @@ describe('Openloop E2E build', () => {
     await expect(new E2eBuilder(fixture.value).build()).rejects.toThrow(
       'isolated E2E binary is missing',
     )
+    expect(fixture.lockEvents).toEqual(['acquire', 'release'])
   })
 })

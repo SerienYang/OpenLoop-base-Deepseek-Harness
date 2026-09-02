@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import {
   createProcessRunner,
   nodeFileSystem,
+  withDesktopBuildLock,
 } from './build-desktop.mjs'
 import { generateArtifactManifest } from './generate-artifact-manifest.mjs'
 
@@ -38,10 +39,20 @@ export function e2eBuildPaths(root) {
 
 export class E2eBuilder {
   constructor(dependencies) {
-    this.dependencies = dependencies
+    this.dependencies = {
+      withBuildLock: withDesktopBuildLock,
+      ...dependencies,
+    }
   }
 
   async build() {
+    return await this.dependencies.withBuildLock(
+      this.dependencies.root,
+      async () => await this.buildLocked(),
+    )
+  }
+
+  async buildLocked() {
     const { root, runner, files, generateArtifactManifest: generate } = this.dependencies
     const paths = e2eBuildPaths(root)
     await runner.run({

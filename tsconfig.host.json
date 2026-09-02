@@ -94,6 +94,7 @@
     "apps/cli/tests/**/*.ts",
     "apps/openloop-desktop/src/credentials.ts",
     "apps/openloop-desktop/src/style-modules.d.ts",
+    "apps/openloop-desktop/wdio-result-audit.ts",
     "apps/openloop-desktop/tests/config.spec.ts",
     "apps/openloop-desktop/tests/credentials.spec.ts",
     "apps/openloop-desktop/tests/openloop-shell.e2e.ts",

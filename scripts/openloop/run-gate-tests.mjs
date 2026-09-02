@@ -483,6 +483,8 @@ function assertWdioResult(result, auditPath) {
   const executed = records.filter(record =>
     record?.state === 'passed' || record?.state === 'failed').length
   if (executed > 0) return
+  const auditedSkipped = records.filter(record => record?.state === 'skipped').length
+  if (auditedSkipped > 0) throw new Error('WDIO all discovered tests were skipped')
   const output = `${result.stdout}\n${result.stderr}`
   const summaries = [...output.matchAll(
     /^(?:Spec Files:\s+)?0\s+passed,\s+0\s+failed,\s+(\d+)\s+skipped\s*$/gmu,

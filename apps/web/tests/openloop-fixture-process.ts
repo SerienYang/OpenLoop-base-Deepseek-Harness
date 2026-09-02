@@ -135,20 +135,21 @@ export class FixtureProcess {
       this.child.once('exit', (code, signal) => { resolve([code, signal]) })
     })
     this.child.kill('SIGTERM')
-    let timer: NodeJS.Timeout | undefined
-    const timeout = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => {
-        this.child.kill('SIGKILL')
-        reject(new Error(
-          `Openloop fixture did not exit within ${String(this.#closeTimeoutMs)}ms`,
-        ))
-      }, this.#closeTimeoutMs)
-    })
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      this.child.kill('SIGKILL')
+    }, this.#closeTimeoutMs)
     try {
-      const [code, signal] = await Promise.race([exited, timeout])
+      const [code, signal] = await exited
+      if (timedOut) {
+        throw new Error(
+          `Openloop fixture did not exit within ${String(this.#closeTimeoutMs)}ms`,
+        )
+      }
       this.#assertCleanExit(code, signal)
     } finally {
-      if (timer !== undefined) clearTimeout(timer)
+      clearTimeout(timer)
     }
   }
 

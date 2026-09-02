@@ -1,8 +1,9 @@
 import type { Options } from '@wdio/types'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, mkdirSync, mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { writeWdioResultAudit } from './wdio-result-audit.ts'
 
 const binary = process.env.OPENLOOP_WDIO_BINARY
   ?? resolve(
@@ -54,9 +55,6 @@ export const config: Options.Testrunner = {
   afterTest: (test, _context, result) => {
     const audit = process.env.OPENLOOP_WDIO_RESULT_AUDIT
     if (audit === undefined) throw new Error('OPENLOOP_WDIO_RESULT_AUDIT is required')
-    appendFileSync(audit, `${JSON.stringify({
-      state: result.error === undefined ? 'passed' : 'failed',
-      title: test.title,
-    })}\n`)
+    writeWdioResultAudit(audit, test.title, result)
   },
 }

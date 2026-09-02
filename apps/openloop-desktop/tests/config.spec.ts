@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
+import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 import ts from 'typescript'
 import { parse as parseToml } from 'smol-toml'
@@ -691,6 +692,38 @@ describe('Openloop desktop foundation configuration', () => {
       repositoryRoot,
       'apps/openloop-desktop/src/e2e.css',
     ))).toBe(false)
+  })
+
+  test('audits passed, failed, and dynamically skipped WDIO results distinctly', async () => {
+    const root = fs.mkdtempSync(path.join(tmpdir(), 'openloop-wdio-audit-'))
+    const audit = path.join(root, 'results.jsonl')
+    try {
+      const { writeWdioResultAudit } = await import('../wdio-result-audit.ts')
+
+      writeWdioResultAudit(audit, 'passes', {
+        passed: true,
+        skipped: false,
+      })
+      writeWdioResultAudit(audit, 'fails', {
+        error: new Error('failed'),
+        passed: false,
+        skipped: false,
+      })
+      writeWdioResultAudit(audit, 'skips at runtime', {
+        passed: false,
+        skipped: true,
+      })
+
+      expect(fs.readFileSync(audit, 'utf8').trim().split('\n').map(line =>
+        JSON.parse(line) as unknown,
+      )).toEqual([
+        { state: 'passed', title: 'passes' },
+        { state: 'failed', title: 'fails' },
+        { state: 'skipped', title: 'skips at runtime' },
+      ])
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
   })
 
   test('keeps the Rust and TypeScript build-manifest contracts identical', () => {

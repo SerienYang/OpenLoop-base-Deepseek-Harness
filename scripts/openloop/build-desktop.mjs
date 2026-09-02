@@ -2,7 +2,19 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { spawn as nodeSpawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import {
   lstat,
   mkdir,
@@ -33,11 +45,151 @@ import {
 const supportedChannels = new Set(['test', 'stable'])
 const supportedTargets = new Set(['aarch64-apple-darwin'])
 const supportedBundles = new Set(['none', 'app', 'dmg', 'all'])
+const DESKTOP_BUILD_LOCK = 'openloop-desktop-build.lock'
 const optionFields = new Map([
   ['--channel', 'channel'],
   ['--target', 'target'],
   ['--bundle', 'bundle'],
 ])
+
+function errorCode(error) {
+  return typeof error === 'object' && error !== null && 'code' in error
+    ? error.code
+    : undefined
+}
+
+function buildLockOwnershipChangedError(lockPath) {
+  return new Error(
+    `build-desktop: desktop build lock ownership changed at ${lockPath}; refusing to remove it`,
+  )
+}
+
+function lockOwnerIsAlive(owner) {
+  try {
+    process.kill(owner, 0)
+    return true
+  } catch (error) {
+    if (errorCode(error) === 'ESRCH') return false
+    if (errorCode(error) === 'EPERM') return true
+    throw error
+  }
+}
+
+function releaseDesktopBuildLock(lockPath, ownedRecord, ownedStat) {
+  let current
+  try {
+    current = lstatSync(lockPath)
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') throw buildLockOwnershipChangedError(lockPath)
+    throw error
+  }
+  if (
+    !current.isFile()
+    || current.isSymbolicLink()
+    || current.nlink !== 1
+    || current.dev !== ownedStat.dev
+    || current.ino !== ownedStat.ino
+    || readFileSync(lockPath, 'utf8') !== ownedRecord
+  ) {
+    throw buildLockOwnershipChangedError(lockPath)
+  }
+  try {
+    unlinkSync(lockPath)
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') throw buildLockOwnershipChangedError(lockPath)
+    throw error
+  }
+}
+
+export function acquireDesktopBuildLock(root) {
+  const repositoryRoot = resolve(root)
+  const rootMetadata = lstatSync(repositoryRoot)
+  if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) {
+    throw new Error(
+      `build-desktop: repository root must be a real directory: ${repositoryRoot}`,
+    )
+  }
+  const artifacts = join(repositoryRoot, '.artifacts')
+  mkdirSync(artifacts, { recursive: true, mode: 0o700 })
+  const artifactsMetadata = lstatSync(artifacts)
+  if (artifactsMetadata.isSymbolicLink()
+    || !artifactsMetadata.isDirectory()
+    || realpathSync(artifacts) !== join(realpathSync(repositoryRoot), '.artifacts')) {
+    throw new Error(
+      `build-desktop: build lock directory must be a real repository directory: ${artifacts}`,
+    )
+  }
+
+  const lockPath = join(artifacts, DESKTOP_BUILD_LOCK)
+  const ownedRecord = `${String(process.pid)} ${randomUUID()}\n`
+  let handle
+  let ownedStat
+  try {
+    handle = openSync(lockPath, 'wx', 0o600)
+    ownedStat = fstatSync(handle)
+    writeFileSync(handle, ownedRecord)
+    fsyncSync(handle)
+  } catch (error) {
+    if (handle !== undefined) {
+      closeSync(handle)
+      handle = undefined
+      if (ownedStat !== undefined) {
+        const current = lstatSync(lockPath)
+        if (current.dev === ownedStat.dev && current.ino === ownedStat.ino) {
+          unlinkSync(lockPath)
+        }
+      }
+    }
+    if (errorCode(error) !== 'EEXIST') throw error
+    const metadata = lstatSync(lockPath)
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) {
+      throw new Error(
+        `build-desktop: invalid desktop build lock at ${lockPath}; remove it manually`,
+      )
+    }
+    const record = readFileSync(lockPath, 'utf8')
+    const match = /^([1-9]\d*) ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\n$/iu
+      .exec(record)
+    if (match?.[1] === undefined) {
+      throw new Error(
+        `build-desktop: invalid or initializing desktop build lock at ${lockPath}; retry only after confirming no build is running`,
+      )
+    }
+    const owner = Number(match[1])
+    if (!Number.isSafeInteger(owner) || !lockOwnerIsAlive(owner)) {
+      throw new Error(
+        `build-desktop: stale desktop build lock at ${lockPath}; confirm no build is running, remove it manually, and retry`,
+      )
+    }
+    throw new Error(
+      `build-desktop: desktop build lock is held by process ${String(owner)} at ${lockPath}`,
+    )
+  } finally {
+    if (handle !== undefined) closeSync(handle)
+  }
+
+  const published = lstatSync(lockPath)
+  if (
+    ownedStat === undefined
+    || !published.isFile()
+    || published.isSymbolicLink()
+    || published.nlink !== 1
+    || published.dev !== ownedStat.dev
+    || published.ino !== ownedStat.ino
+  ) {
+    throw buildLockOwnershipChangedError(lockPath)
+  }
+  return () => releaseDesktopBuildLock(lockPath, ownedRecord, ownedStat)
+}
+
+export async function withDesktopBuildLock(root, operation) {
+  const release = acquireDesktopBuildLock(root)
+  try {
+    return await operation()
+  } finally {
+    release()
+  }
+}
 
 function optionValue(args, index, option) {
   const value = args[index + 1]
@@ -548,11 +700,21 @@ export const nodeFileSystem = {
 /** Testable eight-stage desktop build pipeline. */
 export class DesktopBuilder {
   constructor(dependencies) {
-    this.dependencies = dependencies
+    this.dependencies = {
+      withBuildLock: withDesktopBuildLock,
+      ...dependencies,
+    }
     this.root = resolve(dependencies.root)
   }
 
   async build() {
+    return await this.dependencies.withBuildLock(
+      this.root,
+      async () => await this.buildLocked(),
+    )
+  }
+
+  async buildLocked() {
     const {
       options,
       runner,

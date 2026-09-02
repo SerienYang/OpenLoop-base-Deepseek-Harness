@@ -8,7 +8,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
@@ -44,6 +44,7 @@ interface ArtifactGeneratorModule {
 }
 
 interface DesktopModule {
+  readonly acquireDesktopBuildLock: (root: string) => () => void
   readonly parseDesktopBuildArguments: (args: string[]) => Record<string, string>
   readonly DesktopBuilder: new (dependencies: Record<string, unknown>) => {
     readonly build: () => Promise<void>
@@ -81,6 +82,82 @@ afterEach(() => {
 })
 
 describe('Openloop desktop build orchestrator', () => {
+  it('excludes a concurrent process and releases the shared build lock', async () => {
+    const { acquireDesktopBuildLock } = await import(modulePath) as DesktopModule
+    const root = temporaryRoot()
+    const moduleUrl = new URL(modulePath, import.meta.url).href
+    const contender = `
+      import { acquireDesktopBuildLock } from ${JSON.stringify(moduleUrl)}
+      try {
+        const release = acquireDesktopBuildLock(${JSON.stringify(root)})
+        release()
+      } catch (error) {
+        process.stderr.write(error instanceof Error ? error.message : String(error))
+        process.exitCode = 1
+      }
+    `
+    const release = acquireDesktopBuildLock(root)
+
+    const blocked = spawnSync(
+      process.execPath,
+      ['--input-type=module', '--eval', contender],
+      { encoding: 'utf8' },
+    )
+    expect(blocked.status).toBe(1)
+    expect(blocked.stderr).toContain('desktop build lock is held')
+
+    release()
+    const acquired = spawnSync(
+      process.execPath,
+      ['--input-type=module', '--eval', contender],
+      { encoding: 'utf8' },
+    )
+    expect(acquired.status, acquired.stderr).toBe(0)
+    expect(existsSync(join(root, '.artifacts/openloop-desktop-build.lock'))).toBe(false)
+  })
+
+  it('fails closed without deleting a stale shared build lock', async () => {
+    const { acquireDesktopBuildLock } = await import(modulePath) as DesktopModule
+    const root = temporaryRoot()
+    const lock = join(root, '.artifacts/openloop-desktop-build.lock')
+    mkdirSync(join(root, '.artifacts'))
+    const completed = spawnSync(process.execPath, ['--eval', ''])
+    expect(completed.status).toBe(0)
+    const record = `${String(completed.pid)} 00000000-0000-4000-8000-000000000000\n`
+    writeFileSync(lock, record)
+
+    expect(() => acquireDesktopBuildLock(root)).toThrow(/stale desktop build lock/iu)
+    expect(readFileSync(lock, 'utf8')).toBe(record)
+  })
+
+  it('releases the shared build lock when a build stage fails', async () => {
+    const { DesktopBuilder } = await import(modulePath) as DesktopModule
+    const root = temporaryRoot()
+    const lock = join(root, '.artifacts/openloop-desktop-build.lock')
+    const builder = new DesktopBuilder({
+      root,
+      updaterPublicKey,
+      options: {
+        channel: 'test',
+        target: 'aarch64-apple-darwin',
+        bundle: 'app',
+      },
+      runner: { run: async () => ({ stdout: '', stderr: '' }) },
+      files: {
+        cleanDist: async () => {
+          expect(existsSync(lock)).toBe(true)
+          throw new Error('stage failed')
+        },
+      },
+      createRuntimeBuilder: () => ({ build: async () => undefined }),
+      generateBuildManifest: () => undefined,
+      generateArtifactManifest: () => undefined,
+    })
+
+    await expect(builder.build()).rejects.toThrow('stage failed')
+    expect(existsSync(lock)).toBe(false)
+  })
+
   it.each(['none', 'app', 'dmg', 'all'] as const)(
     'parses the single supported target with %s bundles',
     async (bundle) => {
@@ -152,6 +229,14 @@ describe('Openloop desktop build orchestrator', () => {
     }
     const builder = new DesktopBuilder({
       root: '/repo',
+      withBuildLock: async (_root: string, operation: () => Promise<void>) => {
+        events.push('lock:acquire')
+        try {
+          await operation()
+        } finally {
+          events.push('lock:release')
+        }
+      },
       updaterPublicKey,
       options: {
         channel: 'test',
@@ -175,6 +260,7 @@ describe('Openloop desktop build orchestrator', () => {
     })
     expect(verifyContext).toMatchObject({ root: '/repo' })
     expect(events).toEqual([
+      'lock:acquire',
       '1:clean',
       '2:core',
       'run:pnpm run build',
@@ -183,6 +269,7 @@ describe('Openloop desktop build orchestrator', () => {
       `run:pnpm exec tauri build --target aarch64-apple-darwin --bundles app --config {"identifier":"ai.openloop.desktop.test","version":"1.2.3","bundle":{"createUpdaterArtifacts":false},"plugins":{"updater":{"pubkey":"${updaterPublicKey}","endpoints":["https://github.com/SerienYang/OpenLoop-base-Deepseek-Harness/releases/download/openloop-test-rolling/latest-test-k1.json"]}}} --ci`,
       '7:final',
       '8:verify',
+      'lock:release',
     ])
   })
 
@@ -207,6 +294,9 @@ describe('Openloop desktop build orchestrator', () => {
     }
     const builder = new DesktopBuilder({
       root: '/repo',
+      withBuildLock: async (_root: string, operation: () => Promise<void>) => {
+        await operation()
+      },
       updaterPublicKey,
       options: {
         channel: 'stable',
@@ -282,6 +372,9 @@ describe('Openloop desktop build orchestrator', () => {
       const events: string[] = []
       const builder = new DesktopBuilder({
         root: '/repo',
+        withBuildLock: async (_root: string, operation: () => Promise<void>) => {
+          await operation()
+        },
         updaterPublicKey: ' \n',
         options: {
           channel: 'test',
