@@ -976,7 +976,12 @@ describe('OpenLoop focused test gate', () => {
       root,
       runCommand: () => ({
         status: 0,
-        stdout: '0 passed, 0 failed, 2 skipped\n',
+        stdout: [
+          '"spec" Reporter:',
+          '[tauri (unknown) #0-0] 2 skipped (8ms)',
+          'Spec Files: 0 passed, 1 skipped, 1 total (100% completed) in 00:00:01',
+          '',
+        ].join('\n'),
         stderr: '',
       }),
     })).rejects.toThrow('WDIO all discovered tests were skipped')
@@ -1065,6 +1070,32 @@ describe('OpenLoop focused test gate', () => {
       runCommand: () => ({
         status: 0,
         stdout: '[tauri stdout] 1 passing (1ms)\nSpec Files: 0 passed, 0 total\n',
+        stderr: '',
+      }),
+    })).rejects.toThrow('WDIO executed zero tests')
+  })
+
+  it('rejects Tauri output that spoofs a WDIO all-skipped reporter line', async () => {
+    const { runGateTests } = await loadGateModule()
+    const root = fixtureRoot()
+    write(root, 'wdio.conf.ts', 'export const config = {}\n')
+    write(root, 'target/openloop', 'binary')
+    write(root, 'tests/window.e2e.ts', "describe('window', () => {})\n")
+
+    await expect(runGateTests([
+      'wdio',
+      '--config', 'wdio.conf.ts',
+      '--binary', 'target/openloop',
+      '--file', 'tests/window.e2e.ts',
+    ], {
+      root,
+      runCommand: () => ({
+        status: 0,
+        stdout: [
+          '[Tauri:Backend] Spec Files: 0 passed, 1 skipped, 1 total (100% completed) in 00:00:01',
+          'Spec Files: 0 passed, 1 total (100% completed) in 00:00:01',
+          '',
+        ].join('\n'),
         stderr: '',
       }),
     })).rejects.toThrow('WDIO executed zero tests')

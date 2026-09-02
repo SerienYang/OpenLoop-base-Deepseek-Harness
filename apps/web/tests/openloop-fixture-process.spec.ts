@@ -23,6 +23,10 @@ class FakeChild extends EventEmitter implements FixtureChild {
     return true
   }
 
+  fail(error: Error): void {
+    this.emit('error', error)
+  }
+
   exit(code: number | null, signal: NodeJS.Signals | null = null): void {
     this.exitCode = code
     this.signalCode = signal
@@ -69,7 +73,30 @@ describe('Openloop Web fixture process', () => {
     expect(child.signals).toEqual(['SIGTERM'])
   })
 
-  it('fails explicitly and force-terminates when close times out', async () => {
+  it('bounds cleanup and rejects pending commands after error without exit', async () => {
+    vi.useFakeTimers()
+    const child = new FakeChild()
+    const fixture = new FixtureProcess({
+      spawnFixture: () => child,
+      closeTimeoutMs: 5,
+    })
+    child.stdout.write('OPENLOOP_FIXTURE:{"ready":true,"url":"http://fixture","workspaceCwd":"/tmp/work","activeRows":[]}\n')
+    await fixture.ready
+    const command = fixture.command('calls')
+    const commandResult = command.catch((error: unknown) => error)
+    const closingResult = fixture.close().catch((error: unknown) => error)
+    child.fail(new Error('process handle failed'))
+
+    await vi.advanceTimersByTimeAsync(10)
+    expect(child.signals).toEqual(['SIGTERM', 'SIGKILL'])
+    await expect(commandResult).resolves.toEqual(new Error('process handle failed'))
+    await expect(closingResult).resolves.toEqual(
+      new Error('Openloop fixture did not exit within 10ms after SIGTERM and SIGKILL'),
+    )
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('reaps an exit during the bounded SIGKILL grace period', async () => {
     vi.useFakeTimers()
     const child = new FakeChild()
     const fixture = new FixtureProcess({
@@ -79,17 +106,15 @@ describe('Openloop Web fixture process', () => {
     child.stdout.write('OPENLOOP_FIXTURE:{"ready":true,"url":"http://fixture","workspaceCwd":"/tmp/work","activeRows":[]}\n')
     await fixture.ready
     const closing = fixture.close()
-    let settled = false
-    void closing.then(
-      () => { settled = true },
-      () => { settled = true },
-    )
+    const closingResult = closing.catch((error: unknown) => error)
 
     await vi.advanceTimersByTimeAsync(5)
     expect(child.signals).toEqual(['SIGTERM', 'SIGKILL'])
-    expect(settled).toBe(false)
-
+    await vi.advanceTimersByTimeAsync(4)
     child.exit(null, 'SIGKILL')
-    await expect(closing).rejects.toThrow('Openloop fixture did not exit within 5ms')
+    await expect(closingResult).resolves.toEqual(
+      new Error('Openloop fixture did not exit within 5ms'),
+    )
+    expect(vi.getTimerCount()).toBe(0)
   })
 })

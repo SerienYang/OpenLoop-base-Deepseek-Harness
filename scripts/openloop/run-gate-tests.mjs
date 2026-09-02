@@ -487,10 +487,16 @@ function assertWdioResult(result, auditPath) {
   if (auditedSkipped > 0) throw new Error('WDIO all discovered tests were skipped')
   const output = `${result.stdout}\n${result.stderr}`
   const summaries = [...output.matchAll(
-    /^(?:Spec Files:\s+)?0\s+passed,\s+0\s+failed,\s+(\d+)\s+skipped\s*$/gmu,
+    /^Spec Files:\s+(\d+)\s+passed,\s+(?:(\d+)\s+retries,\s+)?(?:(\d+)\s+failed,\s+)?(?:(\d+)\s+skipped,\s+)?(\d+)\s+total\s+\(\d+%\s+completed\)\s+in\s+\d{2}:\d{2}:\d{2}\s*$/gmu,
   )]
-  const skipped = summaries.reduce((total, match) => total + Number(match[1]), 0)
-  if (executed === 0 && skipped > 0) throw new Error('WDIO all discovered tests were skipped')
+  const allSkipped = summaries.some(match => {
+    const passed = Number(match[1])
+    const failed = Number(match[3] ?? 0)
+    const skipped = Number(match[4] ?? 0)
+    const total = Number(match[5])
+    return passed === 0 && failed === 0 && skipped > 0 && skipped === total
+  })
+  if (allSkipped) throw new Error('WDIO all discovered tests were skipped')
   throw new Error('WDIO executed zero tests')
 }
 
