@@ -239,6 +239,38 @@ describe('draft-provider model discovery', () => {
     })])
   })
 
+  it.each([
+    ['base URL', 'base-url'],
+    ['protocol', 'protocol'],
+    ['API key', 'api-key'],
+  ] as const)('probes an edited built-in route when its %s changes', async (_label, changed) => {
+    const server = await listingServer({ body: JSON.stringify({ data: [{ id: `from-${changed}` }] }) })
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    process.env['EDITED_BUILTIN_KEY'] = 'stored-key'
+    touchedEnv.push('EDITED_BUILTIN_KEY')
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        deepseek: {
+          apiKeyEnv: 'EDITED_BUILTIN_KEY',
+          baseURL: changed === 'base-url' ? `${server.url}/configured` : server.url,
+        },
+      },
+    })
+    const request = {
+      provider: 'deepseek',
+      baseURL: server.url,
+      ...changed === 'protocol' ? { api: 'openai-responses' } : {},
+      ...changed === 'api-key' ? { apiKey: 'typed-key' } : {},
+    }
+
+    await expect(ctx.llm.discoverModels('llm-pi-ai', request))
+      .resolves.toEqual([{ id: `from-${changed}` }])
+    expect(server.paths).toEqual(['/models'])
+    expect(server.headers[0]?.authorization)
+      .toBe(changed === 'api-key' ? 'Bearer typed-key' : 'Bearer stored-key')
+  })
+
   it('leaves a catalog route\'s credential unresolved, having never reached the network', async () => {
     // The catalog answers before any endpoint is asked, so a route whose
     // profile names a credential that is not set must still answer rather than

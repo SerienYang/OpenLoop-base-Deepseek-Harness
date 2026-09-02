@@ -251,11 +251,12 @@ export function apply(ctx: Context, config: Config): void {
   }
   const configuredCatalog = (request: LlmModelDiscoveryRequest) => {
     const provider = request.provider
-    if (provider === undefined || request.apiKey !== undefined) return undefined
+    if (provider === undefined) return undefined
     const profile = profiles().get(provider)
     if (profile === undefined) return undefined
-    if (request.baseURL !== undefined && request.baseURL !== profile.baseURL) return undefined
-    if (request.api !== undefined && request.api !== profile.api) return undefined
+    if (request.apiKey !== undefined) return null
+    if (request.baseURL !== undefined && request.baseURL !== profile.baseURL) return null
+    if (request.api !== undefined && request.api !== profile.api) return null
     return profile.piProvider.getModels().map(model => ({
       id: model.id,
       name: model.name,

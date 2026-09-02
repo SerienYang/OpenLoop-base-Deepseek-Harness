@@ -64,7 +64,8 @@ interface ListingEntry {
 /** Effective catalog of a route the active adapter configuration already owns. */
 export type ConfiguredCatalog = (
   request: LlmModelDiscoveryRequest,
-) => readonly LlmDiscoveredModel[] | undefined | Promise<readonly LlmDiscoveredModel[] | undefined>
+) => readonly LlmDiscoveredModel[] | null | undefined
+  | Promise<readonly LlmDiscoveredModel[] | null | undefined>
 
 /** A positive integer field of a listing entry, or `undefined` when absent or unusable. */
 function capacity(...candidates: readonly unknown[]): number | undefined {
@@ -206,17 +207,19 @@ export async function discoverModels(
   // narrowing, overrides, and hand-declared models after all defaults resolve.
   if (request.provider !== undefined) {
     const configured = await configuredCatalog?.(request)
-    if (configured !== undefined) return configured
-    // A dormant installed route still has a better answer than its endpoint:
-    // the registry carries context windows and output caps listings omit.
-    const installed = catalogModels(request.provider)
-    if (installed.size > 0) {
-      return [...installed.values()].map(model => ({
-        id: model.id,
-        name: model.name,
-        contextWindow: model.contextWindow,
-        maxTokens: model.maxTokens,
-      }))
+    if (configured !== null) {
+      if (configured !== undefined) return configured
+      // A dormant installed route still has a better answer than its endpoint:
+      // the registry carries context windows and output caps listings omit.
+      const installed = catalogModels(request.provider)
+      if (installed.size > 0) {
+        return [...installed.values()].map(model => ({
+          id: model.id,
+          name: model.name,
+          contextWindow: model.contextWindow,
+          maxTokens: model.maxTokens,
+        }))
+      }
     }
   }
   if (request.baseURL === undefined || request.baseURL.length === 0) {
