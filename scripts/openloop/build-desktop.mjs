@@ -1,10 +1,25 @@
 #!/usr/bin/env node
 
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { spawn as nodeSpawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { createServer } from 'node:net'
 import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import {
+  chmod,
   lstat,
+  mkdtemp,
   mkdir,
   readdir,
   readFile,
@@ -13,7 +28,9 @@ import {
   rm,
   writeFile,
 } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
+import { finished } from 'node:stream/promises'
 import {
   generateArtifactManifest,
   hashArtifact,
@@ -29,15 +46,169 @@ import {
   parseOpenloopArtifactManifest,
   parseOpenloopBuildManifest,
 } from '../../packages/openloop/build-contract/src/index.ts'
+import {
+  authenticateBridgeResponse,
+  decodeBridgeFrame,
+  encodeBridgeFrame,
+  MAX_BRIDGE_FRAME_BYTES,
+  NonceReplayGuard,
+  verifyBridgeRequest,
+} from '../../packages/openloop/desktop-bridge-host/src/protocol.ts'
 
 const supportedChannels = new Set(['test', 'stable'])
 const supportedTargets = new Set(['aarch64-apple-darwin'])
 const supportedBundles = new Set(['none', 'app', 'dmg', 'all'])
+const DESKTOP_BUILD_LOCK = 'openloop-desktop-build.lock'
+const HEALTH_SMOKE_TIMEOUT_MS = 30_000
+const PROCESS_TERMINATE_WAIT_MS = 2_000
+const PROCESS_KILL_WAIT_MS = 2_000
+const LAUNCH_SECRETS_MAGIC = Buffer.from('OLSP')
+const LAUNCH_SECRETS_PROTOCOL_VERSION = 1
+const LAUNCH_SECRETS_HEADER_BYTES = 10
 const optionFields = new Map([
   ['--channel', 'channel'],
   ['--target', 'target'],
   ['--bundle', 'bundle'],
 ])
+
+function errorCode(error) {
+  return typeof error === 'object' && error !== null && 'code' in error
+    ? error.code
+    : undefined
+}
+
+function buildLockOwnershipChangedError(lockPath) {
+  return new Error(
+    `build-desktop: desktop build lock ownership changed at ${lockPath}; refusing to remove it`,
+  )
+}
+
+function lockOwnerIsAlive(owner) {
+  try {
+    process.kill(owner, 0)
+    return true
+  } catch (error) {
+    if (errorCode(error) === 'ESRCH') return false
+    if (errorCode(error) === 'EPERM') return true
+    throw error
+  }
+}
+
+function releaseDesktopBuildLock(lockPath, ownedRecord, ownedStat) {
+  let current
+  try {
+    current = lstatSync(lockPath)
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') throw buildLockOwnershipChangedError(lockPath)
+    throw error
+  }
+  if (
+    !current.isFile()
+    || current.isSymbolicLink()
+    || current.nlink !== 1
+    || current.dev !== ownedStat.dev
+    || current.ino !== ownedStat.ino
+    || readFileSync(lockPath, 'utf8') !== ownedRecord
+  ) {
+    throw buildLockOwnershipChangedError(lockPath)
+  }
+  try {
+    unlinkSync(lockPath)
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') throw buildLockOwnershipChangedError(lockPath)
+    throw error
+  }
+}
+
+export function acquireDesktopBuildLock(root) {
+  const repositoryRoot = resolve(root)
+  const rootMetadata = lstatSync(repositoryRoot)
+  if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) {
+    throw new Error(
+      `build-desktop: repository root must be a real directory: ${repositoryRoot}`,
+    )
+  }
+  const artifacts = join(repositoryRoot, '.artifacts')
+  mkdirSync(artifacts, { recursive: true, mode: 0o700 })
+  const artifactsMetadata = lstatSync(artifacts)
+  if (artifactsMetadata.isSymbolicLink()
+    || !artifactsMetadata.isDirectory()
+    || realpathSync(artifacts) !== join(realpathSync(repositoryRoot), '.artifacts')) {
+    throw new Error(
+      `build-desktop: build lock directory must be a real repository directory: ${artifacts}`,
+    )
+  }
+
+  const lockPath = join(artifacts, DESKTOP_BUILD_LOCK)
+  const ownedRecord = `${String(process.pid)} ${randomUUID()}\n`
+  let handle
+  let ownedStat
+  try {
+    handle = openSync(lockPath, 'wx', 0o600)
+    ownedStat = fstatSync(handle)
+    writeFileSync(handle, ownedRecord)
+    fsyncSync(handle)
+  } catch (error) {
+    if (handle !== undefined) {
+      closeSync(handle)
+      handle = undefined
+      if (ownedStat !== undefined) {
+        const current = lstatSync(lockPath)
+        if (current.dev === ownedStat.dev && current.ino === ownedStat.ino) {
+          unlinkSync(lockPath)
+        }
+      }
+    }
+    if (errorCode(error) !== 'EEXIST') throw error
+    const metadata = lstatSync(lockPath)
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) {
+      throw new Error(
+        `build-desktop: invalid desktop build lock at ${lockPath}; remove it manually`,
+      )
+    }
+    const record = readFileSync(lockPath, 'utf8')
+    const match = /^([1-9]\d*) ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\n$/iu
+      .exec(record)
+    if (match?.[1] === undefined) {
+      throw new Error(
+        `build-desktop: invalid or initializing desktop build lock at ${lockPath}; retry only after confirming no build is running`,
+      )
+    }
+    const owner = Number(match[1])
+    if (!Number.isSafeInteger(owner) || !lockOwnerIsAlive(owner)) {
+      throw new Error(
+        `build-desktop: stale desktop build lock at ${lockPath}; confirm no build is running, remove it manually, and retry`,
+      )
+    }
+    throw new Error(
+      `build-desktop: desktop build lock is held by process ${String(owner)} at ${lockPath}`,
+    )
+  } finally {
+    if (handle !== undefined) closeSync(handle)
+  }
+
+  const published = lstatSync(lockPath)
+  if (
+    ownedStat === undefined
+    || !published.isFile()
+    || published.isSymbolicLink()
+    || published.nlink !== 1
+    || published.dev !== ownedStat.dev
+    || published.ino !== ownedStat.ino
+  ) {
+    throw buildLockOwnershipChangedError(lockPath)
+  }
+  return () => releaseDesktopBuildLock(lockPath, ownedRecord, ownedStat)
+}
+
+export async function withDesktopBuildLock(root, operation) {
+  const release = acquireDesktopBuildLock(root)
+  try {
+    return await operation()
+  } finally {
+    release()
+  }
+}
 
 function optionValue(args, index, option) {
   const value = args[index + 1]
@@ -97,15 +268,58 @@ function tauriBundleArguments(bundle) {
   return ['--bundles', bundle]
 }
 
-export function createProcessRunner(spawn = nodeSpawn) {
+export function createProcessRunner(
+  spawn = nodeSpawn,
+  {
+    terminateWaitMs = PROCESS_TERMINATE_WAIT_MS,
+    killWaitMs = PROCESS_KILL_WAIT_MS,
+  } = {},
+) {
   return {
-    run: ({ command, args, cwd, capture = false, env }) =>
-      new Promise((resolvePromise, reject) => {
-        const child = spawn(command, args, {
+    run: async ({ command, args, cwd, capture = false, env, fd3Input, timeoutMs }) => {
+      if (fd3Input !== undefined
+        && (!capture || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0)) {
+        throw new Error(
+          'build-desktop: fd3 input requires captured output and a positive timeout',
+        )
+      }
+      const input = fd3Input === undefined ? undefined : Buffer.from(fd3Input)
+      let child
+      let timeout
+      let childSettled = false
+      let markChildSettled
+      const childSettlement = new Promise(resolvePromise => {
+        markChildSettled = resolvePromise
+      })
+      const waitForChild = async (waitMs) => {
+        if (childSettled) return true
+        let waitTimeout
+        try {
+          return await Promise.race([
+            childSettlement.then(() => true),
+            new Promise(resolvePromise => {
+              waitTimeout = setTimeout(() => resolvePromise(false), waitMs)
+            }),
+          ])
+        } finally {
+          if (waitTimeout !== undefined) clearTimeout(waitTimeout)
+        }
+      }
+      const terminateAndReap = async () => {
+        if (child === undefined || childSettled) return
+        try { child.kill('SIGTERM') } catch {}
+        if (await waitForChild(terminateWaitMs)) return
+        try { child.kill('SIGKILL') } catch {}
+        await waitForChild(killWaitMs)
+      }
+      try {
+        child = spawn(command, args, {
           cwd,
           env: { ...process.env, CI: 'true', ...env },
           shell: false,
-          stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
+          stdio: input === undefined
+            ? (capture ? ['ignore', 'pipe', 'pipe'] : 'inherit')
+            : ['ignore', 'pipe', 'pipe', 'pipe'],
         })
         const stdout = []
         const stderr = []
@@ -113,24 +327,66 @@ export function createProcessRunner(spawn = nodeSpawn) {
           child.stdout.on('data', chunk => stdout.push(Buffer.from(chunk)))
           child.stderr.on('data', chunk => stderr.push(Buffer.from(chunk)))
         }
-        child.once('error', error => reject(new Error(
-          `build-desktop: failed to spawn ${command}: ${error.message}`,
-        )))
-        child.once('exit', (code, signal) => {
-          if (code === 0) {
-            resolvePromise({
-              stdout: Buffer.concat(stdout).toString('utf8'),
-              stderr: Buffer.concat(stderr).toString('utf8'),
-            })
-            return
-          }
-          reject(new Error(
-            `build-desktop: ${command} failed with ${
-              code === null ? `signal ${String(signal)}` : `exit ${String(code)}`
-            }`,
-          ))
+        const exited = new Promise((resolvePromise, reject) => {
+          child.once('error', error => {
+            childSettled = true
+            markChildSettled()
+            reject(new Error(
+              `build-desktop: failed to spawn ${command}: ${error.message}`,
+            ))
+          })
+          child.once('exit', (code, signal) => {
+            childSettled = true
+            markChildSettled()
+            if (code === 0) {
+              resolvePromise({
+                stdout: Buffer.concat(stdout).toString('utf8'),
+                stderr: Buffer.concat(stderr).toString('utf8'),
+              })
+            } else {
+              reject(new Error(
+                `build-desktop: ${command} failed with ${
+                  code === null ? `signal ${String(signal)}` : `exit ${String(code)}`
+                }`,
+              ))
+            }
+          })
         })
-      }),
+        if (input === undefined) return await exited
+        const fd3 = child.stdio?.[3]
+        if (fd3 === undefined || fd3 === null || typeof fd3.end !== 'function') {
+          throw new Error(`build-desktop: failed to open fd3 for ${command}`)
+        }
+        const wroteFd3 = finished(fd3, { cleanup: true }).catch(error => {
+          throw new Error(`build-desktop: failed to write fd3 input for ${command}`, {
+            cause: error,
+          })
+        })
+        try {
+          fd3.end(input)
+        } catch (error) {
+          throw new Error(`build-desktop: failed to write fd3 input for ${command}`, {
+            cause: error,
+          })
+        }
+        const timedOut = new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(new Error(
+            `build-desktop: ${command} timed out after ${String(timeoutMs)} ms`,
+          )), timeoutMs)
+        })
+        return await Promise.race([
+          Promise.all([exited, wroteFd3]).then(([result]) => result),
+          timedOut,
+        ])
+      } catch (error) {
+        await terminateAndReap()
+        throw error
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout)
+        input?.fill(0)
+        fd3Input?.fill(0)
+      }
+    },
   }
 }
 
@@ -364,6 +620,175 @@ function hasExactObjectKeys(value, expectedKeys) {
     && actualKeys.every(key => expectedKeys.includes(key))
 }
 
+function encodeVerifierLaunchSecretsFrame({
+  launchId,
+  bootstrapToken,
+  bridgeSecret,
+  socketPath,
+}) {
+  const fields = [
+    Buffer.from(launchId.replaceAll('-', ''), 'hex'),
+    bootstrapToken,
+    bridgeSecret,
+    Buffer.from(socketPath, 'utf8'),
+  ]
+  const payloadBytes = fields.reduce((total, field) => total + 4 + field.length, 0)
+  const frame = Buffer.alloc(LAUNCH_SECRETS_HEADER_BYTES + payloadBytes)
+  LAUNCH_SECRETS_MAGIC.copy(frame, 0)
+  frame.writeUInt16BE(LAUNCH_SECRETS_PROTOCOL_VERSION, 4)
+  frame.writeUInt32BE(payloadBytes, 6)
+  let offset = LAUNCH_SECRETS_HEADER_BYTES
+  for (const field of fields) {
+    frame.writeUInt32BE(field.length, offset)
+    offset += 4
+    field.copy(frame, offset)
+    offset += field.length
+  }
+  return frame
+}
+
+export async function createVerifierBridge(
+  { launchId, bridgeSecret, socketPath },
+  {
+    createServer: createBridgeServer = createServer,
+    chmod: chmodSocket = chmod,
+  } = {},
+) {
+  const secret = Uint8Array.from(bridgeSecret)
+  const nonces = new NonceReplayGuard()
+  const sockets = new Set()
+  const server = createBridgeServer({ allowHalfOpen: true }, async (socket) => {
+    sockets.add(socket)
+    socket.once('close', () => sockets.delete(socket))
+    socket.setTimeout(HEALTH_SMOKE_TIMEOUT_MS, () => socket.destroy())
+    const chunks = []
+    let received = 0
+    let frame
+    let nonce
+    let response
+    try {
+      frame = await new Promise((resolvePromise, reject) => {
+        socket.on('data', (chunk) => {
+          received += chunk.length
+          if (received > MAX_BRIDGE_FRAME_BYTES + 4) {
+            reject(new Error('build-desktop: verifier bridge request is oversized'))
+            return
+          }
+          chunks.push(chunk)
+        })
+        socket.once('end', () => resolvePromise(Buffer.concat(chunks, received)))
+        socket.once('error', reject)
+      })
+      const envelope = decodeBridgeFrame(frame)
+      const request = verifyBridgeRequest(envelope, { launchId, secret, nonces })
+      if (request.method !== 'readWorkspaceTransaction' || request.payload !== null) {
+        throw new Error('build-desktop: verifier bridge received an unexpected method')
+      }
+      nonce = Buffer.from(envelope.nonce, 'hex')
+      response = Buffer.from(encodeBridgeFrame(authenticateBridgeResponse({
+        version: 1,
+        requestId: request.requestId,
+        ok: true,
+        result: null,
+      }, nonce, secret)))
+      await new Promise((resolvePromise, reject) => {
+        socket.once('error', reject)
+        socket.end(response, resolvePromise)
+      })
+    } catch {
+      socket.destroy()
+    } finally {
+      frame?.fill(0)
+      nonce?.fill(0)
+      response?.fill(0)
+      for (const chunk of chunks) chunk.fill(0)
+    }
+  })
+  let listening = false
+  const closeServer = async () => {
+    for (const socket of sockets) socket.destroy()
+    if (!listening) return
+    await new Promise((resolvePromise, reject) => {
+      server.close(error => {
+        listening = false
+        if (error === undefined) resolvePromise()
+        else reject(error)
+      })
+    })
+  }
+  try {
+    await new Promise((resolvePromise, reject) => {
+      const onError = error => reject(error)
+      server.once('error', onError)
+      server.listen(socketPath, () => {
+        listening = true
+        server.off('error', onError)
+        resolvePromise()
+      })
+    })
+    await chmodSocket(socketPath, 0o600)
+  } catch (error) {
+    try {
+      await closeServer()
+    } catch {
+      // Preserve the initialization error that made the bridge unusable.
+    } finally {
+      secret.fill(0)
+    }
+    throw error
+  }
+  return async () => {
+    try {
+      await closeServer()
+    } finally {
+      secret.fill(0)
+    }
+  }
+}
+
+async function createVerifierLaunch() {
+  const directory = await mkdtemp(join(tmpdir(), 'olh-'))
+  let frame
+  let closeBridge
+  try {
+    await chmod(directory, 0o700)
+    const launchId = randomUUID()
+    const bootstrapToken = randomBytes(32)
+    const bridgeSecret = randomBytes(32)
+    const socketPath = join(directory, 'bridge.sock')
+    try {
+      frame = encodeVerifierLaunchSecretsFrame({
+        launchId,
+        bootstrapToken,
+        bridgeSecret,
+        socketPath,
+      })
+      closeBridge = await createVerifierBridge({
+        launchId,
+        bridgeSecret,
+        socketPath,
+      })
+      return {
+        directory,
+        launchId,
+        frame,
+        closeBridge,
+      }
+    } finally {
+      bootstrapToken.fill(0)
+      bridgeSecret.fill(0)
+    }
+  } catch (error) {
+    frame?.fill(0)
+    try {
+      await closeBridge?.()
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+    throw error
+  }
+}
+
 /** Verify the final external manifest and every executable desktop product. */
 export async function verifyDesktopBuild(context, runner) {
   const fixed = assertFixedVerificationPaths(context)
@@ -486,11 +911,24 @@ export async function verifyDesktopBuild(context, runner) {
       throw new Error(`build-desktop: Info.plist ${key} does not match desktop version`)
     }
   }
-  const health = await runner.run({
-    command: sidecar,
-    args: ['--health-smoke'],
-    capture: true,
-  })
+  const healthLaunch = await createVerifierLaunch()
+  let health
+  try {
+    health = await runner.run({
+      command: sidecar,
+      args: ['--health-smoke'],
+      capture: true,
+      fd3Input: healthLaunch.frame,
+      timeoutMs: HEALTH_SMOKE_TIMEOUT_MS,
+    })
+  } finally {
+    healthLaunch.frame.fill(0)
+    try {
+      await healthLaunch.closeBridge()
+    } finally {
+      await rm(healthLaunch.directory, { recursive: true, force: true })
+    }
+  }
   if (health.stderr !== '') {
     throw new Error('build-desktop: sidecar health smoke stderr must be empty')
   }
@@ -510,21 +948,26 @@ export async function verifyDesktopBuild(context, runner) {
   const readinessKeys = [
     'type',
     'version',
+    'launchId',
     'profile',
     'host',
     'port',
     'origin',
     'coreManifestSha256',
     'healthSmoke',
+    'candidateHealth',
   ]
   const healthSmokeKeys = ['method', 'path', 'status']
+  const candidateHealthKeys = ['webAsset', 'bootstrapExchange']
   const validPort = Number.isSafeInteger(readiness?.port)
     && readiness.port >= 1
     && readiness.port <= 65535
   if (!hasExactObjectKeys(readiness, readinessKeys)
     || !hasExactObjectKeys(readiness.healthSmoke, healthSmokeKeys)
+    || !hasExactObjectKeys(readiness.candidateHealth, candidateHealthKeys)
     || readiness.type !== 'openloop.runtime.ready'
     || readiness.version !== 1
+    || readiness.launchId !== healthLaunch.launchId
     || readiness.profile !== 'openloop'
     || readiness.host !== '127.0.0.1'
     || !validPort
@@ -532,7 +975,9 @@ export async function verifyDesktopBuild(context, runner) {
     || readiness.coreManifestSha256 !== coreSha256
     || readiness.healthSmoke.method !== 'GET'
     || readiness.healthSmoke.path !== '/'
-    || readiness.healthSmoke.status !== 200) {
+    || readiness.healthSmoke.status !== 200
+    || readiness.candidateHealth.webAsset !== true
+    || readiness.candidateHealth.bootstrapExchange !== true) {
     throw new Error('build-desktop: sidecar health smoke readiness contract is invalid')
   }
 }
@@ -548,11 +993,21 @@ export const nodeFileSystem = {
 /** Testable eight-stage desktop build pipeline. */
 export class DesktopBuilder {
   constructor(dependencies) {
-    this.dependencies = dependencies
+    this.dependencies = {
+      withBuildLock: withDesktopBuildLock,
+      ...dependencies,
+    }
     this.root = resolve(dependencies.root)
   }
 
   async build() {
+    return await this.dependencies.withBuildLock(
+      this.root,
+      async () => await this.buildLocked(),
+    )
+  }
+
+  async buildLocked() {
     const {
       options,
       runner,

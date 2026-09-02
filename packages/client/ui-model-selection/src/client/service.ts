@@ -18,6 +18,8 @@ import type { ConnectionHandle, SessionId } from '@deepseek-ai/dsh-api-remotes/c
 import type { SessionRuntime } from '@deepseek-ai/dsh-client-runtime/client'
 import { ModelDirectory } from './directory.ts'
 
+const MODEL_BLOCK_OWNER = 'ui-model-selection'
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     modelDirectories: ModelDirectoryResolver
@@ -88,7 +90,7 @@ export class ModelDirectoryResolver extends Service {
     const conversation = this.ctx.get('conversation')
     if (conversation !== undefined) {
       const publish = (): void => {
-        conversation.blocks.set(sessionId, directory.store.getSnapshot().routable === false
+        conversation.blocks.setOwned(sessionId, MODEL_BLOCK_OWNER, directory.store.getSnapshot().routable === false
           ? { reason: this.blockReason() }
           : undefined)
       }
@@ -97,7 +99,7 @@ export class ModelDirectoryResolver extends Service {
         const stop = directory.store.subscribe(publish)
         return () => {
           stop()
-          conversation.blocks.set(sessionId, undefined)
+          conversation.blocks.setOwned(sessionId, MODEL_BLOCK_OWNER, undefined)
         }
       }, 'ui-model-selection: composer block')
     }

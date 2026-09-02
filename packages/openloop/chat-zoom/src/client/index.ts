@@ -16,6 +16,34 @@ export const name = 'chat-zoom'
 export const inject = ['connection', 'remote', 'settingsScope']
 
 const CSS_PROPERTY = '--openloop-chat-text-scale'
+const STORAGE_KEY = 'openloop.chatZoom.percent'
+
+function processLocalStorage(): Storage | undefined {
+  try {
+    return globalThis.localStorage
+  } catch {
+    return undefined
+  }
+}
+
+function readProcessLocalZoom(fallback: number): number {
+  const storage = processLocalStorage()
+  if (storage === undefined) return fallback
+  try {
+    const stored = storage.getItem(STORAGE_KEY)
+    return stored === null ? fallback : normalizeZoom(Number(stored))
+  } catch {
+    return fallback
+  }
+}
+
+function writeProcessLocalZoom(value: number): void {
+  const storage = processLocalStorage()
+  if (storage === undefined) return
+  try {
+    storage.setItem(STORAGE_KEY, String(value))
+  } catch {}
+}
 
 export function apply(ctx: ClientContext): void {
   const settings = ctx.settingsScope.bind<ChatZoomSettings>({
@@ -41,7 +69,9 @@ export function apply(ctx: ClientContext): void {
       if (pendingWrites > 0) return
       percent = snapshot.status === 'ready'
         ? normalizeZoom(snapshot.value?.percent)
-        : DEFAULT_CHAT_ZOOM
+        : snapshot.mode === 'memory'
+          ? readProcessLocalZoom(percent)
+          : DEFAULT_CHAT_ZOOM
       publish(percent)
     }
     adopt(settings.getSnapshot())
@@ -52,6 +82,7 @@ export function apply(ctx: ClientContext): void {
       event.preventDefault()
       percent = stepZoom(percent, command)
       publish(percent)
+      if (settings.getSnapshot().mode === 'memory') writeProcessLocalZoom(percent)
       pendingWrites += 1
       void settings.set(CHAT_ZOOM_PERCENT_FIELD, percent).finally(() => {
         pendingWrites -= 1

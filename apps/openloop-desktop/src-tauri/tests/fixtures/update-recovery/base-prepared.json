@@ -1,0 +1,17 @@
+{
+  "transactionId": "10000000-0000-4000-8000-000000000001",
+  "installedName": "Openloop.app",
+  "candidateName": "Openloop-candidate.app",
+  "installedIdentity": {
+    "device": 0,
+    "inode": 0,
+    "file_type": 16384
+  },
+  "candidateIdentity": {
+    "device": 0,
+    "inode": 0,
+    "file_type": 16384
+  },
+  "state": "prepared",
+  "migrationTransactionId": "20000000-0000-4000-8000-000000000001"
+}

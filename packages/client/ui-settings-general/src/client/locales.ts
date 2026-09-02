@@ -7,7 +7,7 @@ export const zh = {
   'close': '关闭',
   'openDocument': '打开配置文件',
   'openDocument.error': '无法打开配置文件',
-  'general.nav': '通用设置',
+  'general.nav': '通用',
 } satisfies Record<string, string>
 
 /** The settings namespace key union. */

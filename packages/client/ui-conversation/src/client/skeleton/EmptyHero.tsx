@@ -7,7 +7,7 @@
 import { useId } from 'react'
 import type { ReactNode, RefObject } from 'react'
 import {
-  FishLogo, IconChevronDownOutline14, IconFolderClose16, IconFolderOpen16,
+  FishLogo, IconChevronDownOutline14, IconFolderClose16, IconFolderOpen16, useProductBrand,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { workspaceTitleOf } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ConversationSlotProps } from '../contract/slots.ts'
@@ -92,7 +92,14 @@ export function HeroGlow({ className }: { className?: string | undefined }) {
         </filter>
       </defs>
       <g filter={`url(#${glowFilterId})`}>
-        <ellipse cx="525.5" cy="234" rx="425.5" ry="134" fill="#6187D8" fillOpacity="0.08" />
+        <ellipse
+          cx="525.5"
+          cy="234"
+          rx="425.5"
+          ry="134"
+          fill="var(--dsw-specific-hero-glow, #6187D8)"
+          fillOpacity="0.08"
+        />
       </g>
     </svg>
   )
@@ -113,16 +120,19 @@ export interface HeroShellProps {
  * @returns the centered hero element tree.
  */
 export function HeroShell({ t, children }: HeroShellProps) {
+  const brand = useProductBrand()
   return (
     <div className={css.root}>
       <div className={css.stack}>
         <div className={css.headline}>
           {/* figma 34:10412: fish 34×25 leading the headline, gap 10. */}
           <span className={css.fishHitbox}>
-            <FishLogo size={34} className={css.fish} />
+            {brand.markAsset === undefined
+              ? <FishLogo size={34} className={css.fish} />
+              : <img src={brand.markAsset} alt="" width={34} className={css.fish} />}
           </span>
-          <span className={css.headlineText}>{t('hero.headline')}</span>
-          <span className={css.previewBadge}>{t('hero.preview')}</span>
+          <span className={css.headlineText}>{brand.heroTitle ?? t('hero.headline')}</span>
+          <span className={css.previewBadge}>{brand.previewLabel ?? t('hero.preview')}</span>
         </div>
         <div className={css.body}>
           {/* The resident composer (ConversationRoot's root-owned scrollport;

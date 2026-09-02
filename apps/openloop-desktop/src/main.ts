@@ -2,6 +2,15 @@ import { invoke } from '@tauri-apps/api/core'
 import openloopIcon from '../../../assets/brand/openloop-icon.svg'
 import './styles.css'
 
+export interface OpenloopBrandManifest {
+  readonly productName: string
+  readonly documentSuffix: string
+  readonly markAsset: string
+  readonly heroTitle: string
+  readonly previewLabel: string
+  readonly attribution: string
+}
+
 export interface OpenloopBuildManifest {
   readonly appVersion: string
   readonly channel: 'test' | 'stable'
@@ -13,6 +22,7 @@ export interface OpenloopBuildManifest {
   readonly pluginPackageSpecVersion: string
   readonly openloopDataVersion: number
   readonly dshDataVersion: number
+  readonly brand: OpenloopBrandManifest
 }
 
 const root = document.querySelector<HTMLDivElement>('#app')

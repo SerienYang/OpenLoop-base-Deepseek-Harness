@@ -3,7 +3,7 @@ import { EventEmitter, once } from 'node:events'
 import { createServer, request as httpRequest } from 'node:http'
 import { PassThrough, Readable } from 'node:stream'
 import { Context } from '@deepseek-ai/cordis'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { AddressInfo } from 'node:net'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
@@ -55,6 +55,33 @@ function fakeRawPost(headers: Record<string, string>, url: string, body: string)
   return request
 }
 
+/** Lazy body source that records whether the HTTP bridge started consuming it. */
+function fakeLazyRequest(
+  method: string,
+  headers: Record<string, string>,
+  url: string,
+  body: unknown,
+): { request: IncomingMessage; reads: () => number } {
+  let count = 0
+  const request = new Readable({
+    read() {
+      count += 1
+      this.push(Buffer.from(JSON.stringify(body)))
+      this.push(null)
+    },
+  }) as unknown as IncomingMessage
+  Object.assign(request, {
+    url,
+    method,
+    headers: {
+      'content-type': 'application/json',
+      'content-length': String(160 * 1024 * 1024),
+      ...headers,
+    },
+  })
+  return { request, reads: () => count }
+}
+
 /** Response recorder compatible with both the fence's short-circuit and the bridge. */
 function fakeResponse(): { response: ServerResponse; state: { status?: number; body?: unknown } } {
   const state: { status?: number; body?: unknown } = {}
@@ -75,6 +102,7 @@ function fakeResponse(): { response: ServerResponse; state: { status?: number; b
 }
 
 async function mounted(config?: { trustedHosts?: string[] }): Promise<{
+  ctx: Context
   routes: WebRoute[]
   upgrades: WebUpgradeRoute[]
   dispose: () => Promise<void>
@@ -86,7 +114,7 @@ async function mounted(config?: { trustedHosts?: string[] }): Promise<{
   ctx.provide('apiProxy', {} as unknown as ApiProxy)
   const fiber = ctx.plugin({ inject: [...inject], apply }, config)
   await fiber.await()
-  return { routes, upgrades, dispose: () => fiber.dispose() }
+  return { ctx, routes, upgrades, dispose: () => fiber.dispose() }
 }
 
 describe('connection node half', () => {
@@ -211,6 +239,219 @@ describe('connection node half', () => {
     }), declared.response)
     expect(declared.state.status).toBe(404)
     await dispose()
+  })
+
+  it('reads the optional browser policy live for every legacy fallback', async () => {
+    const { ctx, routes, dispose } = await mounted()
+    const route = routes[0]!
+    const request = {
+      type: 'client-request',
+      rpcId: 'policy-live',
+      method: 'session.list',
+      payload: {},
+    }
+    const before = fakeResponse()
+    await route.handler(
+      fakePost({ host: '127.0.0.1:3080' }, '/api/session.list', request),
+      before.response,
+    )
+    expect(before.state.status).not.toBe(403)
+
+    const allows = vi.fn(() => false)
+    const removePolicy = ctx.provide('browserApiPolicy', {
+      version: 1,
+      allows,
+      allowsTarget: () => true,
+    })
+    const denied = fakeResponse()
+    await route.handler(
+      fakePost({ host: '127.0.0.1:3080' }, '/api/session.list', request),
+      denied.response,
+    )
+    expect(denied.state).toMatchObject({ status: 403, body: 'forbidden' })
+    expect(allows).toHaveBeenCalledWith('session.list', {})
+
+    removePolicy()
+    const after = fakeResponse()
+    await route.handler(
+      fakePost({ host: '127.0.0.1:3080' }, '/api/session.list', request),
+      after.response,
+    )
+    expect(after.state.status).not.toBe(403)
+    await dispose()
+  })
+
+  it('rejects a method-level policy denial before reading the legacy request body', async () => {
+    const { ctx, routes, dispose } = await mounted()
+    const allows = vi.fn(() => false)
+    const allowsTarget = vi.fn((method: string) => method === 'session.create')
+    ctx.provide('browserApiPolicy', {
+      version: 1,
+      allows,
+      allowsTarget,
+    } as never)
+    const body = fakeLazyRequest(
+      'POST',
+      { host: '127.0.0.1:3080' },
+      '/api/settings.update',
+      {
+        type: 'client-request',
+        rpcId: 'policy-preflight',
+        method: 'settings.update',
+        payload: {
+          ns: 'llm-deepseek',
+          patch: { baseURL: `https://attacker.example/${'x'.repeat(1024 * 1024)}` },
+        },
+      },
+    )
+    const denied = fakeResponse()
+
+    await routes[0]!.handler(body.request, denied.response)
+
+    expect(denied.state).toMatchObject({ status: 403, body: 'forbidden' })
+    expect(body.reads()).toBe(0)
+    expect(allowsTarget).toHaveBeenCalledWith('settings.update')
+    expect(allows).not.toHaveBeenCalled()
+    await dispose()
+  })
+
+  it('keeps payload-rule methods on the second policy check after body parsing', async () => {
+    const { ctx, routes, dispose } = await mounted()
+    const allows = vi.fn(() => false)
+    const allowsTarget = vi.fn((method: string) => method === 'session.create')
+    ctx.provide('browserApiPolicy', {
+      version: 1,
+      allows,
+      allowsTarget,
+    } as never)
+    const body = fakeLazyRequest(
+      'POST',
+      { host: '127.0.0.1:3080' },
+      '/api/session.create',
+      {
+        type: 'client-request',
+        rpcId: 'policy-payload',
+        method: 'session.create',
+        payload: {},
+      },
+    )
+    const denied = fakeResponse()
+
+    await routes[0]!.handler(body.request, denied.response)
+
+    expect(denied.state).toMatchObject({ status: 403, body: 'forbidden' })
+    expect(body.reads()).toBeGreaterThan(0)
+    expect(allowsTarget).toHaveBeenCalledWith('session.create')
+    expect(allows).toHaveBeenCalledWith('session.create', {})
+    await dispose()
+  })
+
+  it('preflights POST respond and GET/HEAD transport routes before reading a 160 MiB body', async () => {
+    const { ctx, routes, dispose } = await mounted()
+    const allows = vi.fn(() => false)
+    const allowsTarget = vi.fn(() => true)
+    ctx.provide('browserApiPolicy', { version: 1, allows, allowsTarget })
+
+    for (const [method, path, expected] of [
+      ['POST', '/api/respond', 'POST /api/respond'],
+      ['GET', '/api/session.export?sessionId=session-1', 'GET /api/session.export'],
+      ['HEAD', '/api/session.export?sessionId=session-1', 'HEAD /api/session.export'],
+    ] as const) {
+      const body = fakeLazyRequest(method, { host: '127.0.0.1:3080' }, path, { large: true })
+      const denied = fakeResponse()
+
+      await routes[0]!.handler(body.request, denied.response)
+
+      expect(denied.state).toMatchObject({ status: 403, body: 'forbidden' })
+      expect(body.reads(), `${method} ${path}`).toBe(0)
+      expect(allows).toHaveBeenCalledWith(expected, undefined)
+    }
+    expect(allowsTarget).not.toHaveBeenCalled()
+    await dispose()
+  })
+
+  it.each([
+    ['PUT', '/api/session.list'],
+    ['PATCH', '/api/session.list'],
+    ['DELETE', '/api/session.list'],
+    ['OPTIONS', '/api/session.list'],
+    ['POST', '/api/not-allowlisted'],
+    ['GET', '/api/not-allowlisted'],
+    ['POST', '/api/respond/extra'],
+  ])('rejects unsupported %s %s before reading a 160 MiB body', async (method, path) => {
+    const { ctx, routes, dispose } = await mounted()
+    const allows = vi.fn(() => false)
+    const allowsTarget = vi.fn(() => false)
+    ctx.provide('browserApiPolicy', { version: 1, allows, allowsTarget })
+    const body = fakeLazyRequest(method, { host: '127.0.0.1:3080' }, path, { large: true })
+    const denied = fakeResponse()
+
+    await routes[0]!.handler(body.request, denied.response)
+
+    expect(denied.state).toMatchObject({ status: 403, body: 'forbidden' })
+    expect(body.reads()).toBe(0)
+    await dispose()
+  })
+
+  it('checks the live browser policy before accepting either WebSocket downlink', async () => {
+    const { ctx, upgrades, dispose } = await mounted()
+    const allows = vi.fn(() => false)
+    ctx.provide('browserApiPolicy', { version: 1, allows })
+
+    for (const [index, path] of [MUX_EVENTS_PATH, HOST_EVENTS_PATH].entries()) {
+      const socket = new PassThrough()
+      const chunks: Buffer[] = []
+      socket.on('data', (chunk: Buffer) => { chunks.push(chunk) })
+      const ended = once(socket, 'end')
+
+      await upgrades[index]!.handler(fakeRequest({
+        host: '127.0.0.1:3080',
+      }, path), socket, Buffer.alloc(0))
+
+      await ended
+      expect(Buffer.concat(chunks).toString()).toContain('HTTP/1.1 403 Forbidden')
+      expect(allows).toHaveBeenCalledWith(`GET ${path}`, undefined)
+    }
+    await dispose()
+  })
+
+  it('fails closed while a required browser policy is unloading', async () => {
+    const ctx = new Context()
+    const routes: WebRoute[] = []
+    const list = vi.fn(async (request: { rpcId: string }) => ({
+      rpcId: request.rpcId,
+      result: { ok: true as const, value: { items: [] } },
+    }))
+    ctx.provide('webServer', fakeHttpServer(routes, []) as WebServer)
+    ctx.provide('apiProxy', { sessions: { list } } as unknown as ApiProxy)
+    const removePolicy = ctx.provide('browserApiPolicy', {
+      version: 1,
+      allows: () => true,
+    })
+    const fiber = ctx.plugin({
+      inject: [...inject, 'browserApiPolicy'],
+      apply,
+    })
+    await fiber.await()
+    const route = routes[0]!
+    removePolicy()
+    const denied = fakeResponse()
+
+    await route.handler(
+      fakePost({ host: '127.0.0.1:3080' }, '/api/session.list', {
+        type: 'client-request',
+        rpcId: 'policy-unloading',
+        method: 'session.list',
+        payload: {},
+      }),
+      denied.response,
+    )
+
+    expect(denied.state).toMatchObject({ status: 403, body: 'forbidden' })
+    expect(list).not.toHaveBeenCalled()
+    await fiber.await()
+    expect(routes).toHaveLength(0)
+    await fiber.dispose()
   })
 
   it('provides a disposable dedicated RPC channel without requiring apiProxy', async () => {

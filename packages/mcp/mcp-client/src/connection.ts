@@ -20,6 +20,7 @@ import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/typ
 import type { Context } from '@deepseek-ai/cordis'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { createTransport } from './transport.ts'
+import type { CredentialResolver } from './transport.ts'
 import { syncTools } from './tools.ts'
 import type { ToolBridgeOptions, ToolDisposers } from './tools.ts'
 import type { Config } from './index.ts'
@@ -48,6 +49,8 @@ export const RECONNECT_DEFAULTS: Required<ReconnectConfig> = Object.freeze({
 // Keep one additional second for the process-close event that proves the old
 // generation is gone; timing out fails closed instead of overlapping children.
 const GENERATION_CLOSE_TIMEOUT_MS = 5_000
+
+const CREDENTIAL_RESOLUTION_FAILURE_MESSAGE = 'mcp-client: configured credential could not be resolved'
 
 /** Fully resolved reconnect policy captured at plugin load. */
 export type ResolvedReconnectPolicy = Readonly<Required<ReconnectConfig>>
@@ -118,10 +121,29 @@ export interface ConnectionHandle {
  * @param ctx - Cordis context providing the `tools` registry and logger.
  * @param config - Resolved plugin config selecting the transport and server identity.
  * @param policy - Resolved reconnect policy from {@link resolveReconnectPolicy}.
+ * @param resolveCredential - Optional per-request credential resolver for HTTP headers.
  * @returns Handle with a `ready` promise for startup-await and a `dispose` for teardown.
  */
-export function startConnection(ctx: Context, config: Config, policy: ResolvedReconnectPolicy): ConnectionHandle {
+export function startConnection(
+  ctx: Context,
+  config: Config,
+  policy: ResolvedReconnectPolicy,
+  resolveCredential?: CredentialResolver,
+): ConnectionHandle {
   const label = `mcp-client(${config.serverName})`
+  const safeResolveCredential: CredentialResolver | undefined = resolveCredential === undefined
+    ? undefined
+    : async (reference) => {
+      try {
+        return await resolveCredential(reference)
+      } catch {
+        // Resolver diagnostics are untrusted and may contain the reference,
+        // secret, or a rendered Authorization header. Do not retain the
+        // original exception as a cause: this error reaches logs and strict
+        // startup failures.
+        throw new Error(CREDENTIAL_RESOLUTION_FAILURE_MESSAGE)
+      }
+    }
   const opts: ToolBridgeOptions = {
     registrationFailure: 'contain',
     serverName: config.serverName,
@@ -269,7 +291,7 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
       },
     )
     try {
-      await generation.connect(createTransport(config))
+      await generation.connect(createTransport(config, safeResolveCredential))
       if (hasClosed()) {
         attemptSettled = true
         generationDown(generation)

@@ -25,6 +25,8 @@ export interface EditorFooterProps {
   busy: boolean
   /** Whether the commit is refused, as judged by the owning card. */
   submitDisabled: boolean
+  /** Omit commit when an embedded product control owns the mutation. */
+  hideSubmit?: boolean
   /** Commit label while idle. */
   submitLabel: keyof typeof en
   /** Commit label while a commit is in flight. */
@@ -54,14 +56,18 @@ export function EditorFooter(props: EditorFooterProps): ReactNode {
       >
         {t(props.cancelLabel ?? 'cancel')}
       </button>
-      <button
-        type="button"
-        className={styles['primaryButton']}
-        disabled={props.submitDisabled}
-        onClick={props.onSubmit}
-      >
-        {props.busy ? t(props.submitBusyLabel) : t(props.submitLabel)}
-      </button>
+      {props.hideSubmit === true
+        ? null
+        : (
+          <button
+            type="button"
+            className={styles['primaryButton']}
+            disabled={props.submitDisabled}
+            onClick={props.onSubmit}
+          >
+            {props.busy ? t(props.submitBusyLabel) : t(props.submitLabel)}
+          </button>
+        )}
     </div>
   )
 }

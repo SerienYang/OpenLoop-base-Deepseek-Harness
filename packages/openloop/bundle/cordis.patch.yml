@@ -3,7 +3,36 @@
     printUrl: false
     surfaceContext: true
     trustedHosts: !!js ctx.webStartup.trustedHosts
+- id: connection
+  inject: [webRuntime, browserApiPolicy]
+- id: typert-gateway
+  inject: [browserApiPolicy]
+- id: session-log-download
+  disabled: true
+- id: credentials
+  disabled: true
+- id: code-runtime
+  disabled: true
+- id: subprocess
+  disabled: true
+- id: bash-sandbox
+  disabled: true
+- id: pwsh-sandbox
+  disabled: true
+- id: tool-bash
+  disabled: true
+- id: tool-pwsh
+  disabled: true
+- id: workflow-worker-thread
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-ralph
+  disabled: true
+- id: llm-deepseek
+  inject: [llm, credentialConsumers]
 - id: llm-pi-ai
+  inject: [llm, credentialConsumers]
   config:
     providers:
       volcengine-agent-plan:
@@ -78,10 +107,124 @@
             contextWindow: 1024000
             maxTokens: 65536
             input: [text, image]
+- id: web-search-deepseek
+  inject: [web, credentialConsumers]
+- id: cordis-client-runner
+  disabled: true
+- id: ui-cordis
+  disabled: true
+- id: ui-layout
+  disabled: true
+- id: ui-workspace
+  disabled: true
+- id: ui-settings
+  disabled: true
+- id: ui-settings-general
+  disabled: true
+- id: ui-settings-models
+  disabled: true
+- id: ui-settings-plugin-inventory
+  disabled: true
+- id: ui-settings-plugins
+  disabled: true
+- id: ui-permission
+  disabled: true
+- id: ui-agent-preset
+  disabled: true
+- id: permission
+  disabled: true
+- id: fs-sandbox
+  disabled: true
+- id: tool-fs-search
+  disabled: true
+- id: agent-presets
+  config:
+    default: standard
+    allowedPresetIds: [standard, code]
+    includeUserRoot: false
+    patches:
+      - id: tool-bash
+        disabled: true
+      - id: tool-pwsh
+        disabled: true
+      - id: tool-fs-search
+        disabled: true
+      - id: pty
+        disabled: true
+      - id: terminal-bash
+        disabled: true
+      - id: persistent-bash
+        disabled: true
+      - id: terminal
+        disabled: true
+      - id: tool-terminal
+        disabled: true
+      - id: lsp-stdio
+        disabled: true
+      - id: tool-lsp
+        disabled: true
+      - id: mcp-stdio
+        disabled: true
+      - id: subagent-acp
+        disabled: true
+      - id: subagent-codex
+        disabled: true
+      - id: subagent-claude-code
+        disabled: true
+      - id: subagent-dsh-sdk
+        disabled: true
+      - id: tool-subagent-codex
+        disabled: true
+      - id: tool-subagent-claude-code
+        disabled: true
+      - id: tool-presentation
+        disabled: true
+      - id: workflow-worker-thread
+        disabled: true
+      - id: tool-workflow
+        disabled: true
+      - id: tool-ralph
+        disabled: true
+      - id: tool-cordis
+        disabled: true
+      - id: filesystem
+        isolate: null
+      - id: fs-local
+        disabled: true
 - insert:
+    - id: openloop-settings-foundation
+      name: '@openloop/settings-foundation'
+    - id: desktop-bridge-host
+      name: '@openloop/desktop-bridge-host'
+      inject: [runtimeBootstrap]
+    - id: desktop-bridge-client
+      name: '@openloop/desktop-bridge-client'
+    - id: openloop-workspace-client
+      name: '@openloop/workspace-client'
+    - id: credentials-keychain
+      name: '@openloop/credentials-keychain'
+      inject: [desktopBridge]
     - id: openloop-bootstrap
       name: '@openloop/bundle/bootstrap-host'
-      inject: [webServer, runtimeBootstrap]
+      inject: [credentials, desktopBridge, webServer, runtimeBootstrap]
+- insert:
+    - id: workspace-authority
+      name: '@openloop/workspace-authority'
+      inject: [workspaceRegistry, desktopBridge]
+- insert:
+    - id: file-broker
+      name: '@openloop/file-broker'
+      inject: [desktopBridge]
+- insert:
+    - id: sandbox-workspace
+      name: '@openloop/sandbox-workspace'
+- insert:
+    - id: fs-workspace
+      name: '@openloop/fs-workspace'
+      inject: [fileBroker, workspaceRegistry, sandboxPolicy]
+- insert:
+    - id: shell
+      name: '@openloop/shell'
 - insert:
     - id: chat-zoom
       name: '@openloop/chat-zoom'

@@ -13,7 +13,6 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: resolve(import.meta.dirname, 'index.html'),
-        credentials: resolve(import.meta.dirname, 'src/credentials.html'),
       },
     },
   },

@@ -11,6 +11,7 @@ import {
 import { join, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
+import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
 import { load } from 'js-yaml'
 import { afterEach, describe, expect, it } from 'vitest'
 
@@ -65,6 +66,10 @@ function fixtureRoot(): string {
   })
   writeJson(join(root, 'vendor/cordis/tsconfig.json'), {
     extends: '../../tsconfig.base.json',
+    files: [],
+  })
+  writeJson(join(root, 'packages/runtime-diagnostics/invariants/tsconfig.json'), {
+    extends: '../../../tsconfig.base.json',
     files: [],
   })
   writeJson(join(root, 'tsconfig.host.json'), { files: [], references: [] })
@@ -166,13 +171,31 @@ describe('OpenLoop package scaffolder', () => {
       private: true,
       type: 'module',
       openloop: { face: 'host' },
+      exports: {
+        './invariant': {
+          types: './lib/types/invariant.d.ts',
+          default: './lib/invariant.js',
+        },
+      },
+      peerDependencies: {
+        '@deepseek-ai/dsh-invariants': 'workspace:^',
+      },
+      devDependencies: {
+        '@deepseek-ai/dsh-invariants': 'workspace:^',
+      },
     })
     expect(readFileSync(join(directory, 'src/index.ts'), 'utf8')).toContain('@openloop/window-state')
+    expect(readFileSync(join(directory, 'src/invariant.ts'), 'utf8'))
+      .toContain("ctx.invariants.register('@openloop/window-state'")
     expect(existsSync(join(directory, 'README.md'))).toBe(true)
     expect(readJson(join(directory, 'tsconfig.json'))).toMatchObject({
       extends: '../../../tsconfig.base.json',
       compilerOptions: { rootDir: 'src', outDir: 'lib/types' },
       include: ['src'],
+      references: [
+        { path: '../../../vendor/cordis' },
+        { path: '../../runtime-diagnostics/invariants' },
+      ],
     })
     expect(readJson(join(root, 'tsconfig.host.json')).references).toEqual([
       { path: './packages/openloop/window-state' },
@@ -328,6 +351,43 @@ describe('OpenLoop package scaffolder', () => {
     expect(loaded.plugin.name).toBe('window-state')
     expect(typeof loaded.plugin.apply).toBe('function')
     expect(load(readFileSync(join(bundleDirectory, 'cordis.patch.yml'), 'utf8'))).toEqual([
+      { insert: [{ id: 'window-state', name: '@openloop/window-state' }] },
+    ])
+  })
+
+  it('preserves Loader !!js expressions when appending a bundle row', async () => {
+    const { scaffoldPackage } = await loadScaffoldModule()
+    const root = fixtureRoot()
+    const bundleDirectory = join(root, 'packages/openloop/desktop')
+    writeJson(join(bundleDirectory, 'package.json'), {
+      name: '@openloop/desktop',
+      private: true,
+      dependencies: {},
+    })
+    const originalPatch = [
+      '- id: web-runtime',
+      '  inject: [webStartup, browserApiPolicy]',
+      '  config:',
+      '    trustedHosts: !!js ctx.webStartup.trustedHosts',
+      '',
+    ].join('\n')
+    writeFileSync(join(bundleDirectory, 'cordis.patch.yml'), originalPatch)
+
+    scaffoldPackage({
+      root,
+      name: 'window-state',
+      face: 'host',
+      bundleRow: 'desktop',
+    })
+
+    const patch = readFileSync(join(bundleDirectory, 'cordis.patch.yml'), 'utf8')
+    expect(patch.startsWith(originalPatch)).toBe(true)
+    expect(load(patch, { schema: entryListSchema })).toEqual([
+      {
+        id: 'web-runtime',
+        inject: ['webStartup', 'browserApiPolicy'],
+        config: { trustedHosts: { __jsExpr: 'ctx.webStartup.trustedHosts' } },
+      },
       { insert: [{ id: 'window-state', name: '@openloop/window-state' }] },
     ])
   })

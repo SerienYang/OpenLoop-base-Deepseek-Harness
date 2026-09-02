@@ -20,6 +20,14 @@ The stored selection is independent of catalog membership. A default naming an u
 
 Wire messages form a four-quadrant discriminated union — who initiates × request/response — decoupled from the physical channel: `ClientRequest` (POST `/api/<method>` body), `ServerResponse` (that POST's response body), `ServerRequest` (SSE frame), `ClientResponse` (POST `/api/respond` body). Responses always echo the matching request's `rpcId` and never mint a new one. Method parameter/return structures live only in the domain interface signatures (`SessionsApi`, `HostApi`, `EventsApi`); `RpcMethodMap` registers the methods and every other position derives via `RequestPayload<K>`/`ResponseValue<K>`. Zod schemas anchor `satisfies z.ZodType<Wire<T>>` and parse at two levels: envelope first, business payload second, dispatched per method. Business errors ride `RpcResult`'s error branch (`RpcErrorDetailsMap` closes the code set); HTTP status expresses only the carrier. Every `/api` POST must declare the `application/json` media type — anything else is refused with 415 before dispatch, so cross-site "simple" requests (which browsers send without a CORS preflight) can never execute a side-effectful method blind.
 
+`toFetchHandler(api, policy?)` accepts a structural version 1 browser policy.
+When present, it checks exact legacy method names and envelope-free physical
+routes before route lookup, payload schemas, or API Proxy business objects. An
+optional target-only preflight lets an outer HTTP carrier reject disallowed
+methods before buffering the body; the decoded payload still passes the full
+policy check. Unknown targets return 403. Omitting the policy preserves the
+original DSH carrier behavior.
+
 The layering/protocol decisions are recorded in the GUI layering and RPC protocol RFC; the browser-side consumption architecture in the web client architecture RFC.
 
 Question responses are validated against their pending request before the first answer claims it. A multi-select item may carry both requested option labels in `selected` and non-empty `custom` text; a single-select item must use one or the other. Duplicate labels, unknown labels, mismatched ids, incomplete batches, and empty custom text are rejected as `bad-response`.

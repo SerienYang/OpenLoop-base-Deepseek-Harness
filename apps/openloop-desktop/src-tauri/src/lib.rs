@@ -1,42 +1,101 @@
+#[cfg(all(target_os = "macos", feature = "openloop-e2e"))]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "macos")]
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     ffi::{OsStr, OsString},
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::Duration,
 };
-
 use tauri::{AppHandle, Manager, RunEvent, Url};
+#[cfg(all(target_os = "macos", not(feature = "openloop-e2e")))]
+use tauri_plugin_updater::Update;
 use tauri_plugin_updater::UpdaterExt;
 use tauri_plugin_window_state::StateFlags;
-#[cfg(target_os = "macos")]
-use zeroize::Zeroizing;
 
+#[cfg(not(target_os = "macos"))]
+use crate::bridge::BridgeDispatchTables;
+use crate::bridge::{
+    server::{BridgeHandler, BridgeHandlerError},
+    AuthenticatedBridgeDispatcher, BridgeListener, BridgeServer,
+};
 #[cfg(target_os = "macos")]
-use crate::credentials::{KeychainStore, SecurePromptState};
+use crate::credentials::{
+    credential_bridge_dispatch_tables_with_migration_status,
+    migration::{
+        commit_migration, credential_health_plan, plan_migration, prepare_migration,
+        prepare_migration_with_transaction_id, rollback_migration, MigrationOutcome,
+        NoopMigrationHook, ReadOnlyLegacySource,
+    },
+    AppKitCredentialDeletionConfirmation, AppKitCredentialSheet, CredentialAccount,
+    CredentialMigrationStatusHandle, CredentialSheetCoordinator, CredentialSheetGate,
+    KeychainStore,
+};
+#[cfg(target_os = "macos")]
+use crate::files::{install_file_broker_handlers, FileBroker};
 use crate::launcher::{
     InstanceAction, LaunchReadinessExpectation, LaunchSecrets, SingleInstance, SupervisedChild,
 };
+#[cfg(target_os = "macos")]
+use crate::update::recovery::{CommittedPublication, PublicationCompanion};
 use crate::update::{
     archive::stage_verified_archive,
+    cleanup::{ensure_no_pending_cleanup, load_pending_cleanup, CleanupCompanion, PendingCleanup},
     coordinator::{
         parse_host_action, CheckReport, DownloadStatus, DownloadUrlPolicy, HostAction,
         InstallPublication, InstallReport,
     },
     health::{
-        ensure_channel_dsh_home, required_dsh_home, BundleHealthProbe, CandidateProcessHealth,
-        TEST_PROBE_FAILURE_ENVIRONMENT,
+        ensure_channel_dsh_home, install_credential_health_plan_handler, required_dsh_home,
+        BundleHealthProbe, CandidateProcessHealth, CredentialHealthPlan,
+        MainWebviewHealthAcknowledgement, MainWebviewHealthExpectation,
+        MIGRATION_TRANSACTION_ENVIRONMENT, TEST_PROBE_FAILURE_ENVIRONMENT,
     },
     lease::UpdateLease,
-    recovery::{PublicationOutcome, RecoveryTransaction},
+    recovery::{
+        pending_update_migration_transaction_id, recover_interrupted_update_with_bound_companion,
+        PublicationOutcome, RecoveryTransaction,
+    },
+};
+#[cfg(all(target_os = "macos", any(test, not(feature = "openloop-e2e"))))]
+use crate::update::{coordinator::CoordinatorError, state::UpdateFailure};
+#[cfg(all(target_os = "macos", not(feature = "openloop-e2e")))]
+use crate::update::{
+    coordinator::{check_update, install_checked_update_with_observer},
+    state::{AvailableUpdate, UpdateInstallObserver, UpdateInstallResult},
+};
+#[cfg(target_os = "macos")]
+use crate::update::{
+    schedule::{ScheduledUpdateWorker, UpdateCheckSchedule, UpdateCheckTimestampStore},
+    state::{
+        install_update_bridge_handlers, AppKitUpdateInstallConfirmation, UpdateChecker,
+        UpdateInstaller, UpdateRestartRequester, UpdateState,
+    },
+};
+#[cfg(target_os = "macos")]
+use crate::workspaces::{
+    bridge::{install_workspace_authority_handlers, install_workspace_transaction_handlers},
+    confirmation::AppKitWorkspaceRevokeConfirmation,
+    grants::GrantStore,
+    journal::WorkspaceJournal,
+    picker::{AppKitWorkspaceDirectoryPicker, PendingGrantRegistry},
 };
 
+pub mod bridge;
 pub mod browser;
 #[cfg(target_os = "macos")]
 pub mod credentials;
+#[cfg(all(target_os = "macos", feature = "openloop-e2e"))]
+mod e2e;
+#[cfg(target_os = "macos")]
+pub mod files;
 pub mod launcher;
 pub mod spikes;
 pub mod update;
+#[cfg(target_os = "macos")]
+pub mod workspaces;
 
 #[cfg(target_os = "macos")]
 pub fn build_browser_webview(
@@ -64,6 +123,18 @@ struct OpenloopBuildManifest {
     plugin_package_spec_version: String,
     openloop_data_version: u64,
     dsh_data_version: u64,
+    brand: OpenloopBrandManifest,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OpenloopBrandManifest {
+    product_name: String,
+    document_suffix: String,
+    mark_asset: String,
+    hero_title: String,
+    preview_label: String,
+    attribution: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
@@ -153,72 +224,6 @@ fn build_manifest() -> Result<OpenloopBuildManifest, String> {
     embedded_build_manifest()
 }
 
-#[cfg(target_os = "macos")]
-#[tauri::command]
-fn credentials_set(
-    secret: Vec<u8>,
-    prompt_token: String,
-    window: tauri::WebviewWindow,
-    prompt_state: tauri::State<'_, SecurePromptState>,
-    keychain: tauri::State<'_, KeychainStore>,
-) -> Result<(), String> {
-    let secret = Zeroizing::new(secret);
-    let account = prompt_state
-        .account_for_prompt(window.label(), &prompt_token)
-        .map_err(|error| error.to_string())?;
-    keychain
-        .set(&account, secret.as_slice())
-        .map_err(|error| error.to_string())?;
-    destroy_credentials_prompt(&window, &prompt_state, &prompt_token)
-}
-
-#[cfg(target_os = "macos")]
-#[tauri::command]
-fn credentials_unset(
-    prompt_token: String,
-    window: tauri::WebviewWindow,
-    prompt_state: tauri::State<'_, SecurePromptState>,
-    keychain: tauri::State<'_, KeychainStore>,
-) -> Result<(), String> {
-    let account = prompt_state
-        .account_for_prompt(window.label(), &prompt_token)
-        .map_err(|error| error.to_string())?;
-    keychain
-        .delete(&account)
-        .map_err(|error| error.to_string())?;
-    destroy_credentials_prompt(&window, &prompt_state, &prompt_token)
-}
-
-#[cfg(target_os = "macos")]
-#[tauri::command]
-fn credentials_status(
-    prompt_token: String,
-    window: tauri::WebviewWindow,
-    prompt_state: tauri::State<'_, SecurePromptState>,
-    keychain: tauri::State<'_, KeychainStore>,
-) -> Result<bool, String> {
-    let account = prompt_state
-        .account_for_prompt(window.label(), &prompt_token)
-        .map_err(|error| error.to_string())?;
-    keychain.status(&account).map_err(|error| error.to_string())
-}
-
-#[cfg(target_os = "macos")]
-fn destroy_credentials_prompt(
-    window: &tauri::WebviewWindow,
-    prompt_state: &SecurePromptState,
-    prompt_token: &str,
-) -> Result<(), String> {
-    let clear_result = prompt_state
-        .clear_for_prompt(window.label(), prompt_token)
-        .map(|_| ())
-        .map_err(|error| error.to_string());
-    let destroy_result = window
-        .destroy()
-        .map_err(|error| format!("credential prompt destruction failed: {error}"));
-    clear_result.and(destroy_result)
-}
-
 fn embedded_build_manifest() -> Result<OpenloopBuildManifest, String> {
     serde_json::from_slice(EMBEDDED_BUILD_MANIFEST)
         .map_err(|error| format!("embedded build manifest is invalid: {error}"))
@@ -227,7 +232,288 @@ fn embedded_build_manifest() -> Result<OpenloopBuildManifest, String> {
 struct RuntimeProcessState {
     _instance: SingleInstance,
     _update_lease: UpdateLease,
+    _bridge: BridgeServer,
+    #[cfg(target_os = "macos")]
+    _update_schedule: ScheduledUpdateWorker,
+    #[cfg(target_os = "macos")]
+    _health: Arc<Mutex<RuntimeHealthState>>,
     child: Mutex<SupervisedChild>,
+}
+
+#[cfg(all(target_os = "macos", feature = "openloop-e2e"))]
+static E2E_TERMINATION_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(all(target_os = "macos", feature = "openloop-e2e"))]
+extern "C" fn request_e2e_termination(_signal: libc::c_int) {
+    E2E_TERMINATION_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+#[cfg(all(target_os = "macos", feature = "openloop-e2e"))]
+fn install_e2e_termination_handler(app: AppHandle) -> Result<(), String> {
+    let previous = unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            request_e2e_termination as *const () as libc::sighandler_t,
+        )
+    };
+    if previous == libc::SIG_ERR {
+        return Err(format!(
+            "Openloop E2E SIGTERM handler failed: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    std::thread::Builder::new()
+        .name("openloop-e2e-termination".to_owned())
+        .spawn(move || loop {
+            if E2E_TERMINATION_REQUESTED.swap(false, Ordering::SeqCst) {
+                app.exit(0);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        })
+        .map(|_| ())
+        .map_err(|error| format!("Openloop E2E termination watcher failed: {error}"))
+}
+
+#[cfg(all(target_os = "macos", not(feature = "openloop-e2e")))]
+struct TauriUpdateChecker {
+    app: AppHandle,
+    current_version: String,
+    updater_config: update::channel::UpdateChannelConfig,
+    policy: DownloadUrlPolicy,
+    schedule: Arc<Mutex<UpdateCheckSchedule>>,
+    timestamp_store: Arc<UpdateCheckTimestampStore>,
+}
+
+fn build_channel_updater(
+    app: &AppHandle,
+    config: &update::channel::UpdateChannelConfig,
+) -> tauri_plugin_updater::Result<tauri_plugin_updater::Updater> {
+    let (endpoints, public_key, timeout) = config.updater_builder_config().into_parts();
+    app.updater_builder()
+        .endpoints(endpoints)?
+        .pubkey(public_key)
+        .timeout(timeout)
+        .build()
+}
+
+#[cfg(all(target_os = "macos", not(feature = "openloop-e2e")))]
+impl UpdateChecker<Update> for TauriUpdateChecker {
+    fn check(&self) -> Result<Option<AvailableUpdate<Update>>, UpdateFailure> {
+        let checked_at = update_time();
+        if let Ok(mut schedule) = self.schedule.lock() {
+            schedule.manual_action(checked_at);
+        }
+        let _ = self.timestamp_store.record(checked_at);
+        let updater = build_channel_updater(&self.app, &self.updater_config)
+            .map_err(|_| UpdateFailure::Check)?;
+        let (_report, update) = tauri::async_runtime::block_on(check_update(
+            &updater,
+            &self.current_version,
+            &self.policy,
+        ))
+        .map_err(|error| update_failure(&error))?;
+        Ok(update.map(|update| {
+            let version = update.version.clone();
+            let release_notes = update.body.clone();
+            AvailableUpdate::new(update, version, self.updater_config.channel())
+                .with_optional_release_notes(release_notes)
+        }))
+    }
+}
+
+#[cfg(all(target_os = "macos", not(feature = "openloop-e2e")))]
+struct TauriUpdateInstaller {
+    installed_app: PathBuf,
+    channel_root: PathBuf,
+    channel: update::channel::ReleaseChannel,
+    dsh_home: PathBuf,
+    policy: DownloadUrlPolicy,
+}
+
+#[cfg(all(target_os = "macos", not(feature = "openloop-e2e")))]
+impl UpdateInstaller<Update> for TauriUpdateInstaller {
+    fn install(
+        &self,
+        update: Update,
+        observer: &dyn UpdateInstallObserver,
+    ) -> Result<UpdateInstallResult, UpdateFailure> {
+        ensure_no_pending_cleanup(&self.channel_root, self.channel)
+            .map_err(|_| UpdateFailure::Recovery)?;
+        let credential_plan = credential_health_plan(&self.channel_root, &self.dsh_home, None)
+            .map_err(|_| UpdateFailure::Install)?;
+        let mut health = CandidateProcessHealth::new(&update.version, &self.dsh_home)
+            .with_migration_expectation(
+                credential_plan.migration_transaction_id,
+                credential_plan.references.len(),
+            );
+        let report = tauri::async_runtime::block_on(install_checked_update_with_observer(
+            update,
+            &self.installed_app,
+            &self.channel_root,
+            self.channel,
+            &mut health,
+            &self.policy,
+            observer,
+        ))
+        .map_err(|error| update_failure(&error))?;
+        match report.publication {
+            InstallPublication::Committed => Ok(UpdateInstallResult::Committed),
+            InstallPublication::RolledBack(_) => Ok(UpdateInstallResult::RolledBack),
+            InstallPublication::NoUpdate => Err(UpdateFailure::Install),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct TauriUpdateRestart(AppHandle);
+
+#[cfg(target_os = "macos")]
+impl UpdateRestartRequester for TauriUpdateRestart {
+    fn request_restart(&self) {
+        self.0.request_restart();
+    }
+}
+
+#[cfg(all(target_os = "macos", any(test, not(feature = "openloop-e2e"))))]
+fn update_failure(error: &CoordinatorError) -> UpdateFailure {
+    match error {
+        CoordinatorError::Check(_) => UpdateFailure::Check,
+        CoordinatorError::UnsafeDownloadUrl(_) => UpdateFailure::UnsafeSource,
+        CoordinatorError::Download(
+            tauri_plugin_updater::Error::Minisign(_)
+            | tauri_plugin_updater::Error::Base64(_)
+            | tauri_plugin_updater::Error::SignatureUtf8(_),
+        ) => UpdateFailure::SignatureVerification,
+        CoordinatorError::Download(_) => UpdateFailure::DownloadInterrupted,
+        CoordinatorError::InsufficientDiskSpace { .. } => UpdateFailure::InsufficientDiskSpace,
+        CoordinatorError::Recovery(_) => UpdateFailure::Recovery,
+        CoordinatorError::Cleanup(_) => UpdateFailure::Recovery,
+        CoordinatorError::InvalidArguments
+        | CoordinatorError::Stage(_)
+        | CoordinatorError::MissingInstallationRoot
+        | CoordinatorError::DiskInspection(_)
+        | CoordinatorError::State(_)
+        | CoordinatorError::Serialize(_) => UpdateFailure::Install,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn update_time() -> Duration {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+}
+
+#[cfg(target_os = "macos")]
+struct RuntimeHealthState {
+    acknowledged: bool,
+    pending_migration: Option<PendingCredentialMigration>,
+    pending_cleanup: Option<PendingCleanup>,
+}
+
+#[cfg(target_os = "macos")]
+impl RuntimeHealthState {
+    fn acknowledge(
+        &mut self,
+        migration_status: &CredentialMigrationStatusHandle,
+    ) -> Result<(), BridgeHandlerError> {
+        if self.acknowledged {
+            return Err(BridgeHandlerError::invalid_request());
+        }
+        if let Some(migration) = self.pending_migration.as_mut() {
+            migration
+                .commit_migration()
+                .map_err(|_| BridgeHandlerError::credential_failure())?;
+            migration_status
+                .complete()
+                .map_err(|_| BridgeHandlerError::credential_failure())?;
+        }
+        if let Some(cleanup) = self.pending_cleanup.as_mut() {
+            cleanup
+                .execute()
+                .map_err(|_| BridgeHandlerError::update_failure())?;
+        }
+        self.pending_migration.take();
+        self.pending_cleanup.take();
+        self.acknowledged = true;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct PendingCredentialMigration {
+    channel_root: PathBuf,
+    dsh_home: PathBuf,
+    transaction_id: Option<uuid::Uuid>,
+    store: KeychainStore,
+}
+
+#[cfg(target_os = "macos")]
+impl PendingCredentialMigration {
+    fn new(
+        channel_root: &Path,
+        dsh_home: &Path,
+        transaction_id: uuid::Uuid,
+        store: KeychainStore,
+    ) -> Self {
+        Self {
+            channel_root: channel_root.to_owned(),
+            dsh_home: dsh_home.to_owned(),
+            transaction_id: Some(transaction_id),
+            store,
+        }
+    }
+
+    fn commit_migration(&mut self) -> Result<(), String> {
+        let Some(transaction_id) = self.transaction_id else {
+            return Ok(());
+        };
+        commit_migration(
+            &self.channel_root,
+            &self.dsh_home,
+            transaction_id,
+            &mut NoopMigrationHook,
+        )
+        .map_err(|error| error.to_string())?;
+        self.transaction_id = None;
+        Ok(())
+    }
+
+    fn rollback_migration(&mut self) -> Result<(), String> {
+        let Some(transaction_id) = self.transaction_id else {
+            return Ok(());
+        };
+        rollback_migration(
+            &self.channel_root,
+            &self.dsh_home,
+            transaction_id,
+            &self.store,
+            &mut NoopMigrationHook,
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())?;
+        self.transaction_id = None;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl PublicationCompanion for PendingCredentialMigration {
+    fn commit(&mut self, _: &CommittedPublication) -> Result<(), String> {
+        self.commit_migration()
+    }
+
+    fn rollback(&mut self) -> Result<(), String> {
+        self.rollback_migration()
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for PendingCredentialMigration {
+    fn drop(&mut self) {
+        let _ = self.rollback_migration();
+    }
 }
 
 fn find_runtime_executable(executable: &Path, resource_dir: &Path) -> Option<PathBuf> {
@@ -258,13 +544,12 @@ fn runtime_executable(app: &AppHandle) -> Result<PathBuf, String> {
 fn start_runtime(
     app: &AppHandle,
     updater_config: &update::channel::UpdateChannelConfig,
+    manifest: &OpenloopBuildManifest,
 ) -> Result<Option<RuntimeProcessState>, String> {
     let dsh_home = channel_dsh_home(app, updater_config)?;
     let channel_root = dsh_home
         .parent()
         .ok_or_else(|| "Openloop channel data root is unavailable".to_owned())?;
-    let update_lease = UpdateLease::shared(channel_root)
-        .map_err(|error| format!("runtime update lease acquisition failed: {error}"))?;
     let requested_socket_path = channel_root.join("openloop-runtime.sock");
     let instance = SingleInstance::acquire(&requested_socket_path)
         .map_err(|error| format!("single-instance acquisition failed: {error}"))?;
@@ -272,8 +557,59 @@ fn start_runtime(
         app.exit(0);
         return Ok(None);
     }
-    let secrets = LaunchSecrets::generate(instance.socket_path().to_path_buf())
+    #[cfg(target_os = "macos")]
+    let store = KeychainStore::new(updater_config.channel());
+    #[cfg(target_os = "macos")]
+    let (migration_outcome, pending_migration, pending_cleanup, migration_lease) = {
+        let migration_lease = UpdateLease::exclusive(channel_root)
+            .map_err(|error| format!("credential migration lease acquisition failed: {error}"))?;
+        let installed = current_app_bundle()?;
+        let update_root = installed
+            .parent()
+            .ok_or_else(|| "installed app has no recovery root".to_owned())?;
+        recover_interrupted_publication(
+            update_root,
+            channel_root,
+            &dsh_home,
+            updater_config.channel(),
+            store,
+        )?;
+        let pending_cleanup = load_pending_cleanup(channel_root, updater_config.channel())
+            .map_err(|error| format!("load pending update cleanup failed: {error}"))?;
+        let migration_outcome =
+            prepare_migration(channel_root, &dsh_home, &store, &mut NoopMigrationHook)
+                .unwrap_or(MigrationOutcome::ReadOnlyLegacy);
+        let pending_migration = migration_outcome.transaction_id().map(|transaction_id| {
+            PendingCredentialMigration::new(channel_root, &dsh_home, transaction_id, store)
+        });
+        (
+            migration_outcome,
+            pending_migration,
+            pending_cleanup,
+            migration_lease,
+        )
+    };
+    #[cfg(not(target_os = "macos"))]
+    let migration_lease = UpdateLease::exclusive(channel_root)
+        .map_err(|error| format!("credential migration lease acquisition failed: {error}"))?;
+    let update_lease = migration_lease
+        .downgrade()
+        .map_err(|error| format!("runtime lease downgrade failed: {error}"))?;
+    let bridge_socket_path = if instance.socket_path() == requested_socket_path {
+        channel_root.join("openloop-bridge.sock")
+    } else {
+        let mut bridge_socket_name = instance
+            .socket_path()
+            .file_name()
+            .ok_or_else(|| "single-instance socket has no file name".to_owned())?
+            .to_os_string();
+        bridge_socket_name.push(".bridge");
+        instance.socket_path().with_file_name(bridge_socket_name)
+    };
+    let secrets = LaunchSecrets::generate(bridge_socket_path)
         .map_err(|error| format!("runtime launch secret generation failed: {error}"))?;
+    let bridge_listener = BridgeListener::bind(&secrets.socket_path)
+        .map_err(|error| format!("desktop bridge bind failed: {error}"))?;
     let window = app.get_webview_window("main");
     let forward_window = window.clone();
     instance
@@ -291,6 +627,187 @@ fn start_runtime(
     };
     let mut child = SupervisedChild::spawn_with_dsh_home(&executable, &secrets, &dsh_home)
         .map_err(|error| error.to_string())?;
+    #[cfg(all(target_os = "macos", feature = "openloop-e2e"))]
+    e2e::record_runtime_process(child.identity().pid)?;
+    #[cfg(target_os = "macos")]
+    let health = Arc::new(Mutex::new(RuntimeHealthState {
+        acknowledged: false,
+        pending_migration,
+        pending_cleanup,
+    }));
+    #[cfg(target_os = "macos")]
+    let migration_status = CredentialMigrationStatusHandle::from_outcome(&migration_outcome);
+    #[cfg(target_os = "macos")]
+    let (dispatch_tables, update_state, update_checker, update_schedule) = {
+        let sheet_gate = std::sync::Arc::new(CredentialSheetGate::default());
+        let writable = migration_outcome != MigrationOutcome::ReadOnlyLegacy;
+        let legacy = if migration_outcome == MigrationOutcome::ReadOnlyLegacy {
+            Some(
+                ReadOnlyLegacySource::new(channel_root, &dsh_home)
+                    .map_err(|error| format!("legacy credential fallback setup failed: {error}"))?,
+            )
+        } else {
+            None
+        };
+        let replacement = writable.then(|| {
+            std::sync::Arc::new(CredentialSheetCoordinator::with_gate(
+                std::sync::Arc::new(AppKitCredentialSheet::new(app.clone())),
+                std::sync::Arc::new(store),
+                sheet_gate.clone(),
+            )) as std::sync::Arc<dyn crate::credentials::CredentialReplacement>
+        });
+        let deletion = writable.then(|| {
+            std::sync::Arc::new(AppKitCredentialDeletionConfirmation::new(
+                app.clone(),
+                sheet_gate,
+            )) as std::sync::Arc<dyn crate::credentials::CredentialDeletionConfirmation>
+        });
+        let mut tables = credential_bridge_dispatch_tables_with_migration_status(
+            store,
+            replacement,
+            deletion,
+            legacy,
+            migration_status.clone(),
+        )
+        .map_err(|error| format!("credential bridge setup failed: {error}"))?;
+        let workspace_journal = WorkspaceJournal::open(channel_root, updater_config.channel())
+            .map_err(|error| format!("Workspace journal setup failed: {error}"))?;
+        let workspace_grants = GrantStore::open(channel_root, updater_config.channel())
+            .map_err(|error| format!("Workspace grant store setup failed: {error}"))?;
+        let launch_grants = workspace_grants
+            .load_for_launch()
+            .map_err(|error| format!("Workspace grant verification failed: {error}"))?;
+        let mut pending_grants = PendingGrantRegistry::new(secrets.launch_id);
+        pending_grants.inject_launch_grants(launch_grants);
+        let pending_grants = Arc::new(Mutex::new(pending_grants));
+        let file_broker = Arc::new(FileBroker::new(
+            secrets.launch_id,
+            workspace_grants.clone(),
+            workspace_journal.clone(),
+            pending_grants.clone(),
+        ));
+        install_workspace_authority_handlers(
+            &mut tables,
+            secrets.launch_id,
+            workspace_grants,
+            workspace_journal.clone(),
+            pending_grants,
+            Arc::new(AppKitWorkspaceDirectoryPicker::new(app.clone())),
+            Arc::new(AppKitWorkspaceRevokeConfirmation::new(app.clone())),
+        )?;
+        install_file_broker_handlers(&mut tables, file_broker)?;
+        install_workspace_transaction_handlers(&mut tables, workspace_journal)?;
+        let update_state = Arc::new(UpdateState::new(
+            updater_config.channel(),
+            Duration::from_secs(15 * 60),
+        ));
+        let update_timestamp_store = Arc::new(
+            UpdateCheckTimestampStore::open(channel_root, updater_config.channel())
+                .map_err(|error| format!("update schedule store setup failed: {error}"))?,
+        );
+        let update_schedule = Arc::new(Mutex::new(UpdateCheckSchedule::new(
+            update_timestamp_store.load(),
+        )));
+        #[cfg(not(feature = "openloop-e2e"))]
+        let update_checker: Arc<dyn UpdateChecker<Update>> = Arc::new(TauriUpdateChecker {
+            app: app.clone(),
+            current_version: manifest.app_version.clone(),
+            updater_config: updater_config.clone(),
+            policy: DownloadUrlPolicy::production(updater_config.channel()),
+            schedule: update_schedule.clone(),
+            timestamp_store: update_timestamp_store,
+        });
+        #[cfg(feature = "openloop-e2e")]
+        let update_checker: Arc<dyn UpdateChecker<e2e::FixtureUpdate>> =
+            Arc::new(e2e::FixtureUpdateChecker);
+        #[cfg(not(feature = "openloop-e2e"))]
+        let installed_app = current_app_bundle()?;
+        #[cfg(not(feature = "openloop-e2e"))]
+        let update_installer: Arc<dyn UpdateInstaller<Update>> = Arc::new(TauriUpdateInstaller {
+            installed_app,
+            channel_root: channel_root.to_owned(),
+            channel: updater_config.channel(),
+            dsh_home: dsh_home.clone(),
+            policy: DownloadUrlPolicy::production(updater_config.channel()),
+        });
+        #[cfg(feature = "openloop-e2e")]
+        let update_installer: Arc<dyn UpdateInstaller<e2e::FixtureUpdate>> =
+            Arc::new(e2e::FixtureUpdateInstaller);
+        install_update_bridge_handlers(
+            &mut tables,
+            update_state.clone(),
+            updater_config.channel(),
+            update_checker.clone(),
+            update_installer,
+            Arc::new(AppKitUpdateInstallConfirmation::new(app.clone())),
+            Arc::new(TauriUpdateRestart(app.clone())),
+            Arc::new(update_time),
+        )?;
+        let health_plan = match migration_outcome.transaction_id() {
+            Some(transaction_id) => {
+                let plan = credential_health_plan(channel_root, &dsh_home, Some(transaction_id))
+                    .map_err(|error| {
+                        format!("main WebView credential health plan failed: {error}")
+                    })?;
+                CredentialHealthPlan {
+                    migration_transaction_id: plan.migration_transaction_id,
+                    references: plan.references,
+                }
+            }
+            None => CredentialHealthPlan {
+                migration_transaction_id: None,
+                references: Vec::new(),
+            },
+        };
+        install_credential_health_plan_handler(&mut tables, health_plan.clone())
+            .map_err(|error| format!("credential health bridge setup failed: {error}"))?;
+        let health_state = health.clone();
+        let completed_migration_status = migration_status.clone();
+        #[cfg(feature = "openloop-e2e")]
+        let credential_probe_app = app.clone();
+        let mut expectation = MainWebviewHealthExpectation::new(
+            secrets.launch_id,
+            CORE_MANIFEST_SHA256,
+            manifest.openloop_data_version,
+            manifest.dsh_data_version,
+        );
+        if health_plan.migration_transaction_id.is_some() {
+            expectation = expectation.with_credential_health_plan(health_plan);
+        }
+        let handler: BridgeHandler = Arc::new(move |payload, _cancellation| {
+            let acknowledgement: MainWebviewHealthAcknowledgement = serde_json::from_value(payload)
+                .map_err(|_| BridgeHandlerError::invalid_request())?;
+            expectation
+                .validate(&acknowledgement)
+                .map_err(|_| BridgeHandlerError::invalid_request())?;
+            let mut health = health_state
+                .lock()
+                .map_err(|_| BridgeHandlerError::credential_failure())?;
+            health.acknowledge(&completed_migration_status)?;
+            #[cfg(feature = "openloop-e2e")]
+            e2e::run_credential_probe(credential_probe_app.clone())
+                .map_err(|_| BridgeHandlerError::credential_failure())?;
+            Ok(serde_json::Value::Null)
+        });
+        tables
+            .set_host_handler("acknowledgeMainWebviewHealth", handler)
+            .map_err(|error| format!("main WebView health bridge setup failed: {error}"))?;
+        (tables, update_state, update_checker, update_schedule)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let dispatch_tables = BridgeDispatchTables::unavailable();
+    let bridge_dispatcher = AuthenticatedBridgeDispatcher::new(
+        unsafe { libc::geteuid() },
+        child.identity().clone(),
+        executable,
+        secrets.launch_id,
+        secrets.bridge_secret.to_vec(),
+        dispatch_tables,
+    )
+    .map_err(|error| format!("desktop bridge authentication setup failed: {error}"))?;
+    let bridge = bridge_listener
+        .serve(bridge_dispatcher)
+        .map_err(|error| format!("desktop bridge server startup failed: {error}"))?;
     let readiness = child
         .wait_readiness(&expectation, Duration::from_secs(10))
         .map_err(|error| error.to_string())?;
@@ -307,17 +824,62 @@ fn start_runtime(
                 .map_err(|error| format!("Openloop runtime bootstrap URL is invalid: {error}"))?,
         )
         .map_err(|error| format!("Openloop main webview navigation failed: {error}"))?;
+    #[cfg(target_os = "macos")]
+    let update_schedule = ScheduledUpdateWorker::start(
+        update_schedule,
+        update_state,
+        update_checker,
+        Arc::new(update_time),
+    )?;
     Ok(Some(RuntimeProcessState {
         _instance: instance,
         _update_lease: update_lease,
+        _bridge: bridge,
+        #[cfg(target_os = "macos")]
+        _update_schedule: update_schedule,
+        #[cfg(target_os = "macos")]
+        _health: health,
         child: Mutex::new(child),
     }))
+}
+
+#[cfg(target_os = "macos")]
+fn recover_interrupted_publication(
+    update_root: &Path,
+    channel_root: &Path,
+    dsh_home: &Path,
+    channel: update::channel::ReleaseChannel,
+    store: KeychainStore,
+) -> Result<(), String> {
+    let transaction_id = pending_update_migration_transaction_id(update_root)
+        .map_err(|error| format!("inspect interrupted update failed: {error}"))?;
+    if let Some(transaction_id) = transaction_id {
+        let mut migration =
+            PendingCredentialMigration::new(channel_root, dsh_home, transaction_id, store);
+        let mut cleanup =
+            CleanupCompanion::with_companion(channel_root, channel, &mut migration)
+                .map_err(|error| format!("prepare interrupted update cleanup failed: {error}"))?;
+        recover_interrupted_update_with_bound_companion(update_root, transaction_id, &mut cleanup)
+            .map_err(|error| format!("recover interrupted update failed: {error}"))
+    } else {
+        let mut cleanup = CleanupCompanion::new(channel_root, channel)
+            .map_err(|error| format!("prepare interrupted update cleanup failed: {error}"))?;
+        crate::update::recovery::recover_interrupted_update_with_companion(
+            update_root,
+            &mut cleanup,
+        )
+        .map_err(|error| format!("recover interrupted update failed: {error}"))
+    }
 }
 
 fn channel_dsh_home(
     app: &AppHandle,
     updater_config: &update::channel::UpdateChannelConfig,
 ) -> Result<PathBuf, String> {
+    #[cfg(feature = "openloop-e2e")]
+    if let Some(path) = e2e::configured_dsh_home(updater_config.data_root_name())? {
+        return Ok(path);
+    }
     let app_data = app
         .path()
         .app_data_dir()
@@ -377,30 +939,109 @@ fn write_failure_json(error: &str) {
     }
 }
 
-fn run_health_probe(
+fn start_health_probe(
+    app: &AppHandle,
     manifest: &OpenloopBuildManifest,
     updater_config: &update::channel::UpdateChannelConfig,
 ) -> Result<(), String> {
     let dsh_home_value = std::env::var_os("DSH_HOME");
     let dsh_home = required_dsh_home(dsh_home_value.as_deref(), updater_config.data_root_name())
         .map_err(|error| error.to_string())?;
+    let injected = std::env::var(TEST_PROBE_FAILURE_ENVIRONMENT).ok();
     let probe = BundleHealthProbe::new(
         &manifest.app_version,
         updater_config.bundle_identifier(),
         CORE_MANIFEST_SHA256,
+        manifest.openloop_data_version,
+        manifest.dsh_data_version,
     );
-    let injected = std::env::var(TEST_PROBE_FAILURE_ENVIRONMENT).ok();
     if probe
         .test_failure_injection(&manifest.channel, injected.as_deref())
         .map_err(|error| error.to_string())?
     {
         return Err("trusted test health failure was injected".to_owned());
     }
-    let app = current_app_bundle()?;
-    let report = probe
-        .inspect(&app, Duration::from_secs(45), &dsh_home)
+    let app_bundle = current_app_bundle()?;
+    let migration_transaction_id = std::env::var(MIGRATION_TRANSACTION_ENVIRONMENT)
+        .ok()
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|_| "candidate migration transaction identity is invalid".to_owned())
+        })
+        .transpose()?;
+    let channel_root = dsh_home
+        .parent()
+        .ok_or_else(|| "candidate channel data root is unavailable".to_owned())?;
+    let migration_plan = credential_health_plan(channel_root, &dsh_home, migration_transaction_id)
+        .map_err(|error| format!("candidate credential health plan failed: {error}"))?;
+    let health_plan = CredentialHealthPlan {
+        migration_transaction_id: migration_plan.migration_transaction_id,
+        references: migration_plan.references,
+    };
+    let store = KeychainStore::new(updater_config.channel());
+    let session = probe
+        .begin_with_credential_health(
+            &app_bundle,
+            Duration::from_secs(45),
+            &dsh_home,
+            health_plan,
+            move |reference| {
+                let account = CredentialAccount::new(reference).map_err(|_| ())?;
+                store.status(&account).map_err(|_| ())
+            },
+        )
         .map_err(|error| error.to_string())?;
-    write_stdout_line(&report.to_json_line().map_err(|error| error.to_string())?)
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "candidate health WebView is missing".to_owned())?;
+    window
+        .hide()
+        .map_err(|error| format!("hide candidate health WebView failed: {error}"))?;
+    window
+        .navigate(
+            Url::parse(session.bootstrap_url())
+                .map_err(|error| format!("candidate health bootstrap URL is invalid: {error}"))?,
+        )
+        .map_err(|error| format!("navigate candidate health WebView failed: {error}"))?;
+    let app = app.clone();
+    std::thread::spawn(move || match session.finish() {
+        Ok(report) => {
+            match report
+                .to_json_line()
+                .map_err(|error| error.to_string())
+                .and_then(|line| write_stdout_line(&line))
+            {
+                Ok(()) => app.exit(0),
+                Err(error) => {
+                    write_failure_json(&error);
+                    app.exit(1);
+                }
+            }
+        }
+        Err(error) => {
+            write_failure_json(&error.to_string());
+            app.exit(1);
+        }
+    });
+    Ok(())
+}
+
+async fn run_update_check_after_recovery<T, Check, CheckFuture>(
+    action: HostAction,
+    channel_root: &Path,
+    channel: update::channel::ReleaseChannel,
+    check: Check,
+) -> Result<T, String>
+where
+    Check: FnOnce() -> CheckFuture,
+    CheckFuture: std::future::Future<Output = Result<T, String>>,
+{
+    if action == HostAction::Install {
+        ensure_no_pending_cleanup(channel_root, channel)
+            .map_err(|error| format!("pending update cleanup check failed: {error}"))?;
+    }
+    check().await
 }
 
 async fn run_update_spike(
@@ -415,12 +1056,37 @@ async fn run_update_spike(
         .ok_or_else(|| "Openloop channel data root is unavailable".to_owned())?;
     let _update_lease = UpdateLease::exclusive(channel_root)
         .map_err(|error| format!("exclusive update lease acquisition failed: {error}"))?;
-    let update = app
-        .updater()
-        .map_err(|error| format!("create signed updater failed: {error}"))?
-        .check()
-        .await
-        .map_err(|error| format!("signed update check failed: {error}"))?;
+    if action == HostAction::Install {
+        ensure_no_pending_cleanup(channel_root, updater_config.channel())
+            .map_err(|error| format!("pending update cleanup check failed: {error}"))?;
+    }
+    let installed = current_app_bundle()?;
+    let update_root = installed
+        .parent()
+        .ok_or_else(|| "installed app has no recovery root".to_owned())?;
+    #[cfg(target_os = "macos")]
+    recover_interrupted_publication(
+        update_root,
+        channel_root,
+        &dsh_home,
+        updater_config.channel(),
+        KeychainStore::new(updater_config.channel()),
+    )?;
+    #[cfg(not(target_os = "macos"))]
+    crate::update::recovery::recover_interrupted_update(update_root)
+        .map_err(|error| format!("recover interrupted update failed: {error}"))?;
+    let mut update =
+        run_update_check_after_recovery(action, channel_root, updater_config.channel(), || async {
+            build_channel_updater(app, &updater_config)
+                .map_err(|error| format!("create signed updater failed: {error}"))?
+                .check()
+                .await
+                .map_err(|error| format!("signed update check failed: {error}"))
+        })
+        .await?;
+    if let Some(update) = update.as_mut() {
+        update.timeout = Some(update::channel::UPDATE_NETWORK_TIMEOUT);
+    }
     let download_policy = DownloadUrlPolicy::production(updater_config.channel());
     if let Some(update) = update.as_ref() {
         download_policy
@@ -446,7 +1112,6 @@ async fn run_update_spike(
         .json_line()
         .map_err(|error| error.to_string());
     };
-    let installed = current_app_bundle()?;
     let current = update.current_version.clone();
     let available = update.version.clone();
     download_policy
@@ -458,17 +1123,57 @@ async fn run_update_spike(
         .map_err(|error| format!("signed update download or verification failed: {error}"))?;
     let candidate = stage_verified_archive(&archive, &installed)
         .map_err(|error| format!("verified update staging failed: {error}"))?;
-    let root = installed
-        .parent()
-        .ok_or_else(|| "installed app has no recovery root".to_owned())?;
-    let transaction = RecoveryTransaction::open(root, &installed, candidate.path())
+    let transaction = RecoveryTransaction::open(update_root, &installed, candidate.path())
         .map_err(|error| format!("open candidate recovery transaction failed: {error}"))?;
-    let mut health = CandidateProcessHealth::new(&update.version, dsh_home);
-    let (publication, preserved_backup, failed_candidate) = match transaction
-        .publish(&mut health)
-        .map_err(|error| {
-        format!("publish candidate recovery transaction failed: {error}")
-    })? {
+    #[cfg(target_os = "macos")]
+    let publication_outcome = {
+        let store = KeychainStore::new(updater_config.channel());
+        let migration_plan = plan_migration(channel_root, &dsh_home, &mut NoopMigrationHook)
+            .map_err(|error| format!("candidate credential migration planning failed: {error}"))?;
+        let transaction = transaction
+            .prepare(migration_plan.transaction_id())
+            .map_err(|error| format!("prepare candidate recovery transaction failed: {error}"))?;
+        let migration = match migration_plan.transaction_id() {
+            Some(transaction_id) => prepare_migration_with_transaction_id(
+                channel_root,
+                &dsh_home,
+                &store,
+                transaction_id,
+                &mut NoopMigrationHook,
+            )
+            .map_err(|error| format!("candidate credential migration failed: {error}"))?,
+            None => MigrationOutcome::NotNeeded,
+        };
+        let mut pending_migration = migration.transaction_id().map(|transaction_id| {
+            PendingCredentialMigration::new(channel_root, &dsh_home, transaction_id, store)
+        });
+        let credential_plan =
+            credential_health_plan(channel_root, &dsh_home, migration.transaction_id())
+                .map_err(|error| format!("candidate credential health plan failed: {error}"))?;
+        let mut health = CandidateProcessHealth::new(&update.version, &dsh_home)
+            .with_migration_expectation(
+                credential_plan.migration_transaction_id,
+                credential_plan.references.len(),
+            );
+        if let Some(companion) = pending_migration.as_mut() {
+            let mut cleanup =
+                CleanupCompanion::with_companion(channel_root, updater_config.channel(), companion)
+                    .map_err(|error| format!("prepare update cleanup failed: {error}"))?;
+            transaction.publish_with_companion(&mut health, &mut cleanup)
+        } else {
+            let mut cleanup = CleanupCompanion::new(channel_root, updater_config.channel())
+                .map_err(|error| format!("prepare update cleanup failed: {error}"))?;
+            transaction.publish_with_companion(&mut health, &mut cleanup)
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
+    let publication_outcome = {
+        let mut health = CandidateProcessHealth::new(&update.version, dsh_home);
+        transaction.publish(&mut health)
+    };
+    let publication_outcome = publication_outcome
+        .map_err(|error| format!("publish candidate recovery transaction failed: {error}"))?;
+    let (publication, preserved_backup, failed_candidate) = match publication_outcome {
         PublicationOutcome::Committed { preserved_backup } => {
             (InstallPublication::Committed, Some(preserved_backup), None)
         }
@@ -544,15 +1249,6 @@ pub fn run() -> i32 {
             return 1;
         }
     };
-    if action == HostAction::HealthProbe {
-        return match run_health_probe(&manifest, &updater_config) {
-            Ok(()) => 0,
-            Err(error) => {
-                write_failure_json(&error);
-                1
-            }
-        };
-    }
     let window_state_plugin = tauri_plugin_window_state::Builder::default()
         .with_state_flags(StateFlags::POSITION | StateFlags::SIZE | StateFlags::MAXIMIZED)
         .with_filter(|label| label == "main")
@@ -561,35 +1257,46 @@ pub fn run() -> i32 {
         .target("darwin-aarch64")
         .pubkey(updater_config.public_key())
         .build();
-    let builder = tauri::Builder::default()
-        .plugin(window_state_plugin)
-        .plugin(updater_plugin)
-        .manage(updater_config);
-    #[cfg(target_os = "macos")]
+    let builder = tauri::Builder::default();
+    let builder = if action == HostAction::Normal {
+        builder.plugin(window_state_plugin)
+    } else {
+        builder
+    };
     let builder = builder
-        .manage(KeychainStore::new(channel))
-        .manage(SecurePromptState::default())
-        .invoke_handler(tauri::generate_handler![
-            build_manifest,
-            credentials_set,
-            credentials_unset,
-            credentials_status
-        ]);
-    #[cfg(not(target_os = "macos"))]
-    let builder = builder.invoke_handler(tauri::generate_handler![build_manifest]);
+        .plugin(updater_plugin)
+        .manage(updater_config)
+        .invoke_handler(tauri::generate_handler![build_manifest]);
+    #[cfg(feature = "openloop-e2e")]
+    let builder = builder
+        .plugin(tauri_plugin_wdio::init())
+        .plugin(tauri_plugin_wdio_webdriver::init());
+    let runtime_manifest = manifest.clone();
     let app = builder
         .setup(move |app| {
+            let updater_config = app.state::<update::channel::UpdateChannelConfig>();
+            if action == HostAction::HealthProbe {
+                start_health_probe(app.handle(), &runtime_manifest, &updater_config)?;
+                return Ok(());
+            }
             if action != HostAction::Normal {
                 return Ok(());
             }
-            let updater_config = app.state::<update::channel::UpdateChannelConfig>();
-            if let Some(state) = start_runtime(app.handle(), &updater_config)? {
+            if let Some(state) = start_runtime(app.handle(), &updater_config, &runtime_manifest)? {
                 app.manage(state);
             }
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("failed to build Openloop desktop application");
+    #[cfg(all(target_os = "macos", feature = "openloop-e2e"))]
+    if let Err(error) = install_e2e_termination_handler(app.handle().clone()) {
+        write_failure_json(&error);
+        return 1;
+    }
+    if action == HostAction::HealthProbe {
+        return app.run_return(|_, _| {});
+    }
     if matches!(action, HostAction::Check | HostAction::Install) {
         return match tauri::async_runtime::block_on(run_update_spike(
             app.handle(),
@@ -610,6 +1317,22 @@ pub fn run() -> i32 {
         };
     }
     app.run(|app, event| {
+        #[cfg(feature = "openloop-e2e")]
+        if matches!(
+            &event,
+            RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Destroyed,
+                ..
+            } if label == "main"
+        ) {
+            if let Some(state) = app.try_state::<RuntimeProcessState>() {
+                if let Ok(mut child) = state.child.lock() {
+                    let _ = child.terminate_if_verified();
+                }
+            }
+            app.exit(0);
+        }
         if matches!(event, RunEvent::Exit) {
             if let Some(state) = app.try_state::<RuntimeProcessState>() {
                 if let Ok(mut child) = state.child.lock() {
@@ -624,7 +1347,40 @@ pub fn run() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::{
+        ffi::OsString,
+        fs,
+        os::unix::{ffi::OsStringExt, net::UnixListener},
+        panic::{catch_unwind, AssertUnwindSafe},
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    struct HealthyPublication;
+
+    impl crate::update::recovery::CandidateHealth for HealthyPublication {
+        fn await_health(&mut self, _: &Path, _: Duration) -> crate::update::recovery::HealthStatus {
+            crate::update::recovery::HealthStatus::Healthy
+        }
+    }
+
+    struct CrashAtCommitIntent;
+
+    impl crate::update::recovery::RecoveryTestHook for CrashAtCommitIntent {
+        fn before(
+            &mut self,
+            boundary: crate::update::recovery::RecoveryBoundary,
+            _: &Path,
+            _: &Path,
+        ) {
+            if boundary
+                == crate::update::recovery::RecoveryBoundary::AfterJournalParentFsync(
+                    crate::update::recovery::RecoveryState::CommitIntent,
+                )
+            {
+                panic!("injected recovery journal crash");
+            }
+        }
+    }
 
     #[test]
     fn reads_the_embedded_test_manifest() {
@@ -645,6 +1401,127 @@ mod tests {
     }
 
     #[test]
+    fn update_spike_install_cleanup_gates_surround_recovery_and_precede_network_check() {
+        let source = include_str!("lib.rs");
+        let spike = source
+            .split_once("async fn run_update_spike(")
+            .expect("update spike entry")
+            .1
+            .split_once("\npub fn run()")
+            .expect("update spike boundary")
+            .0;
+        let install_branch = spike
+            .find("if action == HostAction::Install")
+            .expect("Install-specific cleanup gate");
+        let cleanup_gate = spike
+            .find("ensure_no_pending_cleanup(channel_root, updater_config.channel())")
+            .expect("channel-scoped cleanup gate");
+        let recovery = spike
+            .find("recover_interrupted_publication(")
+            .expect("publication recovery");
+        let post_recovery_gate = spike
+            .find("run_update_check_after_recovery(")
+            .expect("post-recovery cleanup gate");
+        let network_check = spike.find(".check()").expect("network update check");
+
+        assert!(install_branch < cleanup_gate);
+        assert!(cleanup_gate < recovery);
+        assert!(recovery < post_recovery_gate);
+        assert!(post_recovery_gate < network_check);
+    }
+
+    #[test]
+    fn install_rejects_cleanup_created_by_recovery_before_network_check() {
+        let fixture = tempfile::tempdir().expect("update spike fixture");
+        let channel_root = fixture.path().join("channel");
+        let update_root = fixture.path().join("Applications");
+        let installed = update_root.join("Openloop.app");
+        let candidate = update_root.join(".openloop-candidate.app");
+        fs::create_dir(&channel_root).expect("channel root");
+        fs::create_dir(&update_root).expect("update root");
+        fs::create_dir(&installed).expect("installed app");
+        fs::write(installed.join("marker"), b"old").expect("installed marker");
+        fs::create_dir(&candidate).expect("candidate app");
+        fs::write(candidate.join("marker"), b"new").expect("candidate marker");
+        let transaction = RecoveryTransaction::open(&update_root, &installed, &candidate)
+            .expect("recovery transaction");
+        let mut cleanup =
+            CleanupCompanion::new(&channel_root, update::channel::ReleaseChannel::Test)
+                .expect("cleanup companion");
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            let _ = transaction.publish_with_companion_and_hook(
+                &mut HealthyPublication,
+                &mut cleanup,
+                &mut CrashAtCommitIntent,
+            );
+        }))
+        .is_err());
+        ensure_no_pending_cleanup(&channel_root, update::channel::ReleaseChannel::Test)
+            .expect("pre-recovery cleanup gate");
+
+        let checker_calls = AtomicUsize::new(0);
+        let result = tauri::async_runtime::block_on(async {
+            let mut cleanup =
+                CleanupCompanion::new(&channel_root, update::channel::ReleaseChannel::Test)
+                    .expect("recovery cleanup companion");
+            crate::update::recovery::recover_interrupted_update_with_companion(
+                &update_root,
+                &mut cleanup,
+            )
+            .expect("recover committed publication");
+            run_update_check_after_recovery(
+                HostAction::Install,
+                &channel_root,
+                update::channel::ReleaseChannel::Test,
+                || async {
+                    checker_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+        });
+
+        assert!(result
+            .expect_err("post-recovery cleanup gate must reject install")
+            .contains("pending update cleanup check failed"));
+        assert_eq!(checker_calls.load(Ordering::SeqCst), 0);
+        assert!(update::cleanup::cleanup_journal_path(
+            &channel_root,
+            update::channel::ReleaseChannel::Test
+        )
+        .exists());
+    }
+
+    #[test]
+    fn check_ignores_pending_cleanup_after_recovery() {
+        let fixture = tempfile::tempdir().expect("update check fixture");
+        let channel_root = fixture.path().join("channel");
+        fs::create_dir(&channel_root).expect("channel root");
+        fs::write(
+            update::cleanup::cleanup_journal_path(
+                &channel_root,
+                update::channel::ReleaseChannel::Test,
+            ),
+            b"{",
+        )
+        .expect("unsafe pending cleanup journal");
+        let checker_calls = AtomicUsize::new(0);
+
+        tauri::async_runtime::block_on(run_update_check_after_recovery(
+            HostAction::Check,
+            &channel_root,
+            update::channel::ReleaseChannel::Test,
+            || async {
+                checker_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        ))
+        .expect("Check action must not inspect pending cleanup");
+
+        assert_eq!(checker_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn finds_the_packaged_runtime_next_to_the_host_executable() {
         let fixture = tempfile::tempdir().expect("temporary app bundle");
         let macos = fixture.path().join("Openloop.app/Contents/MacOS");
@@ -656,5 +1533,82 @@ mod tests {
         fs::write(&runtime, b"runtime").expect("packaged runtime");
 
         assert_eq!(find_runtime_executable(&host, &resources), Some(runtime),);
+    }
+
+    #[test]
+    fn main_webview_ack_keeps_failed_cleanup_pending_and_allows_retry() {
+        let fixture = tempfile::tempdir().expect("runtime health fixture");
+        let channel_root = fixture.path().join("channel");
+        let update_root = fixture.path().join("Applications");
+        let installed = update_root.join("Openloop.app");
+        let candidate = update_root.join(".openloop-candidate-runtime.app");
+        fs::create_dir(&channel_root).expect("channel root");
+        fs::create_dir(&update_root).expect("update root");
+        fs::create_dir(&installed).expect("installed app");
+        fs::write(installed.join("marker"), b"old").expect("installed marker");
+        let socket = UnixListener::bind(installed.join("unsafe.socket")).expect("special file");
+        fs::create_dir(&candidate).expect("candidate app");
+        fs::write(candidate.join("marker"), b"new").expect("candidate marker");
+        let transaction = RecoveryTransaction::open(&update_root, &installed, &candidate)
+            .expect("recovery transaction");
+        let mut cleanup =
+            CleanupCompanion::new(&channel_root, update::channel::ReleaseChannel::Test)
+                .expect("cleanup companion");
+        transaction
+            .publish_with_companion(&mut HealthyPublication, &mut cleanup)
+            .expect("committed publication");
+        let gate_error =
+            ensure_no_pending_cleanup(&channel_root, update::channel::ReleaseChannel::Test)
+                .expect_err("pending cleanup must reject another production install");
+        assert_eq!(
+            update_failure(&CoordinatorError::Cleanup(gate_error)),
+            UpdateFailure::Recovery
+        );
+        let pending_cleanup =
+            load_pending_cleanup(&channel_root, update::channel::ReleaseChannel::Test)
+                .expect("load cleanup")
+                .expect("pending cleanup");
+        let status = CredentialMigrationStatusHandle::from_outcome(&MigrationOutcome::NotNeeded);
+        let mut health = RuntimeHealthState {
+            acknowledged: false,
+            pending_migration: None,
+            pending_cleanup: Some(pending_cleanup),
+        };
+
+        assert!(health.acknowledge(&status).is_err());
+        assert!(!health.acknowledged);
+        assert!(health.pending_cleanup.is_some());
+        assert!(update::cleanup::cleanup_journal_path(
+            &channel_root,
+            update::channel::ReleaseChannel::Test
+        )
+        .exists());
+
+        drop(socket);
+        let journal: serde_json::Value = serde_json::from_slice(
+            &fs::read(update::cleanup::cleanup_journal_path(
+                &channel_root,
+                update::channel::ReleaseChannel::Test,
+            ))
+            .expect("cleanup journal"),
+        )
+        .expect("cleanup journal JSON");
+        let isolated_name: Vec<u8> =
+            serde_json::from_value(journal["isolatedName"].clone()).expect("isolated cleanup name");
+        fs::remove_file(
+            update_root
+                .join(OsString::from_vec(isolated_name))
+                .join("unsafe.socket"),
+        )
+        .expect("remove special file");
+        health.acknowledge(&status).expect("retry health ACK");
+        assert!(health.acknowledged);
+        assert!(health.pending_cleanup.is_none());
+        assert!(!candidate.exists());
+        assert!(!update::cleanup::cleanup_journal_path(
+            &channel_root,
+            update::channel::ReleaseChannel::Test
+        )
+        .exists());
     }
 }

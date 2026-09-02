@@ -15,7 +15,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { assertUsableApiKey, LlmError, resolveRetryPolicy, RetryPolicySchema } from '@deepseek-ai/dsh-llm'
 import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { credentialRef, type ResolvedCredential } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf, type LaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
@@ -114,6 +114,22 @@ const BASE_URL_ENV = 'DEEPSEEK_BASE_URL'
  */
 export type ResolvedDeepSeekOptions = DeepSeekConnectionOptions
 
+interface CredentialConsumerRegistry {
+  registerDeepSeekModel(reference: ReturnType<typeof credentialRef>): {
+    replace(reference: ReturnType<typeof credentialRef>): void
+    dispose(): void
+  }
+}
+
+/** Validate an untrusted reference without retaining its value in the failure. */
+function safeCredentialRef(reference: string): ReturnType<typeof credentialRef> {
+  try {
+    return credentialRef(reference)
+  } catch {
+    throw new TypeError('llm-deepseek: invalid credential reference')
+  }
+}
+
 /** Resolve, validate, and detach the advisory model catalog. */
 function resolveModels(models: readonly DeepSeekCatalogModel[] | undefined): DeepSeekCatalogModel[] {
   const seen = new Set<string>()
@@ -181,7 +197,7 @@ export function resolveAdapterOptions(config: Config, environment?: LaunchEnviro
     )
   }
   return {
-    apiKeyEnv: credentialRef(config.apiKeyEnv ?? DEFAULT_API_KEY_ENV),
+    apiKeyEnv: safeCredentialRef(config.apiKeyEnv ?? DEFAULT_API_KEY_ENV),
     baseURL: config.baseURL
       ?? environment?.get(BASE_URL_ENV)?.value
       ?? PUBLIC_BASE_URL,
@@ -199,28 +215,79 @@ export function resolveAdapterOptions(config: Config, environment?: LaunchEnviro
 
 export function apply(ctx: Context, config: Config): void {
   let current: () => Config = () => config
-  let lastRaw: Config | undefined
-  let lastGood: ResolvedDeepSeekOptions | undefined
-  const options = (): ResolvedDeepSeekOptions => {
+  let lastCandidateRaw: Config | undefined
+  let memoizedCandidate: ResolvedDeepSeekOptions | undefined
+  let acceptedOptions: ResolvedDeepSeekOptions | undefined
+  const candidateOptions = (): ResolvedDeepSeekOptions => {
     const raw = current()
-    if (raw === lastRaw && lastGood !== undefined) return lastGood
+    if (raw === lastCandidateRaw && memoizedCandidate !== undefined) return memoizedCandidate
     try {
       const next = resolveAdapterOptions(raw, launchEnvironmentOf(ctx))
-      lastRaw = raw
-      lastGood = next
+      lastCandidateRaw = raw
+      memoizedCandidate = next
       return next
     } catch (error) {
       // Static composition resolves before anything registers, so this branch
       // only sees a live settings snapshot failing a beyond-schema bound:
       // keep serving the last good facts and say so once per bad snapshot.
-      if (lastGood === undefined) throw error
-      lastRaw = raw
+      if (acceptedOptions === undefined) throw error
+      lastCandidateRaw = raw
+      memoizedCandidate = acceptedOptions
       ctx.logger.error('llm-deepseek: keeping the last good configuration after an invalid settings section')
       ctx.logger.error(error)
-      return lastGood
+      return acceptedOptions
     }
   }
-  options()
+  acceptedOptions = candidateOptions()
+  const accepted = (): ResolvedDeepSeekOptions => {
+    if (acceptedOptions === undefined) {
+      throw new Error('llm-deepseek: serving configuration is unavailable')
+    }
+    return acceptedOptions
+  }
+  let registrationOptions: ResolvedDeepSeekOptions | undefined
+  const options = (): ResolvedDeepSeekOptions => registrationOptions ?? accepted()
+
+  let consumerRegistry: CredentialConsumerRegistry | undefined
+  let consumerRegistration: ReturnType<CredentialConsumerRegistry['registerDeepSeekModel']>
+    | undefined
+  let consumerReference: ReturnType<typeof credentialRef> | undefined
+  const bindCredentialConsumers = (consumers: CredentialConsumerRegistry): void => {
+    if (consumers === consumerRegistry) return
+    const reference = accepted().apiKeyEnv
+    const next = consumers.registerDeepSeekModel(reference)
+    const previous = consumerRegistration
+    consumerRegistry = consumers
+    consumerRegistration = next
+    consumerReference = reference
+    previous?.dispose()
+  }
+  const stageCredentialConsumer = (candidate: ResolvedDeepSeekOptions): boolean => {
+    const reference = candidate.apiKeyEnv
+    if (consumerRegistration === undefined || reference === consumerReference) return false
+    consumerRegistration.replace(reference)
+    consumerReference = reference
+    return true
+  }
+  const initialConsumers = ctx.get('credentialConsumers') as CredentialConsumerRegistry | undefined
+  if (initialConsumers !== undefined) bindCredentialConsumers(initialConsumers)
+  ctx.effect(() => () => {
+    consumerRegistration?.dispose()
+    consumerRegistration = undefined
+    consumerReference = undefined
+    consumerRegistry = undefined
+  }, 'llm-deepseek: credential consumer')
+  ctx.inject(['credentialConsumers'], (consumerCtx) => {
+    const consumers = consumerCtx.get('credentialConsumers') as CredentialConsumerRegistry
+    bindCredentialConsumers(consumers)
+    return () => {
+      if (consumerRegistry !== consumers) return
+      consumerRegistration?.dispose()
+      consumerRegistration = undefined
+      consumerReference = undefined
+      consumerRegistry = undefined
+    }
+  })
 
   const resolveApiKey = async (connection: ResolvedDeepSeekOptions): Promise<string> => {
     // Every credential fact comes from the caller's snapshot, so a rejected
@@ -228,19 +295,30 @@ export function apply(ctx: Context, config: Config): void {
     const ref = connection.apiKeyEnv
     const credentials = ctx.get('credentials')
     if (credentials !== undefined) {
-      const hit = await credentials.resolve(ref)
-      if (hit !== undefined) return assertUsableApiKey(hit.value, 'llm-deepseek', ref)
+      let hit: ResolvedCredential | undefined
+      try {
+        hit = await credentials.resolve(ref)
+      } catch {
+        throw new LlmError(
+          `llm-deepseek: credential resolution failed for provider route "${PROVIDER}"`,
+          'CREDENTIAL_RESOLUTION_FAILED',
+        )
+      }
+      if (hit !== undefined) {
+        return assertUsableApiKey(hit.value, 'llm-deepseek', 'the configured credential')
+      }
     } else {
       // Without the seam there is no managed store to rank against, so the
       // environment is the whole credential plane.
       const ambient = launchEnvironmentOf(ctx).get(ref)
       if (ambient !== undefined && ambient.value.length > 0) {
-        return assertUsableApiKey(ambient.value, 'llm-deepseek', ref)
+        return assertUsableApiKey(ambient.value, 'llm-deepseek', 'the configured credential')
       }
     }
     throw new LlmError(
-      `llm-deepseek: no API key for provider route "${PROVIDER}"; store ${ref} through the credentials`
-      + ` service (the web Models page writes it), or export ${ref} in the launching environment`,
+      `llm-deepseek: no API key is available for provider route "${PROVIDER}";`
+      + ' store it through the credentials service (the web Models page writes it)'
+      + ' or configure it in the launching environment',
       'MISSING_CREDENTIAL',
     )
   }
@@ -254,23 +332,48 @@ export function apply(ctx: Context, config: Config): void {
   // Route effects bind to this apply fiber via the stable `ctx` reference,
   // even when a swap runs inside the scoped settings callback below.
   const registration = ctx.llm.registerAdapter([PROVIDER], adapter)
-  let registeredPolicy = options().retryPolicy
-  const ensureRegistrationFacts = (): void => {
-    const policy = options().retryPolicy
+  let registeredPolicy = acceptedOptions.retryPolicy
+  const ensureRegistrationFacts = (candidate: ResolvedDeepSeekOptions): void => {
+    const policy = candidate.retryPolicy
     if (deepEqualJson(policy, registeredPolicy)) return
     // The registry captures the retry policy at registration, so it is the one
     // fact per-request resolution cannot refresh. `replace` re-reads it in one
     // synchronous registry section: disposing and re-registering instead would
     // publish an empty route set between the two, and an observer that reacted
     // to it would see this provider disappear and come back.
-    registration.replace([PROVIDER])
-    registeredPolicy = policy
+    registrationOptions = candidate
+    try {
+      registration.replace([PROVIDER])
+      registeredPolicy = policy
+    } finally {
+      registrationOptions = undefined
+    }
   }
 
   installSettingsSection(ctx, NS, Config, config, {
     setSource: (source) => {
       current = source
     },
-    onChange: ensureRegistrationFacts,
+    onChange: () => {
+      const desired = candidateOptions()
+      const previous = accepted()
+      let consumerPrepared = false
+      try {
+        consumerPrepared = stageCredentialConsumer(desired)
+        ensureRegistrationFacts(desired)
+        acceptedOptions = desired
+      } catch (error) {
+        if (consumerPrepared) {
+          try {
+            stageCredentialConsumer(previous)
+          } catch (rollbackError) {
+            ctx.logger.error('llm-deepseek: failed to restore the previous credential consumer')
+            ctx.logger.error(rollbackError)
+          }
+        }
+        ctx.logger.error('llm-deepseek: keeping the previous serving generation after a refused update')
+        ctx.logger.error(error)
+      }
+    },
   })
 }

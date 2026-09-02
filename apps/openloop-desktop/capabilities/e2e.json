@@ -1,0 +1,17 @@
+{
+  "$schema": "../src-tauri/gen/schemas/desktop-schema.json",
+  "identifier": "e2e",
+  "description": "Local-only capability for the Openloop WDIO binary.",
+  "local": true,
+  "windows": [
+    "main"
+  ],
+  "platforms": [
+    "macOS"
+  ],
+  "permissions": [
+    "allow-build-manifest",
+    "wdio:default",
+    "wdio-webdriver:default"
+  ]
+}

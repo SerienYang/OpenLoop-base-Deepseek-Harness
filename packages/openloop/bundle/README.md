@@ -15,6 +15,21 @@ ID-targeted patch replaces the whole config object, the override also restates
 product features through this patch; never modify `packages/bundle/web-app` for
 OpenLoop composition.
 
+The patch also mounts `@openloop/desktop-bridge-host` as the sole
+`browserApiPolicy` owner. Both the `connection` and `typert-gateway` rows
+required-inject that service, so unloading the policy suspends the browser
+dispatchers instead of opening a fail-open window. This dependency exists only
+in the OpenLoop layer; the default DSH Web bundle remains unchanged.
+
+The first-release profile disables the inherited `cordis-client-runner` and
+`ui-cordis` rows, so only the static signed Client roster is loaded. It also
+disables the upstream settings, permission, agent-preset, and workspace Client
+owners whose broad Host calls are outside the first policy. Those surfaces
+remain absent until dedicated Host facades replace them in later tasks. The
+Openloop Desktop Bridge client supplies a profile-selected runtime adapter, so
+the shared client runtime never constructs its legacy Workspace runtime or
+calls any `workspace.*` method.
+
 ## Built-in provider
 
 The patch also adds this `llm-pi-ai` provider preset:
@@ -37,4 +52,8 @@ an Agent Plan key under the credential reference above.
 
 `ensureOpenloopProfile()` creates the `openloop` profile only when its
 `package.json` is absent. Once that manifest exists, the profile and all sibling
-files are user-owned and this package leaves their bytes unchanged.
+files are user-owned and this package leaves their bytes unchanged. The
+Openloop runtime nevertheless accepts only the exact shipped bundle tuple and
+allows that profile's patch file to replace `config` on an existing,
+non-protected, non-group row. It rejects inserts, unknown ids, topology fields,
+and every change to the policy, transport, dynamic-Client, and bootstrap rows.

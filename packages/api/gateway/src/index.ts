@@ -91,6 +91,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
   static inject = ['typert']
 
   private srcClaims: ReadonlySet<string> | undefined
+  private readonly browserApiPolicyRequired: boolean
 
   /**
    * Register the Gateway against the active Typert registry.
@@ -98,6 +99,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
    */
   constructor(ctx: Context) {
     super(ctx, 'typertGateway')
+    this.browserApiPolicyRequired = Object.hasOwn(ctx.fiber.inject, 'browserApiPolicy')
     ctx.on('internal/service', () => {
       this.srcClaims = undefined
     })
@@ -114,6 +116,10 @@ export class TypertGatewayService extends Service implements TypertGateway {
   private claimsEndpoint(endpoint: string): boolean {
     const segments = endpoint.split('/')
     if (segments.length !== 2 || segments[0] === '' || segments[1] === '') return false
+    // A mounted product policy owns every syntactically valid Typert endpoint,
+    // including denied and not-yet-registered names. Otherwise Connection
+    // could fall through to a second dispatcher after a policy refusal.
+    if (this.browserApiPolicyRequired || this.ctx.get('browserApiPolicy') !== undefined) return true
     if (this.ctx.typert.local.get(endpoint) !== undefined || this.ctx.typert.local.hasSeen(endpoint)) return true
     this.srcClaims ??= this.collectSrcClaims()
     return this.srcClaims.has(endpoint)
@@ -144,6 +150,15 @@ export class TypertGatewayService extends Service implements TypertGateway {
    */
   async invoke(request: InvokeRemoteRequest): Promise<unknown> {
     const endpoint = endpointOf(request.namespace, request.method)
+    const policy = this.ctx.get('browserApiPolicy')
+    if ((policy === undefined && this.browserApiPolicyRequired)
+      || (policy !== undefined && !policy.allows(endpoint, request.args))) {
+      throw new TypertGatewayError(
+        'policy-denied',
+        endpoint,
+        'browser API policy denied this endpoint',
+      )
+    }
     const descriptor = this.resolveDescriptor(request.namespace, request.method, endpoint)
     assertExactArguments(request.args, descriptor, endpoint)
     const receiverContext = await this.resolveReceiverContext(descriptor, request.args, endpoint)
@@ -169,18 +184,64 @@ export class TypertGatewayService extends Service implements TypertGateway {
       )
     }
 
+    let businessFailure: { readonly error: unknown } | undefined
+    const invoke = async (): Promise<unknown> => {
+      try {
+        return await Reflect.apply(method, receiver, args) as unknown
+      } catch (error) {
+        businessFailure = { error }
+        throw error
+      }
+    }
     let result: unknown
     try {
-      result = await Reflect.apply(method, receiver, args) as unknown
+      if (policy?.allowsInvocation === undefined) {
+        result = await invoke()
+      } else {
+        const admission = await policy.allowsInvocation(
+          endpoint,
+          request.args,
+          request.signal ?? NEVER_ABORTED_SIGNAL,
+          invoke,
+        )
+        if (!admission.allowed) {
+          throw new TypertGatewayError(
+            'policy-denied',
+            endpoint,
+            'browser API policy denied this endpoint',
+          )
+        }
+        result = admission.value
+      }
     } catch (error) {
       if (request.signal?.aborted === true) throw new RemoteInvocationCancelled(endpoint, error)
+      if (businessFailure === undefined && !(error instanceof TypertGatewayError)) {
+        throw new TypertGatewayError(
+          'policy-denied',
+          endpoint,
+          'browser API policy could not admit this endpoint',
+          { cause: error },
+        )
+      }
       throw error
     }
     // A weak descriptor declares no return type, so nothing returned is a void
     // result and rides the wire as an absent value field. A strict descriptor
     // keeps its schema: there, undefined has to be a declared result.
-    if (result === undefined && descriptor.result.mode !== 'strict') return result
-    return decode(descriptor.result, result, 'result-invalid', endpoint, 'result')
+    const decoded = result === undefined && descriptor.result.mode !== 'strict'
+      ? result
+      : decode(descriptor.result, result, 'result-invalid', endpoint, 'result')
+    if (policy?.projectResult === undefined) return decoded
+    try {
+      return policy.projectResult(endpoint, decoded)
+    } catch (error) {
+      throw new TypertGatewayError(
+        'policy-denied',
+        endpoint,
+        'browser API policy could not project this endpoint',
+        { cause: error },
+      )
+    }
   }
 
   private async dispatchRpc(
@@ -217,7 +278,13 @@ export class TypertGatewayService extends Service implements TypertGateway {
       // representation of absence that both args and results already use.
       return { ok: true, value }
     } catch (error) {
-      return rpcFailure(error)
+      const failure = rpcFailure(error)
+      const policy = this.ctx.get('browserApiPolicy')
+      if (failure.ok || policy?.projectError === undefined) return failure
+      return {
+        ok: false,
+        error: policy.projectError(endpoint, failure.error),
+      }
     }
   }
 
@@ -477,6 +544,16 @@ function rpcFailure(error: unknown): ConnectionRpcResult {
   }
   if (error instanceof TypertLookupFailure) {
     return { ok: false, error: error.failure as ConnectionRpcError }
+  }
+  if (error instanceof TypertGatewayError && error.code === 'policy-denied') {
+    return {
+      ok: false,
+      error: {
+        code: 'policy-denied',
+        message: error.message,
+        details: { endpoint: error.endpoint },
+      },
+    }
   }
   return {
     ok: false,

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import Schema from '@deepseek-ai/schemastery'
 import type { RpcResponse, SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
+import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { DeepSeekOnboardingDialog } from '../src/client/DeepSeekOnboardingDialog.tsx'
 import type { DeepSeekOnboardingDialogProps } from '../src/client/DeepSeekOnboardingDialog.tsx'
 import { ModelsSettingsStore } from '../src/client/store.ts'
@@ -66,6 +67,7 @@ function harness(options: {
   providersReject?: boolean
   setFailure?: string
   setReject?: string
+  credentialControl?: CredentialControlAdapter
 } = {}) {
   if (document.getElementById('root') === null) {
     const appRoot = document.createElement('div')
@@ -124,7 +126,7 @@ function harness(options: {
       set,
     },
   }
-  const controller = new ModelsSettingsStore(face as never)
+  const controller = new ModelsSettingsStore(face as never, options.credentialControl)
   const openSection = vi.fn()
   const complete = vi.fn()
   const unusedHook = (() => { throw new Error('unused standard hook') }) as never
@@ -138,6 +140,9 @@ function harness(options: {
     useModels: bindSnapshotSelector(controller.store),
     api: face as never,
     t: key => en[key],
+    ...options.credentialControl === undefined
+      ? {}
+      : { credentialControl: options.credentialControl },
   }
   return {
     controller, complete, openSection, props, mutate, set,
@@ -162,6 +167,59 @@ describe('DeepSeekOnboardingDialog', () => {
     const key = screen.getByLabelText<HTMLInputElement>(en.keyInput)
     await waitFor(() => { expect(document.activeElement).toBe(key) })
     expect(screen.queryByText(en.customized)).toBeNull()
+  })
+
+  it('uses the Host control in Openloop onboarding without exposing a key field', async () => {
+    const credentialControl: CredentialControlAdapter = {
+      describe: vi.fn(() => Promise.resolve({ configured: false, writable: true })),
+      render: ({ label }) => <div data-testid="host-credential-control">{label}</div>,
+      materializeApiKeyEnv: true,
+      deleteCredentialWithProfile: false,
+    }
+    const h = harness({ credentialControl })
+    render(<DeepSeekOnboardingDialog {...h.props} />)
+    await screen.findByRole('dialog', { name: en.onboardingTitle })
+
+    expect(screen.getByTestId('host-credential-control').textContent).toBe(en.keyInput)
+    expect(screen.queryByLabelText(en.keyInput)).toBeNull()
+    expect(screen.queryByRole('button', { name: en.onboardingSave })).toBeNull()
+    expect(screen.getByRole('button', { name: en.onboardingLater })).toBeTruthy()
+    expect(document.querySelector('input[type="password"]')).toBeNull()
+    expect(h.set).not.toHaveBeenCalled()
+  })
+
+  it('refreshes the shared join exactly once and completes from provider readiness', async () => {
+    let configured = false
+    let controlProps: Parameters<CredentialControlAdapter['render']>[0] | undefined
+    const credentialControl: CredentialControlAdapter = {
+      describe: vi.fn(() => Promise.resolve({
+        configured,
+        writable: true,
+        ...configured ? { source: 'keychain' } : {},
+      })),
+      render: (props) => {
+        controlProps = props
+        return <div data-testid="host-credential-control">{props.label}</div>
+      },
+      materializeApiKeyEnv: true,
+      deleteCredentialWithProfile: false,
+    }
+    const h = harness({ credentialControl })
+    const load = vi.spyOn(h.controller, 'load')
+    render(<DeepSeekOnboardingDialog {...h.props} />)
+    await screen.findByRole('dialog', { name: en.onboardingTitle })
+    load.mockClear()
+    configured = true
+
+    await act(async () => {
+      const refresh = controlProps?.onChanged?.()
+      expect(refresh).toBeInstanceOf(Promise)
+      await refresh
+    })
+
+    expect(load).toHaveBeenCalledOnce()
+    await waitFor(() => { expect(h.complete).toHaveBeenCalledOnce() })
+    expect(screen.queryByRole('dialog')).toBeNull()
   })
 
   it('cannot be dismissed implicitly and restores the previous inert state', async () => {

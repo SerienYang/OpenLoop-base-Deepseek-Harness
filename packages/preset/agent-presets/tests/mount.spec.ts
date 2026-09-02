@@ -173,6 +173,54 @@ describe('composing an agent from a preset', () => {
     expect(toolNames(ctx, agent)).toEqual(['alpha'])
   })
 
+  it('applies deployment-owned patches before a preset can register tools', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-preset-patched-'))
+    const presetDir = join(root, 'standard')
+    const plugin = join(root, 'search.js')
+    await mkdir(presetDir)
+    await writeFile(plugin, [
+      'export const inject = ["tools"]',
+      'export function apply(ctx) {',
+      '  const definition = name => ({',
+      '    name, description: name, parameters: { type: "object", properties: {} },',
+      '    output: { schema: { type: "string" }, render: (_args, value) => [{ type: "text", text: value }] },',
+      '    execute: async () => name,',
+      '  })',
+      '  ctx.tools.register(definition("glob"))',
+      '  ctx.tools.register(definition("grep"))',
+      '}',
+      '',
+    ].join('\n'))
+    await writeFile(
+      join(presetDir, COMPOSITION_FILE),
+      `- id: tool-fs-search\n  name: ${plugin}\n`,
+    )
+    const patched = await harness({
+      default: 'standard',
+      roots: [{ path: root, trust: 'system' }],
+      includeUserRoot: false,
+      patches: [{ id: 'tool-fs-search', disabled: true }],
+    })
+
+    const agent = await agentOn(patched, 'sess-patched')
+
+    expect(toolNames(patched, agent)).toEqual([])
+  })
+
+  it('limits discovery and resolution to deployment-allowed preset ids', async () => {
+    const restricted = await harness({
+      default: 'standard',
+      roots: ROOTS,
+      includeUserRoot: false,
+      allowedPresetIds: ['standard'],
+    })
+
+    expect((await restricted.agentPresets.list()).map(preset => preset.id))
+      .toEqual(['standard'])
+    await expect(restricted.agentPresets.resolve('minimal'))
+      .rejects.toThrow(/not found.*standard/iu)
+  })
+
   it('lets two sessions share one preset without colliding', async () => {
     const first = await agentOn(ctx, 'sess-first', 'standard')
     const second = await agentOn(ctx, 'sess-second', 'standard')

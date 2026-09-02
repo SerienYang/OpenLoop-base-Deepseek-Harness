@@ -463,6 +463,73 @@ describe('SSE stream path', () => {
     expect(seen).toEqual(frames)
   })
 
+  it('projects and drops server frames before SSE serialization', async () => {
+    const api = scriptedApi({
+      events: {
+        async *host(request): AsyncGenerator<RpcRequest<HostFrame>> {
+          yield {
+            rpcId: RpcId(`added-${request.rpcId}`),
+            payload: {
+              type: 'host/session-added',
+              sessionId: sid('s1'),
+              blank: true,
+              cwd: '/private/canonical/workspace',
+              agentPreset: 'standard',
+            },
+          }
+          yield {
+            rpcId: RpcId(`workspace-${request.rpcId}`),
+            payload: {
+              type: 'host/workspace-changed',
+              workspace: {
+                workspaceId: 'w1' as never,
+                path: '/private/canonical/workspace',
+                title: 'Workspace',
+                sessionIds: [sid('s1')],
+                createdAt: '2026-01-01T00:00:00.000Z',
+                updatedAt: '2026-01-01T00:00:00.000Z',
+              },
+            },
+          }
+          yield {
+            rpcId: RpcId(`status-${request.rpcId}`),
+            payload: { type: 'host/session-status', sessionId: sid('s1'), running: true },
+          }
+        },
+      },
+    })
+    const projectStreamFrame = vi.fn((frame: MuxFrame | HostFrame) => {
+      if (frame.type === 'host/workspace-changed') return undefined
+      if (frame.type !== 'host/session-added') return frame
+      const { cwd: _cwd, ...projected } = frame
+      return projected
+    })
+    const projectedClient = new InProcessApiClient(toFetchHandler(api, {
+      version: 1,
+      allows: () => true,
+      projectStreamFrame,
+    } as never))
+    const seen: HostFrame[] = []
+
+    for await (const envelope of projectedClient.events.host(
+      {},
+      new AbortController().signal,
+    )) {
+      seen.push(envelope.payload)
+    }
+
+    expect(seen).toEqual([
+      {
+        type: 'host/session-added',
+        sessionId: 's1',
+        blank: true,
+        agentPreset: 'standard',
+      },
+      { type: 'host/session-status', sessionId: 's1', running: true },
+    ])
+    expect(projectStreamFrame).toHaveBeenCalledTimes(3)
+  })
+
   it('reassembles frames across arbitrary chunk boundaries', async () => {
     // Two SSE frames split so one frame spans chunks and one chunk carries parts of both.
     const f1 = { type: 'server-request', rpcId: 'a', method: 'session/subscribed', payload: { type: 'session/subscribed', sessionId: 's1', lastSeq: 1 } }

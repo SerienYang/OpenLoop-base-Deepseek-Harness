@@ -1,6 +1,6 @@
 /** Browser runtime services for slots, sessions, workspaces, and connection-stream delivery. */
 import type { Context } from '@deepseek-ai/cordis'
-import type { ConnectionHandle, SessionId } from '@deepseek-ai/dsh-api-remotes/client'
+import type { ConnectionHandle, IApiClient, SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: the ctx.remote merge. Deliberately the gateway's Client half rather
 // than api-remotes': that face imports a Host-tsdown-generated artifact, and this
 // project sits in the Host build graph.
@@ -10,6 +10,7 @@ import type { MaybeSnapshotSelectorHook, SnapshotSelectorHook } from '@deepseek-
 import { SlotRegistry } from './slots.ts'
 import { SessionRuntime } from './sessions/service.ts'
 import type { SessionListState } from './sessions/service.ts'
+import type { SessionsPort } from './contract/sessions-port.ts'
 import { WorkspaceRuntime } from './workspaces/service.ts'
 import type { ConversationSnapshot } from './sessions/conversation.ts'
 import type { UseProjection } from './sessions/projection-store.ts'
@@ -55,6 +56,7 @@ export type {
 export type { Session } from './sessions/session.ts'
 export type { ISession, ProjectionsFace, SessionFace } from './contract/session.ts'
 export type { AgentContext, ISessions } from './contract/sessions.ts'
+export type { SessionsPort } from './contract/sessions-port.ts'
 export type { IWorkspaces } from './contract/workspaces.ts'
 export type {
   SessionBinding, SessionListState, SessionProvideContribution, SessionProvideDescriptor, SessionSummary,
@@ -110,6 +112,45 @@ export type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 
 /** Client-side Cordis context after declaration merging. */
 export type ClientContext = Context
+
+/** Profile-selected replacement for the concrete Workspace runtime. */
+export interface WorkspaceRuntimeLifecycle {
+  startInitialSelection(): () => void
+  handleHostEnvelope(envelope: Parameters<WorkspaceRuntime['handleHostEnvelope']>[0]): void
+  handleConnected(): void
+}
+
+/** Factory installed by a profile before the shared client runtime activates. */
+export interface WorkspaceRuntimeAdapter {
+  /**
+   * Construct the profile-owned Workspace runtime without exposing Host-only APIs.
+   * @param ctx - Client Cordis context that owns the runtime lifecycle.
+   * @param api - Browser-safe API client.
+   * @param sessions - Client session operations used by the adapter.
+   * @returns The Workspace runtime lifecycle installed by the shared client runtime.
+   */
+  create(ctx: Context, api: IApiClient, sessions: SessionsPort): WorkspaceRuntimeLifecycle
+}
+
+const OPENLOOP_WORKSPACE_ADAPTER_CLIENT = '@openloop/desktop-bridge-client'
+
+/** Whether the signed browser graph requires a profile-owned Workspace adapter. */
+export function requiresWorkspaceRuntimeAdapter(source: unknown = globalThis): boolean {
+  if (typeof source !== 'object' || source === null) return false
+  const boot = (source as { __DSH_BOOT__?: unknown }).__DSH_BOOT__
+  if (boot === undefined) return false
+  if (typeof boot !== 'object' || boot === null) {
+    throw new Error('client runtime boot graph must be an object')
+  }
+  const entries = (boot as { entries?: unknown }).entries
+  if (!Array.isArray(entries)) {
+    throw new Error('client runtime boot graph must contain an entries array')
+  }
+  return entries.some(entry =>
+    typeof entry === 'object'
+    && entry !== null
+    && (entry as { id?: unknown }).id === OPENLOOP_WORKSPACE_ADAPTER_CLIENT)
+}
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertContextMap {
@@ -176,16 +217,15 @@ declare module '@deepseek-ai/cordis' {
     sessions: import('./contract/sessions.ts').ISessions
     /** The outward face only; the concrete service stays inside the runtime. */
     workspaces: import('./contract/workspaces.ts').IWorkspaces
+    /** Optional profile-owned Workspace runtime replacement. */
+    workspaceRuntimeAdapter?: WorkspaceRuntimeAdapter
   }
 }
 
 /** Required services: the wire handle and Client Typert registry. */
 export const inject = ['connection', 'typert', 'remote', 'remote.commands']
 
-/** Mounts the browser runtime services and connection stream.
- * @param ctx - Client Cordis context.
- */
-export function apply(ctx: Context): void {
+function installRuntime(ctx: Context, workspaceRuntimeAdapter?: WorkspaceRuntimeAdapter): void {
   ctx.plugin(SlotRegistry)
   const conversation = {
     events: new ConversationEventRegistry(ctx),
@@ -196,7 +236,9 @@ export function apply(ctx: Context): void {
   ctx.typert.contexts.registerClient('agent', {
     identity: candidate => sessions.scopeOf(candidate),
   })
-  const workspaces = new WorkspaceRuntime(ctx, connection.api, sessions)
+  const workspaces = workspaceRuntimeAdapter === undefined
+    ? new WorkspaceRuntime(ctx, connection.api, sessions)
+    : workspaceRuntimeAdapter.create(ctx, connection.api, sessions)
   ctx.effect(
     () => workspaces.startInitialSelection(),
     'runtime: initial Workspace selection',
@@ -230,4 +272,22 @@ export function apply(ctx: Context): void {
     },
   })
   ctx.effect(() => () => { loop.stop() }, 'runtime: connection stream loop')
+}
+
+/** Mounts the browser runtime services and connection stream.
+ * @param ctx - Client Cordis context.
+ */
+export function apply(ctx: Context): void | PromiseLike<unknown> {
+  const availableAdapter = ctx.get('workspaceRuntimeAdapter')
+  if (availableAdapter !== undefined) {
+    installRuntime(ctx, availableAdapter)
+    return
+  }
+  if (!requiresWorkspaceRuntimeAdapter()) {
+    installRuntime(ctx)
+    return
+  }
+  return ctx.inject(['workspaceRuntimeAdapter'], (adapterCtx) => {
+    installRuntime(adapterCtx, adapterCtx.workspaceRuntimeAdapter)
+  })
 }

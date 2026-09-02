@@ -287,20 +287,39 @@ describe('DeepSeekSearchProvider error handling', () => {
 
   it('maps a credential resolver rejection under an active signal to WEB_PROVIDER_ERROR', async () => {
     const controller = new AbortController()
-    await expect(searchProvider({
+    const privateReference = 'PRIVATE_SEARCH_RESOLVER_REFERENCE'
+    const privateDetail = `${privateReference}: resolver exposed sk-private-search`
+    const failure = await searchProvider({
       ...options,
       apiKey: '',
-      resolveApiKey: () => Promise.reject(new Error('credential backend failed')),
-    }).search({ query: 'q' }, controller.signal))
-      .rejects.toThrow(expect.objectContaining({
-        code: 'WEB_PROVIDER_ERROR',
-        message: 'DeepSeek search credential resolution failed: Error: credential backend failed',
-      }))
+      apiKeyEnv: credentialRef(privateReference),
+      resolveApiKey: () => Promise.reject(new Error(privateDetail)),
+    }).search({ query: 'q' }, controller.signal).catch((error: unknown) => error)
+
+    expect(failure).toMatchObject({
+      code: 'WEB_PROVIDER_ERROR',
+      message: 'DeepSeek search credential resolution failed',
+    })
+    expect(failure).not.toHaveProperty('cause')
+    expect(JSON.stringify(failure)).not.toContain(privateReference)
+    expect(JSON.stringify(failure)).not.toContain('sk-private-search')
   })
 
   it('uses the default credential reference when no resolver is configured', async () => {
-    await expect(searchProvider({ ...options, apiKey: '' }).search({ query: 'q' }))
-      .rejects.toThrow('DeepSeek search has no API key for "DEEPSEEK_API_KEY"')
+    const privateReference = 'PRIVATE_MISSING_SEARCH_REFERENCE'
+    const failure = await searchProvider({
+      ...options,
+      apiKey: '',
+      apiKeyEnv: credentialRef(privateReference),
+    }).search({ query: 'q' }).catch((error: unknown) => error)
+
+    expect(failure).toMatchObject({
+      code: 'WEB_PROVIDER_CREDENTIAL_MISSING',
+      message: 'DeepSeek search has no API key; store it through the credentials service'
+        + ' (the web Models page writes it), configure it in the launching environment,'
+        + ' or set a literal "apiKey" in the web-search-deepseek config',
+    })
+    expect(JSON.stringify(failure)).not.toContain(privateReference)
   })
 
   it('observes cancellation triggered synchronously by credential resolution', async () => {
@@ -400,6 +419,104 @@ describe('DeepSeekSearchProvider error handling', () => {
 })
 
 describe('web-search-deepseek plugin registration', () => {
+  it('does not register a credential consumer when a literal API key wins', async () => {
+    const registerDeepSeekWebSearch = vi.fn()
+    const ctx = new Context()
+    await ctx.plugin(WebRuntime, { searchProvider: DEEPSEEK_PROVIDER_ID })
+    ctx.provide('credentialConsumers', { registerDeepSeekWebSearch } as never)
+
+    const fiber = ctx.plugin(deepseekPlugin, {
+      apiKey: 'literal-key',
+      apiKeyEnv: 'IGNORED_REFERENCE',
+    })
+    await fiber
+
+    expect(registerDeepSeekWebSearch).not.toHaveBeenCalled()
+    await fiber.dispose()
+  })
+
+  it('registers and releases its exact built-in credential consumer', async () => {
+    const disposeConsumer = vi.fn()
+    const registerDeepSeekWebSearch = vi.fn(() => ({
+      replace: vi.fn(),
+      dispose: disposeConsumer,
+    }))
+    const ctx = new Context()
+    await ctx.plugin(WebRuntime, { searchProvider: DEEPSEEK_PROVIDER_ID })
+    ctx.provide('credentialConsumers', { registerDeepSeekWebSearch } as never)
+
+    const fiber = ctx.plugin(deepseekPlugin, { apiKeyEnv: 'SEARCH_API_KEY' })
+    await fiber
+
+    expect(registerDeepSeekWebSearch).toHaveBeenCalledWith(credentialRef('SEARCH_API_KEY'))
+    await fiber.dispose()
+    expect(disposeConsumer).toHaveBeenCalledTimes(1)
+  })
+
+  it('aborts activation before publishing the search provider when initial consumer registration fails', async () => {
+    const ctx = new Context()
+    await ctx.plugin(WebRuntime, { searchProvider: DEEPSEEK_PROVIDER_ID })
+    ctx.provide('credentialConsumers', {
+      registerDeepSeekWebSearch: vi.fn(() => {
+        throw new Error('consumer registry refused Web Search')
+      }),
+    } as never)
+
+    const failure = await ctx.plugin(deepseekPlugin, {
+      apiKeyEnv: 'SEARCH_INITIAL_KEY',
+    }).then(() => undefined, (error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toMatch(/consumer registry refused Web Search/)
+    await expect(ctx.web.search({ query: 'q' }))
+      .rejects.toThrow(expect.objectContaining({ code: 'WEB_PROVIDER_CONFIGURED_MISSING' }))
+  })
+
+  it('moves its registration with a replaced optional consumer registry', async () => {
+    const firstDispose = vi.fn()
+    const secondDispose = vi.fn()
+    const firstRegister = vi.fn(() => ({ replace: vi.fn(), dispose: firstDispose }))
+    const secondRegister = vi.fn(() => ({ replace: vi.fn(), dispose: secondDispose }))
+    const ctx = new Context()
+    await ctx.plugin(WebRuntime, { searchProvider: DEEPSEEK_PROVIDER_ID })
+    const fiber = ctx.plugin(deepseekPlugin, { apiKeyEnv: 'SEARCH_DYNAMIC_KEY' })
+    await fiber
+
+    const firstProvider = ctx.plugin({
+      name: 'first-search-consumer-registry',
+      apply(serviceCtx: Context) {
+        serviceCtx.provide('credentialConsumers', {
+          registerDeepSeekWebSearch: firstRegister,
+        } as never)
+      },
+    })
+    await firstProvider
+    await vi.waitFor(() => {
+      expect(firstRegister).toHaveBeenCalledWith(credentialRef('SEARCH_DYNAMIC_KEY'))
+    })
+    await firstProvider.dispose()
+    await vi.waitFor(() => {
+      expect(firstDispose).toHaveBeenCalledTimes(1)
+    })
+
+    const secondProvider = ctx.plugin({
+      name: 'second-search-consumer-registry',
+      apply(serviceCtx: Context) {
+        serviceCtx.provide('credentialConsumers', {
+          registerDeepSeekWebSearch: secondRegister,
+        } as never)
+      },
+    })
+    await secondProvider
+    await vi.waitFor(() => {
+      expect(secondRegister).toHaveBeenCalledWith(credentialRef('SEARCH_DYNAMIC_KEY'))
+    })
+
+    await fiber.dispose()
+    expect(secondDispose).toHaveBeenCalledTimes(1)
+    await secondProvider.dispose()
+  })
+
   it('registers the provider into ctx.web (HMR-safe)', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(searchResponse())))
     const ctx = new Context()

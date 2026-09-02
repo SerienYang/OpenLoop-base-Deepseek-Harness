@@ -103,3 +103,11 @@ it('boots the built plugin graph and renders a fixture session end to end', asyn
     expect(styleOwners).toContain(plugin)
   }
 })
+
+it('boots the real Openloop client graph with the shared DSH interaction UI', async () => {
+  mountAssembledApp({ profile: 'openloop' })
+
+  expect(await screen.findAllByRole('button', { name: 'New session' }))
+    .toHaveLength(2)
+  expect(await screen.findByRole('button', { name: 'Settings' })).toBeTruthy()
+})

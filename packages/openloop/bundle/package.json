@@ -40,7 +40,17 @@
     "@deepseek-ai/dsh-base": "workspace:^",
     "@deepseek-ai/dsh-web-app": "workspace:^",
     "@openloop/chat-zoom": "workspace:*",
+    "@openloop/credentials-keychain": "workspace:*",
+    "@openloop/desktop-bridge-client": "workspace:*",
+    "@openloop/desktop-bridge-host": "workspace:*",
+    "@openloop/file-broker": "workspace:*",
+    "@openloop/fs-workspace": "workspace:*",
     "@openloop/runtime-bootstrap": "workspace:^",
+    "@openloop/sandbox-workspace": "workspace:^",
+    "@openloop/settings-foundation": "workspace:*",
+    "@openloop/shell": "workspace:*",
+    "@openloop/workspace-client": "workspace:*",
+    "@openloop/workspace-authority": "workspace:*",
     "js-yaml": "^4.2.0"
   },
   "peerDependencies": {
@@ -50,6 +60,8 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "workspace:^",
     "@deepseek-ai/dsh-invariants": "workspace:^",
-    "@types/js-yaml": "^4.0.9"
+    "@deepseek-ai/dsh-typert-generator": "workspace:^",
+    "@types/js-yaml": "^4.0.9",
+    "zod": "^4.4.3"
   }
 }

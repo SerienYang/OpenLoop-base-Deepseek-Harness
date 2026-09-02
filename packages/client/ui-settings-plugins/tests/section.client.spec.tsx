@@ -7,6 +7,7 @@
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import { AgentLoopCard } from '../src/client/AgentLoopCard.tsx'
@@ -350,20 +351,32 @@ describe('AgentLoopCard', () => {
 })
 
 describe('WebSearchCard', () => {
-  function renderWebSearch(state: Partial<WebSearchCardState> = {}) {
+  function renderWebSearch(
+    state: Partial<WebSearchCardState> = {},
+    credentialControl?: CredentialControlAdapter,
+  ) {
     const store = createSnapshotStore<WebSearchCardState>({
       ...settled,
       baseURL: field(''),
       maxUses: field('5'),
       apiKey: field(''),
+      credentialRef: 'DEEPSEEK_API_KEY',
+      credentialVersion: 0,
       apiKeyConfigured: false,
       apiKeyWritable: true,
       ...state,
     })
     const actions = cardActions()
-    const props = { ...actions, t, useWebSearchCard: bindSnapshotSelector(store) } as unknown as WebSearchCardProps
+    const refreshCredential = vi.fn(() => Promise.resolve())
+    const props = {
+      ...actions,
+      refreshCredential,
+      t,
+      useWebSearchCard: bindSnapshotSelector(store),
+      ...credentialControl === undefined ? {} : { credentialControl },
+    } as unknown as WebSearchCardProps
     render(<WebSearchCard {...props} />)
-    return actions
+    return { ...actions, refreshCredential }
   }
 
   it('reports whether a key is configured without ever showing one', () => {
@@ -372,6 +385,31 @@ describe('WebSearchCard', () => {
 
     expect(screen.getByText(en.webSearchApiKeySet)).toBeTruthy()
     expect(screen.getByLabelText(en.webSearchApiKey)).toHaveProperty('type', 'password')
+  })
+
+  it('renders the Host credential control instead of SecretField in Openloop', async () => {
+    let controlProps: Parameters<CredentialControlAdapter['render']>[0] | undefined
+    const credentialControl: CredentialControlAdapter = {
+      describe: vi.fn(),
+      render: (props) => {
+        controlProps = props
+        return <div data-testid="host-credential-control">{`${props.label}:${props.reference}`}</div>
+      },
+      materializeApiKeyEnv: true,
+      deleteCredentialWithProfile: false,
+    }
+    const actions = renderWebSearch({ credentialRef: 'SEARCH_KEY' }, credentialControl)
+    fireEvent.click(screen.getByText(en.webSearchTitle))
+
+    expect(screen.getByTestId('host-credential-control').textContent)
+      .toBe(`${en.webSearchApiKey}:SEARCH_KEY`)
+    expect(screen.queryByLabelText(en.webSearchApiKey)).toBeNull()
+    expect(document.querySelector('input[type="password"]')).toBeNull()
+    expect(controlProps?.onChanged).toBeTypeOf('function')
+
+    await controlProps?.onChanged?.()
+
+    expect(actions.refreshCredential).toHaveBeenCalledOnce()
   })
 
   it('keeps the key control usable while the settings document is read-only', () => {

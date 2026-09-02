@@ -1,0 +1,76 @@
+{
+  "sources": [
+    {
+      "contract": "old-shell",
+      "fixture": "old-dsh/sources/app-shell.ts.source.txt",
+      "version": "0.0.1",
+      "tag": null,
+      "sourceSha": "b00cd0cd8cc75517262b3f1eba93ffd818f7b05c",
+      "sourcePath": "packages/client/web/src/app-shell.ts",
+      "sha256": "e81ab2300780d3f1041365eac80c471f3f0b5ad560121230b54371d1e532bda4"
+    },
+    {
+      "contract": "old-workspace",
+      "fixture": "old-dsh/sources/workspace.ts.source.txt",
+      "version": "0.0.1",
+      "tag": null,
+      "sourceSha": "b00cd0cd8cc75517262b3f1eba93ffd818f7b05c",
+      "sourcePath": "packages/host/apiproxy/src/api/workspace.ts",
+      "sha256": "3a076324f7db8a22c8ab9148acb6f4123ae2958db9093fc24d62503fb3405ee0"
+    },
+    {
+      "contract": "old-settings",
+      "fixture": "old-dsh/sources/settings.ts.source.txt",
+      "version": "0.0.1",
+      "tag": null,
+      "sourceSha": "e31b7221e726f6e93c6462a1e46dddd122e19816",
+      "sourcePath": "packages/host/apiproxy/src/api/settings.ts",
+      "sha256": "eb381eb6ca1c85fcdd56b73e4cf56f6e7a1606584fab8d8b523cb261c6623307"
+    },
+    {
+      "contract": "old-desktop",
+      "fixture": "old-dsh/sources/host.ts.source.txt",
+      "version": "0.0.1",
+      "tag": null,
+      "sourceSha": "b00cd0cd8cc75517262b3f1eba93ffd818f7b05c",
+      "sourcePath": "packages/host/apiproxy/src/api/host.ts",
+      "sha256": "69591641802e2502af83e8caf5cd55097072af2f59f56fd31130d44785e76496"
+    },
+    {
+      "contract": "current-shell",
+      "fixture": "current-dsh/sources/app-shell.ts.source.txt",
+      "version": "0.1.0-rc.7",
+      "tag": "dsh-v0.1.0-rc.7",
+      "sourceSha": "99f6f02fecdb7dff40c3fbc9470f5907c29f74ca",
+      "sourcePath": "packages/client/web/src/app-shell.ts",
+      "sha256": "b164f0f72e0a522b44f83851858adc2adc3c13da722a3b2ee15a0eee11942bcc"
+    },
+    {
+      "contract": "current-workspace",
+      "fixture": "current-dsh/sources/workspace.ts.source.txt",
+      "version": "0.1.0-rc.7",
+      "tag": "dsh-v0.1.0-rc.7",
+      "sourceSha": "99f6f02fecdb7dff40c3fbc9470f5907c29f74ca",
+      "sourcePath": "packages/host/apiproxy/src/api/workspace.ts",
+      "sha256": "de4fbddcdfd65ab3a8ce8a3c03b59031fce7ca47475553204c46bb16a0fc0ae6"
+    },
+    {
+      "contract": "current-settings",
+      "fixture": "current-dsh/sources/settings.ts.source.txt",
+      "version": "0.1.0-rc.7",
+      "tag": "dsh-v0.1.0-rc.7",
+      "sourceSha": "99f6f02fecdb7dff40c3fbc9470f5907c29f74ca",
+      "sourcePath": "packages/host/apiproxy/src/api/settings.ts",
+      "sha256": "6c6dd27f994f0cb1d8dfcd1fb05bd82c31c0b9b9e8b93917abae8f39aa9bf732"
+    },
+    {
+      "contract": "current-desktop",
+      "fixture": "current-dsh/sources/host.ts.source.txt",
+      "version": "0.1.0-rc.7",
+      "tag": "dsh-v0.1.0-rc.7",
+      "sourceSha": "99f6f02fecdb7dff40c3fbc9470f5907c29f74ca",
+      "sourcePath": "packages/host/apiproxy/src/api/host.ts",
+      "sha256": "179b1124920059b39a1063d57f9c90d69e62767dee5600751608cab857a547c9"
+    }
+  ]
+}

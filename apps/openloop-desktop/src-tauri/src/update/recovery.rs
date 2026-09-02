@@ -1,7 +1,8 @@
 use std::{
     error::Error,
     ffi::{CStr, CString, OsStr},
-    fmt, fs, io,
+    fmt, fs,
+    io::{self, Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::{ffi::OsStrExt, fs::MetadataExt},
@@ -10,7 +11,13 @@ use std::{
     time::Duration,
 };
 
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
+const UPDATE_JOURNAL_FILE: &str = ".openloop-update-transaction.json";
+const UPDATE_JOURNAL_TEMP: &str = ".openloop-update-transaction.tmp";
+const MAX_UPDATE_JOURNAL_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "status", content = "detail")]
@@ -22,6 +29,28 @@ pub enum HealthStatus {
 
 pub trait CandidateHealth {
     fn await_health(&mut self, candidate: &Path, timeout: Duration) -> HealthStatus;
+}
+
+pub trait PublicationCompanion {
+    fn commit(&mut self, publication: &CommittedPublication) -> Result<(), String>;
+    fn rollback(&mut self) -> Result<(), String>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedPublication {
+    pub(crate) publication_id: Uuid,
+    pub(crate) update_root: PathBuf,
+    pub(crate) update_root_identity: FileIdentity,
+    pub(crate) installed_name: Vec<u8>,
+    pub(crate) installed_identity: FileIdentity,
+    pub(crate) backup_name: Vec<u8>,
+    pub(crate) backup_identity: FileIdentity,
+}
+
+impl CommittedPublication {
+    pub fn preserved_backup(&self) -> PathBuf {
+        self.update_root.join(OsStr::from_bytes(&self.backup_name))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,19 +67,31 @@ pub enum PublicationOutcome {
 #[cfg(debug_assertions)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryBoundary {
+    BeforeJournalFileFsync(RecoveryState),
+    AfterJournalFileFsync(RecoveryState),
+    BeforeJournalParentFsync(RecoveryState),
+    AfterJournalParentFsync(RecoveryState),
     BeforeCandidatePublishSwap,
     AfterCandidatePublishSwap,
+    AfterCompanionCommit,
     BeforeHealthRollbackSwap,
     AfterHealthRollbackSwap,
+    AfterCompanionRollback,
 }
 
 #[cfg(not(debug_assertions))]
 #[derive(Debug, Clone, Copy)]
 enum RecoveryBoundary {
+    BeforeJournalFileFsync(RecoveryState),
+    AfterJournalFileFsync(RecoveryState),
+    BeforeJournalParentFsync(RecoveryState),
+    AfterJournalParentFsync(RecoveryState),
     BeforeCandidatePublishSwap,
     AfterCandidatePublishSwap,
+    AfterCompanionCommit,
     BeforeHealthRollbackSwap,
     AfterHealthRollbackSwap,
+    AfterCompanionRollback,
 }
 
 #[cfg(debug_assertions)]
@@ -68,6 +109,18 @@ impl TransactionHook for NoopHook {
     fn before(&mut self, _: RecoveryBoundary, _: &Path, _: &Path) {}
 }
 
+struct NoopCompanion;
+
+impl PublicationCompanion for NoopCompanion {
+    fn commit(&mut self, _: &CommittedPublication) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn rollback(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 #[cfg(debug_assertions)]
 struct TestHookAdapter<'a, T>(&'a mut T);
 
@@ -78,15 +131,26 @@ impl<T: RecoveryTestHook> TransactionHook for TestHookAdapter<'_, T> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileIdentity {
-    device: u64,
-    inode: u64,
-    file_type: u32,
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecoveryState {
+    Prepared,
+    CandidatePublished,
+    CommitIntent,
+    RollbackIntent,
+    AppRestored,
+    CompanionRolledBack,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct FileIdentity {
+    pub(crate) device: u64,
+    pub(crate) inode: u64,
+    pub(crate) file_type: u32,
 }
 
 impl FileIdentity {
-    fn from_metadata(metadata: &fs::Metadata) -> Self {
+    pub(crate) fn from_metadata(metadata: &fs::Metadata) -> Self {
         Self {
             device: metadata.dev(),
             inode: metadata.ino(),
@@ -94,7 +158,7 @@ impl FileIdentity {
         }
     }
 
-    fn from_stat(metadata: &libc::stat) -> Self {
+    pub(crate) fn from_stat(metadata: &libc::stat) -> Self {
         Self {
             device: metadata.st_dev as u64,
             inode: metadata.st_ino,
@@ -102,8 +166,62 @@ impl FileIdentity {
         }
     }
 
-    fn is_directory(self) -> bool {
+    pub(crate) fn is_directory(self) -> bool {
         self.file_type == libc::S_IFDIR as u32
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RecoveryJournal {
+    transaction_id: Uuid,
+    update_root_identity: FileIdentity,
+    installed_name: Vec<u8>,
+    candidate_name: Vec<u8>,
+    installed_identity: FileIdentity,
+    candidate_identity: FileIdentity,
+    state: RecoveryState,
+    migration_transaction_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyRecoveryJournal {
+    transaction_id: Uuid,
+    installed_name: String,
+    candidate_name: String,
+    installed_identity: FileIdentity,
+    candidate_identity: FileIdentity,
+    state: RecoveryState,
+    migration_transaction_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RecoveryJournalWire {
+    // The variants stay disjoint because legacy denies the current-only root
+    // identity field, so malformed current journals cannot fall back.
+    Current(RecoveryJournal),
+    Legacy(LegacyRecoveryJournal),
+}
+
+impl RecoveryJournalWire {
+    fn into_current(self, root: RawFd) -> Result<RecoveryJournal, RecoveryError> {
+        match self {
+            Self::Current(journal) => Ok(journal),
+            Self::Legacy(journal) => Ok(RecoveryJournal {
+                transaction_id: journal.transaction_id,
+                update_root_identity: descriptor_identity(root).map_err(|source| {
+                    RecoveryError::io("inspect legacy recovery update root", source)
+                })?,
+                installed_name: journal.installed_name.into_bytes(),
+                candidate_name: journal.candidate_name.into_bytes(),
+                installed_identity: journal.installed_identity,
+                candidate_identity: journal.candidate_identity,
+                state: journal.state,
+                migration_transaction_id: journal.migration_transaction_id,
+            }),
+        }
     }
 }
 
@@ -111,10 +229,18 @@ impl FileIdentity {
 pub struct RecoveryTransaction {
     root_path: PathBuf,
     root: OwnedFd,
+    root_identity: FileIdentity,
     installed_name: CString,
     candidate_name: CString,
     installed_identity: FileIdentity,
     candidate_identity: FileIdentity,
+    transaction_id: Uuid,
+    migration_transaction_id: Option<Uuid>,
+    prepared: bool,
+}
+
+pub fn update_journal_path(root: &Path) -> PathBuf {
+    root.join(UPDATE_JOURNAL_FILE)
 }
 
 impl RecoveryTransaction {
@@ -176,18 +302,62 @@ impl RecoveryTransaction {
         Ok(Self {
             root_path: canonical_root,
             root,
+            root_identity,
             installed_name,
             candidate_name,
             installed_identity,
             candidate_identity,
+            transaction_id: Uuid::new_v4(),
+            migration_transaction_id: None,
+            prepared: false,
         })
+    }
+
+    pub fn prepare(self, migration_transaction_id: Option<Uuid>) -> Result<Self, RecoveryError> {
+        self.prepare_inner(migration_transaction_id, &mut NoopHook)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn prepare_with_hook(
+        self,
+        migration_transaction_id: Option<Uuid>,
+        hook: &mut impl RecoveryTestHook,
+    ) -> Result<Self, RecoveryError> {
+        self.prepare_inner(migration_transaction_id, &mut TestHookAdapter(hook))
+    }
+
+    fn prepare_inner(
+        mut self,
+        migration_transaction_id: Option<Uuid>,
+        hook: &mut impl TransactionHook,
+    ) -> Result<Self, RecoveryError> {
+        if self.prepared {
+            if self.migration_transaction_id != migration_transaction_id {
+                return Err(RecoveryError::invalid(
+                    "prepared update migration transaction identity changed",
+                ));
+            }
+            return Ok(self);
+        }
+        self.migration_transaction_id = migration_transaction_id;
+        self.persist_journal(RecoveryState::Prepared, hook)?;
+        self.prepared = true;
+        Ok(self)
     }
 
     pub fn publish(
         self,
         health: &mut impl CandidateHealth,
     ) -> Result<PublicationOutcome, RecoveryError> {
-        self.publish_inner(health, &mut NoopHook)
+        self.publish_inner(health, &mut NoopHook, &mut NoopCompanion, false)
+    }
+
+    pub fn publish_with_companion(
+        self,
+        health: &mut impl CandidateHealth,
+        companion: &mut impl PublicationCompanion,
+    ) -> Result<PublicationOutcome, RecoveryError> {
+        self.publish_inner(health, &mut NoopHook, companion, true)
     }
 
     #[cfg(debug_assertions)]
@@ -196,14 +366,45 @@ impl RecoveryTransaction {
         health: &mut impl CandidateHealth,
         hook: &mut impl RecoveryTestHook,
     ) -> Result<PublicationOutcome, RecoveryError> {
-        self.publish_inner(health, &mut TestHookAdapter(hook))
+        self.publish_inner(
+            health,
+            &mut TestHookAdapter(hook),
+            &mut NoopCompanion,
+            false,
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn publish_with_companion_and_hook(
+        self,
+        health: &mut impl CandidateHealth,
+        companion: &mut impl PublicationCompanion,
+        hook: &mut impl RecoveryTestHook,
+    ) -> Result<PublicationOutcome, RecoveryError> {
+        self.publish_inner(health, &mut TestHookAdapter(hook), companion, true)
     }
 
     fn publish_inner(
-        self,
+        mut self,
         health: &mut impl CandidateHealth,
         hook: &mut impl TransactionHook,
+        companion: &mut impl PublicationCompanion,
+        has_companion: bool,
     ) -> Result<PublicationOutcome, RecoveryError> {
+        if !has_companion && self.migration_transaction_id.is_some() {
+            return Err(RecoveryError::invalid(
+                "update migration transaction requires an exactly bound companion",
+            ));
+        }
+        if self.migration_transaction_id.is_some() && !self.prepared {
+            return Err(RecoveryError::invalid(
+                "migration-bound update must be durably prepared before publication",
+            ));
+        }
+        if !self.prepared {
+            self.persist_journal(RecoveryState::Prepared, hook)?;
+            self.prepared = true;
+        }
         if let Err(source) = self.swap_checked(
             &self.installed_name,
             self.installed_identity,
@@ -216,21 +417,47 @@ impl RecoveryTransaction {
         ) {
             return Err(RecoveryError::io("publish candidate app bundle", source));
         }
+        self.persist_journal(RecoveryState::CandidatePublished, hook)?;
 
         let installed_path = self.path(&self.installed_name);
         let status = health.await_health(&installed_path, HEALTH_TIMEOUT);
         if status == HealthStatus::Healthy {
-            return Ok(PublicationOutcome::Committed {
-                preserved_backup: self.path(&self.candidate_name),
-            });
+            self.persist_journal(RecoveryState::CommitIntent, hook)?;
+            let publication = self.committed_publication();
+            match companion.commit(&publication) {
+                Ok(()) => {
+                    hook.before(
+                        RecoveryBoundary::AfterCompanionCommit,
+                        &self.path(&self.installed_name),
+                        &self.path(&self.candidate_name),
+                    );
+                    self.remove_journal()?;
+                    return Ok(PublicationOutcome::Committed {
+                        preserved_backup: publication.preserved_backup(),
+                    });
+                }
+                Err(_) => return Err(RecoveryError::CompanionCommit),
+            }
         }
 
+        self.persist_journal(RecoveryState::RollbackIntent, hook)?;
         if let Err(restore) = self.health_rollback_swap(hook) {
             return Err(RecoveryError::RestoreFailed {
                 restore,
                 candidate_republish: None,
             });
         }
+        self.persist_journal(RecoveryState::AppRestored, hook)?;
+        companion
+            .rollback()
+            .map_err(|_| RecoveryError::CompanionRollback)?;
+        hook.before(
+            RecoveryBoundary::AfterCompanionRollback,
+            &self.path(&self.installed_name),
+            &self.path(&self.candidate_name),
+        );
+        self.persist_journal(RecoveryState::CompanionRolledBack, hook)?;
+        self.remove_journal()?;
         Ok(PublicationOutcome::RolledBack {
             status,
             failed_candidate: self.path(&self.candidate_name),
@@ -429,6 +656,416 @@ impl RecoveryTransaction {
     fn path(&self, name: &CStr) -> PathBuf {
         self.root_path.join(OsStr::from_bytes(name.to_bytes()))
     }
+
+    fn committed_publication(&self) -> CommittedPublication {
+        CommittedPublication {
+            publication_id: self.transaction_id,
+            update_root: self.root_path.clone(),
+            update_root_identity: self.root_identity,
+            installed_name: self.installed_name.to_bytes().to_vec(),
+            installed_identity: self.candidate_identity,
+            backup_name: self.candidate_name.to_bytes().to_vec(),
+            backup_identity: self.installed_identity,
+        }
+    }
+
+    fn journal(&self, state: RecoveryState) -> RecoveryJournal {
+        RecoveryJournal {
+            transaction_id: self.transaction_id,
+            update_root_identity: self.root_identity,
+            installed_name: self.installed_name.to_bytes().to_vec(),
+            candidate_name: self.candidate_name.to_bytes().to_vec(),
+            installed_identity: self.installed_identity,
+            candidate_identity: self.candidate_identity,
+            state,
+            migration_transaction_id: self.migration_transaction_id,
+        }
+    }
+
+    fn persist_journal(
+        &self,
+        state: RecoveryState,
+        hook: &mut impl TransactionHook,
+    ) -> Result<(), RecoveryError> {
+        let bytes = serde_json::to_vec(&self.journal(state))
+            .map_err(|source| RecoveryError::json("serialize update journal", source))?;
+        remove_optional_file_at(self.root.as_raw_fd(), UPDATE_JOURNAL_TEMP)?;
+        let temp = CString::new(UPDATE_JOURNAL_TEMP).expect("fixed update journal temp name");
+        let descriptor = unsafe {
+            libc::openat(
+                self.root.as_raw_fd(),
+                temp.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0o600,
+            )
+        };
+        if descriptor < 0 {
+            return Err(RecoveryError::io(
+                "create update journal temp file",
+                io::Error::last_os_error(),
+            ));
+        }
+        let mut file = unsafe { fs::File::from_raw_fd(descriptor) };
+        file.write_all(&bytes)
+            .map_err(|source| RecoveryError::io("write update journal", source))?;
+        hook.before(
+            RecoveryBoundary::BeforeJournalFileFsync(state),
+            &self.path(&self.installed_name),
+            &self.path(&self.candidate_name),
+        );
+        file.sync_all()
+            .map_err(|source| RecoveryError::io("sync update journal", source))?;
+        hook.before(
+            RecoveryBoundary::AfterJournalFileFsync(state),
+            &self.path(&self.installed_name),
+            &self.path(&self.candidate_name),
+        );
+        drop(file);
+        rename_entry(
+            self.root.as_raw_fd(),
+            &temp,
+            &CString::new(UPDATE_JOURNAL_FILE).expect("fixed update journal name"),
+        )
+        .map_err(|source| RecoveryError::io("publish update journal", source))?;
+        hook.before(
+            RecoveryBoundary::BeforeJournalParentFsync(state),
+            &self.path(&self.installed_name),
+            &self.path(&self.candidate_name),
+        );
+        sync_directory(self.root.as_raw_fd())
+            .map_err(|source| RecoveryError::io("sync update journal directory", source))?;
+        hook.before(
+            RecoveryBoundary::AfterJournalParentFsync(state),
+            &self.path(&self.installed_name),
+            &self.path(&self.candidate_name),
+        );
+        Ok(())
+    }
+
+    fn remove_journal(&self) -> Result<(), RecoveryError> {
+        remove_optional_file_at(self.root.as_raw_fd(), UPDATE_JOURNAL_FILE)?;
+        remove_optional_file_at(self.root.as_raw_fd(), UPDATE_JOURNAL_TEMP)?;
+        sync_directory(self.root.as_raw_fd())
+            .map_err(|source| RecoveryError::io("sync update journal removal", source))
+    }
+}
+
+pub fn pending_update_migration_transaction_id(root: &Path) -> Result<Option<Uuid>, RecoveryError> {
+    let (_, descriptor) = open_update_root(root)?;
+    Ok(read_recovery_journal(descriptor.as_raw_fd())?
+        .and_then(|journal| journal.migration_transaction_id))
+}
+
+pub fn recover_interrupted_update(root: &Path) -> Result<(), RecoveryError> {
+    recover_interrupted_update_inner(root, None, &mut NoopCompanion, false)
+}
+
+pub fn recover_interrupted_update_with_companion(
+    root: &Path,
+    companion: &mut impl PublicationCompanion,
+) -> Result<(), RecoveryError> {
+    recover_interrupted_update_inner(root, None, companion, true)
+}
+
+pub fn recover_interrupted_update_with_bound_companion(
+    root: &Path,
+    migration_transaction_id: Uuid,
+    companion: &mut impl PublicationCompanion,
+) -> Result<(), RecoveryError> {
+    recover_interrupted_update_inner(root, Some(migration_transaction_id), companion, true)
+}
+
+fn recover_interrupted_update_inner(
+    root: &Path,
+    expected_migration_transaction_id: Option<Uuid>,
+    companion: &mut impl PublicationCompanion,
+    has_companion: bool,
+) -> Result<(), RecoveryError> {
+    let (root_path, root_descriptor) = open_update_root(root)?;
+    let Some(journal) = read_recovery_journal(root_descriptor.as_raw_fd())? else {
+        remove_optional_file_at(root_descriptor.as_raw_fd(), UPDATE_JOURNAL_TEMP)?;
+        return Ok(());
+    };
+    validate_recovery_journal(&journal)?;
+    if !has_companion && expected_migration_transaction_id.is_some() {
+        return Err(RecoveryError::invalid(
+            "update migration recovery requires an exactly bound companion",
+        ));
+    }
+    if journal.migration_transaction_id != expected_migration_transaction_id {
+        return Err(RecoveryError::invalid(
+            "update journal migration transaction identity does not match",
+        ));
+    }
+    let transaction = RecoveryTransaction {
+        root_path,
+        root: root_descriptor,
+        root_identity: journal.update_root_identity,
+        installed_name: CString::new(journal.installed_name.clone())
+            .map_err(|_| RecoveryError::invalid("update journal installed name is invalid"))?,
+        candidate_name: CString::new(journal.candidate_name.clone())
+            .map_err(|_| RecoveryError::invalid("update journal candidate name is invalid"))?,
+        installed_identity: journal.installed_identity,
+        candidate_identity: journal.candidate_identity,
+        transaction_id: journal.transaction_id,
+        migration_transaction_id: journal.migration_transaction_id,
+        prepared: true,
+    };
+    if descriptor_identity(transaction.root.as_raw_fd())
+        .map_err(|source| RecoveryError::io("inspect recovery update root", source))?
+        != transaction.root_identity
+    {
+        return Err(RecoveryError::invalid(
+            "recovery update root identity does not match its journal",
+        ));
+    }
+    let installed_observed = identity_at(transaction.root.as_raw_fd(), &transaction.installed_name)
+        .map_err(|source| RecoveryError::io("inspect recovery installed app", source))?;
+    let candidate_observed = identity_at(transaction.root.as_raw_fd(), &transaction.candidate_name)
+        .map_err(|source| RecoveryError::io("inspect recovery candidate app", source))?;
+    let original = installed_observed == transaction.installed_identity
+        && candidate_observed == transaction.candidate_identity;
+    let published = installed_observed == transaction.candidate_identity
+        && candidate_observed == transaction.installed_identity;
+
+    match journal.state {
+        RecoveryState::Prepared | RecoveryState::CandidatePublished => {
+            transaction.persist_journal(RecoveryState::RollbackIntent, &mut NoopHook)?;
+            if published {
+                transaction
+                    .health_rollback_swap(&mut NoopHook)
+                    .map_err(|source| RecoveryError::io("restore interrupted update", source))?;
+            } else if !original {
+                return Err(RecoveryError::invalid(
+                    "interrupted update app identities are ambiguous",
+                ));
+            }
+            transaction.persist_journal(RecoveryState::AppRestored, &mut NoopHook)?;
+            companion
+                .rollback()
+                .map_err(|_| RecoveryError::CompanionRollback)?;
+            transaction.persist_journal(RecoveryState::CompanionRolledBack, &mut NoopHook)?;
+        }
+        RecoveryState::CommitIntent => {
+            if !published {
+                return Err(RecoveryError::invalid(
+                    "committing update no longer owns the published app identities",
+                ));
+            }
+            companion
+                .commit(&transaction.committed_publication())
+                .map_err(|_| RecoveryError::CompanionCommit)?;
+        }
+        RecoveryState::RollbackIntent => {
+            if published {
+                transaction
+                    .health_rollback_swap(&mut NoopHook)
+                    .map_err(|source| RecoveryError::io("resume update rollback", source))?;
+            } else if !original {
+                return Err(RecoveryError::invalid(
+                    "rolling back update no longer owns the app identities",
+                ));
+            }
+            transaction.persist_journal(RecoveryState::AppRestored, &mut NoopHook)?;
+            companion
+                .rollback()
+                .map_err(|_| RecoveryError::CompanionRollback)?;
+            transaction.persist_journal(RecoveryState::CompanionRolledBack, &mut NoopHook)?;
+        }
+        RecoveryState::AppRestored => {
+            if !original {
+                return Err(RecoveryError::invalid(
+                    "restored update no longer owns the app identities",
+                ));
+            }
+            companion
+                .rollback()
+                .map_err(|_| RecoveryError::CompanionRollback)?;
+            transaction.persist_journal(RecoveryState::CompanionRolledBack, &mut NoopHook)?;
+        }
+        RecoveryState::CompanionRolledBack => {
+            if !original {
+                return Err(RecoveryError::invalid(
+                    "rolled back update no longer owns the app identities",
+                ));
+            }
+        }
+    }
+    transaction.remove_journal()
+}
+
+fn open_update_root(root: &Path) -> Result<(PathBuf, OwnedFd), RecoveryError> {
+    let metadata = fs::symlink_metadata(root)
+        .map_err(|source| RecoveryError::io("inspect update root", source))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(RecoveryError::invalid(
+            "update root must be a real directory, not a symlink",
+        ));
+    }
+    let canonical = fs::canonicalize(root)
+        .map_err(|source| RecoveryError::io("canonicalize update root", source))?;
+    let root_c = CString::new(canonical.as_os_str().as_bytes())
+        .map_err(|_| RecoveryError::invalid("update root contains a NUL byte"))?;
+    let descriptor = unsafe {
+        libc::open(
+            root_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if descriptor < 0 {
+        return Err(RecoveryError::io(
+            "open update root",
+            io::Error::last_os_error(),
+        ));
+    }
+    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    if descriptor_identity(descriptor.as_raw_fd())
+        .map_err(|source| RecoveryError::io("inspect opened update root", source))?
+        != FileIdentity::from_metadata(&metadata)
+    {
+        return Err(RecoveryError::invalid(
+            "update root identity changed while opening recovery",
+        ));
+    }
+    Ok((canonical, descriptor))
+}
+
+fn read_recovery_journal(root: RawFd) -> Result<Option<RecoveryJournal>, RecoveryError> {
+    for name in [UPDATE_JOURNAL_FILE, UPDATE_JOURNAL_TEMP] {
+        let name_c = CString::new(name).expect("fixed update journal name");
+        let descriptor = unsafe {
+            libc::openat(
+                root,
+                name_c.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            )
+        };
+        if descriptor < 0 {
+            let source = io::Error::last_os_error();
+            if source.kind() == io::ErrorKind::NotFound {
+                continue;
+            }
+            return Err(RecoveryError::io("open update journal", source));
+        }
+        let mut file = unsafe { fs::File::from_raw_fd(descriptor) };
+        let metadata = descriptor_stat(file.as_raw_fd())
+            .map_err(|source| RecoveryError::io("inspect update journal", source))?;
+        if metadata.st_mode as u32 & libc::S_IFMT as u32 != libc::S_IFREG as u32
+            || metadata.st_mode as u32 & 0o777 != 0o600
+            || metadata.st_uid != unsafe { libc::geteuid() }
+            || metadata.st_nlink != 1
+        {
+            return Err(RecoveryError::invalid(
+                "update journal ownership or permissions are unsafe",
+            ));
+        }
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take((MAX_UPDATE_JOURNAL_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|source| RecoveryError::io("read update journal", source))?;
+        if bytes.len() > MAX_UPDATE_JOURNAL_BYTES {
+            return Err(RecoveryError::invalid("update journal is oversized"));
+        }
+        let journal: RecoveryJournalWire = serde_json::from_slice(&bytes)
+            .map_err(|source| RecoveryError::json("parse update journal", source))?;
+        return Ok(Some(journal.into_current(root)?));
+    }
+    Ok(None)
+}
+
+fn validate_recovery_journal(journal: &RecoveryJournal) -> Result<(), RecoveryError> {
+    for (name, label) in [
+        (&journal.installed_name, "installed"),
+        (&journal.candidate_name, "candidate"),
+    ] {
+        let path = Path::new(OsStr::from_bytes(name));
+        if name.is_empty()
+            || !matches!(
+                path.components().collect::<Vec<_>>().as_slice(),
+                [std::path::Component::Normal(_)]
+            )
+            || path.extension() != Some(OsStr::new("app"))
+        {
+            return Err(RecoveryError::invalid(format!(
+                "update journal {label} name is invalid"
+            )));
+        }
+    }
+    if journal.installed_name == journal.candidate_name
+        || !journal.update_root_identity.is_directory()
+        || !journal.installed_identity.is_directory()
+        || !journal.candidate_identity.is_directory()
+        || journal.update_root_identity.device != journal.installed_identity.device
+        || journal.installed_identity.device != journal.candidate_identity.device
+    {
+        return Err(RecoveryError::invalid(
+            "update journal app identities are invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn rename_entry(root: RawFd, source: &CStr, destination: &CStr) -> io::Result<()> {
+    if unsafe { libc::renameat(root, source.as_ptr(), root, destination.as_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn remove_optional_file_at(root: RawFd, name: &str) -> Result<(), RecoveryError> {
+    let name = CString::new(name).expect("fixed update journal name");
+    let metadata = match stat_at(root, &name) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(RecoveryError::io("inspect update journal removal", source)),
+    };
+    if metadata.st_mode as u32 & libc::S_IFMT as u32 != libc::S_IFREG as u32
+        || metadata.st_uid != unsafe { libc::geteuid() }
+        || metadata.st_nlink != 1
+    {
+        return Err(RecoveryError::invalid(
+            "update journal removal target is unsafe",
+        ));
+    }
+    if unsafe { libc::unlinkat(root, name.as_ptr(), 0) } < 0 {
+        return Err(RecoveryError::io(
+            "remove update journal",
+            io::Error::last_os_error(),
+        ));
+    }
+    Ok(())
+}
+
+fn stat_at(root: RawFd, name: &CStr) -> io::Result<libc::stat> {
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            root,
+            name.as_ptr(),
+            metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { metadata.assume_init() })
+}
+
+fn descriptor_stat(descriptor: RawFd) -> io::Result<libc::stat> {
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(descriptor, metadata.as_mut_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { metadata.assume_init() })
+}
+
+fn sync_directory(descriptor: RawFd) -> io::Result<()> {
+    if unsafe { libc::fsync(descriptor) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn bundle_name(root: &Path, bundle: &Path, label: &str) -> Result<CString, RecoveryError> {
@@ -518,6 +1155,12 @@ pub enum RecoveryError {
         restore: io::Error,
         candidate_republish: Option<io::Error>,
     },
+    Json {
+        operation: &'static str,
+        source: serde_json::Error,
+    },
+    CompanionCommit,
+    CompanionRollback,
 }
 
 impl RecoveryError {
@@ -528,6 +1171,10 @@ impl RecoveryError {
     fn io(operation: &'static str, source: io::Error) -> Self {
         Self::Io { operation, source }
     }
+
+    fn json(operation: &'static str, source: serde_json::Error) -> Self {
+        Self::Json { operation, source }
+    }
 }
 
 impl fmt::Display for RecoveryError {
@@ -535,6 +1182,7 @@ impl fmt::Display for RecoveryError {
         match self {
             Self::InvalidState(message) => formatter.write_str(message),
             Self::Io { operation, source } => write!(formatter, "{operation} failed: {source}"),
+            Self::Json { operation, source } => write!(formatter, "{operation} failed: {source}"),
             Self::RestoreFailed {
                 restore,
                 candidate_republish,
@@ -548,6 +1196,8 @@ impl fmt::Display for RecoveryError {
                 }
                 Ok(())
             }
+            Self::CompanionCommit => formatter.write_str("candidate companion commit failed"),
+            Self::CompanionRollback => formatter.write_str("candidate companion rollback failed"),
         }
     }
 }
@@ -557,7 +1207,9 @@ impl Error for RecoveryError {
         match self {
             Self::InvalidState(_) => None,
             Self::Io { source, .. } => Some(source),
+            Self::Json { source, .. } => Some(source),
             Self::RestoreFailed { restore, .. } => Some(restore),
+            Self::CompanionCommit | Self::CompanionRollback => None,
         }
     }
 }

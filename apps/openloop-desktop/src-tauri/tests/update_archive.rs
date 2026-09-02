@@ -33,11 +33,36 @@ fn archive(entries: &[(&[u8], u8, &[u8])]) -> Vec<u8> {
     for (path, kind, body) in entries {
         append(&mut tar, path, *kind, body);
     }
+    compress(tar)
+}
+
+fn compress(mut tar: Builder<Vec<u8>>) -> Vec<u8> {
     tar.finish().expect("finish test tar");
     let bytes = tar.into_inner().expect("read test tar");
     let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
     gzip.write_all(&bytes).expect("compress test tar");
     gzip.finish().expect("finish test gzip")
+}
+
+fn archive_with_component_count(component_count: usize) -> (Vec<u8>, std::path::PathBuf) {
+    assert!(component_count >= 2);
+    let relative = std::iter::repeat_n("d", component_count - 2)
+        .chain(std::iter::once("marker"))
+        .collect::<std::path::PathBuf>();
+    let archive_path = Path::new("Openloop.app").join(&relative);
+    let mut tar = Builder::new(Vec::new());
+    append(&mut tar, b"Openloop.app/", b'5', b"");
+    let mut header = Header::new_gnu();
+    header.set_entry_type(EntryType::Regular);
+    header.set_mode(0o644);
+    header.set_size(3);
+    header.set_uid(501);
+    header.set_gid(20);
+    header.set_mtime(0);
+    header.set_cksum();
+    tar.append_data(&mut header, &archive_path, Cursor::new(b"new"))
+        .expect("append deep archive entry");
+    (compress(tar), relative)
 }
 
 fn installed_app(root: &Path) -> std::path::PathBuf {
@@ -105,6 +130,57 @@ fn stages_one_valid_app_root_directly_as_the_only_candidate_artifact() {
 }
 
 #[test]
+fn accepts_archive_paths_with_100_total_components() {
+    let root = tempdir().expect("update root");
+    let installed = installed_app(root.path());
+    let (bytes, relative) = archive_with_component_count(100);
+
+    let staged =
+        stage_verified_archive(&bytes, &installed).expect("100-component path must be accepted");
+
+    assert_eq!(
+        fs::read(staged.path().join(relative)).expect("deep staged file"),
+        b"new"
+    );
+}
+
+#[test]
+fn rejects_101_component_archive_before_creating_a_candidate_directory() {
+    let root = tempdir().expect("update root");
+    let installed = installed_app(root.path());
+    let (bytes, _) = archive_with_component_count(101);
+
+    let error = stage_verified_archive(&bytes, &installed)
+        .expect_err("101-component path must exceed the archive depth limit");
+
+    assert!(error.to_string().contains("100"));
+    assert!(error.preserved_paths().is_empty());
+    assert_eq!(
+        fs::read_dir(root.path()).expect("update root").count(),
+        1,
+        "depth rejection created a candidate directory"
+    );
+}
+
+#[test]
+fn rejects_extremely_deep_archive_without_creating_a_candidate_directory() {
+    let root = tempdir().expect("update root");
+    let installed = installed_app(root.path());
+    let (bytes, _) = archive_with_component_count(10_000);
+
+    let error = stage_verified_archive(&bytes, &installed)
+        .expect_err("extremely deep path must fail without recursive processing");
+
+    assert!(error.to_string().contains("100"));
+    assert!(error.preserved_paths().is_empty());
+    assert_eq!(
+        fs::read_dir(root.path()).expect("update root").count(),
+        1,
+        "extreme depth rejection created a candidate directory"
+    );
+}
+
+#[test]
 fn preserved_candidate_blocks_the_next_stage_until_recovery_cleanup() {
     let root = tempdir().expect("update root");
     let installed = installed_app(root.path());
@@ -129,6 +205,32 @@ fn preserved_candidate_blocks_the_next_stage_until_recovery_cleanup() {
     assert_eq!(
         fs::read_to_string(candidate.join("Contents/marker")).expect("preserved candidate"),
         "new"
+    );
+    assert_eq!(fs::read_dir(root.path()).expect("update root").count(), 2);
+}
+
+#[test]
+fn cleanup_isolation_blocks_staging_without_deleting_the_recovery_owned_artifact() {
+    let root = tempdir().expect("update root");
+    let installed = installed_app(root.path());
+    let isolated = root.path().join(
+        ".openloop-cleanup-0f40b072-8c3f-48f9-86c1-5f857d537aef-\
+         5345877f-ef7b-4fd8-a6e1-35f91385848d",
+    );
+    fs::create_dir(&isolated).expect("cleanup isolation");
+    fs::write(isolated.join("marker"), b"recovery-owned").expect("cleanup isolation marker");
+
+    let error = stage_verified_archive(&archive(&update_entries()), &installed)
+        .expect_err("cleanup isolation must block staging");
+
+    assert!(error.to_string().contains("requires recovery cleanup"));
+    assert_eq!(
+        error.preserved_paths(),
+        [fs::canonicalize(&isolated).expect("canonical cleanup isolation")]
+    );
+    assert_eq!(
+        fs::read(isolated.join("marker")).expect("preserved cleanup isolation marker"),
+        b"recovery-owned"
     );
     assert_eq!(fs::read_dir(root.path()).expect("update root").count(), 2);
 }

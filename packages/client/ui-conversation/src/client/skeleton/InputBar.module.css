@@ -380,7 +380,7 @@
 
 /* Primary send (figma IconButton 34:10465): 34px circle, #3964FE light /
    #679EFE dark — the info-fill pair (500→400), NOT button-primary (ink);
-   white glyph; empty text = 0.4 opacity. */
+   paired glyph foreground with a white DSH fallback; empty text = 0.4 opacity. */
 .primary {
   display: grid;
   place-items: center;
@@ -390,9 +390,7 @@
   border: none;
   border-radius: 999px;
   background: var(--dsw-alias-button-info-fill);
-  /* Static white, not the foreground token: the arrow stays white on the blue
-     fill in both themes (design 34:10465). */
-  color: #fff;
+  color: var(--dsw-alias-button-info-foreground, #fff);
   cursor: pointer;
   transition: background-color 100ms ease;
   /* Opts out of the row's 2px downward shift (.row top pad): the send circle

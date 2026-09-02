@@ -1,0 +1,38 @@
+- complementary:
+  - button "New session": Openloop
+  - button "Collapse sidebar":
+    - img
+  - button "New session":
+    - img
+    - text: New Session
+  - region "Workspaces":
+    - text: Workspaces
+    - button "Add Workspace":
+      - img
+    - button "Switch to Workspace Alpha": Workspace Alpha ~/Projects/authority-project
+    - text: Ready
+    - button "Workspace actions for Workspace Alpha":
+      - img
+    - button "New session in Workspace Alpha": +
+    - button "authority-project"
+    - button "authority-project"
+  - button "Settings":
+    - img
+    - text: Settings
+- main:
+  - text: Openloop 预览版
+  - button "Choose workspace":
+    - img
+    - text: Workspace Alpha
+    - img
+  - textbox "Describe what you want to build"
+  - button "Commands":
+    - img
+  - button "Select model, current DeepSeek-V4-Flash":
+    - text: DeepSeek-V4-Flash
+    - img
+  - button "Send message" [disabled]
+- complementary:
+  - text: Details
+  - button "Close details"
+  - text: Click a tool row in the message flow to view its details

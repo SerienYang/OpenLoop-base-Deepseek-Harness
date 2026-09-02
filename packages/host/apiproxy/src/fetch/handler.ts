@@ -71,6 +71,24 @@ import {
   subagentPromptRequestSchema,
 } from '../api/subagents.schema.ts'
 
+interface BrowserApiPolicy {
+  readonly version: 1
+  allowsTarget?(method: string): boolean
+  allows(method: string, payload: unknown): boolean
+  allowsInvocation?<T>(
+    method: string,
+    payload: unknown,
+    signal: AbortSignal,
+    operation: () => Promise<T>,
+  ): Promise<
+    | { readonly allowed: false }
+    | { readonly allowed: true; readonly value: T }
+  >
+  projectResult?(method: string, value: unknown): unknown
+  projectError?(method: string, error: RpcError): RpcError
+  projectStreamFrame?(frame: MuxFrame | HostFrame): MuxFrame | HostFrame | undefined
+}
+
 /**
  * Unary dispatch table, keyed by (and compiler-locked to) RpcMethodMap: a map row without a
  * route row fails to compile, and each row's schema/invoke pair is checked against that row's
@@ -166,28 +184,73 @@ function fullResponse(narrow: RpcResponse<unknown>): Response {
   return Response.json(body)
 }
 
+function projectedResponse(
+  method: string,
+  narrow: RpcResponse<unknown>,
+  policy?: BrowserApiPolicy,
+): Response {
+  if (!narrow.result.ok) {
+    if (policy?.projectError === undefined) return fullResponse(narrow)
+    return fullResponse({
+      rpcId: narrow.rpcId,
+      result: {
+        ok: false,
+        error: policy.projectError(method, narrow.result.error),
+      },
+    })
+  }
+  if (policy?.projectResult === undefined) return fullResponse(narrow)
+  return fullResponse({
+    rpcId: narrow.rpcId,
+    result: {
+      ok: true,
+      value: policy.projectResult(method, narrow.result.value),
+    },
+  })
+}
+
 /**
  * Parse the payload and invoke one unary route. Generic over the map key so
  * the row's schema/invoke pairing typechecks; the only cast collapses the
  * Wire<> widening back to the exact payload (undefined-valued properties and
  * absent ones are indistinguishable after JSON transport).
  */
-// K appears once in the signature but ties the UNARY_ROUTES[K] row lookup to its own
-// schema/invoke pairing; a union parameter degrades the row to an uninvokable intersection.
-// oxlint-disable-next-line typescript/no-unnecessary-type-parameters
+// The route parameter keeps each map row paired with its own method type; a
+// union route degrades its invoke function to an uncallable intersection.
 async function handleUnary<K extends keyof RpcMethodMap>(
-  api: ApiProxy, method: K, message: ClientRequest, signal: AbortSignal,
+  api: ApiProxy,
+  method: K,
+  route: UnaryRoutes[K],
+  message: ClientRequest,
+  signal: AbortSignal,
+  policy?: BrowserApiPolicy,
 ): Promise<Response> {
-  const route = UNARY_ROUTES[method]
   const payload = route.schema.safeParse(message.payload)
   if (!payload.success) {
     return errorResponse(message.rpcId, { code: 'bad-request', message: `invalid payload for ${method}`, details: { issues: payload.error.issues } })
   }
+  let businessFailure: { readonly error: unknown } | undefined
+  const invoke = async () => {
+    try {
+      return await route.invoke(api, { rpcId: message.rpcId, payload: payload.data }, signal)
+    } catch (error) {
+      businessFailure = { error }
+      throw error
+    }
+  }
   try {
-    return fullResponse(await route.invoke(api, { rpcId: message.rpcId, payload: payload.data }, signal))
-  } catch (error: unknown) {
+    if (policy?.allowsInvocation === undefined) {
+      return projectedResponse(method, await invoke(), policy)
+    }
+    const admission = await policy.allowsInvocation(method, payload.data, signal, invoke)
+    if (!admission.allowed) return new Response('forbidden', { status: 403 })
+    return projectedResponse(method, admission.value, policy)
+  } catch {
+    if (businessFailure === undefined) {
+      return new Response('forbidden', { status: 403 })
+    }
     // The impl never throws business errors; reaching here means the implementation itself crashed — 500, carrier layer.
-    return new Response(`handler failure: ${String(error)}`, { status: 500 })
+    return new Response(`handler failure: ${String(businessFailure.error)}`, { status: 500 })
   }
 }
 
@@ -196,11 +259,30 @@ function fullFrame(narrow: RpcRequest<MuxFrame | HostFrame>): ServerRequest {
   return { type: 'server-request', rpcId: narrow.rpcId, method: narrow.payload.type, payload: narrow.payload }
 }
 
+function projectedStreamFrame(
+  frame: MuxFrame | HostFrame,
+  policy?: BrowserApiPolicy,
+): MuxFrame | HostFrame | undefined {
+  let projected = frame
+  if (projected.type === 'stream/error' && policy?.projectError !== undefined) {
+    projected = {
+      ...projected,
+      error: policy.projectError(projected.type, projected.error),
+    }
+  }
+  return policy?.projectStreamFrame === undefined
+    ? projected
+    : policy.projectStreamFrame(projected)
+}
+
 /**
  * Wrap a frame stream as an SSE Response; stops when req.signal aborts. An
  * impl throw mid-stream emits one stream/error frame and then closes.
  */
-function sseResponse(frames: AsyncIterable<RpcRequest<MuxFrame | HostFrame>>): Response {
+function sseResponse(
+  frames: AsyncIterable<RpcRequest<MuxFrame | HostFrame>>,
+  policy?: BrowserApiPolicy,
+): Response {
   const encoder = new TextEncoder()
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -210,7 +292,12 @@ function sseResponse(frames: AsyncIterable<RpcRequest<MuxFrame | HostFrame>>): R
         // a comment line is not a frame, so client frame parsing skips it naturally).
         controller.enqueue(encoder.encode(': connected\n\n'))
         for await (const narrow of frames) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(fullFrame(narrow))}\n\n`))
+          const payload = projectedStreamFrame(narrow.payload, policy)
+          if (payload === undefined) continue
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(fullFrame({
+            ...narrow,
+            payload,
+          }))}\n\n`))
         }
       } catch (error: unknown) {
         // Mid-stream impl failure → one stream/error frame, then close: the client must see
@@ -218,10 +305,15 @@ function sseResponse(frames: AsyncIterable<RpcRequest<MuxFrame | HostFrame>>): R
         // rpcId is minted — this is a server-initiated push like any other frame.
         const failure: MuxFrame | HostFrame = { type: 'stream/error', error: { code: 'internal', message: String(error), details: {} } }
         try {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(fullFrame({ rpcId: RpcId(randomUUID()), payload: failure }))}\n\n`))
+          const payload = projectedStreamFrame(failure, policy)
+          if (payload !== undefined) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(fullFrame({
+              rpcId: RpcId(randomUUID()),
+              payload,
+            }))}\n\n`))
+          }
         } catch {
-          // Consumer already cancelled the stream: enqueue-after-cancel is the
-          // only reachable error, and there is no one left to tell.
+          // Consumer cancellation or projection failure leaves no safe frame to enqueue.
         }
       } finally {
         try {
@@ -238,9 +330,10 @@ function sseResponse(frames: AsyncIterable<RpcRequest<MuxFrame | HostFrame>>): R
 /**
  * Wraps an ApiProxy into a pure fetch function (isomorphic point: feed the returned fetch straight to InProcessApiClient).
  * @param api - the host-side ApiProxy implementation.
+ * @param policy - optional product policy checked before route-owned business work.
  * @returns an object holding `fetch(Request)`; paths outside /api/ return 404.
  */
-export function toFetchHandler(api: ApiProxy): { fetch: typeof fetch } {
+export function toFetchHandler(api: ApiProxy, policy?: BrowserApiPolicy): { fetch: typeof fetch } {
   return {
     // Signature matches global fetch: the isomorphic point hands this function to InProcessApiClient as its transport aspect,
     // Clients call in (url, init) form — normalize to Request before handling.
@@ -252,12 +345,27 @@ export function toFetchHandler(api: ApiProxy): { fetch: typeof fetch } {
       // No-envelope read channels (SSE GET streams + host-only download):
       // physical routes that answer directly, without a wire envelope.
       if (path === '/api/events.mux' && req.method === 'GET') {
-        return sseResponse(api.events.mux({ rpcId: RpcId(randomUUID()), payload: {} }, req.signal))
+        if (policy !== undefined && !policy.allows('GET /api/events.mux', undefined)) {
+          return new Response('forbidden', { status: 403 })
+        }
+        return sseResponse(
+          api.events.mux({ rpcId: RpcId(randomUUID()), payload: {} }, req.signal),
+          policy,
+        )
       }
       if (path === '/api/events.host' && req.method === 'GET') {
-        return sseResponse(api.events.host({ rpcId: RpcId(randomUUID()), payload: {} }, req.signal))
+        if (policy !== undefined && !policy.allows('GET /api/events.host', undefined)) {
+          return new Response('forbidden', { status: 403 })
+        }
+        return sseResponse(
+          api.events.host({ rpcId: RpcId(randomUUID()), payload: {} }, req.signal),
+          policy,
+        )
       }
       if (path === '/api/session.export' && (req.method === 'GET' || req.method === 'HEAD')) {
+        if (policy !== undefined && !policy.allows(`${req.method} /api/session.export`, undefined)) {
+          return new Response('forbidden', { status: 403 })
+        }
         // Query params are a different boundary from the POST envelope, but
         // the request still casts its brands only through the domain schema.
         const parsed = sessionLogQuerySchema.safeParse(Object.fromEntries(url.searchParams))
@@ -271,7 +379,22 @@ export function toFetchHandler(api: ApiProxy): { fetch: typeof fetch } {
       }
 
       if (req.method !== 'POST' || !path.startsWith('/api/')) {
+        if (policy !== undefined && path.startsWith('/api/')
+          && !policy.allows(`${req.method} ${path}`, undefined)) {
+          return new Response('forbidden', { status: 403 })
+        }
         return new Response('not found', { status: 404 })
+      }
+
+      if (path === '/api/respond'
+        && policy !== undefined
+        && !policy.allows('POST /api/respond', undefined)) {
+        return new Response('forbidden', { status: 403 })
+      }
+
+      const methodName = path.slice('/api/'.length)
+      if (path !== '/api/respond' && policy?.allowsTarget?.(methodName) === false) {
+        return new Response('forbidden', { status: 403 })
       }
 
       // Cross-site write fence: browsers send "simple" POSTs (text/plain,
@@ -299,7 +422,13 @@ export function toFetchHandler(api: ApiProxy): { fetch: typeof fetch } {
         return Response.json(await api.respond(parsed.data))
       }
 
-      const method = methodFor(path.slice('/api/'.length))
+      const rawPayload = isRecord(body) && Object.hasOwn(body, 'payload')
+        ? body.payload
+        : undefined
+      if (policy !== undefined && !policy.allows(methodName, rawPayload)) {
+        return new Response('forbidden', { status: 403 })
+      }
+      const method = methodFor(methodName)
       if (method === undefined) return new Response('not found', { status: 404 })
 
       const envelope = clientRequestSchema.safeParse(body)
@@ -314,7 +443,11 @@ export function toFetchHandler(api: ApiProxy): { fetch: typeof fetch } {
       if (message.method !== method) {
         return errorResponse(message.rpcId, { code: 'bad-request', message: `method "${message.method}" does not match path "${method}"`, details: { issues: [] } })
       }
-      return handleUnary(api, method, message, req.signal)
+      return handleUnary(api, method, UNARY_ROUTES[method], message, req.signal, policy)
     },
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
 }

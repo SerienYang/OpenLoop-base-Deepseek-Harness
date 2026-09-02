@@ -51,10 +51,11 @@ const NS = 'settings'
 
 /**
  * Required services (cordis fiber inject). The target slots are declared by
- * ui-settings' apply, whose activation order relative to this one is NOT
- * constrained; registrations depend on their slots through `slots.inject()`.
+ * settingsShellOwner is supplied by ui-settings in the default profile or by
+ * the product shell. Slot registrations still follow declaration lifetimes
+ * through `slots.inject()`.
  */
-export const inject = ['slots', 'locale', 'connection']
+export const inject = ['slots', 'locale', 'connection', 'settingsShellOwner']
 
 /**
  * Register the `settings` dictionaries, the chrome content, and the General
@@ -63,6 +64,8 @@ export const inject = ['slots', 'locale', 'connection']
  */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-general: dictionaries')
+  const shellOverridden = ctx.settingsShellOwner.id
+    !== '@deepseek-ai/dsh-client-ui-settings-general'
 
   // Copy freshness is framework-owned: components read the standard `t`
   // seat, and the nav label is a thunk the owner resolves per render — no
@@ -139,23 +142,27 @@ export function apply(ctx: ClientContext): void {
       },
     },
   })
-  ctx.slots.inject('sidebar.settings', () => ctx.slots.register({
-    name: 'sidebar.settings',
-    children: {
-      'settings.trigger': { kind: 'single', scope: 'root' },
-      'settings.header': { kind: 'single', scope: 'root' },
-      'settings.action': { kind: 'list', scope: 'root' },
-      'settings.close': { kind: 'single', scope: 'root' },
-      'settings.section': { kind: 'list', scope: 'root' },
-      'settings.onboarding': { kind: 'list', scope: 'root' },
-    },
-    inject: shellInjected,
-  }, SettingsRoot))
+  if (!shellOverridden) {
+    ctx.slots.inject('sidebar.settings', () => ctx.slots.register({
+      name: 'sidebar.settings',
+      children: {
+        'settings.trigger': { kind: 'single', scope: 'root' },
+        'settings.header': { kind: 'single', scope: 'root' },
+        'settings.action': { kind: 'list', scope: 'root' },
+        'settings.close': { kind: 'single', scope: 'root' },
+        'settings.section': { kind: 'list', scope: 'root' },
+        'settings.onboarding': { kind: 'list', scope: 'root' },
+      },
+      inject: shellInjected,
+    }, SettingsRoot))
 
-  ctx.slots.inject('settings.trigger', () =>
-    ctx.slots.register({ name: 'settings.trigger', locale: NS }, TriggerContent))
-  ctx.slots.inject('settings.header', () =>
-    ctx.slots.register({ name: 'settings.header', locale: NS }, HeaderContent))
+    ctx.slots.inject('settings.trigger', () =>
+      ctx.slots.register({ name: 'settings.trigger', locale: NS }, TriggerContent))
+    ctx.slots.inject('settings.header', () =>
+      ctx.slots.register({ name: 'settings.header', locale: NS }, HeaderContent))
+    ctx.slots.inject('settings.close', () =>
+      ctx.slots.register({ name: 'settings.close', locale: NS }, CloseLabel))
+  }
   if (documentInjected !== undefined) {
     ctx.slots.inject('settings.action', () => ctx.slots.register({
       name: 'settings.action',
@@ -165,8 +172,6 @@ export function apply(ctx: ClientContext): void {
       inject: documentInjected,
     }, SettingsDocumentAction))
   }
-  ctx.slots.inject('settings.close', () =>
-    ctx.slots.register({ name: 'settings.close', locale: NS }, CloseLabel))
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'general',

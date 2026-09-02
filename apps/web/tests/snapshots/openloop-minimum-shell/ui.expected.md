@@ -1,0 +1,57 @@
+- complementary:
+  - button "New session": Openloop
+  - button "Collapse sidebar":
+    - img
+  - button "New session":
+    - img
+    - text: New Session
+  - region "Workspaces":
+    - text: Workspaces
+    - button "Add Workspace":
+      - img
+    - paragraph: No Workspaces yet.
+  - button "Settings" [expanded]:
+    - img
+    - text: Settings
+- main:
+  - text: Openloop 预览版
+  - button "Choose workspace":
+    - img
+    - text: Choose workspace
+    - img
+  - textbox "Choose workspace":
+    - /placeholder: Choose a workspace to start
+  - button "Commands" [disabled]:
+    - img
+  - button "Send message" [disabled]
+- complementary
+- dialog "Settings":
+  - heading "Settings" [level=2]
+  - button "Close Settings":
+    - img
+  - navigation "Settings":
+    - tablist "Settings":
+      - tab "General"
+      - tab "Models & Credentials"
+      - tab "Workspace"
+      - tab "Plugins"
+      - tab "About & Updates" [selected]
+  - tabpanel "About & Updates":
+    - heading "About Openloop" [level=3]
+    - paragraph: Built on DeepSeek Harness
+    - term: Version
+    - definition: 0.1.0
+    - term: Channel
+    - definition: test
+    - term: DSH commit
+    - definition:
+      - code: 99f6f02fecdb7dff40c3fbc9470f5907c29f74ca
+    - heading "Updates" [level=3]
+    - term: Last checked
+    - definition: 2026-09-01T08:00:00.000Z
+    - term: Target version
+    - definition: 0.2.0
+    - alert: "desktop bridge test-native-error: Deterministic update service failure"
+    - paragraph: <strong>Security fixes</strong> with deterministic notes.
+    - button "Check for updates"
+    - button "Install and restart" [disabled]

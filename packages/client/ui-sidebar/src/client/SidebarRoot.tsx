@@ -20,7 +20,7 @@ import clsx from 'clsx'
 import {
   BrandWordmark, FishLogo,
   IconNewChatOutline16, IconPanelLeftOutline16,
-  Tooltip,
+  Tooltip, useProductBrand,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SidebarRootComponentProps } from './contract/slots.ts'
 import css from './SidebarRoot.module.css'
@@ -49,6 +49,8 @@ export function SidebarRoot({
   t,
   renderSlot,
 }: SidebarRootComponentProps) {
+  const brand = useProductBrand()
+
   // Wide content stays mounted while the collapse animates (fading via
   // .collapsed .wide), unmounts at settle, and remounts right away on expand.
   const [settled, setSettled] = useState(collapsed)
@@ -137,7 +139,14 @@ export function SidebarRoot({
             aria-label={t('session.new.label')}
             onClick={() => { startSession() }}
           >
-            <BrandWordmark />
+            {brand.markAsset === undefined
+              ? <BrandWordmark />
+              : (
+                <>
+                  <img src={brand.markAsset} alt="" width={24} />
+                  <span>{brand.productName}</span>
+                </>
+              )}
           </button>
         )}
         {/* Rail resting state is the whale mark; hovering swaps in the panel
@@ -149,7 +158,9 @@ export function SidebarRoot({
             aria-label={collapsed ? t('toggle.open') : t('toggle.collapse')}
             onClick={() => { toggleSidebar() }}
           >
-            {!wide && <FishLogo className={css.railFish} size={24} />}
+            {!wide && (brand.markAsset === undefined
+              ? <FishLogo className={css.railFish} size={24} />
+              : <img className={css.railFish} src={brand.markAsset} alt="" width={24} />)}
             {/* Rail icons render at 18 (figma rail spec); expanded keeps the glyph-native sizes. */}
             <IconPanelLeftOutline16 className={css.panelIcon} size={wide ? 16 : 18} />
           </button>

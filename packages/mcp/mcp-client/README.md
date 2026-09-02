@@ -26,7 +26,11 @@ One plugin instance per MCP server in `cordis.yml`:
     transport: streamable-http
     url: http://localhost:3000/mcp
     headers:
-      Authorization: !!js '`Bearer ${process.env.MCP_TOKEN}`'
+      x-tenant: example
+    credentialHeaders:
+      Authorization:
+        ref: MCP_TOKEN
+        prefix: 'Bearer '
 ```
 
 The model sees `mcp__github__create_issue`, `mcp__web__search`, … — the same server-qualified shape Claude Code and Codex use. HMR hot-swaps: editing the entry triggers disconnect + reconnect without process restart; an unchanged `serverName` reproduces identical tool names.
@@ -43,6 +47,7 @@ The model sees `mcp__github__create_issue`, `mcp__web__search`, … — the same
 | `cwd` | stdio | no | Working directory for the child process |
 | `url` | http | yes | MCP server URL |
 | `headers` | http | no | Extra headers (e.g. auth tokens) |
+| `credentialHeaders` | http | no | Header name to `{ ref, prefix? }`; resolves each distinct reference once per request |
 | `toolCallTimeoutMs` | both | no | Timeout per `callTool` invocation (default 60000) |
 | `failOnStartupError` | both | no | Reject plugin activation when initial connection or tool synchronization fails (default `false`) |
 | `reconnect.enabled` | both | no | Reconnect automatically after a lost connection (default `true`) |
@@ -64,6 +69,8 @@ Every MCP tool has two names: the raw MCP name (sent on the wire in `tools/call`
 - On connect: plugin activation awaits `listTools()` and registers each tool via `ctx.tools.register()` under its public name before the composition starts its first turn. Initial connection, discovery, or registration failure is always logged; it rejects activation when `failOnStartupError` is true and otherwise activates with no tools.
 - Listens for `notifications/tools/list_changed` → re-syncs; a fetch-phase failure keeps the previous generation registered, while a registration conflict rolls back the attempted generation and leaves no tools from that server.
 - Tool execute: `client.callTool({ name: rawName, arguments }, { signal })` with timeout + abort support—the public name is never sent to the server.
+- Streamable HTTP credential headers resolve through `ctx.credentials` for every request (or the launch environment when that service is absent). Each distinct reference is resolved once into a request-local snapshot and reused by every mapped header. Configured headers, input `Request` headers, and `init.headers` merge in that order before credential headers are applied last. Resolution honors the effective request abort signal. Header names, prefixes, and resolved values are validated before dispatch; credential headers cannot collide with literal or MCP protocol-owned headers. Credential-backed requests reject redirects before following them, and every other non-success response is reduced to status only before the SDK sees it, so authorization material echoed by a server cannot reach errors or logs.
+- Stdio `env` entries remain literal values. They are never interpreted as credential references.
 - Canonical success is `{ content: JsonValue[], structuredContent? }`; complete JSON MCP blocks survive for programmatic callers. A supported advertised `outputSchema` validates `structuredContent`; unsupported schema vocabulary falls back to unconstrained `JsonValue`.
 - Native/model rendering preserves MCP block order. Text-like runs join with newlines; resource links keep their name and URI as text; supported images become durable core image blocks only when `ctx.attachments` is mounted and the exact calling model route explicitly declares image input. The whole image batch is decoded and admitted before any member is saved. A malformed/refused image batch, audio, embedded resources, and unsupported blocks become explicit diagnostic text rather than disappearing.
 - On disconnect/crash: the supervisor restarts the original server config with exponential backoff (`reconnect.initialDelayMs` doubling up to `reconnect.maxDelayMs`) and re-runs discovery on success — the recovered generation replaces the previous one, so tools neither duplicate nor leak. During the outage the last good generation stays registered; calls against it fail until recovery.

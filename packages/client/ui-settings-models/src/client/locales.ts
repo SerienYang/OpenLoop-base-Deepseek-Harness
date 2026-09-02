@@ -4,7 +4,7 @@ import { WELCOME_NOTICE_COPY } from '../onboarding-copy.ts'
 
 /** English strings (the key-set source of truth for this pair). */
 export const en = {
-  nav: 'Models',
+  nav: 'Models & Credentials',
   title: 'Models',
   intro: 'Enter your API keys to use models from the following providers.',
   edit: 'Edit',
@@ -32,6 +32,8 @@ export const en = {
   keyInput: 'API key',
   keyPlaceholder: 'Enter your API key',
   keyPlaceholderNative: 'Enter an API key, or leave blank to use environment authentication',
+  keyManagedAfterCreate: 'Create the provider first, then add its API key through the secure Host control.',
+  keyManagedAfterApply: 'Apply this profile first. The secure Host control will be available after it reloads.',
   keyStored: 'Configured — enter a new value to replace',
   keyEnvLocked: 'Provided by the launch environment (read-only)',
   customized: 'Customized settings',
@@ -104,7 +106,7 @@ export type ModelsKey = keyof typeof en
 
 /** Chinese strings (same keys as {@link en}). */
 export const zh: { [Key in keyof typeof en]: string } = {
-  nav: '模型',
+  nav: '模型与凭据',
   title: '模型',
   intro: '填入各提供方的 API 密钥即可使用其模型。',
   edit: '编辑',
@@ -132,6 +134,8 @@ export const zh: { [Key in keyof typeof en]: string } = {
   keyInput: 'API 密钥',
   keyPlaceholder: '输入 API 密钥',
   keyPlaceholderNative: '输入 API 密钥，或留空使用环境认证',
+  keyManagedAfterCreate: '先创建提供方，再通过安全的 Host 控件添加 API 密钥。',
+  keyManagedAfterApply: '请先保存此提供方配置；重新加载后即可使用安全的 Host 控件。',
   keyStored: '已配置——输入新值可替换',
   keyEnvLocked: '由启动环境提供（只读）',
   customized: '自定义设置',

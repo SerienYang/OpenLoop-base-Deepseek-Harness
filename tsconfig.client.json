@@ -93,7 +93,11 @@
     { "path": "./packages/client/ui-settings-plugin-inventory" },
     { "path": "./packages/client/locale" },
     { "path": "./packages/client/web" },
+    { "path": "./packages/openloop/desktop-bridge-client" },
+    { "path": "./packages/openloop/settings-foundation" },
+    { "path": "./packages/openloop/workspace-client" },
     { "path": "./apps/web" },
+    { "path": "./packages/openloop/shell" },
     { "path": "./packages/openloop/chat-zoom" }
   ]
 }

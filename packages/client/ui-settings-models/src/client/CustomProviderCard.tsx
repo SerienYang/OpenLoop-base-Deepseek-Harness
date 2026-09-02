@@ -24,6 +24,7 @@
 import { useState } from 'react'
 import type { ReactNode } from 'react'
 import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
+import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { apiKeyFailure } from './apiKey.ts'
 import { EditorFooter } from './EditorFooter.tsx'
 import { validateDeepSeekModels } from './DeepSeekModelsEditor.tsx'
@@ -64,6 +65,8 @@ export interface CustomProviderCardProps {
   t: (key: keyof typeof en) => string
   /** Disable writes (read-only settings provider). */
   readOnly: boolean
+  /** Optional product-owned, value-free credential control. */
+  credentialControl?: CredentialControlAdapter
   /** Close the card; `changed` reports whether a provider was created. */
   onClose: (changed: boolean) => void
 }
@@ -102,7 +105,7 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
   // bad row is named by its position here too. Capacities have route-level
   // fallbacks; what a route cannot default is at least one model.
   const modelFailure = validateDeepSeekModels(models)
-  const keyFailure = apiKeyFailure(keyDraft)
+  const keyFailure = props.credentialControl === undefined ? apiKeyFailure(keyDraft) : undefined
   // The typed key with paste whitespace removed. A blank field yields an empty
   // string, which the create path reads as "no key supplied" — a route may
   // legitimately authenticate through the provider's own ambient discovery.
@@ -132,6 +135,7 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
   const createOnce = async (): Promise<string | undefined> => {
     const keyRef = deriveKeyRef(route)
     const storesKey = keyValue.length > 0
+      || props.credentialControl?.materializeApiKeyEnv === true
     if (!committed) {
       const profile = {
         ...displayName.length === 0 ? {} : { displayName },
@@ -159,7 +163,7 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
       // key could never be stored from this card at all.
       setCommitted(true)
     }
-    if (storesKey) {
+    if (props.credentialControl === undefined && keyValue.length > 0) {
       const stored = await api.credentials.set({ ref: keyRef, value: keyValue })
       // The profile landed; saying the key did not is the only honest report,
       // and the retry above now goes straight back to this write.
@@ -245,25 +249,29 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
           {protocols.map(choice => <option key={choice} value={choice}>{choice}</option>)}
         </select>
       </div>
-      <div className={styles['field']}>
-        <span className={styles['fieldLabel']}>{t('keyInput')}</span>
-        <input
-          className={styles['input']}
-          type="password"
-          autoComplete="off"
-          value={keyDraft}
-          placeholder={t('keyPlaceholder')}
-          aria-label={t('keyInput')}
-          disabled={disabled}
-          onChange={(event) => { setKeyDraft(event.target.value) }}
-        />
-        {/* A create card has no stored key to keep, so the blank case says
-            what a blank field means here instead: this route may authenticate
-            through the provider's own ambient discovery or OAuth. */}
-        {keyFailure === undefined
-          ? null
-          : <p className={styles['error']}>{t(keyFailure === 'keyBlank' ? 'keyBlankNew' : keyFailure)}</p>}
-      </div>
+      {props.credentialControl === undefined
+        ? (
+          <div className={styles['field']}>
+            <span className={styles['fieldLabel']}>{t('keyInput')}</span>
+            <input
+              className={styles['input']}
+              type="password"
+              autoComplete="off"
+              value={keyDraft}
+              placeholder={t('keyPlaceholder')}
+              aria-label={t('keyInput')}
+              disabled={disabled}
+              onChange={(event) => { setKeyDraft(event.target.value) }}
+            />
+            {/* A create card has no stored key to keep, so the blank case says
+                what a blank field means here instead: this route may authenticate
+                through the provider's own ambient discovery or OAuth. */}
+            {keyFailure === undefined
+              ? null
+              : <p className={styles['error']}>{t(keyFailure === 'keyBlank' ? 'keyBlankNew' : keyFailure)}</p>}
+          </div>
+        )
+        : <p className={styles['advancedHint']}>{t('keyManagedAfterCreate')}</p>}
       <ModelListEditor
         models={models}
         onChange={setModels}
@@ -271,7 +279,7 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
           settingsNs: NS,
           baseURL,
           api: protocol,
-          ...keyValue.length === 0 ? {} : { apiKey: keyValue },
+          ...props.credentialControl !== undefined || keyValue.length === 0 ? {} : { apiKey: keyValue },
         }}
         probeBlocked={keyFailure === 'keyBlank' ? 'keyBlankNew' : keyFailure}
         api={api}

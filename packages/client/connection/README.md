@@ -12,6 +12,19 @@ The node half guards every entry under `/api` before bridging or upgrading (`src
 
 `/api/events.mux` and `/api/events.host` each accept a WebSocket upgrade and send only the corresponding `ServerRequest` text messages to the browser; the client sends no application data over these sockets. If either socket ends, the current connection generation fails and rebuilds both streams; readiness still requires both sockets to be open and the `host.describe` HTTP call to succeed. Host teardown terminates both sockets, aborts their sources, and waits for source cleanup before returning. Ordinary network GETs to these paths return 426 with no SSE fallback; `toFetchHandler`'s SSE codec serves only the isomorphic in-process carrier.
 
+Products may provide the optional version 1 `ctx.browserApiPolicy` service. The
+Host half reads that service for every API Proxy fallback and every WebSocket
+upgrade, so policy replacement is live rather than snapshotted at startup.
+When a policy is present, the HTTP route classifies every method and path
+before buffering its body: ordinary POST RPC paths must pass `allowsTarget`,
+`POST /api/respond` and GET/HEAD transport paths must pass `allows` with their
+complete `METHOD /api/path` key, and every other verb or path is rejected.
+Admitted RPC paths still undergo the ordinary payload-aware `allows` check
+after decoding.
+Compositions that require a policy must express that as a Loader injection;
+if that required provider starts unloading, the still-disposing HTTP and
+WebSocket routes fail closed. Base DSH deliberately provides no policy service.
+
 ## Model Experience
 
 None, as the wire consumer layer moves already-composed messages between browser and host; nothing here reaches a model request.

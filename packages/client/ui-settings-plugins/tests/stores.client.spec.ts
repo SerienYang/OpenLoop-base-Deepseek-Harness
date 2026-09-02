@@ -5,6 +5,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { stubSettingsScope, type StubSettingsScope } from '@deepseek-ai/dsh-client-test-runtime'
+import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { CardForm, numberField, textField } from '../src/client/card-form.ts'
 import { AgentLoopCardController, type AgentLoopSettings } from '../src/client/agent-loop-card-controller.ts'
 import { BashCardController, type BashSettings } from '../src/client/bash-card-controller.ts'
@@ -32,6 +33,19 @@ function credentialsApi(configured: boolean) {
   }))
   const set = vi.fn(() => Promise.resolve({ rpcId: 'c-2' as never, result: { ok: true as const, value: {} } }))
   return { api: { credentials: { describe, set } } as never, describe, set }
+}
+
+function hostCredentialControl(configured = true): CredentialControlAdapter {
+  return {
+    describe: vi.fn(() => Promise.resolve({
+      configured,
+      writable: true,
+      ...configured ? { source: 'keychain' } : {},
+    })),
+    render: () => null,
+    materializeApiKeyEnv: true,
+    deleteCredentialWithProfile: false,
+  }
 }
 
 describe('CardForm', () => {
@@ -381,6 +395,96 @@ describe('AgentLoopCardController', () => {
 })
 
 describe('WebSearchCardController', () => {
+  it('uses the Host adapter without creating a secret draft or calling legacy credentials', async () => {
+    const host = stubSettingsScope<WebSearchSettings>()
+    const credentials = credentialsApi(false)
+    const describe = vi.fn(() => Promise.resolve({
+      configured: true,
+      source: 'keychain',
+      writable: true,
+    }))
+    const credentialControl = { ...hostCredentialControl(), describe }
+    const controller = new WebSearchCardController(host.scope, credentials.api, credentialControl)
+    host.publish({ status: 'ready', writable: true, value: {}, user: {} })
+
+    await vi.waitFor(() => { expect(describe).toHaveBeenCalledWith('DEEPSEEK_API_KEY') })
+    const state = controller.inject().hooks.webSearchCard.getSnapshot()
+    expect(state).not.toHaveProperty('apiKey')
+    expect(state).toMatchObject({
+      credentialRef: 'DEEPSEEK_API_KEY',
+      apiKeyConfigured: true,
+      apiKeyWritable: true,
+    })
+    expect(credentials.describe).not.toHaveBeenCalled()
+    expect(credentials.set).not.toHaveBeenCalled()
+  })
+
+  it('exposes one awaited Host credential refresh to the rendered control', async () => {
+    const host = stubSettingsScope<WebSearchSettings>()
+    const credentials = credentialsApi(false)
+    const describe = vi.fn(() => Promise.resolve({
+      configured: false,
+      writable: true,
+    }))
+    const controller = new WebSearchCardController(
+      host.scope,
+      credentials.api,
+      { ...hostCredentialControl(false), describe },
+    )
+    host.publish({ status: 'ready', writable: true, value: {}, user: {} })
+    await vi.waitFor(() => { expect(describe).toHaveBeenCalled() })
+    describe.mockClear()
+    const face = controller.inject() as unknown as {
+      refreshCredential: () => Promise<void>
+    }
+
+    await face.refreshCredential()
+
+    expect(describe).toHaveBeenCalledOnce()
+    expect(credentials.describe).not.toHaveBeenCalled()
+  })
+
+  it('does not let an older describe overwrite the latest state for the same reference', async () => {
+    const host = stubSettingsScope<WebSearchSettings>()
+    const credentials = credentialsApi(false)
+    const stale = Promise.withResolvers<{
+      configured: boolean
+      writable: boolean
+    }>()
+    const latest = Promise.withResolvers<{
+      configured: boolean
+      source: string
+      writable: boolean
+    }>()
+    const describe = vi.fn()
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValueOnce(latest.promise)
+    const controller = new WebSearchCardController(
+      host.scope,
+      credentials.api,
+      { ...hostCredentialControl(false), describe },
+    )
+
+    const refresh = controller.refreshCredential()
+    latest.resolve({ configured: true, source: 'keychain', writable: true })
+    await refresh
+    expect(controller.inject().hooks.webSearchCard.getSnapshot()).toMatchObject({
+      credentialVersion: 1,
+      apiKeyConfigured: true,
+      apiKeyWritable: true,
+    })
+
+    stale.resolve({ configured: false, writable: false })
+    await stale.promise
+    await Promise.resolve()
+
+    expect(controller.inject().hooks.webSearchCard.getSnapshot()).toMatchObject({
+      credentialVersion: 1,
+      apiKeyConfigured: true,
+      apiKeyWritable: true,
+    })
+  })
+
   it('reads the credential state for the reference the tab names', async () => {
     const host = stubSettingsScope<WebSearchSettings>()
     const credentials = credentialsApi(true)
@@ -446,7 +550,7 @@ describe('WebSearchCardController', () => {
     credentials.describe.mockClear()
 
     // Another reference is not this card's business.
-    controller.refreshCredential('OTHER_KEY')
+    await controller.refreshCredential('OTHER_KEY')
     expect(credentials.describe).not.toHaveBeenCalled()
 
     // A key written on another surface reaches this card only through this signal.
@@ -454,7 +558,7 @@ describe('WebSearchCardController', () => {
       rpcId: 'c-1' as never,
       result: { ok: true as const, value: { credentials: { DEEPSEEK_API_KEY: { configured: true, writable: true } } } },
     }))
-    controller.refreshCredential('DEEPSEEK_API_KEY')
+    await controller.refreshCredential('DEEPSEEK_API_KEY')
 
     await vi.waitFor(() => {
       expect(controller.inject().hooks.webSearchCard.getSnapshot().apiKeyConfigured).toBe(true)
