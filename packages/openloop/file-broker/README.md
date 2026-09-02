@@ -1,5 +1,7 @@
 # @openloop/file-broker
 
+English | [中文](README.zh.md)
+
 Private OpenLoop package on the `host` compiler face.
 
 This Host-only package validates normalized Workspace-relative paths and

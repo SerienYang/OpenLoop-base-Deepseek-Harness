@@ -1,5 +1,7 @@
 # @openloop/fs-workspace
 
+English | [中文](README.zh.md)
+
 Private OpenLoop Host plugin implementing the DSH `FileSystem` service over
 `@openloop/file-broker`.
 

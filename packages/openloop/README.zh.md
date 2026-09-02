@@ -22,10 +22,23 @@ OpenLoop 业务包只能通过包根或已声明的公开子路径导出来使�
 `@openloop/adapters` 所有；该包以带版本、无副作用的契约转换公开的 Shell、
 Workspace、设置与桌面数据，但不负责持久化或工作流状态。
 
+`@openloop/shell` 是 Openloop profile 唯一的 Client `root` owner。它声明现有的
+sidebar、conversation、details 和 overlay Slot，以及一个供可信 WorkbenchHost
+使用的 root-scoped `workbench` Slot；同时保留共享的 `ctx.layout` panel action
+与主题投影，且不会改变默认 DSH profile 的行为。
+
 `@openloop/credentials-keychain` 是 Openloop profile 的 Host 凭据 provider。
 它依次解析继承的进程环境变量、按发布通道隔离的 macOS Keychain item，以及可选的
 只读旧来源。它的 Host-only consumer registry 负责生成原生删除确认所需的展示信息；
 浏览器调用方既不能解析明文，也不能提供这些展示信息。
+
+`@openloop/workspace-authority` 负责 Host 侧 Workspace 授权、事务、generation
+冲突和恢复契约。其浏览器视图仅包含 DSH Workspace id、显示名称和公开状态；
+规范路径、文件系统 identity、descriptor 与待处理 grant id 均仅留在 Host。
+
+`@openloop/file-broker` 是 Host-only Workspace 文件边界。它只接受 Workspace id
+和规范化的相对路径；原生操作从已保留且验证过的根 descriptor 开始遍历，并返回
+仅在本次启动中有效的不透明 handle。
 
 `@openloop/fs-workspace` 是 Openloop profile 的 DSH `FileSystem` provider。
 它把已登记 Workspace 路径映射为进程内 capability key，并通过 file broker handle

@@ -1,5 +1,7 @@
 # @openloop/shell
 
+English | [中文](README.zh.md)
+
 Private Openloop package on the `client` compiler face and the sole `root`
 Slot owner in the Openloop profile.
 
