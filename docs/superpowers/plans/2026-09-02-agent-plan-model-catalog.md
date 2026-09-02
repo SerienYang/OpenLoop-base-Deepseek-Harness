@@ -455,6 +455,7 @@ git commit -m "fix(settings): retain discovered model capabilities"
 - Modify: `packages/openloop/bundle/README.md`
 - Modify: `packages/openloop/bundle/README.zh.md`
 - Modify: `packages/openloop/bundle/README.i18n.yaml`
+- Modify: `packages/llm/llm-pi-ai/tests/adapter.spec.ts`
 
 - [ ] **Step 1: Rewrite the failing profile expectation first**
 
