@@ -423,6 +423,10 @@ describe('Openloop desktop foundation configuration', () => {
       'StateFlags::POSITION | StateFlags::SIZE | StateFlags::MAXIMIZED',
     )
     expect(windowStatePlugin).toContain('.with_filter(|label| label == "main")')
+    expect(library).toContain(
+      'let builder = if action == HostAction::Normal {',
+    )
+    expect(library).toContain('builder.plugin(window_state_plugin)')
     expect(library).not.toContain('StateFlags::FULLSCREEN')
     expect(builderPlugins.indexOf('.plugin(window_state_plugin)')).toBeGreaterThanOrEqual(0)
     expect(builderPlugins.indexOf('.plugin(window_state_plugin)')).toBeLessThan(

@@ -1257,8 +1257,13 @@ pub fn run() -> i32 {
         .target("darwin-aarch64")
         .pubkey(updater_config.public_key())
         .build();
-    let builder = tauri::Builder::default()
-        .plugin(window_state_plugin)
+    let builder = tauri::Builder::default();
+    let builder = if action == HostAction::Normal {
+        builder.plugin(window_state_plugin)
+    } else {
+        builder
+    };
+    let builder = builder
         .plugin(updater_plugin)
         .manage(updater_config)
         .invoke_handler(tauri::generate_handler![build_manifest]);
