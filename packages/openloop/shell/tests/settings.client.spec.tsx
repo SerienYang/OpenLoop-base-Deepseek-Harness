@@ -615,6 +615,7 @@ describe('Openloop Settings slot owner', () => {
     }
     ctx.provide('remote', { openloopDesktop } as never)
     ctx.provide('remote.openloopDesktop', openloopDesktop)
+    ctx.provide('openloopSettingsApi', {} as never)
     provideUpdates(ctx)
 
     const fiber = ctx.plugin({ inject: [...inject], apply })
@@ -686,6 +687,7 @@ describe('Openloop Settings slot owner', () => {
     }
     ctx.provide('remote', { openloopDesktop } as never)
     ctx.provide('remote.openloopDesktop', openloopDesktop)
+    ctx.provide('openloopSettingsApi', {} as never)
     provideUpdates(ctx)
 
     const fiber = ctx.plugin({ inject: [...inject], apply })
@@ -783,6 +785,7 @@ describe('Openloop Settings slot owner', () => {
       unset: () => Promise.resolve(),
     }
     ctx.provide('settingsScope', { bind: () => unavailableScope } as never)
+    ctx.provide('openloopSettingsApi', {} as never)
     const sessions = createSnapshotStore<SessionListState>({
       ids: [],
       byId: {},

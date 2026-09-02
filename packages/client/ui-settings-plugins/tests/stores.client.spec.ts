@@ -395,6 +395,28 @@ describe('AgentLoopCardController', () => {
 })
 
 describe('WebSearchCardController', () => {
+  it('projects only settings fields accepted by the product policy', () => {
+    const host = stubSettingsScope<WebSearchSettings>()
+    const credentials = credentialsApi(false)
+    const controller = new WebSearchCardController(
+      host.scope,
+      credentials.api,
+      undefined,
+      (_namespace, path) => path[0] === 'maxUses',
+    )
+    host.publish({
+      status: 'ready',
+      writable: true,
+      value: { baseURL: 'https://search.test/v1', maxUses: 5 },
+      user: {},
+    })
+
+    expect(controller.inject().hooks.webSearchCard.getSnapshot()).toMatchObject({
+      maxUses: { text: '5' },
+    })
+    expect(controller.inject().hooks.webSearchCard.getSnapshot()).not.toHaveProperty('baseURL')
+  })
+
   it('uses the Host adapter without creating a secret draft or calling legacy credentials', async () => {
     const host = stubSettingsScope<WebSearchSettings>()
     const credentials = credentialsApi(false)

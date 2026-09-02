@@ -32,13 +32,16 @@ export class WelcomeNoticeStore {
   })
 
   private generation = 0
+  private revision: number | undefined
 
   /**
    * @param api - settings wire face used for durable reads and writes.
    * @param persistence - remote browsers use memory because settings is loopback-only.
    */
   constructor(
-    private readonly api: Pick<IApiClient, 'settings'>,
+    private readonly api: {
+      readonly settings: Pick<IApiClient['settings'], 'describe' | 'mutate'>
+    },
     private readonly persistence: 'host' | 'memory' = 'host',
   ) {}
 
@@ -58,6 +61,7 @@ export class WelcomeNoticeStore {
       )
       if (view === undefined) throw new Error('welcome acknowledgement settings are unavailable')
       if (generation !== this.generation) return
+      this.revision = view.revision
       this.store.update((state) => {
         state.status = 'ready'
         state.acknowledged = acknowledgementOf(view) === WELCOME_NOTICE_VERSION
@@ -92,9 +96,11 @@ export class WelcomeNoticeStore {
       const response = await this.api.settings.mutate({
         ns: WELCOME_NOTICE_SETTINGS_NAMESPACE,
         ops: [{ op: 'set', path: [WELCOME_NOTICE_ACK_FIELD], value: WELCOME_NOTICE_VERSION }],
+        ...this.revision === undefined ? {} : { expectedRevision: this.revision },
       })
       if (!response.result.ok) throw new Error(response.result.error.message)
       if (generation === this.generation) {
+        this.revision = response.result.value.revision
         this.store.update((state) => {
           state.status = 'ready'
           state.acknowledged = true

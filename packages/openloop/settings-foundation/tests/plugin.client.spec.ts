@@ -113,13 +113,76 @@ describe('Openloop settings foundation', () => {
     await fiber.dispose()
   })
 
-  it('does not expose endpoint discovery through the product API', async () => {
-    const api = new OpenloopSettingsApi(vi.fn())
-    const result = await api.llm.discoverModels({ settingsNs: 'llm-pi-ai' })
+  it('does not expose endpoint discovery and reports the field mutation boundary', async () => {
+    const api = new OpenloopSettingsApi(vi.fn(() => Promise.resolve(response({
+      ok: true,
+      value: {
+        providers: [{
+          provider: 'openai',
+          displayName: 'OpenAI',
+          settingsNs: 'llm-pi-ai',
+          settingsPath: ['providers', 'openai'],
+          active: true,
+          builtIn: true,
+        }, {
+          provider: 'custom',
+          displayName: 'Custom',
+          settingsNs: 'llm-pi-ai',
+          settingsPath: ['providers', 'custom'],
+          active: true,
+          builtIn: false,
+        }],
+      },
+    }))))
+    await api.llm.providers({})
+    expect(api.llm.discoverModels).toBeUndefined()
+    const canMutate = api.canMutate
+    expect(canMutate('web-search-deepseek', ['maxUses'])).toBe(true)
+    expect(canMutate('web-search-deepseek', ['baseURL'])).toBe(false)
+    expect(canMutate('llm-pi-ai', ['providers', 'openai', 'baseURL'])).toBe(false)
+    expect(canMutate('llm-pi-ai', ['providers', 'openai', 'models'])).toBe(true)
+    expect(canMutate('llm-pi-ai', ['providers', 'custom', 'models'])).toBe(false)
+  })
+
+  it('maps Host conflict errors to the shared settings error contract', async () => {
+    const api = new OpenloopSettingsApi(vi.fn(() => Promise.resolve({
+      ok: false,
+      status: 409,
+      json: () => Promise.resolve({
+        ok: false,
+        error: { code: 'SETTINGS_CONFLICT', message: 'SETTINGS_CONFLICT' },
+      }),
+    } as Response)))
+
+    const result = await api.settings.mutate({
+      ns: 'locale',
+      ops: [{ op: 'set', path: ['preference'], value: 'en' }],
+      expectedRevision: 2,
+    })
+
+    expect(result.result).toMatchObject({
+      ok: false,
+      error: { code: 'settings-conflict' },
+    })
+  })
+
+  it('rejects secret-bearing settings mutations before creating an HTTP body', async () => {
+    const fetcher = vi.fn()
+    const api = new OpenloopSettingsApi(fetcher)
+    const sentinel = 'openloop-secret-sentinel'
+
+    const result = await api.settings.mutate({
+      ns: 'web-search-deepseek',
+      ops: [{ op: 'set', path: ['apiKey'], value: sentinel }],
+      expectedRevision: 2,
+    })
+
     expect(result.result).toMatchObject({
       ok: false,
       error: { code: 'policy-denied' },
     })
+    expect(fetcher).not.toHaveBeenCalled()
+    expect(JSON.stringify(fetcher.mock.calls)).not.toContain(sentinel)
   })
 
   it('stops providing settings services with the plugin lifetime', async () => {

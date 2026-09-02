@@ -9,12 +9,9 @@
  * through ui-layout and ui-theme. Export discipline: packages/client/AGENTS.md.
  */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
 import type { CredentialControlAdapter } from './credential-control.ts'
 import { SettingsScopeBinder } from './settings-scope.ts'
-
-/** Product-filtered settings and provider directory used by a custom Settings shell. */
-export type ProductSettingsApi = Pick<IApiClient, 'settings' | 'llm'>
+import type { ProductSettingsApi } from './settings-scope.ts'
 
 /** Browser service selecting the Settings shell and its optional product controls. */
 export interface SettingsShellOwner {
@@ -42,6 +39,7 @@ export type {
   SettingsPluginsTabOwnerProps, SettingsSectionOwnerProps, SettingsTriggerOwnerProps,
 } from './contract/slots.ts'
 export { SettingsScopeController, SettingsScopeBinder } from './settings-scope.ts'
+export type { ProductSettingsApi } from './settings-scope.ts'
 
 /**
  * Required services: none. This plugin provides both settingsScope and the

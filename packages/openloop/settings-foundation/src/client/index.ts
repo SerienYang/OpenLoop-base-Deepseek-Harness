@@ -4,7 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import {
   SettingsScopeBinder,
   type ProductSettingsApi,
-} from '@deepseek-ai/dsh-client-ui-settings/client'
+} from '@deepseek-ai/dsh-client-ui-settings/client/scope'
 import { OpenloopSettingsApi } from './settings-api.ts'
 
 export { OpenloopSettingsApi } from './settings-api.ts'

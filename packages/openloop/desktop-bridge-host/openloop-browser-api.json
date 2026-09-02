@@ -67,6 +67,18 @@
     },
     {
       "method": "POST",
+      "path": "/api/openloop/settings/describe"
+    },
+    {
+      "method": "POST",
+      "path": "/api/openloop/settings/mutate"
+    },
+    {
+      "method": "POST",
+      "path": "/api/openloop/settings/providers"
+    },
+    {
+      "method": "POST",
       "path": "/api/respond"
     }
   ]

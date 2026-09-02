@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Readable } from 'node:stream'
+import { fileURLToPath } from 'node:url'
 import { Context, symbols } from '@deepseek-ai/cordis'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import { WorkspaceTypertGenerator } from '@deepseek-ai/dsh-typert-generator'
@@ -33,7 +34,7 @@ import {
   OpenloopDesktopRemoteService,
 } from '../src/remote.ts'
 
-const root = new URL('../../../..', import.meta.url).pathname
+const root = fileURLToPath(new URL('../../../..', import.meta.url))
 let openloopTypertPromise: Promise<TypertContribution> | undefined
 
 async function openloopTypert(): Promise<TypertContribution> {

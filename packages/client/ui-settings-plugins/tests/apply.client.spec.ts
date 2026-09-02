@@ -177,6 +177,7 @@ describe('ui-settings-plugins apply', () => {
   })
 
   it('uses the product settings API for the configurable namespace directory', async () => {
+    const canMutate = vi.fn(() => false)
     const productDescribe = vi.fn(() => Promise.resolve({
       rpcId: 'product',
       result: {
@@ -193,7 +194,8 @@ describe('ui-settings-plugins apply', () => {
       undefined,
       {
         settings: { describe: productDescribe, mutate: vi.fn() },
-        llm: { providers: vi.fn(), discoverModels: vi.fn() },
+        llm: { providers: vi.fn() },
+        canMutate,
       },
     )
     declareRoot(slots)
@@ -201,6 +203,7 @@ describe('ui-settings-plugins apply', () => {
 
     await vi.waitFor(() => { expect(productDescribe).toHaveBeenCalled() })
     expect(describeSettings).not.toHaveBeenCalled()
+    expect(canMutate).toHaveBeenCalledWith('web-search-deepseek', ['baseURL'])
   })
 
   it('dispatches the served namespaces its cards claim, and no others', async () => {

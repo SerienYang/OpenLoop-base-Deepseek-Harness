@@ -389,6 +389,9 @@ importers:
       vite:
         specifier: 8.0.16
         version: 8.0.16(@types/node@26.1.2)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
+      webdriverio:
+        specifier: 9.29.1
+        version: 9.29.1
 
   apps/openloop-runtime:
     dependencies:
@@ -5919,6 +5922,9 @@ importers:
       '@deepseek-ai/dsh-client-ui-sidebar':
         specifier: workspace:^
         version: link:../../client/ui-sidebar
+      '@openloop/settings-foundation':
+        specifier: workspace:*
+        version: link:../settings-foundation
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: workspace:^

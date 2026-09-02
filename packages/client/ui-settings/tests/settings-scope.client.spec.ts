@@ -171,7 +171,7 @@ describe('SettingsScopeController', () => {
       .mockReturnValueOnce(first.promise)
       .mockResolvedValueOnce(ok(view({ preference: 'light' }, 6)))
     const scope = new SettingsScopeController<UiTestSettings>(
-      { settings: { describe: describeCall, mutate } } as never,
+      { settings: { describe: describeCall, mutate } },
       { namespace: 'ui-test' },
     )
     const published = trackValues(scope)
@@ -203,7 +203,7 @@ describe('SettingsScopeController', () => {
       .mockResolvedValueOnce(rejected())
       .mockRejectedValueOnce(new Error('offline'))
     const scope = new SettingsScopeController<UiTestSettings>(
-      { settings: { describe: describeCall, mutate } } as never,
+      { settings: { describe: describeCall, mutate } },
       { namespace: 'ui-test' },
     )
     const published = trackValues(scope)
@@ -219,7 +219,7 @@ describe('SettingsScopeController', () => {
       .mockRejectedValueOnce(new Error('offline'))
       .mockResolvedValueOnce(ok(view({ preference: 'light' }, 3)))
     const scope = new SettingsScopeController<UiTestSettings>(
-      { settings: { describe: describeCall, mutate } } as never,
+      { settings: { describe: describeCall, mutate } },
       { namespace: 'ui-test' },
     )
     const published = trackValues(scope)
@@ -256,7 +256,7 @@ describe('SettingsScopeController', () => {
     const mutate = vi.fn().mockReturnValue(first.promise)
     const describeCall = vi.fn()
     const scope = new SettingsScopeController<UiTestSettings>(
-      { settings: { describe: describeCall, mutate } } as never,
+      { settings: { describe: describeCall, mutate } },
       { namespace: 'ui-test' },
     )
     const published = trackValues(scope)
@@ -280,7 +280,7 @@ describe('SettingsScopeController', () => {
     const describeCall = vi.fn()
     const mutate = vi.fn()
     const scope = new SettingsScopeController<UiTestSettings>(
-      { settings: { describe: describeCall, mutate } } as never,
+      { settings: { describe: describeCall, mutate } },
       { namespace: 'ui-test' },
       'memory',
     )
@@ -334,7 +334,7 @@ describe('SettingsScopeController', () => {
     const mutate = vi.fn().mockResolvedValueOnce(ok(view({ preference: 'system' }, 4)))
     const describeCall = vi.fn().mockResolvedValueOnce(described({ preference: 'dark' }, 3))
     const scope = new SettingsScopeController<UiTestSettings>(
-      { settings: { describe: describeCall, mutate } } as never,
+      { settings: { describe: describeCall, mutate } },
       { namespace: 'ui-test' },
     )
     await scope.load()
@@ -355,7 +355,7 @@ describe('SettingsScopeController', () => {
       .mockResolvedValueOnce(described({ preference: 'dark' }, 3))
       .mockResolvedValueOnce(described({ preference: 'light' }, 5))
     const scope = new SettingsScopeController<UiTestSettings>(
-      { settings: { describe: describeCall, mutate } } as never,
+      { settings: { describe: describeCall, mutate } },
       { namespace: 'ui-test' },
     )
     await scope.load()

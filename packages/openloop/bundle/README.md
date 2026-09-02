@@ -21,14 +21,13 @@ required-inject that service, so unloading the policy suspends the browser
 dispatchers instead of opening a fail-open window. This dependency exists only
 in the OpenLoop layer; the default DSH Web bundle remains unchanged.
 
-The first-release profile disables the inherited `cordis-client-runner` and
-`ui-cordis` rows, so only the static signed Client roster is loaded. It also
-disables the upstream settings, permission, agent-preset, and workspace Client
-owners whose broad Host calls are outside the first policy. Those surfaces
-remain absent until dedicated Host facades replace them in later tasks. The
-Openloop Desktop Bridge client supplies a profile-selected runtime adapter, so
-the shared client runtime never constructs its legacy Workspace runtime or
-calls any `workspace.*` method.
+The profile disables the inherited `cordis-client-runner`, `ui-cordis`,
+permission, agent-preset, plugin-inventory, and workspace Client owners whose
+broad Host calls are outside the product policy. General, Models & Credentials,
+and configurable Plugins use an authenticated, field-scoped Openloop settings
+facade instead. The Openloop Desktop Bridge client supplies a profile-selected
+runtime adapter, so the shared client runtime never constructs its legacy
+Workspace runtime or calls any `workspace.*` method.
 
 ## Built-in provider
 

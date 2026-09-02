@@ -85,6 +85,7 @@ export function apply(ctx: ClientContext): void {
     api,
     t,
     ...credentialControl === undefined ? {} : { credentialControl },
+    ...settingsApi?.canMutate === undefined ? {} : { canMutate: settingsApi.canMutate },
   })
   const deepSeekOnboardingInjected = (): DeepSeekOnboardingInjected => ({
     controller,

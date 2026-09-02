@@ -18,12 +18,12 @@
 服务声明为 required injection，因此 policy 卸载时浏览器分派器会暂停，而不会
 出现 fail-open 窗口。此依赖只存在于 OpenLoop 层；默认 DSH Web bundle 不变。
 
-首发 profile 会禁用继承来的 `cordis-client-runner` 与 `ui-cordis` 两行，因此
-只加载静态签名的 Client roster。它还会禁用首版 policy 未开放其宽泛 Host 调用的
-上游设置、权限、agent-preset 与 Workspace Client owner。后续任务用专用 Host
-facade 替代前，这些界面不会加载。Openloop Desktop Bridge client 会提供由
-profile 选择的 runtime adapter，因此共享 client runtime 不会构造 legacy
-Workspace runtime，也不会调用任何 `workspace.*` 方法。
+该 profile 会禁用继承来的 `cordis-client-runner`、`ui-cordis`、权限、
+agent-preset、插件清单与 Workspace Client owner，这些模块的宽泛 Host 调用不在
+产品 policy 内。通用、模型与凭据、可配置插件改用经过认证且按字段限制的 Openloop
+settings facade。Openloop Desktop Bridge client 会提供由 profile 选择的 runtime
+adapter，因此共享 client runtime 不会构造 legacy Workspace runtime，也不会调用
+任何 `workspace.*` 方法。
 
 ## 内置提供方
 

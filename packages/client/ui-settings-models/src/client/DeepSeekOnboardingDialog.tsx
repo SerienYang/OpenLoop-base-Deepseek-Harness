@@ -8,11 +8,10 @@
 
 import { useEffect } from 'react'
 import type { ReactNode } from 'react'
-import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { ModelsSettingsState, ModelsSettingsStore } from './store.ts'
+import type { ModelsSettingsApi, ModelsSettingsState, ModelsSettingsStore } from './store.ts'
 import { onboardingReadiness } from './store.ts'
 import { ProviderEditor } from './ProviderEditor.tsx'
 import type { en } from './locales.ts'
@@ -28,7 +27,7 @@ export interface DeepSeekOnboardingInjected {
   /** Shared Models-page join controller. */
   controller: ModelsSettingsStore
   /** Existing wire face reused by the Models credential editor. */
-  api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>
+  api: ModelsSettingsApi
   /** Feature copy. */
   t: (key: keyof typeof en) => string
   /** Optional product-owned, value-free credential control. */

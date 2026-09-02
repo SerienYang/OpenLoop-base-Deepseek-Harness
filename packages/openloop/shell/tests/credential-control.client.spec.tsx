@@ -353,6 +353,8 @@ describe('Openloop CredentialControl', () => {
     render(<CredentialControl reference="READ_ONLY_KEY" label="API 密钥" remote={host} />)
 
     expect(await screen.findByText(label)).toBeTruthy()
+    expect(screen.getByText('尚未配置 API 密钥')).toBeTruthy()
+    expect(screen.queryByText('API 密钥已安全保存')).toBeNull()
     expect(screen.queryByRole('button', { name: '替换 API 密钥' })).toBeNull()
     expect(screen.queryByRole('button', { name: '删除 API 密钥' })).toBeNull()
   })
@@ -370,7 +372,7 @@ describe('Openloop CredentialControl', () => {
       configured: false,
       writable: true,
     })
-    expect(adapter.materializeApiKeyEnv).toBe(true)
+    expect(adapter.materializeApiKeyEnv).toBe(false)
     expect(adapter.deleteCredentialWithProfile).toBe(false)
 
     render(adapter.render({ reference: 'DEEPSEEK_API_KEY', label: 'API 密钥' }))

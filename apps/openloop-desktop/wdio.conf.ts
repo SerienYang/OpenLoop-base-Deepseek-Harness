@@ -30,6 +30,7 @@ export const config: Options.Testrunner = {
     '@wdio/tauri-service',
     {
       appBinaryPath: binary,
+      appArgs: ['-ApplePersistenceIgnoreState', 'YES'],
       driverProvider: 'embedded',
       captureBackendLogs: true,
       captureFrontendLogs: true,

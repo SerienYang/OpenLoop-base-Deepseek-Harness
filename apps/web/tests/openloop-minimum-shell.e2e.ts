@@ -45,6 +45,14 @@ test.describe.serial('assembled minimum Openloop shell', () => {
     await expect(page.getByRole('button', { name: 'New session', exact: true }).first())
       .toContainText('Openloop')
     await expect(page.getByRole('main')).toContainText(/Openloop\s*预览版/u)
+    const welcome = page.getByRole('dialog', { name: 'Internal Testing Notice' })
+    if (await welcome.count() > 0) {
+      await welcome.getByRole('button', { name: 'Continue' }).click()
+    }
+    const credentialOnboarding = page.getByRole('dialog', { name: 'Add an API key to get started' })
+    if (await credentialOnboarding.count() > 0) {
+      await credentialOnboarding.getByRole('button', { name: 'Configure later' }).click()
+    }
     await expect(page.getByRole('button', { name: 'Settings', exact: true })).toBeVisible()
 
     const activeRows = new Set(ready.activeRows)
@@ -56,8 +64,12 @@ test.describe.serial('assembled minimum Openloop shell', () => {
       'approval',
       'desktop-bridge-client',
       'openloop-settings-foundation',
+      'openloop-settings-host',
       'openloop-workspace-client',
       'shell',
+      'ui-settings-general',
+      'ui-settings-models',
+      'ui-settings-plugins',
       'ui-model-selection',
       'ui-plan',
       'ui-user-questions',
@@ -71,6 +83,24 @@ test.describe.serial('assembled minimum Openloop shell', () => {
     }).toBeGreaterThan(0)
     await page.getByRole('button', { name: 'Settings', exact: true }).click()
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
+    expect(await settings.getByRole('tab').allTextContents()).toEqual([
+      'General',
+      'Models & Credentials',
+      'Plugins',
+      'About & Updates',
+    ])
+    await expect(settings.getByRole('tab', { name: 'Workspace', exact: true })).toHaveCount(0)
+    for (const [id, name] of [
+      ['general', 'General'],
+      ['models', 'Models & Credentials'],
+      ['plugins', 'Plugins'],
+    ] as const) {
+      await settings.getByRole('tab', { name, exact: true }).click()
+      const panel = settings.locator(`#openloop-settings-panel-${id}`)
+      await expect(panel).toBeVisible()
+      await expect(panel)
+        .not.toContainText('This section is unavailable in this build.')
+    }
     await settings.getByRole('tab', { name: 'About & Updates', exact: true }).click()
 
     await expect(settings.getByText('0.1.0', { exact: true })).toBeVisible()
@@ -120,6 +150,8 @@ test.describe.serial('assembled minimum Openloop shell', () => {
     } else {
       expect(snapshot).toBe(await readFile(UI_EXPECTED, 'utf8'))
     }
+    await settings.getByRole('button', { name: 'Close Settings' }).click()
+    await expect(page.getByRole('button', { name: 'Add Workspace' })).toBeVisible()
     expect(await readdir(SNAPSHOT_DIR)).toEqual(['ui.expected.md'])
   })
 })

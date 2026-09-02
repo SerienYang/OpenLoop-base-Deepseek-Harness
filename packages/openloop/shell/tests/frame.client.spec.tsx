@@ -179,6 +179,7 @@ describe('Openloop root shell Slot contract', () => {
     }
     ctx.provide('remote', { openloopDesktop } as never)
     ctx.provide('remote.openloopDesktop', openloopDesktop)
+    ctx.provide('openloopSettingsApi', {} as never)
     ctx.provide('openloopUpdates', {
       view: createSnapshotStore({
         phase: 'idle' as const,
@@ -200,6 +201,7 @@ describe('Openloop root shell Slot contract', () => {
       'locale',
       'remote',
       'remote.openloopDesktop',
+      'openloopSettingsApi',
       'openloopUpdates',
     ])
     const settingsShellOwner = ctx.get('settingsShellOwner') as {

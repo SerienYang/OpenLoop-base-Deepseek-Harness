@@ -127,9 +127,11 @@ describe('ui-settings-models apply', () => {
   })
 
   it('uses the product settings API for the Models surfaces', async () => {
+    const canMutate = vi.fn(() => false)
     const settingsApi = {
       settings: { describe: vi.fn(), mutate: vi.fn() },
-      llm: { providers: vi.fn(), discoverModels: vi.fn() },
+      llm: { providers: vi.fn() },
+      canMutate,
     }
     const b = await bench(true, undefined, settingsApi)
     declare(b.slots)
@@ -142,6 +144,7 @@ describe('ui-settings-models apply', () => {
     )()
     expect(face.api.settings).toBe(settingsApi.settings)
     expect(face.api.llm).toBe(settingsApi.llm)
+    expect(face.canMutate).toBe(canMutate)
   })
 
   it('the label thunk follows the active locale without re-registration', async () => {

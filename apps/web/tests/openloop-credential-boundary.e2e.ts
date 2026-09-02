@@ -3,6 +3,7 @@
 // Keychain boundary; every Cordis plugin and dispatcher remains real.
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
+import { readdir, readFile } from 'node:fs/promises'
 import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -70,6 +71,19 @@ async function closeAll(
   }
 }
 
+async function fixtureFileBodies(root: string): Promise<string[]> {
+  const bodies: string[] = []
+  const visit = async (directory: string): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) await visit(path)
+      else if (entry.isFile()) bodies.push((await readFile(path)).toString('utf8'))
+    }
+  }
+  await visit(root)
+  return bodies
+}
+
 describe('web e2e: Openloop credential boundary', () => {
   let scaffold: WebScaffold
   let bridge: AuthenticatedUnixBridgeServer
@@ -110,6 +124,17 @@ describe('web e2e: Openloop credential boundary', () => {
       undefined,
       { timeout: 30_000 },
     )
+    const welcome = page.getByRole('dialog', { name: WELCOME_NOTICE_COPY.zh.title })
+    await welcome.waitFor({ timeout: 10_000 })
+    expect(await welcome.locator('input[type="password"]').count()).toBe(0)
+    await welcome.getByRole('button', { name: WELCOME_NOTICE_COPY.zh.continueLabel }).click()
+    const credential = page.getByRole('dialog', { name: '添加一个 API Key 开始使用' })
+    const credentialVisible = await credential.waitFor({ timeout: 5_000 })
+      .then(() => true, () => false)
+    if (credentialVisible) {
+      expect(await credential.locator('input[type="password"]').count()).toBe(0)
+      await credential.getByRole('button', { name: '稍后配置' }).click()
+    }
   }, 120_000)
 
   afterAll(async () => {
@@ -125,8 +150,9 @@ describe('web e2e: Openloop credential boundary', () => {
     const entry = (id: string) => entries.find(candidate => candidate.options.id === id)
     for (const id of [
       'ui-settings',
-      'ui-settings-models',
-      'ui-settings-plugins',
+      'ui-settings-plugin-inventory',
+      'ui-permission',
+      'ui-agent-preset',
     ]) {
       expect(entry(id)?.disabled, `${id} must stay disabled in the Openloop profile`).toBe(true)
     }
@@ -138,6 +164,9 @@ describe('web e2e: Openloop credential boundary', () => {
       'api-gateway',
       'typert-gateway',
       'openloop-bootstrap',
+      'ui-settings-general',
+      'ui-settings-models',
+      'ui-settings-plugins',
     ]) {
       expect(entry(id)?.fiber, `${id} must be active in the Openloop fixture`).toBeDefined()
     }
@@ -165,12 +194,16 @@ describe('web e2e: Openloop credential boundary', () => {
     const workspaceSettings = page.getByRole('button', { name: '设置', exact: true })
     expect(await workspaceSettings.count()).toBe(1)
     await workspaceSettings.click()
-    const settings = page.getByRole('dialog', { name: '设置', exact: true })
+    let settings = page.getByRole('dialog', { name: '设置', exact: true })
+    if (await settings.count() === 0) {
+      await page.getByRole('button', { name: '设置', exact: true }).click()
+      settings = page.getByRole('dialog', { name: '设置', exact: true })
+      await settings.waitFor()
+    }
     await settings.waitFor({ timeout: 10_000 })
     expect(await settings.getByRole('tab').allTextContents()).toEqual([
       '通用',
       '模型与凭据',
-      '工作区',
       '插件',
       '关于与更新',
     ])
@@ -181,32 +214,70 @@ describe('web e2e: Openloop credential boundary', () => {
     expect(tripwire.pageErrors).toEqual([])
   })
 
-  it('keeps replacement pending until the native sheet reports saved', async () => {
+  it('keeps a native-sheet sentinel out of every browser, settings, log, and crash sink', async () => {
+    const sentinel = 'OPENLOOP_SECRET_SENTINEL_1788373237'
     await expect(scaffold.ctx.typertGateway.invoke({
       namespace: 'openloopDesktop',
       method: 'describeCredential',
       args: { ref: REF },
     })).resolves.toEqual({ configured: false, writable: true })
 
-    let replacementSettled = false
-    const replacement = scaffold.ctx.typertGateway.invoke({
-      namespace: 'openloopDesktop',
-      method: 'openCredentialReplacement',
-      args: { ref: REF },
-    }).finally(() => {
-      replacementSettled = true
+    const requests: string[] = []
+    const responses: Promise<void>[] = []
+    const requestListener = (request: import('playwright').Request): void => {
+      requests.push(`${request.url()}\n${request.postData() ?? ''}`)
+    }
+    const responseListener = (response: import('playwright').Response): void => {
+      responses.push(response.text().then(
+        (body) => { requests.push(`${response.url()}\n${body}`) },
+        () => undefined,
+      ))
+    }
+    page.on('request', requestListener)
+    page.on('response', responseListener)
+    const hostLogs: unknown[][] = []
+    const consoleSpies = (['log', 'warn', 'error'] as const).map(method =>
+      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+        hostLogs.push(args)
+      }))
+
+    await page.getByRole('dialog', { name: '设置', exact: true })
+      .getByRole('button', { name: '关闭设置' }).click()
+    await page.getByRole('button', { name: '设置', exact: true }).click()
+    const settings = page.getByRole('dialog', { name: '设置', exact: true })
+    await settings.waitFor({ timeout: 10_000 })
+    await settings.getByRole('tab', { name: '模型与凭据' }).click()
+    const providers: unknown = await page.evaluate(async (): Promise<unknown> => {
+      const response = await fetch('/api/openloop/settings/providers', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      })
+      return await response.json() as unknown
     })
+    const providerResponse = providers as {
+      readonly ok?: unknown
+      readonly value?: {
+        readonly providers?: readonly {
+          readonly provider?: unknown
+          readonly credentialRef?: unknown
+        }[]
+      }
+    }
+    expect(providerResponse.ok).toBe(true)
+    expect(providerResponse.value?.providers?.some(provider =>
+      provider.provider === 'deepseek-official'
+      && provider.credentialRef === REF)).toBe(true)
+    expect(await settings.getByRole('tabpanel').innerText()).toContain('DeepSeek')
+    const addCredential = settings.getByRole('button', { name: '添加 API 密钥' })
+    if (await addCredential.count() === 0) {
+      await settings.getByRole('button', { name: '重试' }).click()
+    }
+    await addCredential.click()
     await bridge.whenCredentialReplacementOpened()
 
-    expect(replacementSettled).toBe(false)
-    await expect(scaffold.ctx.typertGateway.invoke({
-      namespace: 'openloopDesktop',
-      method: 'describeCredential',
-      args: { ref: REF },
-    })).resolves.toEqual({ configured: false, writable: true })
-
-    bridge.completeCredentialReplacement()
-    await expect(replacement).resolves.toBe('saved')
+    bridge.completeCredentialReplacement(sentinel)
     await expect(scaffold.ctx.typertGateway.invoke({
       namespace: 'openloopDesktop',
       method: 'describeCredential',
@@ -216,6 +287,41 @@ describe('web e2e: Openloop credential boundary', () => {
       source: 'keychain',
       writable: true,
     })
+    expect(bridge.storedCredentialByteLength()).toBe(Buffer.byteLength(sentinel))
+    await Promise.all(responses)
+    page.off('request', requestListener)
+    page.off('response', responseListener)
+    for (const spy of consoleSpies) spy.mockRestore()
+
+    const browserState = await page.evaluate(() => ({
+      dom: document.documentElement.outerHTML,
+      localStorage: JSON.stringify(Object.fromEntries(
+        Array.from({ length: localStorage.length }, (_, index) => {
+          const key = localStorage.key(index) ?? ''
+          return [key, localStorage.getItem(key)]
+        }),
+      )),
+      sessionStorage: JSON.stringify(Object.fromEntries(
+        Array.from({ length: sessionStorage.length }, (_, index) => {
+          const key = sessionStorage.key(index) ?? ''
+          return [key, sessionStorage.getItem(key)]
+        }),
+      )),
+    }))
+    const fixtureFiles = await fixtureFileBodies(scaffold.workspaceCwd)
+    const audit = JSON.stringify({
+      requests,
+      browserState,
+      browserWarnings: tripwire.warnings,
+      browserErrors: tripwire.pageErrors,
+      hostLogs,
+      bridgeCalls: bridge.calls,
+      fixtureFiles,
+    })
+    expect(audit).not.toContain(sentinel)
+    expect(bridge.calls.filter(call => call.method === 'resolveCredential')).toEqual([])
+    expect(bridge.calls.filter(call => call.method === 'openCredentialReplacement'))
+      .toEqual([{ method: 'openCredentialReplacement', payload: { ref: REF } }])
   })
 
   it('denies legacy credential handlers and Host-only Typert endpoints', async () => {

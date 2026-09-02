@@ -78,6 +78,7 @@ export function apply(ctx: ClientContext): void {
     ctx.settingsScope.bind({ namespace: WEB_SEARCH_NS }),
     api,
     credentialControl,
+    settingsApi?.canMutate,
   )
 
   // The credential a card reports is not part of any settings section, so its

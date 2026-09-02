@@ -10,7 +10,7 @@ function ok<T>(value: T): RpcResponse<T> {
   return { rpcId: `welcome-${rpc++}` as never, result: { ok: true, value } }
 }
 
-function namespace(version?: string) {
+function namespace(version?: string, revision = 0) {
   return {
     ns: WELCOME_NOTICE_SETTINGS_NAMESPACE,
     schema: {},
@@ -19,7 +19,7 @@ function namespace(version?: string) {
     user: {},
     applies: 'live' as const,
     secrets: [],
-    revision: 0,
+    revision,
   }
 }
 
@@ -34,7 +34,7 @@ describe('WelcomeNoticeStore', () => {
   it('acknowledges in memory without calling loopback-only settings APIs', async () => {
     const describe = vi.fn()
     const mutate = vi.fn()
-    const controller = new WelcomeNoticeStore({ settings: { describe, mutate } } as never, 'memory')
+    const controller = new WelcomeNoticeStore({ settings: { describe, mutate } }, 'memory')
 
     await controller.load()
     expect(controller.store.getSnapshot()).toEqual({ status: 'ready', acknowledged: false, error: null })
@@ -66,12 +66,19 @@ describe('WelcomeNoticeStore', () => {
   })
 
   it('persists the owner version through one idempotent path mutation', async () => {
-    const mutate = vi.fn(() => Promise.resolve(ok(namespace(WELCOME_NOTICE_VERSION))))
-    const controller = new WelcomeNoticeStore({ settings: { mutate } } as never)
+    const mutate = vi.fn(() => Promise.resolve(ok(namespace(WELCOME_NOTICE_VERSION, 6))))
+    const describe = vi.fn(() => Promise.resolve(ok({
+      writable: true,
+      hasDocument: false,
+      namespaces: [namespace(undefined, 5)],
+    })))
+    const controller = new WelcomeNoticeStore({ settings: { describe, mutate } })
+    await controller.load()
     await expect(controller.acknowledge()).resolves.toBe(true)
     expect(mutate).toHaveBeenCalledWith({
       ns: WELCOME_NOTICE_SETTINGS_NAMESPACE,
       ops: [{ op: 'set', path: [WELCOME_NOTICE_ACK_FIELD], value: WELCOME_NOTICE_VERSION }],
+      expectedRevision: 5,
     })
     expect(controller.store.getSnapshot()).toMatchObject({ status: 'ready', acknowledged: true })
   })

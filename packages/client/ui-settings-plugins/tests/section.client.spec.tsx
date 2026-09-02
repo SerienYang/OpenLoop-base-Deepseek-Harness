@@ -354,10 +354,11 @@ describe('WebSearchCard', () => {
   function renderWebSearch(
     state: Partial<WebSearchCardState> = {},
     credentialControl?: CredentialControlAdapter,
+    includeEndpoint = true,
   ) {
     const store = createSnapshotStore<WebSearchCardState>({
       ...settled,
-      baseURL: field(''),
+      ...includeEndpoint ? { baseURL: field('') } : {},
       maxUses: field('5'),
       apiKey: field(''),
       credentialRef: 'DEEPSEEK_API_KEY',
@@ -385,6 +386,14 @@ describe('WebSearchCard', () => {
 
     expect(screen.getByText(en.webSearchApiKeySet)).toBeTruthy()
     expect(screen.getByLabelText(en.webSearchApiKey)).toHaveProperty('type', 'password')
+  })
+
+  it('omits the endpoint when the product policy does not expose it', () => {
+    renderWebSearch({}, undefined, false)
+    fireEvent.click(screen.getByText(en.webSearchTitle))
+
+    expect(screen.queryByLabelText(en.webSearchBaseUrl)).toBeNull()
+    expect(screen.getByLabelText(en.webSearchMaxUses)).toBeTruthy()
   })
 
   it('renders the Host credential control instead of SecretField in Openloop', async () => {

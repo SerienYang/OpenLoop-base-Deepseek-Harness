@@ -208,7 +208,7 @@ describe('OpenLoop profile', () => {
     expect(entries.find(entry => entry.id === 'openloop-settings-host')).toEqual({
       id: 'openloop-settings-host',
       name: '@openloop/bundle/settings-host',
-      inject: ['webServer', 'runtimeBootstrap', 'settings', 'llm'],
+      inject: ['webServer', 'runtimeBootstrap', 'settings', 'llm', 'credentialConsumers'],
     })
     expect(entries.findIndex(entry => entry.id === 'openloop-settings-host'))
       .toBeGreaterThan(entries.findIndex(entry => entry.id === 'openloop-bootstrap'))
@@ -368,6 +368,8 @@ describe('OpenLoop profile', () => {
       .toContain('credentialConsumers')
     expect(entries.find(entry => entry.id === 'web-search-deepseek')?.inject)
       .toContain('credentialConsumers')
+    expect(entries.find(entry => entry.id === 'openloop-settings-host')?.inject)
+      .toContain('credentialConsumers')
   })
 
   it('disables legacy Client rows whose calls are intentionally absent from the first policy', () => {
@@ -451,6 +453,22 @@ describe('OpenLoop profile', () => {
       entry.id.includes('workbench')
       || (typeof entry.name === 'string' && entry.name.includes('workbench')),
     )).toBe(false)
+  })
+
+  it('has no Workbench slot contributor or enabled Workbench client package', () => {
+    const workbenchSlotContributors = openloopEntries().filter(entry =>
+      entry.disabled !== true
+      && (
+        entry.id === 'workbench'
+        || entry.id === 'ui-workbench'
+        || entry.id.includes('workbench')
+        || (typeof entry.name === 'string' && entry.name.includes('workbench'))
+      ))
+    const workbenchPackages = [...enabledClientPackages()]
+      .filter(packageName => packageName.includes('workbench'))
+
+    expect(workbenchSlotContributors).toEqual([])
+    expect(workbenchPackages).toEqual([])
   })
 
   it('replaces the DSH root owner with exactly one Openloop shell in this profile', () => {

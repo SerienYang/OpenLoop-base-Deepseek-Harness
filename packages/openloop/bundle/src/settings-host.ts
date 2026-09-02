@@ -6,6 +6,9 @@ import type { RuntimeBootstrap } from '@openloop/runtime-bootstrap'
 import {
   allowedSettingsNamespaces,
   assertAllowedSettingsMutation,
+  isAllowedSettingsReadPath,
+  projectAllowedSettingsData,
+  projectAllowedSettingsSchema,
   type OpenloopSettingsMutation,
 } from './settings-policy.ts'
 
@@ -63,9 +66,25 @@ interface SettingsHostContext extends Context {
       readonly declared?: boolean
     }[]
   }
+  readonly credentialConsumers: {
+    planDeletion(reference: string): {
+      readonly consumers: readonly {
+        readonly kind: string
+        readonly display: {
+          readonly values: Readonly<Record<string, string>>
+        }
+      }[]
+    }
+  }
 }
 
-export const inject = ['webServer', 'runtimeBootstrap', 'settings', 'llm']
+export const inject = [
+  'webServer',
+  'runtimeBootstrap',
+  'settings',
+  'llm',
+  'credentialConsumers',
+]
 
 function responseJson(response: ServerResponse, status: number, body: object): void {
   response.writeHead(status, {
@@ -106,18 +125,46 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function namespaceView(descriptor: SettingsDescriptor): Record<string, unknown> {
+function namespaceView(
+  descriptor: SettingsDescriptor,
+  providers: ReadonlySet<string>,
+): Record<string, unknown> {
   return {
     ns: descriptor.ns,
-    schema: descriptor.schema,
-    value: descriptor.value,
-    ...descriptor.base === undefined ? {} : { base: descriptor.base },
-    ...descriptor.user === undefined ? {} : { user: descriptor.user },
+    schema: projectAllowedSettingsSchema(descriptor.ns, descriptor.schema, providers),
+    value: projectAllowedSettingsData(
+      descriptor.ns,
+      descriptor.value,
+      descriptor.schema,
+      providers,
+    ),
+    ...descriptor.base === undefined ? {} : {
+      base: projectAllowedSettingsData(
+        descriptor.ns,
+        descriptor.base,
+        descriptor.schema,
+        providers,
+      ),
+    },
+    ...descriptor.user === undefined ? {} : {
+      user: projectAllowedSettingsData(
+        descriptor.ns,
+        descriptor.user,
+        descriptor.schema,
+        providers,
+      ),
+    },
     applies: descriptor.applies,
-    secrets: (descriptor.secrets ?? []).map(secret => ({
-      path: [...secret.path],
-      set: secret.set,
-    })),
+    secrets: (descriptor.secrets ?? [])
+      .filter(secret => isAllowedSettingsReadPath(
+        descriptor.ns,
+        secret.path,
+        providers,
+      ))
+      .map(secret => ({
+        path: [...secret.path],
+        set: secret.set,
+      })),
     revision: descriptor.revision,
   }
 }
@@ -128,6 +175,15 @@ function builtInProviders(ctx: SettingsHostContext): Set<string> {
       .filter(provider => provider.declared !== true)
       .map(provider => provider.provider),
   )
+}
+
+function valueAt(source: unknown, path: readonly string[]): unknown {
+  let current = source
+  for (const segment of path) {
+    if (!isRecord(current)) return undefined
+    current = current[segment]
+  }
+  return current
 }
 
 function authenticated(
@@ -166,9 +222,10 @@ async function handleDescribe(
     return
   }
   const selected = new Set(requested as string[])
+  const providers = builtInProviders(ctx)
   const namespaces = ctx.settings.describe({ redactSecrets: true })
     .filter(descriptor => selected.has(descriptor.ns))
-    .map(namespaceView)
+    .map(descriptor => namespaceView(descriptor, providers))
   responseJson(response, 200, {
     ok: true,
     value: { writable: ctx.settings.writable, hasDocument: false, namespaces },
@@ -202,14 +259,14 @@ async function handleMutate(
   try {
     await ctx.settings.mutate(mutation.ns, mutation.ops, mutation.expectedRevision)
   } catch (cause) {
-    const record = cause as { readonly name?: unknown }
-    error(
-      response,
-      record.name === 'SettingsConflictError' ? 409 : 422,
-      record.name === 'SettingsConflictError'
-        ? 'SETTINGS_CONFLICT'
-        : 'SETTINGS_VALIDATION_FAILED',
-    )
+    const record = cause as { readonly name?: unknown; readonly code?: unknown }
+    if (record.name === 'SettingsConflictError' || record.code === 'SETTINGS_CONFLICT') {
+      error(response, 409, 'SETTINGS_CONFLICT')
+    } else if (cause instanceof TypeError || record.code === 'SETTINGS_VALIDATION_FAILED') {
+      error(response, 422, 'SETTINGS_VALIDATION_FAILED')
+    } else {
+      error(response, 503, 'SETTINGS_UNAVAILABLE')
+    }
     return
   }
   const descriptor = ctx.settings.describe({ redactSecrets: true })
@@ -218,7 +275,10 @@ async function handleMutate(
     error(response, 503, 'SETTINGS_UNAVAILABLE')
     return
   }
-  responseJson(response, 200, { ok: true, value: namespaceView(descriptor) })
+  responseJson(response, 200, {
+    ok: true,
+    value: namespaceView(descriptor, builtInProviders(ctx)),
+  })
 }
 
 async function handleProviders(
@@ -238,14 +298,30 @@ async function handleProviders(
     return
   }
   const active = new Set(ctx.llm.listProviders().map(provider => provider.id))
-  const providers = ctx.llm.listConfigurableProviders().map(provider => ({
-    provider: provider.provider,
-    displayName: provider.displayName,
-    settingsNs: provider.settingsNs,
-    settingsPath: [...provider.settingsPath],
-    active: active.has(provider.provider),
-    ...provider.declared === undefined ? {} : { declared: provider.declared },
-  }))
+  const namespaces = new Map(
+    ctx.settings.describe({ redactSecrets: true }).map(descriptor => [descriptor.ns, descriptor]),
+  )
+  const providers = ctx.llm.listConfigurableProviders()
+    .filter(provider => provider.declared !== true)
+    .map(provider => ({
+      provider: provider.provider,
+      displayName: provider.displayName,
+      settingsNs: provider.settingsNs,
+      settingsPath: [...provider.settingsPath],
+      active: active.has(provider.provider),
+      builtIn: true,
+      ...(() => {
+        const profile = valueAt(namespaces.get(provider.settingsNs)?.value, provider.settingsPath)
+        const credentialRef = isRecord(profile) ? profile.apiKeyEnv : undefined
+        if (typeof credentialRef !== 'string') return {}
+        const consumers = ctx.credentialConsumers.planDeletion(credentialRef).consumers
+        return consumers.some(consumer =>
+          consumer.kind === 'model-route'
+          && consumer.display.values.routeId === provider.provider)
+          ? { credentialRef }
+          : {}
+      })(),
+    }))
   responseJson(response, 200, { ok: true, value: { providers } })
 }
 

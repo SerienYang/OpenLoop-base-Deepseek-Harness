@@ -156,7 +156,7 @@ describe('ui-settings-general apply', () => {
     expect(resolveSlotLabel(generalEntry(b.slots)!.options.label)).toBe('通用')
   })
 
-  it('defers shell ownership to an optional product marker while retaining General and safe actions', async () => {
+  it('defers shell ownership to a product marker and withholds the generic document action', async () => {
     const b = await bench(true, { id: '@openloop/shell' })
     declare(b.slots)
     await b.ctx.plugin({ inject: [...inject], apply }).await()
@@ -165,7 +165,8 @@ describe('ui-settings-general apply', () => {
     expect(b.slots.entries('settings.trigger')).toEqual([])
     expect(b.slots.entries('settings.header')).toEqual([])
     expect(b.slots.entries('settings.close')).toEqual([])
-    expect(b.slots.entries('settings.action')[0]?.component).toBe(SettingsDocumentAction)
+    expect(b.slots.entries('settings.action')).toEqual([])
+    expect(b.settingsDescribe).not.toHaveBeenCalled()
     expect(generalEntry(b.slots)?.options).toMatchObject({ id: 'general', order: 0 })
     expect(resolveSlotLabel(generalEntry(b.slots)!.options.label)).toBe('通用')
   })

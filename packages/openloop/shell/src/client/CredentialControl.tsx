@@ -153,7 +153,7 @@ export function CredentialControl(props: CredentialControlProps): ReactNode {
     })
   }
 
-  const configured = status?.configured === true
+  const configured = status?.configured === true && status.source === 'keychain'
   const writable = status?.writable === true && props.disabled !== true
   return (
     <div className={styles.control} aria-busy={reading || busy !== undefined || undefined}>
@@ -232,7 +232,7 @@ export function createOpenloopCredentialControlAdapter(
       )
     },
     render: props => <CredentialControl {...props} remote={remote} t={t} />,
-    materializeApiKeyEnv: true,
+    materializeApiKeyEnv: false,
     deleteCredentialWithProfile: false,
   }
 }

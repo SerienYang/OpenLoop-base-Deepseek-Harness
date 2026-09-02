@@ -17,6 +17,16 @@ import type {
   CredentialControlStatus,
 } from '@deepseek-ai/dsh-client-ui-settings/client'
 
+/** Minimal wire surface used by the Models settings UI. */
+export interface ModelsSettingsApi {
+  readonly settings: Pick<IApiClient['settings'], 'describe' | 'mutate'>
+  readonly credentials: Pick<IApiClient['credentials'], 'describe' | 'set' | 'unset'>
+  readonly llm: {
+    readonly providers: IApiClient['llm']['providers']
+    readonly discoverModels?: IApiClient['llm']['discoverModels']
+  }
+}
+
 /**
  * Any route key walks a dict schema to the same profile node, so the lookup
  * names one that cannot collide with a configured route.
@@ -113,7 +123,7 @@ export class ModelsSettingsStore {
    * @param api - the wire face (settings/credentials/llm domains).
    */
   constructor(
-    private readonly api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>,
+    private readonly api: ModelsSettingsApi,
     private readonly credentialControl?: CredentialControlAdapter,
   ) {}
 
@@ -167,7 +177,7 @@ export class ModelsSettingsStore {
         entry,
         configured,
         removable,
-        apiKeyEnv: apiKeyEnvOf(namespace, entry.settingsPath),
+        apiKeyEnv: entry.credentialRef ?? apiKeyEnvOf(namespace, entry.settingsPath),
         credential: undefined,
       }
     })
@@ -195,7 +205,11 @@ export class ModelsSettingsStore {
           }))
           for (const result of results) {
             if (result.status === undefined) failedRefs.push(result.ref)
-            else credentials[result.ref] = result.status
+            else {
+              credentials[result.ref] = result.status.source === 'keychain'
+                ? result.status
+                : { ...result.status, configured: false }
+            }
           }
           if (failedRefs.length > 0) credentialError = 'credential status is unavailable'
         }

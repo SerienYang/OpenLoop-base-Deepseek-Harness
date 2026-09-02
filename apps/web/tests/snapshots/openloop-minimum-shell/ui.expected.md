@@ -33,7 +33,6 @@
     - tablist "Settings":
       - tab "General"
       - tab "Models & Credentials"
-      - tab "Workspace"
       - tab "Plugins"
       - tab "About & Updates" [selected]
   - tabpanel "About & Updates":

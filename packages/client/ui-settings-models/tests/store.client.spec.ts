@@ -1,6 +1,6 @@
 /** Page-store join: directory × namespaces × credentials, with last-good rows on failure. */
 import { describe, expect, it } from 'vitest'
-import type { RpcResponse } from '@deepseek-ai/dsh-api-remotes/client'
+import type { ConfigurableProviderView, RpcResponse } from '@deepseek-ai/dsh-api-remotes/client'
 import type { CredentialControlAdapter } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { messageOf, ModelsSettingsStore, onboardingReadiness } from '../src/client/store.ts'
 
@@ -41,7 +41,7 @@ const NAMESPACES = [
 ]
 
 function api(overrides: {
-  providers?: () => Promise<RpcResponse<{ providers: typeof DIRECTORY }>>
+  providers?: () => Promise<RpcResponse<{ providers: ConfigurableProviderView[] }>>
   describeSettings?: () => Promise<RpcResponse<{ writable: boolean; namespaces: typeof NAMESPACES }>>
   describeCredentials?: (refs: string[]) => Promise<RpcResponse<{ credentials: Record<string, unknown> }>>
 } = {}) {
@@ -71,6 +71,23 @@ function api(overrides: {
 }
 
 describe('ModelsSettingsStore', () => {
+  it('uses the Host-projected credential reference instead of browser inference', async () => {
+    const providers: ConfigurableProviderView[] = DIRECTORY.map(entry =>
+      entry.provider === 'openai'
+        ? { ...entry, credentialRef: 'OPENLOOP_OPENAI_KEY' }
+        : entry)
+    const { face, seenRefs } = api({
+      providers: () => Promise.resolve(ok({ providers })),
+    })
+    const store = new ModelsSettingsStore(face)
+
+    await store.load()
+
+    expect(seenRefs[0]).toContain('OPENLOOP_OPENAI_KEY')
+    expect(store.store.getSnapshot().rows.find(row => row.entry.provider === 'openai'))
+      .toMatchObject({ apiKeyEnv: 'OPENLOOP_OPENAI_KEY' })
+  })
+
   it('joins rows with configured, removable, and credential state', async () => {
     const { face, seenRefs } = api()
     const store = new ModelsSettingsStore(face)
@@ -276,6 +293,31 @@ describe('ModelsSettingsStore', () => {
       writable: false,
     })
     expect(state.rows.find(row => row.apiKeyEnv === 'ANTHROPIC_API_KEY')?.credential).toBeUndefined()
+  })
+
+  it('does not treat non-Keychain product credentials as configured', async () => {
+    const credentialControl: CredentialControlAdapter = {
+      describe: async () => ({
+        configured: true,
+        source: 'environment',
+        writable: false,
+      }),
+      render: () => null,
+      materializeApiKeyEnv: false,
+      deleteCredentialWithProfile: false,
+    }
+    const { face } = api()
+    const store = new ModelsSettingsStore(face, credentialControl)
+
+    await store.load()
+
+    const credential = store.store.getSnapshot().rows
+      .find(row => row.apiKeyEnv === 'DEEPSEEK_API_KEY')?.credential
+    expect(credential).toEqual({
+      configured: false,
+      source: 'environment',
+      writable: false,
+    })
   })
 
   it('keeps onboarding available when only another credential reference fails', async () => {

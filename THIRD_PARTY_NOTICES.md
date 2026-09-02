@@ -170,6 +170,7 @@ External packages **directly declared** only by repository tooling, test infrast
 | [`vite`](https://github.com/vitejs/vite) | MIT |
 | [`vite-tsconfig-paths`](https://github.com/aleclarson/vite-tsconfig-paths) | MIT |
 | [`vitest`](https://github.com/vitest-dev/vitest) | MIT |
+| [`webdriverio`](https://github.com/webdriverio/webdriverio) | MIT |
 
 `eslint-plugin-sonarjs` (LGPL-3.0-only) and `lightningcss` (MPL-2.0) run only as development tooling; their code is not linked into or distributed with any DeepSeek Harness artifact.
 

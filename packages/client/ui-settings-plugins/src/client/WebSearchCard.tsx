@@ -60,18 +60,22 @@ export function WebSearchCard(props: WebSearchCardProps) {
           refreshToken: state.credentialVersion,
           onChanged: props.refreshCredential,
         })}
-      <ValueField
-        id="plugin-config-web-search-endpoint"
-        label={t('webSearchBaseUrl')}
-        hint={t('webSearchBaseUrlHint')}
-        overriddenLabel={t('overridden')}
-        resetLabel={t('reset')}
-        invalidLabel={t('invalidNumber')}
-        disabled={disabled}
-        {...state.baseURL}
-        onEdit={(text) => { props.edit('baseURL', text) }}
-        onReset={() => { props.resetField('baseURL') }}
-      />
+      {state.baseURL === undefined
+        ? null
+        : (
+          <ValueField
+            id="plugin-config-web-search-endpoint"
+            label={t('webSearchBaseUrl')}
+            hint={t('webSearchBaseUrlHint')}
+            overriddenLabel={t('overridden')}
+            resetLabel={t('reset')}
+            invalidLabel={t('invalidNumber')}
+            disabled={disabled}
+            {...state.baseURL}
+            onEdit={(text) => { props.edit('baseURL', text) }}
+            onReset={() => { props.resetField('baseURL') }}
+          />
+        )}
       <ValueField
         id="plugin-config-web-search-max-uses"
         label={t('webSearchMaxUses')}

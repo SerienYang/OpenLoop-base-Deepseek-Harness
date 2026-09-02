@@ -42,6 +42,7 @@ export const CORDIS_CONTEXT_SCAN_EXEMPTIONS: Readonly<Record<string, string>> = 
   openloopCredentialOperations:
     'Host credential-operation implementation reached only through the reviewed desktopBridge facade.',
   openloopUpdates: 'OpenLoop Client update state service, absent from the Host catalog.',
+  openloopSettingsApi: 'OpenLoop Client settings facade, absent from the Host catalog.',
   openloopWorkspaces: 'OpenLoop Client Workspace state service, absent from the Host catalog.',
   remote: 'Client gateway accessor.',
   sessionLogDownload: 'Client session export controller.',

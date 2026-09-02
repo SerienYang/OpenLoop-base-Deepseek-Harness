@@ -143,6 +143,7 @@ export const inject = [
   'locale',
   'remote',
   'remote.openloopDesktop',
+  'openloopSettingsApi',
   'openloopUpdates',
 ]
 
@@ -166,11 +167,11 @@ export function apply(ctx: ClientContext): void {
   const desktop = (
     ctx.remote as unknown as { openloopDesktop: OpenloopCredentialRemote }
   ).openloopDesktop
-  const settingsApi = ctx.get('openloopSettingsApi')
+  const settingsApi = ctx.openloopSettingsApi
   const settingsShellOwner: SettingsShellOwner = Object.freeze({
     id: '@openloop/shell',
     credentialControl: createOpenloopCredentialControlAdapter(desktop, t),
-    ...settingsApi === undefined ? {} : { settingsApi },
+    settingsApi,
   })
   ctx.effect(
     () => ctx.reflect.provide('settingsShellOwner', settingsShellOwner),

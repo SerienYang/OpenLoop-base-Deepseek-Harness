@@ -31,7 +31,19 @@ import type {} from '@deepseek-ai/dsh-api-remotes/types'
 // never — the owning package's client-safe, type-only subpath supplies the
 // cordis `Events` entry (and with it the branded `SettingsNamespace`).
 import type {} from '@deepseek-ai/dsh-settings/types'
-type SettingsFace = Pick<IApiClient, 'settings'>
+type SettingsFace = {
+  readonly settings: Pick<IApiClient['settings'], 'describe' | 'mutate'>
+}
+
+/** Product-filtered settings and provider directory used by a custom Settings shell. */
+export interface ProductSettingsApi extends SettingsFace {
+  readonly llm: {
+    readonly providers: IApiClient['llm']['providers']
+    readonly discoverModels?: IApiClient['llm']['discoverModels']
+  }
+  /** Whether the product facade accepts one settings path. */
+  readonly canMutate?: (namespace: string, path: readonly string[]) => boolean
+}
 
 /**
  * Serializes one namespace's Host reads and writes behind a snapshot store.
