@@ -13,6 +13,7 @@ afterEach(cleanup)
 const zhT = (key: string): string => ({
   credentialReading: '正在读取凭据状态…',
   credentialConfigured: 'API 密钥已安全保存',
+  credentialReadOnly: 'API 密钥已提供（只读）',
   credentialMissing: '尚未配置 API 密钥',
   sourceKeychain: 'macOS 钥匙串 · 不显示已保存内容',
   sourceEnvironment: '环境变量',
@@ -20,7 +21,7 @@ const zhT = (key: string): string => ({
   sourceHost: '由 Openloop Host 管理',
   sourceManaged: '受管凭据来源',
   replaceOpening: '正在打开…',
-  replace: '替换 API 密钥',
+  replace: '更新 API 密钥',
   add: '添加 API 密钥',
   deleteBusy: '正在删除…',
   delete: '删除 API 密钥',
@@ -34,6 +35,7 @@ const zhT = (key: string): string => ({
 const enT = (key: string): string => ({
   credentialReading: 'Reading credential status…',
   credentialConfigured: 'API key is securely stored',
+  credentialReadOnly: 'API key is provided (read-only)',
   credentialMissing: 'API key is not configured',
   sourceKeychain: 'macOS Keychain · saved value is never shown',
   sourceEnvironment: 'Environment variable',
@@ -41,7 +43,7 @@ const enT = (key: string): string => ({
   sourceHost: 'Managed by the Openloop Host',
   sourceManaged: 'Managed credential source',
   replaceOpening: 'Opening…',
-  replace: 'Replace API key',
+  replace: 'Update API key',
   add: 'Add API key',
   deleteBusy: 'Deleting…',
   delete: 'Delete API key',
@@ -83,7 +85,9 @@ describe('Openloop CredentialControl', () => {
     render(<CredentialControl reference="DEEPSEEK_API_KEY" label="API 密钥" remote={host} />)
 
     expect(await screen.findByText('API 密钥已安全保存')).toBeTruthy()
+    expect(screen.getByText('**** **** **** ****')).toBeTruthy()
     expect(screen.getByText('macOS 钥匙串 · 不显示已保存内容')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '更新 API 密钥' })).toBeTruthy()
     expect(document.querySelector('input')).toBeNull()
     expect(JSON.stringify(document.body.textContent)).not.toContain('DEEPSEEK_API_KEY')
   })
@@ -109,17 +113,18 @@ describe('Openloop CredentialControl', () => {
       />,
     )
     await screen.findByText('尚未配置 API 密钥')
+    expect(screen.queryByText('**** **** **** ****')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '添加 API 密钥' }))
 
     expect(screen.getByRole('button', { name: '正在打开…' })).toHaveProperty('disabled', true)
-    expect(screen.getByText('API 密钥').parentElement?.parentElement?.getAttribute('aria-busy'))
+    expect(screen.getByRole('status').parentElement?.parentElement?.getAttribute('aria-busy'))
       .toBe('true')
     expect(describeCredential).toHaveBeenCalledTimes(1)
     expect(screen.getByText('尚未配置 API 密钥')).toBeTruthy()
 
     replacement.resolve({ ok: true, value: 'saved' })
     expect(await screen.findByText('API 密钥已安全保存')).toBeTruthy()
-    expect(screen.getByText('API 密钥').parentElement?.parentElement?.getAttribute('aria-busy'))
+    expect(screen.getByRole('status').parentElement?.parentElement?.getAttribute('aria-busy'))
       .toBeNull()
     expect(openCredentialReplacement).toHaveBeenCalledWith('DEEPSEEK_API_KEY')
     expect(describeCredential).toHaveBeenCalledTimes(2)
@@ -142,7 +147,7 @@ describe('Openloop CredentialControl', () => {
     const loading = screen.getByRole('status')
     expect(loading.textContent).toBe('正在读取凭据状态…')
     expect(loading.getAttribute('aria-live')).toBe('polite')
-    expect(screen.getByText('API 密钥').parentElement?.parentElement?.getAttribute('aria-busy'))
+    expect(loading.parentElement?.parentElement?.getAttribute('aria-busy'))
       .toBe('true')
 
     await act(async () => { initial.reject(new Error('offline')) })
@@ -179,8 +184,9 @@ describe('Openloop CredentialControl', () => {
     )
 
     expect(await screen.findByText('API key is securely stored')).toBeTruthy()
+    expect(screen.getByText('**** **** **** ****')).toBeTruthy()
     expect(screen.getByText('macOS Keychain · saved value is never shown')).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Replace API key' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Update API key' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Delete API key' })).toBeTruthy()
     expect(document.body.textContent).not.toContain('密钥')
   })
@@ -298,16 +304,16 @@ describe('Openloop CredentialControl', () => {
     )
     await screen.findByText('API 密钥已安全保存')
 
-    fireEvent.click(screen.getByRole('button', { name: '替换 API 密钥' }))
+    fireEvent.click(screen.getByRole('button', { name: '更新 API 密钥' }))
     await waitFor(() => { expect(openCredentialReplacement).toHaveBeenCalledTimes(1) })
     expect(describeCredential).toHaveBeenCalledTimes(1)
     expect(onChanged).not.toHaveBeenCalled()
 
-    fireEvent.click(screen.getByRole('button', { name: '替换 API 密钥' }))
+    fireEvent.click(screen.getByRole('button', { name: '更新 API 密钥' }))
     expect(await screen.findByText('无法更新 API 密钥，请重试。')).toBeTruthy()
     expect(onChanged).not.toHaveBeenCalled()
 
-    fireEvent.click(screen.getByRole('button', { name: '替换 API 密钥' }))
+    fireEvent.click(screen.getByRole('button', { name: '更新 API 密钥' }))
     await waitFor(() => { expect(openCredentialReplacement).toHaveBeenCalledTimes(3) })
     expect(describeCredential).toHaveBeenCalledTimes(1)
     expect(onChanged).not.toHaveBeenCalled()
@@ -340,7 +346,9 @@ describe('Openloop CredentialControl', () => {
 
   it.each([
     ['environment', '环境变量'],
+    ['env', '环境变量'],
     ['legacy-file', '旧版凭据文件'],
+    ['file', '旧版凭据文件'],
   ])('renders %s as read-only and offers no mutation actions', async (source, label) => {
     const host = remote({
       describeCredential: vi.fn(() => ok({
@@ -353,9 +361,11 @@ describe('Openloop CredentialControl', () => {
     render(<CredentialControl reference="READ_ONLY_KEY" label="API 密钥" remote={host} />)
 
     expect(await screen.findByText(label)).toBeTruthy()
-    expect(screen.getByText('尚未配置 API 密钥')).toBeTruthy()
+    expect(screen.getByText('API 密钥已提供（只读）')).toBeTruthy()
+    expect(screen.queryByText('**** **** **** ****')).toBeNull()
+    expect(screen.queryByText('尚未配置 API 密钥')).toBeNull()
     expect(screen.queryByText('API 密钥已安全保存')).toBeNull()
-    expect(screen.queryByRole('button', { name: '替换 API 密钥' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '更新 API 密钥' })).toBeNull()
     expect(screen.queryByRole('button', { name: '删除 API 密钥' })).toBeNull()
   })
 
@@ -406,6 +416,49 @@ describe('Openloop CredentialControl', () => {
 
     expect(await screen.findByText('API 密钥已安全保存')).toBeTruthy()
     expect(describeCredential).toHaveBeenCalledTimes(2)
+  })
+
+  it('disables configured actions while a status refresh is pending', async () => {
+    const refresh = Promise.withResolvers<{
+      ok: true
+      value: { configured: true; source: 'keychain'; writable: true }
+    }>()
+    const describeCredential = vi.fn()
+      .mockReturnValueOnce(ok({ configured: true, source: 'keychain', writable: true }))
+      .mockReturnValueOnce(refresh.promise)
+    const host = remote({ describeCredential })
+    const view = render(
+      <CredentialControl
+        reference="DEEPSEEK_API_KEY"
+        label="API 密钥"
+        remote={host}
+        refreshToken={0}
+      />,
+    )
+    await screen.findByText('API 密钥已安全保存')
+
+    view.rerender(
+      <CredentialControl
+        reference="DEEPSEEK_API_KEY"
+        label="API 密钥"
+        remote={host}
+        refreshToken={1}
+      />,
+    )
+    await waitFor(() => { expect(describeCredential).toHaveBeenCalledTimes(2) })
+
+    expect(screen.getByRole('button', { name: '更新 API 密钥' }))
+      .toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '删除 API 密钥' }))
+      .toHaveProperty('disabled', true)
+
+    await act(async () => {
+      refresh.resolve({
+        ok: true,
+        value: { configured: true, source: 'keychain', writable: true },
+      })
+      await refresh.promise
+    })
   })
 
   it.each([
