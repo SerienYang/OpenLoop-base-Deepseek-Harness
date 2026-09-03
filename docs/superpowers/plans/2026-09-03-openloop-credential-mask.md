@@ -248,7 +248,7 @@ Run:
 
 ```bash
 pnpm build:lib
-DSH_SNAPSHOT=replay pnpm openloop:gate-test -- playwright \
+DSH_SNAPSHOT=replay pnpm openloop:gate-test -- web-vitest \
   --file apps/web/tests/openloop-credential-boundary.e2e.ts
 ```
 
@@ -280,7 +280,7 @@ attachment boundary.
 - [ ] **Step 4: Build and verify the desktop flow**
 
 ```bash
-pnpm openloop:build-e2e
+pnpm e2e:build
 pnpm openloop:gate-test -- wdio \
   --config apps/openloop-desktop/wdio.conf.ts \
   --binary ".artifacts/openloop-e2e-target/aarch64-apple-darwin/release/bundle/macos/Openloop E2E.app/Contents/MacOS/openloop-desktop" \

@@ -287,7 +287,27 @@ describe('web e2e: Openloop credential boundary', () => {
       source: 'keychain',
       writable: true,
     })
+    const configuredMask = settings.getByText('**** **** **** ****', { exact: true })
+    if (await configuredMask.count() === 0) {
+      const providerRow = settings.getByText('DeepSeek', { exact: true })
+        .locator('xpath=ancestor::li[1]')
+      await providerRow.getByRole('button', { name: /编辑|Edit/u }).click()
+    }
+    await configuredMask.waitFor({ timeout: 10_000 })
+    expect(await configuredMask.count()).toBe(1)
+    expect(await settings.getByRole('button', { name: '更新 API 密钥' }).count()).toBe(1)
+    expect(await settings.locator('input[type="password"]').count()).toBe(0)
+    const modelsText = await settings.getByRole('tabpanel').innerText()
+    expect(modelsText).not.toContain(REF)
+    expect(modelsText).not.toContain(sentinel)
     expect(bridge.storedCredentialByteLength()).toBe(Buffer.byteLength(sentinel))
+
+    await settings.getByRole('button', { name: '更新 API 密钥' }).click()
+    await bridge.whenCalled('openCredentialReplacement', 2)
+    bridge.completeCredentialReplacement(sentinel)
+    await configuredMask.waitFor({ timeout: 10_000 })
+    expect(bridge.storedCredentialByteLength()).toBe(Buffer.byteLength(sentinel))
+
     await Promise.all(responses)
     page.off('request', requestListener)
     page.off('response', responseListener)
@@ -321,7 +341,10 @@ describe('web e2e: Openloop credential boundary', () => {
     expect(audit).not.toContain(sentinel)
     expect(bridge.calls.filter(call => call.method === 'resolveCredential')).toEqual([])
     expect(bridge.calls.filter(call => call.method === 'openCredentialReplacement'))
-      .toEqual([{ method: 'openCredentialReplacement', payload: { ref: REF } }])
+      .toEqual([
+        { method: 'openCredentialReplacement', payload: { ref: REF } },
+        { method: 'openCredentialReplacement', payload: { ref: REF } },
+      ])
   })
 
   it('denies legacy credential handlers and Host-only Typert endpoints', async () => {

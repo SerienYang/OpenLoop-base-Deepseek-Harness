@@ -86,6 +86,14 @@ async function expectAppKitEvent(event: string): Promise<void> {
   })
 }
 
+async function expectAppKitEventCount(event: string, count: number): Promise<void> {
+  await desktop.waitUntil(async () => (
+    await appKitEvents()
+  ).filter(candidate => candidate === event).length >= count, {
+    timeout: 15_000,
+  })
+}
+
 async function writePersistenceFixture(
   browser: DesktopBrowser,
   values: PersistedSettings,
@@ -209,6 +217,29 @@ describe('Openloop desktop shell', () => {
       strictEqual(await (await element(`#openloop-settings-tab-${id}`)).isExisting(), true)
     }
     strictEqual(await (await element('#openloop-settings-tab-workspace')).isExisting(), false)
+    await (await element('#openloop-settings-tab-models')).click()
+    const agentPlanRow = '//*[@role="tabpanel"]'
+      + '//*[normalize-space()="火山方舟 Agent Plan"]/ancestor::li[1]'
+    await (await element(
+      `${agentPlanRow}//button[contains(., "Edit") or contains(., "编辑")]`,
+    )).click()
+    const agentPlanText = await (await element(agentPlanRow)).getText()
+    strictEqual(agentPlanText.includes('VOLCENGINE_ARK_AGENT_PLAN_API_KEY'), false)
+    const credentialAction = await element(
+      `${agentPlanRow}//button[normalize-space()="Update API key"`
+      + ' or normalize-space()="更新 API 密钥"'
+      + ' or normalize-space()="Add API key"'
+      + ' or normalize-space()="添加 API 密钥"]',
+    )
+    await desktop.waitUntil(async () => credentialAction.isExisting(), {
+      timeout: 15_000,
+    })
+    ok(await credentialAction.isExisting(), agentPlanText)
+    const credentialEvents = (await appKitEvents())
+      .filter(event => event === 'credential-replacement:main').length
+    await credentialAction.click()
+    await expectAppKitEventCount('credential-replacement:main', credentialEvents + 1)
+    strictEqual((await desktop.getWindowHandles()).length, 1)
     await (await element('#openloop-settings-tab-about-update')).click()
     await expectText(
       '//*[@role="tabpanel"]//*[normalize-space()="0.1.0"]',
@@ -239,6 +270,7 @@ describe('Openloop desktop shell', () => {
     await expectAppKitEvent('workspace-picker:main')
     strictEqual((await desktop.getWindowHandles()).length, 1)
     deepStrictEqual(await appKitEvents(), [
+      'credential-replacement:main',
       'credential-replacement:main',
       'update-install:main',
       'workspace-picker:main',
