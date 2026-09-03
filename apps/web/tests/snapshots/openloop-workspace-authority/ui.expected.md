@@ -14,8 +14,6 @@
     - button "Workspace actions for Workspace Alpha":
       - img
     - button "New session in Workspace Alpha": +
-    - button "authority-project"
-    - button "authority-project"
   - button "Settings":
     - img
     - text: Settings

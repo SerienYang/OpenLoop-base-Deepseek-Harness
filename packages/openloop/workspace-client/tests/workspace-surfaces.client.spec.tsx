@@ -152,6 +152,79 @@ describe('Openloop Workspace surfaces', () => {
     expect(h.startSession).toHaveBeenCalledWith('alpha')
   })
 
+  it('does not repeat a privacy-safe display path that equals the Workspace name', () => {
+    const workspace = {
+      ...grant('alpha'),
+      name: 'Luki编剧Agent',
+      displayPath: 'Luki编剧Agent',
+    }
+    const h = harness([workspace])
+
+    render(
+      <WorkspaceSidebar
+        wide
+        expandSidebar={vi.fn()}
+        useGrants={h.useGrants}
+        useSessions={h.useSessions}
+        actions={h.actions}
+      />,
+    )
+
+    expect(screen.getAllByText('Luki编剧Agent')).toHaveLength(1)
+  })
+
+  it('keeps a display path that differs from the Workspace name only by whitespace', () => {
+    const workspace = {
+      ...grant('alpha'),
+      name: 'Alpha',
+      displayPath: 'Alpha ',
+    }
+    const h = harness([workspace])
+
+    const view = render(
+      <WorkspaceSidebar
+        wide
+        expandSidebar={vi.fn()}
+        useGrants={h.useGrants}
+        useSessions={h.useSessions}
+        actions={h.actions}
+      />,
+    )
+
+    expect(view.container.querySelector('[class*="workspacePath"]')?.textContent).toBe('Alpha ')
+  })
+
+  it('hides the reusable blank session from Workspace history', () => {
+    const current = sid('session-current')
+    const h = harness([grant('alpha', 'ready', [current, sid('session-history')])], current)
+    h.sessionStore.set({
+      ...sessions(current),
+      byId: {
+        ...sessions(current).byId,
+        [current]: {
+          id: current,
+          displayTitle: 'Alpha',
+          running: false,
+          blank: true,
+          updatedAt: 3,
+        },
+      },
+    })
+
+    render(
+      <WorkspaceSidebar
+        wide
+        expandSidebar={vi.fn()}
+        useGrants={h.useGrants}
+        useSessions={h.useSessions}
+        actions={h.actions}
+      />,
+    )
+
+    expect(screen.queryByRole('button', { name: /^Alpha$/u })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Historical discussion' })).toBeTruthy()
+  })
+
   it('keeps the collapsed rail compact while retaining Add and Workspace entry points', () => {
     const h = harness([grant('alpha')])
     const view = render(
