@@ -272,6 +272,11 @@ In the existing real-runtime WDIO scenario:
 8. Assert only one Tauri window exists because the prompt is an attached
    AppKit Sheet.
 
+Do not seed, replace, or delete the fixed Agent Plan account in the developer's
+system test Keychain. The configured mask is covered deterministically by the
+browser bridge fixture in Step 1; this real-App test owns only the native Sheet
+attachment boundary.
+
 - [ ] **Step 4: Build and verify the desktop flow**
 
 ```bash
@@ -307,7 +312,7 @@ Run:
 
 ```bash
 git diff --check
-git diff origin/main...HEAD -- \
+git diff origin/main -- \
   packages/client/ui-settings-models \
   packages/openloop/shell \
   apps/web/tests/openloop-credential-boundary.e2e.ts \

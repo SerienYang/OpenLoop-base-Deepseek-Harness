@@ -122,9 +122,11 @@ props.credentialRef !== undefined
 
 ### 桌面集成
 
-1. 打开火山方舟 Agent Plan 编辑卡可看到固定遮罩和更新入口。
-2. 点击更新入口触发附着在 Openloop 主窗口上的原生凭据 Sheet。
-3. 保存或取消后主 WebView 中均不出现明文。
+1. 组装后的浏览器集成场景用确定性的 Keychain 状态验证固定遮罩和更新入口。
+2. 真实 Tauri 场景打开火山方舟 Agent Plan 编辑卡，点击当前可用的添加或
+   更新入口，并验证它触发附着在 Openloop 主窗口上的原生凭据 Sheet。
+3. 两类场景都验证主 WebView 中不出现明文；真实 Tauri 场景不预置或覆盖
+   开发者系统钥匙串中的现有测试凭据。
 
 ## 验收标准
 
