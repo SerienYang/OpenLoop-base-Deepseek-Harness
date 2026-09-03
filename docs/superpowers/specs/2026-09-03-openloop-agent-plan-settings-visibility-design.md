@@ -16,8 +16,9 @@ provider directory and the projected `llm-pi-ai` settings value.
 Determine product-built-in providers from settings provenance:
 
 - Keep pi-ai catalog providers (`declared !== true`) trusted as before.
-- Also trust a configurable provider when its exact settings path exists in
-  the corresponding namespace's `base` layer.
+- Also trust a declared provider only when `settingsNs === 'llm-pi-ai'`, its
+  settings path is exactly `['providers', provider]`, and that exact path
+  exists in the `llm-pi-ai` namespace's `base` layer.
 - Do not trust a `declared === true` route that exists only in the user layer.
 
 This preserves the fixed Host-controlled settings boundary without hardcoding
@@ -25,7 +26,8 @@ This preserves the fixed Host-controlled settings boundary without hardcoding
 
 ## Data Flow
 
-1. The Settings Host reads redacted namespace descriptors once.
+1. The Settings Host reads one redacted namespace-descriptor snapshot per
+   request; it does not cache provenance across requests.
 2. It combines pi-ai catalog membership with base-layer path presence to build
    the product-built-in provider set.
 3. The same set drives provider listing, settings projection, and mutation
@@ -47,6 +49,9 @@ This preserves the fixed Host-controlled settings boundary without hardcoding
 - A declared provider present in the base layer is returned as built-in and its
   allowed model fields survive projection.
 - A declared provider present only in the user/value layer remains excluded.
+- Allowed fields can be mutated for a base-backed declared provider.
+- A mutation targeting a user-only declared provider is rejected before
+  `settings.mutate` runs.
 - Existing catalog-provider, credential-reference, and denied-field tests stay
   green.
 
