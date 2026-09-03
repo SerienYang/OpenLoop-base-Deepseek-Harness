@@ -30,6 +30,45 @@ const localeSchema = {
   },
 }
 
+const piAiProviderSchema = {
+  uid: 6,
+  refs: {
+    0: { type: 'string', meta: {} },
+    1: { type: 'object', meta: {}, dict: { id: 0 } },
+    2: { type: 'array', meta: {}, inner: 1 },
+    3: { type: 'object', meta: {}, dict: { models: 2, baseURL: 0, apiKeyEnv: 0 } },
+    4: { type: 'dict', meta: {}, inner: 3 },
+    5: { type: 'object', meta: {}, dict: { providers: 4 } },
+    6: { type: 'object', meta: {}, dict: { providers: 4 } },
+  },
+}
+
+const agentPlanProfile = {
+  models: [{ id: 'glm-5.3-flash' }],
+  apiKeyEnv: 'VOLCENGINE_ARK_AGENT_PLAN_API_KEY',
+  baseURL: 'https://ark.invalid',
+}
+
+function agentPlanDescriptor(options: {
+  base?: unknown
+  user?: unknown
+} = {}): TestSettingsDescriptor {
+  const value = {
+    providers: {
+      'volcengine-agent-plan': agentPlanProfile,
+    },
+  }
+  return {
+    ns: 'llm-pi-ai',
+    schema: piAiProviderSchema,
+    value,
+    ...options.base === undefined ? {} : { base: options.base },
+    ...options.user === undefined ? {} : { user: options.user },
+    applies: 'live',
+    revision: 5,
+  }
+}
+
 class MemorySettings extends SettingsProvider {
   readonly writable = true
   doc: Record<string, unknown>
@@ -311,6 +350,169 @@ describe('Openloop settings Host routes', () => {
     })
     expect(JSON.stringify(response.body))
       .not.toMatch(/baseURL|endpoint|credentials|apiKeyEnv|secret\.invalid|unknown|custom/u)
+  })
+
+  it('lists and projects a declared provider backed by the exact bundled base path', async () => {
+    const layer = {
+      providers: {
+        'volcengine-agent-plan': agentPlanProfile,
+      },
+    }
+    const b = bench({
+      descriptors: [agentPlanDescriptor({ base: layer })],
+      configurableProviders: [{
+        provider: 'volcengine-agent-plan',
+        displayName: '火山方舟 Agent Plan',
+        settingsNs: 'llm-pi-ai',
+        settingsPath: ['providers', 'volcengine-agent-plan'],
+        declared: true,
+      }],
+    })
+
+    const providersResponse = await call(
+      b.routes.get(OPENLOOP_SETTINGS_PROVIDERS_PATH)!,
+      {},
+      'a'.repeat(64),
+    )
+    const describeResponse = await call(
+      b.routes.get(OPENLOOP_SETTINGS_DESCRIBE_PATH)!,
+      { namespaces: ['llm-pi-ai'] },
+      'a'.repeat(64),
+    )
+
+    expect(providersResponse).toMatchObject({
+      status: 200,
+      body: {
+        value: {
+          providers: [{
+            provider: 'volcengine-agent-plan',
+            displayName: '火山方舟 Agent Plan',
+            builtIn: true,
+          }],
+        },
+      },
+    })
+    expect(describeResponse).toMatchObject({
+      status: 200,
+      body: {
+        value: {
+          namespaces: [{
+            value: {
+              providers: {
+                'volcengine-agent-plan': {
+                  models: [{ id: 'glm-5.3-flash' }],
+                },
+              },
+            },
+          }],
+        },
+      },
+    })
+    expect(JSON.stringify([providersResponse.body, describeResponse.body]))
+      .not.toMatch(/baseURL|apiKeyEnv|VOLCENGINE_ARK_AGENT_PLAN_API_KEY|ark\.invalid/u)
+  })
+
+  it('allows model mutation for a declared provider backed by the exact bundled base path', async () => {
+    const layer = {
+      providers: {
+        'volcengine-agent-plan': agentPlanProfile,
+      },
+    }
+    const b = bench({
+      descriptors: [agentPlanDescriptor({ base: layer })],
+      configurableProviders: [{
+        provider: 'volcengine-agent-plan',
+        displayName: '火山方舟 Agent Plan',
+        settingsNs: 'llm-pi-ai',
+        settingsPath: ['providers', 'volcengine-agent-plan'],
+        declared: true,
+      }],
+    })
+    const ops = [{
+      op: 'set' as const,
+      path: ['providers', 'volcengine-agent-plan', 'models'],
+      value: [{ id: 'glm-5.3-flash' }],
+    }]
+
+    const response = await call(
+      b.routes.get(OPENLOOP_SETTINGS_MUTATE_PATH)!,
+      { ns: 'llm-pi-ai', ops, expectedRevision: 5 },
+      'a'.repeat(64),
+    )
+
+    expect(response.status).toBe(200)
+    expect(b.mutateSettings).toHaveBeenCalledWith('llm-pi-ai', ops, 5)
+  })
+
+  it.each([
+    {
+      label: 'only in value and user',
+      descriptor: agentPlanDescriptor({
+        user: { providers: { 'volcengine-agent-plan': agentPlanProfile } },
+      }),
+      settingsNs: 'llm-pi-ai',
+      settingsPath: ['providers', 'volcengine-agent-plan'],
+    },
+    {
+      label: 'registered under another namespace',
+      descriptor: agentPlanDescriptor({
+        base: { providers: { 'volcengine-agent-plan': agentPlanProfile } },
+      }),
+      settingsNs: 'llm-custom',
+      settingsPath: ['providers', 'volcengine-agent-plan'],
+    },
+    {
+      label: 'registered at a non-exact path',
+      descriptor: agentPlanDescriptor({
+        base: { providers: { 'volcengine-agent-plan': agentPlanProfile } },
+      }),
+      settingsNs: 'llm-pi-ai',
+      settingsPath: ['providers', 'volcengine-agent-plan', 'profile'],
+    },
+  ])('excludes and denies a declared provider $label', async ({
+    descriptor,
+    settingsNs,
+    settingsPath,
+  }) => {
+    const b = bench({
+      descriptors: [descriptor],
+      configurableProviders: [{
+        provider: 'volcengine-agent-plan',
+        displayName: '火山方舟 Agent Plan',
+        settingsNs,
+        settingsPath,
+        declared: true,
+      }],
+    })
+
+    const providersResponse = await call(
+      b.routes.get(OPENLOOP_SETTINGS_PROVIDERS_PATH)!,
+      {},
+      'a'.repeat(64),
+    )
+    const mutationResponse = await call(
+      b.routes.get(OPENLOOP_SETTINGS_MUTATE_PATH)!,
+      {
+        ns: 'llm-pi-ai',
+        ops: [{
+          op: 'set',
+          path: ['providers', 'volcengine-agent-plan', 'models'],
+          value: [{ id: 'glm-5.3-flash' }],
+        }],
+        expectedRevision: 5,
+      },
+      'a'.repeat(64),
+    )
+
+    expect(providersResponse).toMatchObject({
+      status: 200,
+      body: { value: { providers: [] } },
+    })
+    expect(mutationResponse).toMatchObject({
+      status: 403,
+      body: { error: { code: 'SETTINGS_POLICY_DENIED' } },
+    })
+    expect(b.mutateSettings).not.toHaveBeenCalled()
   })
 
   it('projects only credential references owned by the matching registered Host model consumer', async () => {
