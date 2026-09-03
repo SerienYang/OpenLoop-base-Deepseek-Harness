@@ -26,8 +26,9 @@ This preserves the fixed Host-controlled settings boundary without hardcoding
 
 ## Data Flow
 
-1. The Settings Host reads one redacted namespace-descriptor snapshot per
-   request; it does not cache provenance across requests.
+1. The Settings Host derives provenance from request-local redacted namespace
+   descriptors; mutation responses may refresh descriptors after the write,
+   but provenance is never cached across requests.
 2. It combines pi-ai catalog membership with base-layer path presence to build
    the product-built-in provider set.
 3. The same set drives provider listing, settings projection, and mutation
