@@ -34,6 +34,13 @@ function sourceLabel(source: string | undefined, t: CredentialControlProps['t'])
   return source === undefined ? t('sourceHost') : t('sourceManaged')
 }
 
+function isReadOnlySource(source: string | undefined): boolean {
+  return source === 'environment'
+    || source === 'env'
+    || source === 'legacy-file'
+    || source === 'file'
+}
+
 function valueOf<T>(result: RemoteResult<T>, failure: string): T {
   if (result.ok) return result.value
   throw new Error(failure)
@@ -153,23 +160,38 @@ export function CredentialControl(props: CredentialControlProps): ReactNode {
     })
   }
 
-  const configured = status?.configured === true && status.source === 'keychain'
-  const writable = status?.writable === true && props.disabled !== true
+  const keychainConfigured = status?.configured === true && status.source === 'keychain'
+  const readOnlyConfigured = status?.configured === true && isReadOnlySource(status.source)
+  const writable = status?.writable === true
+    && props.disabled !== true
+    && !readOnlyConfigured
+  const actionsDisabled = reading || busy !== undefined
   return (
     <div className={styles.control} aria-busy={reading || busy !== undefined || undefined}>
       <div className={styles.summary}>
-        <span className={styles.label}>{props.label}</span>
+        <div className={styles.credentialLine}>
+          <span className={styles.label}>{props.label}</span>
+          {keychainConfigured
+            ? <span className={styles.mask}>**** **** **** ****</span>
+            : null}
+        </div>
         {status === undefined && !reading
           ? null
           : (
             <span
-              className={configured ? styles.configured : styles.missing}
+              className={keychainConfigured || readOnlyConfigured
+                ? styles.configured
+                : styles.missing}
               role="status"
               aria-live="polite"
             >
               {status === undefined
                 ? t('credentialReading')
-                : configured ? t('credentialConfigured') : t('credentialMissing')}
+                : keychainConfigured
+                  ? t('credentialConfigured')
+                  : readOnlyConfigured
+                    ? t('credentialReadOnly')
+                    : t('credentialMissing')}
             </span>
           )}
         {status === undefined
@@ -193,20 +215,20 @@ export function CredentialControl(props: CredentialControlProps): ReactNode {
               <button
                 type="button"
                 className={styles.action}
-                disabled={busy !== undefined}
+                disabled={actionsDisabled}
                 onClick={() => { void mutate('replace') }}
               >
                 {busy === 'replace'
                   ? t('replaceOpening')
-                  : configured ? t('replace') : t('add')}
+                  : keychainConfigured ? t('replace') : t('add')}
               </button>
-              {!configured
+              {!keychainConfigured
                 ? null
                 : (
                   <button
                     type="button"
                     className={styles.deleteAction}
-                    disabled={busy !== undefined}
+                    disabled={actionsDisabled}
                     onClick={() => { void mutate('delete') }}
                   >
                     {busy === 'delete' ? t('deleteBusy') : t('delete')}

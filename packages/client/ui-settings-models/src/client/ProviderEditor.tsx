@@ -207,6 +207,7 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
     return typeof value === 'string' && value.trim().length > 0 ? value : undefined
   }
   const hasRegisteredKeyRef = layout !== 'pi-ai'
+    || props.credentialRef !== undefined
     || stringAt(fallback, 'apiKeyEnv') !== undefined
   const setField = (key: string, next: string | undefined): void => {
     // A value of nothing but whitespace is cleared, not stored: `stringAt`
