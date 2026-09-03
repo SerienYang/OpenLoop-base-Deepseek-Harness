@@ -38,6 +38,14 @@ interface SettingsDescriptor {
   readonly revision: number
 }
 
+interface ConfigurableProvider {
+  readonly provider: string
+  readonly displayName: string
+  readonly settingsNs: string
+  readonly settingsPath: readonly string[]
+  readonly declared?: boolean
+}
+
 interface SettingsHostContext extends Context {
   readonly runtimeBootstrap: RuntimeBootstrap
   readonly webServer: {
@@ -58,13 +66,7 @@ interface SettingsHostContext extends Context {
   }
   readonly llm: {
     listProviders(): readonly { readonly id: string; readonly name: string }[]
-    listConfigurableProviders(): readonly {
-      readonly provider: string
-      readonly displayName: string
-      readonly settingsNs: string
-      readonly settingsPath: readonly string[]
-      readonly declared?: boolean
-    }[]
+    listConfigurableProviders(): readonly ConfigurableProvider[]
   }
   readonly credentialConsumers: {
     planDeletion(reference: string): {
@@ -169,21 +171,42 @@ function namespaceView(
   }
 }
 
-function builtInProviders(ctx: SettingsHostContext): Set<string> {
-  return new Set(
-    ctx.llm.listConfigurableProviders()
-      .filter(provider => provider.declared !== true)
-      .map(provider => provider.provider),
-  )
-}
-
 function valueAt(source: unknown, path: readonly string[]): unknown {
   let current = source
   for (const segment of path) {
-    if (!isRecord(current)) return undefined
+    if (!isRecord(current) || !Object.hasOwn(current, segment)) return undefined
     current = current[segment]
   }
   return current
+}
+
+function providerIsInBase(
+  provider: ConfigurableProvider,
+  descriptors: readonly SettingsDescriptor[],
+): boolean {
+  if (provider.settingsNs !== 'llm-pi-ai'
+    || provider.settingsPath.length !== 2
+    || provider.settingsPath[0] !== 'providers'
+    || provider.settingsPath[1] !== provider.provider) {
+    return false
+  }
+  const descriptor = descriptors.find(candidate => candidate.ns === 'llm-pi-ai')
+  return valueAt(descriptor?.base, provider.settingsPath) !== undefined
+}
+
+function trustedBuiltInProviders(
+  ctx: SettingsHostContext,
+  descriptors: readonly SettingsDescriptor[],
+): {
+  readonly entries: readonly ConfigurableProvider[]
+  readonly providers: ReadonlySet<string>
+} {
+  const entries = ctx.llm.listConfigurableProviders()
+    .filter(provider => provider.declared !== true || providerIsInBase(provider, descriptors))
+  return {
+    entries,
+    providers: new Set(entries.map(provider => provider.provider)),
+  }
 }
 
 function authenticated(
@@ -222,8 +245,9 @@ async function handleDescribe(
     return
   }
   const selected = new Set(requested as string[])
-  const providers = builtInProviders(ctx)
-  const namespaces = ctx.settings.describe({ redactSecrets: true })
+  const descriptors = ctx.settings.describe({ redactSecrets: true })
+  const { providers } = trustedBuiltInProviders(ctx, descriptors)
+  const namespaces = descriptors
     .filter(descriptor => selected.has(descriptor.ns))
     .map(descriptor => namespaceView(descriptor, providers))
   responseJson(response, 200, {
@@ -247,7 +271,11 @@ async function handleMutate(
       || typeof body.expectedRevision !== 'number') {
       throw new Error('invalid')
     }
-    assertAllowedSettingsMutation(body as unknown as OpenloopSettingsMutation, builtInProviders(ctx))
+    const descriptors = body.ns === 'llm-pi-ai'
+      ? ctx.settings.describe({ redactSecrets: true })
+      : []
+    const { providers } = trustedBuiltInProviders(ctx, descriptors)
+    assertAllowedSettingsMutation(body as unknown as OpenloopSettingsMutation, providers)
   } catch (cause) {
     const code = cause instanceof Error && cause.message === 'SETTINGS_POLICY_DENIED'
       ? 'SETTINGS_POLICY_DENIED'
@@ -269,15 +297,16 @@ async function handleMutate(
     }
     return
   }
-  const descriptor = ctx.settings.describe({ redactSecrets: true })
-    .find(candidate => candidate.ns === mutation.ns)
+  const descriptors = ctx.settings.describe({ redactSecrets: true })
+  const descriptor = descriptors.find(candidate => candidate.ns === mutation.ns)
   if (descriptor === undefined) {
     error(response, 503, 'SETTINGS_UNAVAILABLE')
     return
   }
+  const { providers } = trustedBuiltInProviders(ctx, descriptors)
   responseJson(response, 200, {
     ok: true,
-    value: namespaceView(descriptor, builtInProviders(ctx)),
+    value: namespaceView(descriptor, providers),
   })
 }
 
@@ -298,11 +327,10 @@ async function handleProviders(
     return
   }
   const active = new Set(ctx.llm.listProviders().map(provider => provider.id))
-  const namespaces = new Map(
-    ctx.settings.describe({ redactSecrets: true }).map(descriptor => [descriptor.ns, descriptor]),
-  )
-  const providers = ctx.llm.listConfigurableProviders()
-    .filter(provider => provider.declared !== true)
+  const descriptors = ctx.settings.describe({ redactSecrets: true })
+  const namespaces = new Map(descriptors.map(descriptor => [descriptor.ns, descriptor]))
+  const { entries } = trustedBuiltInProviders(ctx, descriptors)
+  const providers = entries
     .map(provider => ({
       provider: provider.provider,
       displayName: provider.displayName,
