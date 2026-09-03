@@ -290,6 +290,66 @@ describe('ModelsSection', () => {
     }))
   })
 
+  it('renders the Host credential control for a redacted Agent Plan profile', async () => {
+    const scripted = scriptedFace()
+    scripted.face.llm.providers.mockResolvedValue(ok({
+      providers: [{
+        provider: 'volcengine-agent-plan',
+        displayName: '火山方舟 Agent Plan',
+        settingsNs: 'llm-pi-ai',
+        settingsPath: ['providers', 'volcengine-agent-plan'],
+        active: true,
+        builtIn: true,
+        declared: true,
+        credentialRef: 'VOLCENGINE_ARK_AGENT_PLAN_API_KEY',
+      }],
+    }))
+    scripted.face.settings.describe.mockResolvedValue(ok({
+      writable: true,
+      hasDocument: false,
+      namespaces: wireNamespaces().map(namespace =>
+        namespace.ns === 'llm-pi-ai'
+          ? {
+            ...namespace,
+            value: {
+              providers: {
+                'volcengine-agent-plan': {
+                  models: [{ id: 'ark-code-latest' }],
+                },
+              },
+            },
+            base: {
+              providers: {
+                'volcengine-agent-plan': {
+                  models: [{ id: 'ark-code-latest' }],
+                },
+              },
+            },
+            user: { providers: {} },
+          }
+          : namespace),
+    }))
+    const renderCredential = vi.fn(({ label }) =>
+      <div data-testid="host-credential-control">{label}</div>)
+
+    await mountFace(
+      scripted,
+      hostCredentialControl({ render: renderCredential }),
+    )
+    fireEvent.click(screen.getByRole('button', {
+      name: providerCopy(en.editProvider, {
+        provider: 'volcengine-agent-plan',
+        displayName: '火山方舟 Agent Plan',
+      }),
+    }))
+
+    expect(renderCredential).toHaveBeenCalledWith(expect.objectContaining({
+      reference: 'VOLCENGINE_ARK_AGENT_PLAN_API_KEY',
+      label: en.keyInput,
+    }))
+    expect(document.body.textContent).not.toContain('VOLCENGINE_ARK_AGENT_PLAN_API_KEY')
+  })
+
   it('hides model discovery when the product API does not provide it', () => {
     render(
       <ModelListEditor
