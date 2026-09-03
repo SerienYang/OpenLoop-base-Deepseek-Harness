@@ -30,6 +30,12 @@ providers: {
 }
 ```
 
+Use a valid serialized Schemastery graph matching the existing projection test:
+an object root with a `providers` dict, provider-profile object, `models` array,
+and model object containing `id`. This ensures the projection test exercises
+provenance rather than failing because an empty schema projects every value to
+`{}`.
+
 Declare the route with `declared: true`,
 `settingsNs: 'llm-pi-ai'`, and
 `settingsPath: ['providers', 'volcengine-agent-plan']`.
@@ -109,6 +115,7 @@ provider.declared !== true || providerIsInBase(provider, descriptors)
 ```
 
 Keep the result request-local and reuse it for projection and authorization.
+Each handler must derive the trusted list and set from the same descriptor snapshot.
 
 - [ ] **Step 3: Use the trusted provider list in all three Host routes**
 
@@ -181,6 +188,7 @@ Run `openloop-spike-release.yml` from merged `main` with:
 ```text
 release_tag=openloop-test-a-v0.1.3-test.14
 app_version=0.1.3-test.14
+release_notes=Restore the bundled Volcengine Agent Plan provider in Models settings while preserving the Host settings allowlist.
 update_rolling_manifest=true
 ```
 
