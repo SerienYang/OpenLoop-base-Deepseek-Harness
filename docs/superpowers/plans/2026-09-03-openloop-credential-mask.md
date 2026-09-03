@@ -262,7 +262,9 @@ In the existing real-runtime WDIO scenario:
 1. Open Settings and select `#openloop-settings-tab-models`.
 2. Find the 火山方舟 Agent Plan row and open its editor.
 3. Scope all following selectors to that editor.
-4. Find the single Host action named “更新 API 密钥” or “添加 API 密钥”.
+4. Find the single Host action with a bilingual selector accepting
+   “更新 API 密钥” / “Update API key” or
+   “添加 API 密钥” / “Add API key”; do not depend on the startup locale.
 5. Assert the editor text does not contain
    `VOLCENGINE_ARK_AGENT_PLAN_API_KEY`.
 6. Record the current count of `credential-replacement:main` audit events.
