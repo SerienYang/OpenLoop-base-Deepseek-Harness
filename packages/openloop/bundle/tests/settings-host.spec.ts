@@ -515,6 +515,57 @@ describe('Openloop settings Host routes', () => {
     expect(b.mutateSettings).not.toHaveBeenCalled()
   })
 
+  it('excludes and denies a user-only declared provider named constructor', async () => {
+    const profile = { models: [{ id: 'user-model' }] }
+    const b = bench({
+      descriptors: [{
+        ns: 'llm-pi-ai',
+        schema: piAiProviderSchema,
+        value: { providers: { constructor: profile } },
+        base: { providers: {} },
+        user: { providers: { constructor: profile } },
+        applies: 'live',
+        revision: 5,
+      }],
+      configurableProviders: [{
+        provider: 'constructor',
+        displayName: 'User Constructor Provider',
+        settingsNs: 'llm-pi-ai',
+        settingsPath: ['providers', 'constructor'],
+        declared: true,
+      }],
+    })
+
+    const providersResponse = await call(
+      b.routes.get(OPENLOOP_SETTINGS_PROVIDERS_PATH)!,
+      {},
+      'a'.repeat(64),
+    )
+    const mutationResponse = await call(
+      b.routes.get(OPENLOOP_SETTINGS_MUTATE_PATH)!,
+      {
+        ns: 'llm-pi-ai',
+        ops: [{
+          op: 'set',
+          path: ['providers', 'constructor', 'models'],
+          value: [{ id: 'user-model' }],
+        }],
+        expectedRevision: 5,
+      },
+      'a'.repeat(64),
+    )
+
+    expect.soft(providersResponse).toMatchObject({
+      status: 200,
+      body: { value: { providers: [] } },
+    })
+    expect.soft(mutationResponse).toMatchObject({
+      status: 403,
+      body: { error: { code: 'SETTINGS_POLICY_DENIED' } },
+    })
+    expect(b.mutateSettings).not.toHaveBeenCalled()
+  })
+
   it('projects only credential references owned by the matching registered Host model consumer', async () => {
     const b = bench({
       descriptors: [{

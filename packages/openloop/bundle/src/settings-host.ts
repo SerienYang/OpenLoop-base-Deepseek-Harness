@@ -174,7 +174,7 @@ function namespaceView(
 function valueAt(source: unknown, path: readonly string[]): unknown {
   let current = source
   for (const segment of path) {
-    if (!isRecord(current)) return undefined
+    if (!isRecord(current) || !Object.hasOwn(current, segment)) return undefined
     current = current[segment]
   }
   return current
