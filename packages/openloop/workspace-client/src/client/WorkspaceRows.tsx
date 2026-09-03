@@ -75,7 +75,7 @@ export function WorkspaceRows({
         const menuOpen = menuId === workspace.workspaceId
         const workspaceSessions = workspace.sessionIds
           .map(sessionId => sessions.byId[sessionId])
-          .filter(summary => summary !== undefined)
+          .flatMap(summary => summary === undefined || summary.blank ? [] : [summary])
         const menuItems = [
           ...(workspace.state === 'ready'
             ? [{ id: 'rename', label: copy(t, 'rename'), disabled: surfaceBusy }]
@@ -116,7 +116,10 @@ export function WorkspaceRows({
                 onClick={() => { selectWorkspace(workspace) }}
               >
                 <span className={css.workspaceName}>{workspace.name}</span>
-                <span className={css.workspacePath}>{workspace.displayPath}</span>
+                {workspace.displayPath !== undefined
+                  && workspace.displayPath !== workspace.name
+                  ? <span className={css.workspacePath}>{workspace.displayPath}</span>
+                  : null}
               </button>
               <span className={css.status} role={authorityBusy ? 'status' : undefined}>
                 {stateLabel(t, workspace.state)}

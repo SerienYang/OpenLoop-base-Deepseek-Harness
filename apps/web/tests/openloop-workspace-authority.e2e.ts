@@ -485,12 +485,9 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     await sidebarWorkspace.click()
     await expect.poll(() => workspace.sessionIds.length, { timeout: 15_000 })
       .toBeGreaterThanOrEqual(1)
-    const sessionRow = page.locator('[class*="sessionRow"]').first()
-    await sessionRow.waitFor({ timeout: 10_000 })
-    await sessionRow.click()
-    await expect.poll(() => sessionRow.getAttribute('aria-current'), {
+    await expect.poll(() => page.locator('[class*="sessionRow"]').count(), {
       timeout: 10_000,
-    }).toBe('true')
+    }).toBe(0)
 
     await openWorkspaceActions('authority-project')
     await page.getByRole('menuitem', { name: 'Rename' }).click()
@@ -519,10 +516,6 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
       request => request.rpcMethod === 'openloopDesktop/listWorkspaceGrants',
     ).length, { timeout: 15_000 }).toBeGreaterThan(missingRefreshes)
     await page.getByText('Missing', { exact: true }).waitFor({ timeout: 15_000 })
-    await sessionRow.click()
-    await expect.poll(() => sessionRow.getAttribute('aria-current'), {
-      timeout: 10_000,
-    }).toBe('true')
     await expectComposerBlocked(true)
     await expect(scaffold.ctx.desktopBridge.inspectWorkspaceGrant(workspace.id))
       .resolves.toMatchObject({
@@ -563,7 +556,6 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
     await expect.poll(() => browserApiRequests.filter(
       request => request.rpcMethod === 'openloopDesktop/listWorkspaceGrants',
     ).length, { timeout: 15_000 }).toBeGreaterThan(readyRefreshes)
-    await sessionRow.click()
     await expectComposerBlocked(false)
 
     const events = scaffold.ctx.apiProxy.events
@@ -595,7 +587,7 @@ describe('web e2e: assembled Openloop Workspace authority', () => {
 
     const preRemoveAria = await captureStableAria(page, '[class*="frame"]', scaffold.workspaceCwd)
     await compareOrRefreshGolden(UI_EXPECTED, preRemoveAria, MODE)
-    expect(preRemoveAria).toContain('button "authority-project"')
+    expect(preRemoveAria).not.toContain('button "authority-project"')
     expect(preRemoveAria).not.toContain(initialSessionId)
 
     expect(scaffold.ctx.sessions.get(initialSessionId)).toBeDefined()
