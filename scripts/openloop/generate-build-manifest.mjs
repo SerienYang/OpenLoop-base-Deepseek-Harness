@@ -19,7 +19,7 @@ import {
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url))
 const baselinePath = fileURLToPath(new URL('./upstream-baseline.json', import.meta.url))
-const brandMarkPath = fileURLToPath(new URL('../../assets/brand/openloop-icon.svg', import.meta.url))
+const brandMarkPath = fileURLToPath(new URL('../../assets/brand/openloop-mark.svg', import.meta.url))
 const integerOptions = new Map([
   ['--runtime-version', 'runtimeVersion'],
   ['--bridge-protocol-version', 'bridgeProtocolVersion'],
