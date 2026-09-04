@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import openloopMark from '../../../assets/brand/openloop-mark.svg'
+import openloopMark from '../../../assets/brand/openloop-mark.svg?no-inline'
 import './styles.css'
 
 export interface OpenloopBrandManifest {

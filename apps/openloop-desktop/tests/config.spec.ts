@@ -947,7 +947,7 @@ describe('Openloop desktop foundation configuration', () => {
     expect(viteConfig).toMatch(/strictPort:\s*true/u)
     expect(viteConfig).toContain("main: resolve(import.meta.dirname, 'index.html')")
     expect(viteConfig).not.toMatch(/credentials/u)
-    expect(mainSource).toContain('../../../assets/brand/openloop-mark.svg')
+    expect(mainSource).toContain('../../../assets/brand/openloop-mark.svg?no-inline')
     expect(mainSource).not.toContain('<img class="brand-mark"')
     expect(mainSource).toContain(
       "root.style.setProperty('--openloop-brand-mark'",
