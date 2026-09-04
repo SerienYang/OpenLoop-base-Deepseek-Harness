@@ -18,7 +18,7 @@
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import {
-  BrandWordmark, FishLogo,
+  BrandWordmark, FishLogo, ProductMark,
   IconNewChatOutline16, IconPanelLeftOutline16,
   Tooltip, useProductBrand,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -143,7 +143,7 @@ export function SidebarRoot({
               ? <BrandWordmark />
               : (
                 <>
-                  <img src={brand.markAsset} alt="" width={24} />
+                  <ProductMark src={brand.markAsset} size={24} />
                   <span>{brand.productName}</span>
                 </>
               )}
@@ -160,7 +160,7 @@ export function SidebarRoot({
           >
             {!wide && (brand.markAsset === undefined
               ? <FishLogo className={css.railFish} size={24} />
-              : <img className={css.railFish} src={brand.markAsset} alt="" width={24} />)}
+              : <ProductMark className={css.railFish} src={brand.markAsset} size={24} />)}
             {/* Rail icons render at 18 (figma rail spec); expanded keeps the glyph-native sizes. */}
             <IconPanelLeftOutline16 className={css.panelIcon} size={wide ? 16 : 18} />
           </button>

@@ -60,7 +60,7 @@ const t: ConversationRootProps['t'] = makeTranslate(zh, commonZh)
 const openloopBrand: ProductBrand = {
   productName: 'Openloop',
   documentSuffix: 'Openloop',
-  markAsset: 'openloop-icon',
+  markAsset: 'openloop-mark',
   heroTitle: 'Openloop',
   previewLabel: '预览版',
   attribution: 'Built on DeepSeek Harness',
@@ -286,7 +286,11 @@ describe('Hero chrome', () => {
         <HeroShell t={makeTranslate(en, commonEn)} />
       </ProductBrandProvider>,
     )
-    expect(view.container.querySelector('img')?.getAttribute('src')).toBe('openloop-icon')
+    const mark = view.container.querySelector('[data-product-mark]')
+    expect(mark?.getAttribute('style')).toContain(
+      '--dsh-product-mark-image: url("openloop-mark")',
+    )
+    expect(mark?.getAttribute('style')).toContain('--dsh-product-mark-size: 34px')
     expect(view.getByText('Openloop')).toBeTruthy()
     expect(view.getByText('预览版')).toBeTruthy()
     expect(view.queryByText('Into the Unknown')).toBeNull()
