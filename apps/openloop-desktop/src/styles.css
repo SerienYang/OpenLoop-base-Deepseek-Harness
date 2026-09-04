@@ -38,8 +38,18 @@ body {
 .brand-mark {
   grid-row: 1 / span 2;
   align-self: start;
+  display: block;
   width: 176px;
   height: 176px;
+  background: currentColor;
+  -webkit-mask-image: var(--openloop-brand-mark);
+  mask-image: var(--openloop-brand-mark);
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-size: contain;
+  mask-size: contain;
 }
 
 header {
@@ -171,10 +181,6 @@ dd {
 
   .bootstrap {
     background: #0b0d0f;
-  }
-
-  .brand-mark {
-    filter: invert(1);
   }
 
   .eyebrow,
