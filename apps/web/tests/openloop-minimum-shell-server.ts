@@ -1,4 +1,5 @@
 import { createInterface } from 'node:readline'
+import { readFileSync } from 'node:fs'
 import {
   launchWebScaffold,
   type WebScaffold,
@@ -16,6 +17,10 @@ const LAUNCH_ID = '8df91e3f-5a18-4ef5-b96c-59ecbde7f3f2'
 const BOOTSTRAP_TOKEN = Uint8Array.from({ length: 32 }, (_, index) => index + 17)
 const BRIDGE_SECRET = Uint8Array.from({ length: 32 }, (_, index) => index + 81)
 const CORE_MANIFEST_SHA256 = 'c'.repeat(64)
+const OPENLOOP_MARK_DATA_URI = `data:image/svg+xml;base64,${
+  readFileSync(new URL('../../../assets/brand/openloop-mark.svg', import.meta.url))
+    .toString('base64')
+}`
 const CORE_MANIFEST = {
   appVersion: '0.1.0',
   channel: 'test',
@@ -24,7 +29,7 @@ const CORE_MANIFEST = {
   brand: {
     productName: 'Openloop',
     documentSuffix: 'Openloop',
-    markAsset: 'data:image/svg+xml;base64,PHN2Zy8+',
+    markAsset: OPENLOOP_MARK_DATA_URI,
     heroTitle: 'Openloop',
     previewLabel: '预览版',
     attribution: 'Built on DeepSeek Harness',

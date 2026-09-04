@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { expect, test, type Page } from '@playwright/test'
+import { readFileSync } from 'node:fs'
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import {
   FixtureProcess,
@@ -12,6 +13,10 @@ const SNAPSHOT_DIR = fileURLToPath(new URL(
   import.meta.url,
 ))
 const UI_EXPECTED = join(SNAPSHOT_DIR, 'ui.expected.md')
+const OPENLOOP_MARK_DATA_URI = `data:image/svg+xml;base64,${
+  readFileSync(fileURLToPath(new URL('../../../assets/brand/openloop-mark.svg', import.meta.url)))
+    .toString('base64')
+}`
 
 async function stableAria(page: Page, selector: string): Promise<string> {
   const region = page.locator(selector).first()
@@ -54,6 +59,45 @@ test.describe.serial('assembled minimum Openloop shell', () => {
       await credentialOnboarding.getByRole('button', { name: 'Configure later' }).click()
     }
     await expect(page.getByRole('button', { name: 'Settings', exact: true })).toBeVisible()
+    const marks = page.locator('[data-product-mark]')
+    await expect(marks).toHaveCount(2)
+    for (const mark of await marks.all()) {
+      expect(await mark.evaluate(element =>
+        (element as HTMLElement).style.getPropertyValue('--dsh-product-mark-image')))
+        .toBe(`url("${OPENLOOP_MARK_DATA_URI}")`)
+      const box = await mark.boundingBox()
+      expect(box?.width).toBeGreaterThan(0)
+      expect(box?.height).toBeGreaterThan(0)
+    }
+    const originalTheme = await page.evaluate(() => ({
+      colorScheme: document.documentElement.style.colorScheme,
+      dark: document.body.hasAttribute('data-ds-dark-theme'),
+      labelPrimary: document.body.style.getPropertyValue('--dsw-alias-label-primary'),
+    }))
+    await page.evaluate(() => {
+      document.documentElement.style.colorScheme = 'light'
+      document.body.removeAttribute('data-ds-dark-theme')
+      document.body.style.setProperty('--dsw-alias-label-primary', '#111316')
+    })
+    const lightMarkColor = await marks.first().evaluate(element =>
+      getComputedStyle(element).backgroundColor)
+    await page.evaluate(() => {
+      document.documentElement.style.colorScheme = 'dark'
+      document.body.setAttribute('data-ds-dark-theme', '')
+      document.body.style.setProperty('--dsw-alias-label-primary', '#f7f8fa')
+    })
+    const darkMarkColor = await marks.first().evaluate(element =>
+      getComputedStyle(element).backgroundColor)
+    expect(darkMarkColor).not.toBe(lightMarkColor)
+    await page.evaluate((theme) => {
+      document.documentElement.style.colorScheme = theme.colorScheme
+      document.body.toggleAttribute('data-ds-dark-theme', theme.dark)
+      if (theme.labelPrimary === '') {
+        document.body.style.removeProperty('--dsw-alias-label-primary')
+      } else {
+        document.body.style.setProperty('--dsw-alias-label-primary', theme.labelPrimary)
+      }
+    }, originalTheme)
 
     const activeRows = new Set(ready.activeRows)
     expect(activeRows.has('ui-trajectory'), 'ui-trajectory must remain active').toBe(true)
