@@ -152,6 +152,7 @@ describe('public repository layout', () => {
       'assets/brand/openloop-dsh-hero.png',
       'assets/brand/openloop-dsh-hero.svg',
       'assets/brand/openloop-icon.svg',
+      'assets/brand/openloop-mark.svg',
       'assets/brand/openloop.tokens.json',
       '.github/workflows/openloop-ci.yml',
       'scripts/openloop/upstream-baseline.json',

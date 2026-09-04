@@ -7,14 +7,16 @@ identity.
 
 | File | Role | Source status |
 |---|---|---|
-| `openloop-icon.svg` | Master OpenLoop loop mark | Editable vector source |
+| `openloop-icon.svg` | Boxed application and favicon master | Editable vector source |
+| `openloop-mark.svg` | Transparent in-product loop mark | Editable vector source |
 | `openloop-dsh-hero.svg` | README hero artwork | Editable vector source |
 | `openloop-dsh-hero.png` | Rendered README hero | Generated presentation asset |
 | `openloop.tokens.json` | Brand and semantic color definitions | Design-token source of truth |
 
-The loop mark is the current brand master, not a complete macOS application
-icon set. Tauri `.icns` and platform-sized icon outputs will be generated when
-the desktop application package is introduced.
+Use the boxed icon for macOS application surfaces and browser favicons. Use
+the transparent mark inside product UI, where the renderer supplies the
+theme-aware foreground color. Generated Tauri `.icns` and platform-sized icon
+outputs remain derived from `openloop-icon.svg`.
 
 ## Design Tokens
 
