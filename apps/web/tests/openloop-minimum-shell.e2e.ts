@@ -98,6 +98,16 @@ test.describe.serial('assembled minimum Openloop shell', () => {
         document.body.style.setProperty('--dsw-alias-label-primary', theme.labelPrimary)
       }
     }, originalTheme)
+    await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click()
+    const collapsedToggle = page.getByRole('button', { name: 'Open sidebar', exact: true })
+    await expect(collapsedToggle).toBeVisible()
+    const collapsedMark = collapsedToggle.locator('[data-product-mark]')
+    await expect(collapsedMark).toBeVisible()
+    const collapsedBox = await collapsedMark.boundingBox()
+    expect(collapsedBox?.width).toBeGreaterThan(0)
+    expect(collapsedBox?.height).toBeGreaterThan(0)
+    await collapsedToggle.click()
+    await expect(page.getByRole('button', { name: 'Collapse sidebar', exact: true })).toBeVisible()
 
     const activeRows = new Set(ready.activeRows)
     expect(activeRows.has('ui-trajectory'), 'ui-trajectory must remain active').toBe(true)
