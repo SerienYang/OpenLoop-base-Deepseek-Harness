@@ -214,14 +214,21 @@ describe('Openloop root shell Slot contract', () => {
       reference: 'DEEPSEEK_API_KEY',
       label: 'API key',
     }))
-    expect(await screen.findByText('API key is securely stored')).toBeTruthy()
-    expect(screen.getByText('macOS Keychain · saved value is never shown')).toBeTruthy()
+    expect((await screen.findByRole('status', {
+      name: 'API key is securely stored',
+    })).textContent).toBe('**** **** **** ****')
+    expect(screen.queryByText('API key is securely stored')).toBeNull()
+    expect(screen.queryByText('macOS Keychain · saved value is never shown')).toBeNull()
     locale.setLocale('zh')
     credential.rerender(credentialControl.render({
       reference: 'DEEPSEEK_API_KEY',
       label: 'API 密钥',
     }))
-    expect(await screen.findByText('API 密钥已安全保存')).toBeTruthy()
+    expect((await screen.findByRole('status', {
+      name: 'API 密钥已安全保存',
+    })).textContent).toBe('**** **** **** ****')
+    expect(screen.queryByText('API 密钥已安全保存')).toBeNull()
+    expect(screen.queryByText('macOS 钥匙串 · 不显示已保存内容')).toBeNull()
     expect(document.body.hasAttribute('data-ds-dark-theme')).toBe(true)
     expect(document.body.style.getPropertyValue('--dsw-alias-brand-primary')).toBe('#f7f8fa')
     expect(slots.entries('root')).toHaveLength(1)
