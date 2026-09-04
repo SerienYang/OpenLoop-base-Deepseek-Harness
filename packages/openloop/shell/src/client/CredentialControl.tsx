@@ -166,35 +166,45 @@ export function CredentialControl(props: CredentialControlProps): ReactNode {
     && props.disabled !== true
     && !readOnlyConfigured
   const actionsDisabled = reading || busy !== undefined
+  const visibleStatus = status === undefined
+    ? reading ? t('credentialReading') : undefined
+    : keychainConfigured
+      ? undefined
+      : readOnlyConfigured
+        ? t('credentialReadOnly')
+        : t('credentialMissing')
   return (
     <div className={styles.control} aria-busy={reading || busy !== undefined || undefined}>
       <div className={styles.summary}>
         <div className={styles.credentialLine}>
           <span className={styles.label}>{props.label}</span>
           {keychainConfigured
-            ? <span className={styles.mask}>**** **** **** ****</span>
+            ? (
+              <span
+                className={styles.mask}
+                role="status"
+                aria-live="polite"
+                aria-label={t('credentialConfigured')}
+              >
+                **** **** **** ****
+              </span>
+            )
             : null}
         </div>
-        {status === undefined && !reading
+        {visibleStatus === undefined
           ? null
           : (
             <span
-              className={keychainConfigured || readOnlyConfigured
+              className={readOnlyConfigured
                 ? styles.configured
                 : styles.missing}
               role="status"
               aria-live="polite"
             >
-              {status === undefined
-                ? t('credentialReading')
-                : keychainConfigured
-                  ? t('credentialConfigured')
-                  : readOnlyConfigured
-                    ? t('credentialReadOnly')
-                    : t('credentialMissing')}
+              {visibleStatus}
             </span>
           )}
-        {status === undefined
+        {status === undefined || keychainConfigured
           ? null
           : <span className={styles.source}>{sourceLabel(status.source, t)}</span>}
       </div>

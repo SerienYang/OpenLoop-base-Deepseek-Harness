@@ -298,6 +298,8 @@ describe('web e2e: Openloop credential boundary', () => {
     expect(await settings.getByRole('button', { name: '更新 API 密钥' }).count()).toBe(1)
     expect(await settings.locator('input[type="password"]').count()).toBe(0)
     const modelsText = await settings.getByRole('tabpanel').innerText()
+    expect(modelsText).not.toContain('API 密钥已安全保存')
+    expect(modelsText).not.toContain('macOS 钥匙串 · 不显示已保存内容')
     expect(modelsText).not.toContain(REF)
     expect(modelsText).not.toContain(sentinel)
     expect(bridge.storedCredentialByteLength()).toBe(Buffer.byteLength(sentinel))
