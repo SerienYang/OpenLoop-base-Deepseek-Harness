@@ -22,6 +22,8 @@ export type { RiskConfirmationProps } from './RiskConfirmation.tsx'
 export { ConnectionBanner } from './ConnectionBanner.tsx'
 export { FishLogo } from './FishLogo.tsx'
 export { BrandWordmark } from './BrandWordmark.tsx'
+export { ProductMark } from './ProductMark.tsx'
+export type { ProductMarkProps } from './ProductMark.tsx'
 export {
   DEFAULT_PRODUCT_BRAND, ProductBrandProvider, useProductBrand,
 } from './ProductBrand.tsx'
