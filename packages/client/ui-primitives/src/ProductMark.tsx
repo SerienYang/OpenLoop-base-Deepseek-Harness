@@ -3,8 +3,8 @@ import css from './ProductMark.module.css'
 
 export interface ProductMarkProps {
   readonly src: string
-  readonly size?: number
-  readonly className?: string
+  readonly size?: number | undefined
+  readonly className?: string | undefined
 }
 
 /** Render a product-provided silhouette in the surrounding text color. */
