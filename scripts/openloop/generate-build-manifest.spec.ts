@@ -167,7 +167,7 @@ describe('OpenLoop build manifest generator', () => {
       '',
     )
     expect(Buffer.from(encodedMark, 'base64')).toEqual(
-      readFileSync(new URL('../../assets/brand/openloop-icon.svg', import.meta.url)),
+      readFileSync(new URL('../../assets/brand/openloop-mark.svg', import.meta.url)),
     )
     expect(result.bytes).toBe(readFileSync(out, 'utf8'))
     expect(result.sha256).toBe(

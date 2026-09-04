@@ -11,7 +11,7 @@
 import { useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import {
-  DEFAULT_PRODUCT_BRAND, ProductBrandProvider,
+  DEFAULT_PRODUCT_BRAND, ProductBrandProvider, ProductMark,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ProductBrand } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { KernelSignal, LoaderStatus } from './loader-status.ts'
@@ -54,7 +54,7 @@ export function AppRoot(props: AppRootProps) {
                   ? (brand === DEFAULT_PRODUCT_BRAND ? 'HARNESS' : brand.productName)
                   : (
                     <>
-                      <img src={brand.markAsset} alt="" width={24} />
+                      <ProductMark src={brand.markAsset} size={24} />
                       <span>{brand.productName}</span>
                     </>
                   )}

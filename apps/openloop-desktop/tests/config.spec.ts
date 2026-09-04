@@ -934,6 +934,8 @@ describe('Openloop desktop foundation configuration', () => {
     const mainSource = readText('apps/openloop-desktop/src/main.ts')
     const styles = readText('apps/openloop-desktop/src/styles.css')
     const index = readText('apps/openloop-desktop/index.html')
+    const desktopPackage = readJson('apps/openloop-desktop/package.json')
+    const desktopScripts = stringRecord(desktopPackage.scripts, 'desktop package scripts')
     const frontend = [
       viteConfig,
       mainSource,
@@ -945,7 +947,16 @@ describe('Openloop desktop foundation configuration', () => {
     expect(viteConfig).toMatch(/strictPort:\s*true/u)
     expect(viteConfig).toContain("main: resolve(import.meta.dirname, 'index.html')")
     expect(viteConfig).not.toMatch(/credentials/u)
-    expect(mainSource).toContain('../../../assets/brand/openloop-icon.svg')
+    expect(mainSource).toContain('../../../assets/brand/openloop-mark.svg?no-inline')
+    expect(mainSource).not.toContain('<img class="brand-mark"')
+    expect(mainSource).toContain(
+      "root.style.setProperty('--openloop-brand-mark'",
+    )
+    expect(styles).toMatch(/-webkit-mask-image:\s*var\(--openloop-brand-mark\)/u)
+    expect(styles).toMatch(/mask-image:\s*var\(--openloop-brand-mark\)/u)
+    expect(styles).toMatch(/background:\s*currentColor/u)
+    expect(styles).not.toMatch(/\.brand-mark\s*\{[^}]*filter:/u)
+    expect(desktopScripts.icon).toContain('../../assets/brand/openloop-icon.svg')
     expect(mainSource).toContain("invoke<OpenloopBuildManifest>('build_manifest')")
     expect(index).toContain('<title>Openloop</title>')
     expect(fs.existsSync(path.join(appRoot, 'src/credentials.html'))).toBe(false)

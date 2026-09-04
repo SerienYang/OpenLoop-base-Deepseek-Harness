@@ -476,6 +476,16 @@ function documentProblems(document: Record<string, unknown>): string[] {
 }
 
 describe('OpenLoop design tokens', () => {
+  test('separates the boxed app icon from the frameless product mark', () => {
+    const icon = fs.readFileSync('assets/brand/openloop-icon.svg', 'utf8')
+    const mark = fs.readFileSync('assets/brand/openloop-mark.svg', 'utf8')
+
+    expect(icon).toMatch(/<rect\b/u)
+    expect(mark).toContain('viewBox="160 160 704 704"')
+    expect(mark).not.toMatch(/<rect\b|fill="#f7f8fa"|stroke="#d7dbe2"/iu)
+    expect(mark).toMatch(/<path\b[^>]*stroke="#111316"/u)
+  })
+
   test('publishes the approved DTCG token file', () => {
     expect(fs.existsSync(tokenFile)).toBe(true)
     const document = readDocument()

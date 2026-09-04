@@ -25,7 +25,7 @@ afterEach(() => {
 const openloopBrand: ProductBrand = {
   productName: 'Openloop',
   documentSuffix: 'Openloop',
-  markAsset: 'openloop-icon',
+  markAsset: 'openloop-mark',
   heroTitle: 'Openloop',
   previewLabel: '预览版',
   attribution: 'Built on DeepSeek Harness',
@@ -109,15 +109,17 @@ describe('AppRoot', () => {
 
   it('renders the injected identity throughout loading, failure, and the settled app', () => {
     const { container, error, settled, getByText, queryByText, getByTestId } = mount(openloopBrand)
-    const mark = container.querySelector('img')
-    expect(mark?.getAttribute('src')).toBe('openloop-icon')
-    expect(mark?.getAttribute('width')).toBe('24')
+    const mark = container.querySelector('[data-product-mark]')
+    expect(mark?.getAttribute('style')).toContain(
+      '--dsh-product-mark-image: url("openloop-mark")',
+    )
+    expect(mark?.getAttribute('style')).toContain('--dsh-product-mark-size: 24px')
     expect(getByText('Openloop')).toBeTruthy()
     expect(getByText('Built on DeepSeek Harness')).toBeTruthy()
     expect(queryByText('HARNESS')).toBeNull()
 
     act(() => { error.set('brand fixture failure') })
-    expect(container.querySelector('img')?.getAttribute('src')).toBe('openloop-icon')
+    expect(container.querySelector('[data-product-mark]')).toBe(mark)
     expect(getByText('Openloop')).toBeTruthy()
     expect(queryByText('HARNESS')).toBeNull()
 

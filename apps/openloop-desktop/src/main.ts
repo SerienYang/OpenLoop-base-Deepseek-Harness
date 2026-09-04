@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import openloopIcon from '../../../assets/brand/openloop-icon.svg'
+import openloopMark from '../../../assets/brand/openloop-mark.svg?no-inline'
 import './styles.css'
 
 export interface OpenloopBrandManifest {
@@ -28,9 +28,10 @@ export interface OpenloopBuildManifest {
 const root = document.querySelector<HTMLDivElement>('#app')
 if (root === null) throw new Error('Openloop bootstrap root is missing')
 
+root.style.setProperty('--openloop-brand-mark', `url("${openloopMark}")`)
 root.innerHTML = `
   <main class="bootstrap" aria-labelledby="bootstrap-title">
-    <img class="brand-mark" src="${openloopIcon}" alt="" aria-hidden="true">
+    <span class="brand-mark" aria-hidden="true"></span>
     <header>
       <p class="eyebrow">Desktop foundation</p>
       <h1 id="bootstrap-title">Openloop bootstrap</h1>
