@@ -64,8 +64,10 @@ function mount(brand?: ProductBrand, renderApp: () => ReactNode = () => <Settled
 
 describe('AppRoot', () => {
   it('shows the loading page and never calls renderApp before settled', () => {
-    const { queryByTestId, counts, getByText } = mount()
+    const { container, queryByTestId, counts, getByText } = mount()
     expect(getByText('HARNESS').textContent).toBe('HARNESS')
+    expect(container.querySelector('[data-product-lockup]')).toBeNull()
+    expect(container.querySelector('[data-product-mark]')).toBeNull()
     expect(queryByTestId('real-ui')).toBeNull()
     expect(counts()).toBe(0)
   })
@@ -108,15 +110,28 @@ describe('AppRoot', () => {
   })
 
   it('renders the injected identity throughout loading, failure, and the settled app', () => {
-    const { container, error, settled, getByText, queryByText, getByTestId } = mount(openloopBrand)
-    const mark = container.querySelector('[data-product-mark]')
+    const {
+      container, error, settled, status, getByText, queryByText, getByTestId,
+    } = mount(openloopBrand)
+    const lockups = container.querySelectorAll('[data-product-lockup]')
+    const mark = lockups[0]?.querySelector('[data-product-mark]')
+    const spinnerSeat = container.querySelector('[class*="spinnerSeat"]')
+    const spinner = spinnerSeat?.firstElementChild
+    expect(lockups).toHaveLength(1)
     expect(mark?.getAttribute('style')).toContain(
       '--dsh-product-mark-image: url("openloop-mark")',
     )
-    expect(mark?.getAttribute('style')).toContain('--dsh-product-mark-size: 24px')
+    expect(mark?.getAttribute('style')).toContain('--dsh-product-mark-size: 25px')
     expect(getByText('Openloop')).toBeTruthy()
     expect(getByText('Built on DeepSeek Harness')).toBeTruthy()
+    expect(spinnerSeat).toBeTruthy()
+    expect(spinner?.getAttribute('class')).toContain('spinnerPending')
+    expect(queryByText('Loading plugins…')).toBeNull()
     expect(queryByText('HARNESS')).toBeNull()
+
+    act(() => { status.set('brand-fixture', 'loading') })
+    expect(container.querySelector('[class*="spinnerSeat"]')?.firstElementChild).toBe(spinner)
+    expect(spinner?.getAttribute('class')).not.toContain('spinnerPending')
 
     act(() => { error.set('brand fixture failure') })
     expect(container.querySelector('[data-product-mark]')).toBe(mark)
@@ -128,10 +143,12 @@ describe('AppRoot', () => {
   })
 
   it('renders a non-default product name when its failure brand has no mark asset', () => {
-    const { error, getByText, queryByText } = mount(openloopFailureBrand)
+    const { container, error, getByText, queryByText } = mount(openloopFailureBrand)
 
     expect(getByText('Openloop')).toBeTruthy()
     expect(getByText('Built on DeepSeek Harness')).toBeTruthy()
+    expect(container.querySelector('[data-product-lockup]')).toBeNull()
+    expect(container.querySelector('[data-product-mark]')).toBeNull()
     expect(queryByText('HARNESS')).toBeNull()
 
     act(() => { error.set('preboot failed') })

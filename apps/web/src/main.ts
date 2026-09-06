@@ -14,6 +14,7 @@ import type { ProductBrand } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createElement } from 'react'
 import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
+import openloopMark from '../../../assets/brand/openloop-mark.svg?inline'
 
 const el = document.getElementById('root')
 if (el === null) throw new Error('web app: missing #root')
@@ -36,6 +37,7 @@ const BRAND_FIELDS = [
 const OPENLOOP_FAILURE_BRAND: ProductBrand = Object.freeze({
   productName: 'Openloop',
   documentSuffix: 'Openloop',
+  markAsset: openloopMark,
   heroTitle: 'Openloop',
   previewLabel: '预览版',
   attribution: 'Built on DeepSeek Harness',
