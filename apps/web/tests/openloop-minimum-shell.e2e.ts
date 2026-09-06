@@ -40,7 +40,8 @@ async function boxOf(locator: Locator, label: string): Promise<ElementBox> {
 }
 
 function expectZeroTracking(value: string, label: string): void {
-  expect(value, `${label} computed letter spacing`).toMatch(/^(?:normal|0px)$/u)
+  // Chromium normalizes authored `letter-spacing: 0` to computed `normal`.
+  expect(value, `${label} computed letter spacing`).toBe('normal')
 }
 
 async function lockupGeometry(
@@ -152,23 +153,22 @@ test.describe.serial('assembled minimum Openloop shell', () => {
   test('brands the complete shell and drives the native update boundary', async ({ page }) => {
     let bootstrapObserved = false
     let gateReleased = false
+    let bootstrapHandlerCompletion = Promise.resolve()
     const bootstrapGate = Promise.withResolvers<undefined>()
-    const firstBootstrapHandled = Promise.withResolvers<undefined>()
     const releaseBootstrap = (): void => {
       if (gateReleased) return
       gateReleased = true
       bootstrapGate.resolve(undefined)
     }
-    const bootstrapHandler = async (route: Route): Promise<void> => {
-      const firstRequest = !bootstrapObserved
-      try {
+    const bootstrapHandler = (route: Route): Promise<void> => {
+      if (route.request().method() !== 'POST') return route.continue()
+      bootstrapObserved = true
+      bootstrapHandlerCompletion = (async () => {
         const response = await route.fetch()
-        bootstrapObserved = true
         await bootstrapGate.promise
         await route.fulfill({ response })
-      } finally {
-        if (firstRequest) firstBootstrapHandled.resolve(undefined)
-      }
+      })()
+      return bootstrapHandlerCompletion
     }
     await page.route(BOOTSTRAP_ROUTE, bootstrapHandler)
     try {
@@ -436,7 +436,17 @@ test.describe.serial('assembled minimum Openloop shell', () => {
       const collapsedBox = await boxOf(collapsedMark, 'collapsed sidebar mark')
       expect(collapsedBox.width).toBe(24)
       expect(collapsedBox.height).toBe(24)
-      await expect(collapsedToggle.locator('[data-product-lockup-name]')).toHaveCount(0)
+      const collapsedLogoRow = collapsedToggle.locator('..')
+      const collapsedSidebarRoot = collapsedLogoRow.locator('..')
+      await expect(collapsedSidebarRoot.locator('[data-product-lockup-name]')).toHaveCount(0)
+      await expect(
+        collapsedLogoRow.getByRole('button', { name: 'New session', exact: true }),
+        'the expanded brand button must unmount after collapse settles',
+      ).toHaveCount(0)
+      await expect(
+        collapsedLogoRow.locator('[data-product-lockup]'),
+        'the expanded ProductLockup must unmount after collapse settles',
+      ).toHaveCount(0)
       await collapsedToggle.click()
       await expect(page.getByRole('button', { name: 'Collapse sidebar', exact: true })).toBeVisible()
 
@@ -540,7 +550,7 @@ test.describe.serial('assembled minimum Openloop shell', () => {
       expect(await readdir(SNAPSHOT_DIR)).toEqual(['ui.expected.md'])
     } finally {
       releaseBootstrap()
-      if (bootstrapObserved) await firstBootstrapHandled.promise
+      await bootstrapHandlerCompletion
       await page.unroute(BOOTSTRAP_ROUTE, bootstrapHandler)
     }
   })

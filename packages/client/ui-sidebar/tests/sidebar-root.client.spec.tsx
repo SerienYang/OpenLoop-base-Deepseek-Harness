@@ -72,6 +72,7 @@ function mountShell({
   }
   const view = render(root())
   return {
+    container: view.container,
     startSession,
     toggleSidebar,
     regionOwner: () => {
@@ -156,7 +157,7 @@ describe('SidebarRoot shell', () => {
   })
 
   it('renders the injected product mark in the collapsed rail', () => {
-    mountShell({ collapsed: true, brand: openloopBrand })
+    const shell = mountShell({ collapsed: true, brand: openloopBrand })
     const toggle = screen.getByRole('button', { name: 'Open sidebar' })
     const mark = toggle.querySelector('[data-product-mark]')
 
@@ -164,6 +165,6 @@ describe('SidebarRoot shell', () => {
       '--dsh-product-mark-image: url("openloop-mark")',
     )
     expect(mark?.getAttribute('style')).toContain('--dsh-product-mark-size: 24px')
-    expect(toggle.querySelector('[data-product-lockup-name]')).toBeNull()
+    expect(shell.container.querySelector('[data-product-lockup-name]')).toBeNull()
   })
 })
