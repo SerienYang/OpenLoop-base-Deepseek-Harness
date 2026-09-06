@@ -164,5 +164,6 @@ describe('SidebarRoot shell', () => {
       '--dsh-product-mark-image: url("openloop-mark")',
     )
     expect(mark?.getAttribute('style')).toContain('--dsh-product-mark-size: 24px')
+    expect(toggle.querySelector('[data-product-lockup-name]')).toBeNull()
   })
 })
