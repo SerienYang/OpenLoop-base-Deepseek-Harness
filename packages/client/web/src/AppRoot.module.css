@@ -75,6 +75,7 @@
 @media (prefers-reduced-motion: reduce) {
   .spinner {
     transition: none;
+    animation: none;
   }
 }
 

@@ -7,6 +7,7 @@
  * gate semantics. Stores are the kernel-own signals production boot uses
  * (shell self-sufficiency: the loading page depends on no plugin package).
  */
+import { readFileSync } from 'node:fs'
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
 import { act, cleanup, render } from '@testing-library/react'
@@ -16,6 +17,15 @@ import type { ProductBrand } from '@deepseek-ai/dsh-client-ui-primitives'
 import { AppRoot } from '@deepseek-ai/dsh-client-web/src/AppRoot.tsx'
 import { DocumentTitle } from '@deepseek-ai/dsh-client-web/src/DocumentTitle.tsx'
 import { createLoaderStatusStore, createSignal } from '@deepseek-ai/dsh-client-web/src/loader-status.ts'
+
+const appRootStyles = readFileSync(
+  'packages/client/web/src/AppRoot.module.css',
+  'utf8',
+)
+const productLockupStyles = readFileSync(
+  'packages/client/ui-primitives/src/ProductLockup.module.css',
+  'utf8',
+)
 
 afterEach(() => {
   cleanup()
@@ -63,6 +73,22 @@ function mount(brand?: ProductBrand, renderApp: () => ReactNode = () => <Settled
 }
 
 describe('AppRoot', () => {
+  it('locks the launch brand geometry and disables spinner motion when requested', () => {
+    const productLockupRule = appRootStyles.match(/\.productLockup\s*\{([^}]*)\}/u)?.[1]
+
+    expect(appRootStyles).toMatch(
+      /\.spinnerSeat\s*\{[^}]*\bwidth:\s*26px;[^}]*\bheight:\s*26px;/u,
+    )
+    expect(productLockupRule).toMatch(/--dsh-product-lockup-gap:\s*9px;/u)
+    expect(productLockupRule).toMatch(/--dsh-product-lockup-font-size:\s*20px;/u)
+    expect(productLockupRule).toMatch(/--dsh-product-lockup-font-weight:\s*600;/u)
+    expect(productLockupRule).toMatch(/--dsh-product-lockup-line-height:\s*25px;/u)
+    expect(productLockupStyles).toMatch(/\.root\s*\{[^}]*\bletter-spacing:\s*0;/u)
+    expect(appRootStyles).toMatch(
+      /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{\s*\.spinner\s*\{[^}]*\btransition:\s*none;[^}]*\banimation:\s*none;[^}]*\}\s*\}/u,
+    )
+  })
+
   it('shows the loading page and never calls renderApp before settled', () => {
     const { container, queryByTestId, counts, getByText } = mount()
     expect(getByText('HARNESS').textContent).toBe('HARNESS')
