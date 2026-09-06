@@ -24,6 +24,8 @@ export { FishLogo } from './FishLogo.tsx'
 export { BrandWordmark } from './BrandWordmark.tsx'
 export { ProductMark } from './ProductMark.tsx'
 export type { ProductMarkProps } from './ProductMark.tsx'
+export { ProductLockup } from './ProductLockup.tsx'
+export type { ProductLockupProps } from './ProductLockup.tsx'
 export {
   DEFAULT_PRODUCT_BRAND, ProductBrandProvider, useProductBrand,
 } from './ProductBrand.tsx'
