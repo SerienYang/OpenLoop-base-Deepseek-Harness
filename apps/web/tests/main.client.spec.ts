@@ -98,12 +98,14 @@ afterEach(() => {
   document.body.innerHTML = ''
   document.title = ''
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   vi.resetModules()
 })
 
 describe('web application entry', () => {
-  it('shows the Openloop loading surface while Host preboot is pending, then passes its frozen brand to AppWebEntry', async () => {
+  it('hands the frozen brand to AppWebEntry when animation frames are suspended', async () => {
     const consoleError = vi.spyOn(console, 'error')
+    vi.stubGlobal('requestAnimationFrame', vi.fn((_callback: FrameRequestCallback) => 1))
     const root = installRoot()
     document.title = 'DeepSeek Harness'
     let release!: () => void

@@ -116,11 +116,6 @@ async function runOpenloopEntry(
   brand: ProductBrand,
 ): Promise<void> {
   loading.handoff(brand)
-  await new Promise<void>((resolve) => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => { resolve() })
-    })
-  })
   try {
     await new AppWebEntry(root, { brand, reactRoot: loading.reactRoot }).run()
   } catch (reason) {

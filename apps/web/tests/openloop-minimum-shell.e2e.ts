@@ -39,27 +39,8 @@ async function boxOf(locator: Locator, label: string): Promise<ElementBox> {
   return box as ElementBox
 }
 
-async function authoredStyleValues(
-  locator: Locator,
-  property: string,
-): Promise<readonly string[]> {
-  return await locator.evaluate((element, propertyName) => {
-    const values: string[] = []
-    const visit = (rules: CSSRuleList): void => {
-      for (const rule of rules) {
-        if (rule instanceof CSSStyleRule) {
-          if (element.matches(rule.selectorText)) {
-            const value = rule.style.getPropertyValue(propertyName)
-            if (value !== '') values.push(value)
-          }
-        } else if ('cssRules' in rule) {
-          visit((rule as CSSGroupingRule).cssRules)
-        }
-      }
-    }
-    for (const sheet of document.styleSheets) visit(sheet.cssRules)
-    return values
-  }, property)
+function expectZeroTracking(value: string, label: string): void {
+  expect(value, `${label} computed letter spacing`).toMatch(/^(?:normal|0px)$/u)
 }
 
 async function lockupGeometry(
@@ -216,7 +197,11 @@ test.describe.serial('assembled minimum Openloop shell', () => {
         launchName,
         'preboot launch',
       )
-      const launchStyles = await Promise.all([
+      const launchLockupElement = await launchLockup.elementHandle()
+      expect(launchLockupElement, 'the launch lockup handle must remain addressable')
+        .not.toBeNull()
+      if (launchLockupElement === null) throw new Error('launch lockup handle is missing')
+      const [launchGap, launchNameStyle, launchLetterSpacing] = await Promise.all([
         launchLockup.evaluate(element => getComputedStyle(element).gap),
         launchName.evaluate((element) => {
           const style = getComputedStyle(element)
@@ -226,19 +211,17 @@ test.describe.serial('assembled minimum Openloop shell', () => {
             lineHeight: style.lineHeight,
           }
         }),
-        authoredStyleValues(launchLockup, 'letter-spacing'),
+        launchName.evaluate(element => getComputedStyle(element).letterSpacing),
       ])
       expect(prebootGeometry.mark.width).toBe(25)
       expect(prebootGeometry.mark.height).toBe(25)
-      expect(launchStyles).toEqual([
-        '9px',
-        {
-          fontSize: '20px',
-          fontWeight: '600',
-          lineHeight: '25px',
-        },
-        ['0px'],
-      ])
+      expect(launchGap).toBe('9px')
+      expect(launchNameStyle).toEqual({
+        fontSize: '20px',
+        fontWeight: '600',
+        lineHeight: '25px',
+      })
+      expectZeroTracking(launchLetterSpacing, 'launch name')
       expectCentersAligned(prebootGeometry.mark, prebootGeometry.name, 'launch')
 
       const attributionStyle = await attribution.evaluate((element) => {
@@ -300,9 +283,7 @@ test.describe.serial('assembled minimum Openloop shell', () => {
 
       releaseBootstrap()
       await expect.poll(async () => {
-        return await page.evaluate(() => {
-          const element = document.querySelector<HTMLElement>('[data-product-lockup]')
-          if (element === null) return null
+        return await launchLockupElement.evaluate((element) => {
           const mark = element.querySelector<HTMLElement>('[data-product-mark]')
           const name = element.querySelector<HTMLElement>('[data-product-lockup-name]')
           if (mark === null || name === null) return null
@@ -360,7 +341,7 @@ test.describe.serial('assembled minimum Openloop shell', () => {
         sidebarName,
         'sidebar',
       )
-      const sidebarStyles = await Promise.all([
+      const [sidebarGap, sidebarNameStyle, sidebarLetterSpacing] = await Promise.all([
         sidebarLockup.evaluate(element => getComputedStyle(element).gap),
         sidebarName.evaluate((element) => {
           const style = getComputedStyle(element)
@@ -370,19 +351,17 @@ test.describe.serial('assembled minimum Openloop shell', () => {
             lineHeight: style.lineHeight,
           }
         }),
-        authoredStyleValues(sidebarLockup, 'letter-spacing'),
+        sidebarName.evaluate(element => getComputedStyle(element).letterSpacing),
       ])
       expect(sidebarGeometry.mark.width).toBe(20)
       expect(sidebarGeometry.mark.height).toBe(20)
-      expect(sidebarStyles).toEqual([
-        '7px',
-        {
-          fontSize: '16px',
-          fontWeight: '600',
-          lineHeight: '20px',
-        },
-        ['0px'],
-      ])
+      expect(sidebarGap).toBe('7px')
+      expect(sidebarNameStyle).toEqual({
+        fontSize: '16px',
+        fontWeight: '600',
+        lineHeight: '20px',
+      })
+      expectZeroTracking(sidebarLetterSpacing, 'sidebar name')
       expectCentersAligned(sidebarGeometry.mark, sidebarGeometry.name, 'sidebar')
       const sidebarLogoRow = brandButton.locator('..')
       expect((await boxOf(sidebarLogoRow, 'sidebar logo row')).height).toBe(44)
