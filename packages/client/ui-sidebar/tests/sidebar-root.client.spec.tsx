@@ -142,12 +142,16 @@ describe('SidebarRoot shell', () => {
   it('replaces the DeepSeek wordmark with the injected product identity', () => {
     mountShell({ brand: openloopBrand })
     const brandButton = screen.getAllByRole('button', { name: 'New session' })[0]
-    const mark = brandButton?.querySelector('[data-product-mark]')
+    const lockup = brandButton?.querySelector('[data-product-lockup]')
+    const mark = lockup?.querySelector('[data-product-mark]')
+    const name = lockup?.querySelector('[data-product-lockup-name]')
+
+    expect(lockup).not.toBeNull()
     expect(mark?.getAttribute('style')).toContain(
       '--dsh-product-mark-image: url("openloop-mark")',
     )
-    expect(mark?.getAttribute('style')).toContain('--dsh-product-mark-size: 24px')
-    expect(brandButton?.textContent).toBe('Openloop')
+    expect(mark?.getAttribute('style')).toContain('--dsh-product-mark-size: 20px')
+    expect(name?.textContent).toBe('Openloop')
     expect(brandButton?.querySelector('svg[viewBox="0 0 182 24"]')).toBeNull()
   })
 
