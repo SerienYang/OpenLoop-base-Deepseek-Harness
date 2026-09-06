@@ -92,6 +92,7 @@ describe('AppRoot', () => {
   it('shows the loading page and never calls renderApp before settled', () => {
     const { container, queryByTestId, counts, getByText } = mount()
     expect(getByText('HARNESS').textContent).toBe('HARNESS')
+    expect(getByText('Loading plugins…', { exact: true })).toBeTruthy()
     expect(container.querySelector('[data-product-lockup]')).toBeNull()
     expect(container.querySelector('[data-product-mark]')).toBeNull()
     expect(queryByTestId('real-ui')).toBeNull()
@@ -137,7 +138,7 @@ describe('AppRoot', () => {
 
   it('renders the injected identity throughout loading, failure, and the settled app', () => {
     const {
-      container, error, settled, status, getByText, queryByText, getByTestId,
+      container, error, settled, status, getByRole, getByText, queryByText, getByTestId,
     } = mount(openloopBrand)
     const lockups = container.querySelectorAll('[data-product-lockup]')
     const mark = lockups[0]?.querySelector('[data-product-mark]')
@@ -151,6 +152,7 @@ describe('AppRoot', () => {
     expect(getByText('Openloop')).toBeTruthy()
     expect(getByText('Built on DeepSeek Harness')).toBeTruthy()
     expect(spinnerSeat).toBeTruthy()
+    expect(getByRole('status', { name: 'Loading plugins' })).toBe(spinnerSeat)
     expect(spinner?.getAttribute('class')).toContain('spinnerPending')
     expect(queryByText('Loading plugins…')).toBeNull()
     expect(queryByText('HARNESS')).toBeNull()

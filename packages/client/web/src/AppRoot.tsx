@@ -72,13 +72,21 @@ export function AppRoot(props: AppRootProps) {
                 )}
               {!loud
                 ? (
-                  <div className={css.spinnerSeat}>
+                  <>
                     <div
-                      className={spinnerPending
-                        ? `${css.spinner} ${css.spinnerPending}`
-                        : css.spinner}
-                    />
-                  </div>
+                      className={css.spinnerSeat}
+                      aria-label={brand.markAsset === undefined ? undefined : 'Loading plugins'}
+                      role={brand.markAsset === undefined ? undefined : 'status'}
+                    >
+                      <div
+                        className={spinnerPending
+                          ? `${css.spinner} ${css.spinnerPending}`
+                          : css.spinner}
+                      />
+                    </div>
+                    {brand.markAsset === undefined
+                      && <div className={css.hint}>Loading plugins…</div>}
+                  </>
                 )
                 : (
                   <div className={css.failed}>
