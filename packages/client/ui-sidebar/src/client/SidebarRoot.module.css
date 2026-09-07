@@ -84,17 +84,17 @@
   from { opacity: 0; }
 }
 
-/* Logo row (figma pad (4,8,4,8)): expanded keeps the panel toggle at the
-   right edge; the rail gives every control the same base left anchor before
-   the shared entry translation is applied. */
+/* Logo row: expanded uses the approved 44px brand geometry and keeps the
+   panel toggle at the right edge; the rail gives every control the same base
+   left anchor before the shared entry translation is applied. */
 .logoRow {
   flex: none;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  height: 60px;
-  padding: 8px 0 8px 4px;
+  height: 44px;
+  padding: 0 0 0 2px;
   margin-bottom: 8px;
   box-sizing: border-box;
   overflow: hidden;
@@ -122,6 +122,13 @@
   background: transparent;
   color: inherit;
   cursor: pointer;
+}
+
+.productLockup {
+  --dsh-product-lockup-gap: 7px;
+  --dsh-product-lockup-font-size: 16px;
+  --dsh-product-lockup-font-weight: 600;
+  --dsh-product-lockup-line-height: 20px;
 }
 
 .iconButton {

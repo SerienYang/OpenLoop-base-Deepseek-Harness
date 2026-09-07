@@ -2,11 +2,15 @@
 
 English | [中文](README.zh.md)
 
-Pure React atoms (zero cordis): StateDot, DisclosureRow, ProductMark, ic_ds_* icons, Button/Pill/Menu/Modal/Input, the Toast transient banner, the OnboardingSurface first-run takeover (body-portaled mask + opaque stage that holds `#root` inert for exactly its own lifetime), the markdown family (MessageText/MarkdownText/JsonBlock), the read-only JsonTree inspector, the `useAnchoredMaxHeight` hook that clamps a bottom-anchored overlay to the viewport space above its anchor (re-measured on resize, scroll, and a caller-supplied dependency), TerminalBlock, DiffBlock, ReadBlock, SearchBlock, and WebBlock.
+Pure React atoms (zero cordis): StateDot, DisclosureRow, ProductMark, ProductLockup, ic_ds_* icons, Button/Pill/Menu/Modal/Input, the Toast transient banner, the OnboardingSurface first-run takeover (body-portaled mask + opaque stage that holds `#root` inert for exactly its own lifetime), the markdown family (MessageText/MarkdownText/JsonBlock), the read-only JsonTree inspector, the `useAnchoredMaxHeight` hook that clamps a bottom-anchored overlay to the viewport space above its anchor (re-measured on resize, scroll, and a caller-supplied dependency), TerminalBlock, DiffBlock, ReadBlock, SearchBlock, and WebBlock.
 
 `ProductMark` renders a product-provided silhouette as a decorative,
 caller-sized CSS mask in the surrounding text color, so one transparent asset
-adapts to both Light and Dark themes.
+adapts to both Light and Dark themes. It is mark-only; use `ProductLockup` to
+align a mark and readable product name as one lockup. Consumers own the
+lockup's typography and spacing through `--dsh-product-lockup-font-size`,
+`--dsh-product-lockup-font-weight`, `--dsh-product-lockup-line-height`, and
+`--dsh-product-lockup-gap`.
 
 ## Hover cards
 

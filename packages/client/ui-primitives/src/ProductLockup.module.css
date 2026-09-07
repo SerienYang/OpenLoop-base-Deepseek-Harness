@@ -1,0 +1,16 @@
+.root {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--dsh-product-lockup-gap, 0);
+  color: inherit;
+  font-size: var(--dsh-product-lockup-font-size, inherit);
+  font-weight: var(--dsh-product-lockup-font-weight, inherit);
+  line-height: var(--dsh-product-lockup-line-height, normal);
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.name {
+  display: block;
+}

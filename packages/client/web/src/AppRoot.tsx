@@ -11,7 +11,7 @@
 import { useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import {
-  DEFAULT_PRODUCT_BRAND, ProductBrandProvider, ProductMark,
+  DEFAULT_PRODUCT_BRAND, ProductBrandProvider, ProductLockup,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ProductBrand } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { KernelSignal, LoaderStatus } from './loader-status.ts'
@@ -40,6 +40,7 @@ export function AppRoot(props: AppRootProps) {
   const failed = Object.entries(status).filter(([, s]) => s === 'failed')
   const brand = props.brand ?? DEFAULT_PRODUCT_BRAND
   const loud = error !== undefined || failed.length > 0
+  const spinnerPending = Object.keys(status).length === 0
 
   return (
     <ProductBrandProvider brand={brand}>
@@ -49,23 +50,42 @@ export function AppRoot(props: AppRootProps) {
         : (
           <div className={css.boot}>
             <div className={css.card}>
-              <div className={css.wordmark}>
-                {brand.markAsset === undefined
-                  ? (brand === DEFAULT_PRODUCT_BRAND ? 'HARNESS' : brand.productName)
-                  : (
-                    <>
-                      <ProductMark src={brand.markAsset} size={24} />
-                      <span>{brand.productName}</span>
-                    </>
-                  )}
-              </div>
+              {brand.markAsset === undefined
+                ? (
+                  <div className={css.wordmark}>
+                    {brand === DEFAULT_PRODUCT_BRAND ? 'HARNESS' : brand.productName}
+                  </div>
+                )
+                : (
+                  <ProductLockup
+                    className={css.productLockup}
+                    markAsset={brand.markAsset}
+                    productName={brand.productName}
+                    markSize={25}
+                  />
+                )}
               {brand.attribution !== undefined
-                && <div className={css.hint}>{brand.attribution}</div>}
+                && (
+                  <div className={brand.markAsset === undefined ? css.hint : css.attribution}>
+                    {brand.attribution}
+                  </div>
+                )}
               {!loud
                 ? (
                   <>
-                    <div className={css.spinner} />
-                    <div className={css.hint}>Loading plugins…</div>
+                    <div
+                      className={css.spinnerSeat}
+                      aria-label={brand.markAsset === undefined ? undefined : 'Loading plugins'}
+                      role={brand.markAsset === undefined ? undefined : 'status'}
+                    >
+                      <div
+                        className={spinnerPending
+                          ? `${css.spinner} ${css.spinnerPending}`
+                          : css.spinner}
+                      />
+                    </div>
+                    {brand.markAsset === undefined
+                      && <div className={css.hint}>Loading plugins…</div>}
                   </>
                 )
                 : (

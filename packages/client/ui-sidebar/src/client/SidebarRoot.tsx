@@ -18,7 +18,7 @@
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import {
-  BrandWordmark, FishLogo, ProductMark,
+  BrandWordmark, FishLogo, ProductLockup, ProductMark,
   IconNewChatOutline16, IconPanelLeftOutline16,
   Tooltip, useProductBrand,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -141,12 +141,12 @@ export function SidebarRoot({
           >
             {brand.markAsset === undefined
               ? <BrandWordmark />
-              : (
-                <>
-                  <ProductMark src={brand.markAsset} size={24} />
-                  <span>{brand.productName}</span>
-                </>
-              )}
+              : <ProductLockup
+                className={css.productLockup}
+                markAsset={brand.markAsset}
+                productName={brand.productName}
+                markSize={20}
+              />}
           </button>
         )}
         {/* Rail resting state is the whale mark; hovering swaps in the panel
